@@ -100,7 +100,7 @@ fi
 # Define the environment file and compose files based on the chosen environment
 ENV_FILE=".env.$ENV"
 COMPOSE_FILES=(
-    -f docker-compose.$ENV.yml
+    -f docker-compose.$ENV.yaml
 )
 
 # Check if the required .env file exists

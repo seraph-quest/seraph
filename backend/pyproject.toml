@@ -3,5 +3,5 @@ name = "backend"
 version = "0.1.0"
 description = "Seraph's backend service"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = []

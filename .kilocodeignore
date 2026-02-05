@@ -1,0 +1,6 @@
+.env.dev
+.env.prod
+!memory-bank/
+.env
+backend/.env
+agent/.env

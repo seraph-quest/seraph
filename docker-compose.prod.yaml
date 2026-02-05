@@ -1,0 +1,26 @@
+# ------------------------------------------------------------------
+#         Infrastructure Services (Third-Party)
+# ------------------------------------------------------------------
+# Defines the core third-party services like databases and message queues.
+
+services:
+  backend-prod:
+    container_name: backend-prod
+    build:
+      context: ./backend
+      dockerfile: ./Dockerfile
+    volumes:
+      - ${BACKEND_DATA_PATH_PROD}:/app/data
+      - ${BACKEND_LOGS_PATH_PROD}:/app/logs
+      - ./shared:/app/shared
+    env_file:
+      - .env.prod
+    networks:
+      - seraph-network-prod
+    ports:
+      - "8003:8003"
+    restart: unless-stopped
+
+networks:
+  seraph-network-prod:
+    name: seraph-network-prod

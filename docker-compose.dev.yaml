@@ -1,0 +1,30 @@
+# ------------------------------------------------------------------
+#         Infrastructure Services (Third-Party)
+# ------------------------------------------------------------------
+# Defines the core third-party services like databases and message queues.
+
+services:
+  backend-dev:
+    container_name: backend-dev
+    build:
+      context: ./backend
+      dockerfile: ./Dockerfile
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/config:/app/config
+      - ./backend/main.py:/app/main.py
+      - ./backend/pyproject.toml:/app/pyproject.toml
+      - ./backend/uv.lock:/app/uv.lock
+      - ${BACKEND_DATA_PATH_DEV}:/app/data
+      - ${BACKEND_LOGS_PATH_DEV}:/app/logs
+      - ./shared:/app/shared
+    env_file:
+      - .env.dev
+    networks:
+      - seraph-network-dev
+    ports:
+      - "8004:8003" # Non-standard port for dev
+
+networks:
+  seraph-network-dev:
+    name: seraph-network-dev

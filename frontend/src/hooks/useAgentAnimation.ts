@@ -1,115 +1,74 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect } from "react";
 import { useChatStore } from "../stores/chatStore";
-import {
-  getToolTarget,
-  getFacingDirection,
-  getIdleState,
-  getThinkingState,
-} from "../lib/animationStateMachine";
-import { WALK_DURATION_MS, SPEECH_DISPLAY_MS, POSITIONS } from "../config/constants";
+import { getToolTarget, getIdleState, getThinkingState } from "../lib/animationStateMachine";
+import { EventBus } from "../game/EventBus";
 
 export function useAgentAnimation() {
   const { agentVisual, setAgentVisual, resetAgentVisual } = useChatStore();
-  const walkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const speechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearTimers = useCallback(() => {
-    if (walkTimerRef.current) clearTimeout(walkTimerRef.current);
-    if (speechTimerRef.current) clearTimeout(speechTimerRef.current);
-  }, []);
 
   const onThinking = useCallback(() => {
-    clearTimers();
     const thinking = getThinkingState();
-    const facing = getFacingDirection(agentVisual.positionX, thinking.positionX);
-
-    if (agentVisual.positionX !== thinking.positionX) {
-      setAgentVisual({
-        animationState: "walking",
-        positionX: thinking.positionX,
-        facing,
-        speechText: null,
-      });
-      walkTimerRef.current = setTimeout(() => {
-        setAgentVisual({ animationState: "thinking" });
-      }, WALK_DURATION_MS);
-    } else {
-      setAgentVisual({
-        animationState: "thinking",
-        speechText: null,
-      });
-    }
-  }, [agentVisual.positionX, setAgentVisual, clearTimers]);
+    setAgentVisual({
+      animationState: "thinking",
+      positionX: thinking.positionX,
+      speechText: null,
+    });
+    EventBus.emit("agent-think");
+  }, [setAgentVisual]);
 
   const onToolDetected = useCallback(
     (toolName: string) => {
-      clearTimers();
       const target = getToolTarget(toolName);
       if (!target) return;
 
-      const currentX = useChatStore.getState().agentVisual.positionX;
-      const facing = getFacingDirection(currentX, target.positionX);
-
       setAgentVisual({
-        animationState: "walking",
+        animationState: target.animationState,
         positionX: target.positionX,
-        facing,
         speechText: null,
       });
 
-      walkTimerRef.current = setTimeout(() => {
-        setAgentVisual({ animationState: target.animationState });
-      }, WALK_DURATION_MS);
+      EventBus.emit("agent-move-to-tool", {
+        tool: toolName,
+        targetX: target.pixelX,
+        targetY: target.pixelY,
+        anim: target.animationState,
+      });
     },
-    [setAgentVisual, clearTimers]
+    [setAgentVisual]
   );
 
   const onFinalAnswer = useCallback(
     (answer: string) => {
-      clearTimers();
-      const currentX = useChatStore.getState().agentVisual.positionX;
       const idle = getIdleState();
-      const facing = getFacingDirection(currentX, idle.positionX);
+      const truncated =
+        answer.length > 80 ? answer.slice(0, 80) + "..." : answer;
 
       setAgentVisual({
-        animationState: "walking",
+        animationState: "speaking",
         positionX: idle.positionX,
-        facing,
-        speechText: null,
+        speechText: truncated,
       });
 
-      walkTimerRef.current = setTimeout(() => {
-        const truncated =
-          answer.length > 80 ? answer.slice(0, 80) + "..." : answer;
-        setAgentVisual({
-          animationState: "speaking",
-          speechText: truncated,
-        });
-
-        speechTimerRef.current = setTimeout(() => {
-          resetAgentVisual();
-        }, SPEECH_DISPLAY_MS);
-      }, WALK_DURATION_MS);
+      EventBus.emit("agent-final-answer", { text: answer });
     },
-    [setAgentVisual, resetAgentVisual, clearTimers]
+    [setAgentVisual]
   );
 
   const returnToIdle = useCallback(() => {
-    clearTimers();
-    const currentX = useChatStore.getState().agentVisual.positionX;
-    const idle = getIdleState();
-    const facing = getFacingDirection(currentX, idle.positionX);
+    resetAgentVisual();
+    EventBus.emit("agent-return-idle");
+  }, [resetAgentVisual]);
 
-    setAgentVisual({
-      animationState: "walking",
-      positionX: idle.positionX,
-      facing,
-    });
-
-    walkTimerRef.current = setTimeout(() => {
+  // Listen for speech done from Phaser scene
+  useEffect(() => {
+    const onSpeechDone = () => {
       resetAgentVisual();
-    }, WALK_DURATION_MS);
-  }, [setAgentVisual, resetAgentVisual, clearTimers]);
+    };
+    EventBus.on("agent-speech-done", onSpeechDone);
+    return () => {
+      EventBus.off("agent-speech-done", onSpeechDone);
+    };
+  }, [resetAgentVisual]);
 
   return {
     currentPosition: agentVisual.positionX,
@@ -121,6 +80,3 @@ export function useAgentAnimation() {
     returnToIdle,
   };
 }
-
-// Re-export for convenience
-export { POSITIONS };

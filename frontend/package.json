@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "phaser": "3.90",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zustand": "^5.0.0"

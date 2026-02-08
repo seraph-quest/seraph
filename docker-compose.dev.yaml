@@ -33,6 +33,7 @@ services:
       dockerfile: ./Dockerfile
     volumes:
       - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
       - ./frontend/index.html:/app/index.html
       - ./frontend/vite.config.ts:/app/vite.config.ts
       - ./frontend/tailwind.config.ts:/app/tailwind.config.ts

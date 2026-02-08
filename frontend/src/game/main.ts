@@ -1,18 +1,17 @@
 import Phaser from "phaser";
 import { StudyScene } from "./scenes/StudyScene";
-import { SCENE } from "../config/constants";
 
 export function StartGame(parent: string): Phaser.Game {
   return new Phaser.Game({
     type: Phaser.AUTO,
-    width: SCENE.WIDTH,
-    height: SCENE.HEIGHT,
     parent,
     pixelArt: true,
-    backgroundColor: "#0a0a2e",
+    backgroundColor: "#4a8c3f",
     scale: {
-      mode: Phaser.Scale.FIT,
-      autoCenter: Phaser.Scale.CENTER_HORIZONTALLY,
+      mode: Phaser.Scale.RESIZE,
+      width: "100%",
+      height: "100%",
+      autoCenter: Phaser.Scale.NO_CENTER,
     },
     scene: [StudyScene],
   });

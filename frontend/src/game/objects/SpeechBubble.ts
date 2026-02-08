@@ -12,9 +12,14 @@ export class SpeechBubble {
   private text: Phaser.GameObjects.Text;
   private scene: Phaser.Scene;
   private targetSprite: Phaser.GameObjects.Sprite | null = null;
+  private clampWidth: number;
+  private clampOffsetX: number;
 
-  constructor(scene: Phaser.Scene) {
+  constructor(scene: Phaser.Scene, clampWidth?: number, clampOffsetX?: number) {
     this.scene = scene;
+    this.clampWidth = clampWidth ?? scene.scale.width;
+    this.clampOffsetX = clampOffsetX ?? 0;
+
     this.bg = scene.add.graphics();
     this.text = scene.add.text(0, 0, "", {
       fontFamily: '"Press Start 2P"',
@@ -33,6 +38,11 @@ export class SpeechBubble {
 
   setTarget(sprite: Phaser.GameObjects.Sprite) {
     this.targetSprite = sprite;
+  }
+
+  updateClampBounds(width: number, offsetX: number) {
+    this.clampWidth = width;
+    this.clampOffsetX = offsetX;
   }
 
   show(message: string) {
@@ -127,8 +137,10 @@ export class SpeechBubble {
     let cx = this.targetSprite.x - bubbleW / 2;
     const cy = this.targetSprite.y - this.targetSprite.displayHeight - bubbleH - 4;
 
-    // Clamp to canvas edges
-    cx = Phaser.Math.Clamp(cx, 4, SCENE.WIDTH - bubbleW - 4);
+    // Clamp to canvas edges using dynamic bounds
+    const minX = this.clampOffsetX + 4;
+    const maxX = this.clampOffsetX + this.clampWidth - bubbleW - 4;
+    cx = Phaser.Math.Clamp(cx, minX, maxX);
 
     this.container.setPosition(cx, Math.max(4, cy));
   }

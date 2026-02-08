@@ -17,14 +17,14 @@ export function useAgentAnimation() {
   }, [setAgentVisual]);
 
   const onToolDetected = useCallback(
-    (toolName: string) => {
+    (toolName: string, stepContent?: string) => {
       const target = getToolTarget(toolName);
       if (!target) return;
 
       setAgentVisual({
         animationState: target.animationState,
         positionX: target.positionX,
-        speechText: null,
+        speechText: stepContent ?? null,
       });
 
       EventBus.emit("agent-move-to-tool", {
@@ -32,6 +32,7 @@ export function useAgentAnimation() {
         targetX: target.pixelX,
         targetY: target.pixelY,
         anim: target.animationState,
+        text: stepContent ?? "",
       });
     },
     [setAgentVisual]

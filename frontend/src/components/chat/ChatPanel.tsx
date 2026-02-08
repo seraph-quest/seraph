@@ -14,7 +14,7 @@ export function ChatPanel({ onSend }: ChatPanelProps) {
   const isConnected = connectionStatus === "connected";
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col p-2">
+    <div className="chat-overlay">
       <DialogFrame
         title="Chat Log"
         className="flex-1 min-h-0 flex flex-col relative"

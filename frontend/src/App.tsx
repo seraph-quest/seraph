@@ -1,5 +1,4 @@
 import { useRef } from "react";
-import { GameContainer } from "./components/layout/GameContainer";
 import { PhaserGame, type IRefPhaserGame } from "./game/PhaserGame";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
@@ -9,11 +8,12 @@ export default function App() {
   const phaserRef = useRef<IRefPhaserGame>(null);
 
   return (
-    <GameContainer>
-      <div className="h-[45vh] min-h-[200px] pixel-border overflow-hidden">
+    <>
+      <div id="game-viewport" className="fixed inset-0 z-0">
         <PhaserGame ref={phaserRef} />
       </div>
       <ChatPanel onSend={sendMessage} />
-    </GameContainer>
+      <div className="crt-overlay" />
+    </>
   );
 }

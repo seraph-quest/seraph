@@ -13,7 +13,7 @@ export function MessageList() {
   return (
     <div className="flex-1 overflow-y-auto retro-scrollbar space-y-2 pr-1">
       {messages.length === 0 && (
-        <div className="flex items-center justify-center h-full text-retro-text/20 text-[9px]">
+        <div className="flex items-center justify-center h-full text-retro-text/20 text-[11px]">
           Send a message to begin...
         </div>
       )}

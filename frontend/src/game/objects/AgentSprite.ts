@@ -1,19 +1,10 @@
 import Phaser from "phaser";
 import { SCENE } from "../../config/constants";
 
-const SPRITE_KEY = "character";
+const SPRITE_KEY = "agent";
 const FRAME_W = 32;
 const FRAME_H = 32;
 
-/**
- * Pipoya 32x32 spritesheet layout (3 cols x 4 rows):
- *   Row 0 (frames 0-2): facing down
- *   Row 1 (frames 3-5): facing left
- *   Row 2 (frames 6-8): facing right
- *   Row 3 (frames 9-11): facing up
- *
- * Frame 1 in each row = idle pose, frames 0+2 = walk cycle
- */
 export class AgentSprite {
   sprite: Phaser.GameObjects.Sprite;
   private scene: Phaser.Scene;
@@ -23,20 +14,18 @@ export class AgentSprite {
   constructor(scene: Phaser.Scene, x: number, y: number) {
     this.scene = scene;
 
-    // Check if the spritesheet loaded with valid frame data
     const hasValidFrames =
       scene.textures.exists(SPRITE_KEY) &&
       scene.textures.get(SPRITE_KEY).frameTotal > 2;
 
     if (!hasValidFrames) {
-      // Remove broken texture if preload failed
       if (scene.textures.exists(SPRITE_KEY)) {
         scene.textures.remove(SPRITE_KEY);
       }
       this.createFallbackTexture(scene);
     }
-    this.sprite = scene.add.sprite(x, y, SPRITE_KEY, 1);
 
+    this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
     this.sprite.setScale(SCENE.SPRITE_SCALE);
     this.sprite.setOrigin(0.5, 1);
     this.sprite.setDepth(10);
@@ -46,48 +35,43 @@ export class AgentSprite {
   }
 
   static preload(scene: Phaser.Scene) {
-    scene.load.spritesheet(SPRITE_KEY, "assets/character.png", {
-      frameWidth: FRAME_W,
-      frameHeight: FRAME_H,
-    });
+    scene.load.atlas(
+      SPRITE_KEY,
+      "assets/agent.png",
+      "assets/agent-atlas.json"
+    );
   }
 
   private createFallbackTexture(scene: Phaser.Scene) {
-    // Generate a 96x128 placeholder spritesheet (3 cols x 4 rows of 32x32)
     const canvas = scene.textures.createCanvas(SPRITE_KEY, 96, 128);
     if (!canvas) return;
     const ctx = canvas.context;
 
     const directions = [
-      { row: 0, eyeOffsets: [[10, 12], [18, 12]] },         // down
-      { row: 1, eyeOffsets: [[8, 12], [14, 12]] },          // left
-      { row: 2, eyeOffsets: [[14, 12], [20, 12]] },         // right
-      { row: 3, eyeOffsets: [[10, 12], [18, 12]] },         // up
+      { row: 0, label: "down", eyeOffsets: [[10, 12], [18, 12]] },
+      { row: 1, label: "left", eyeOffsets: [[8, 12], [14, 12]] },
+      { row: 2, label: "right", eyeOffsets: [[14, 12], [20, 12]] },
+      { row: 3, label: "up", eyeOffsets: [[10, 12], [18, 12]] },
     ];
 
     for (const dir of directions) {
       for (let col = 0; col < 3; col++) {
         const ox = col * 32;
         const oy = dir.row * 32;
-        const legOffset = col === 1 ? 0 : (col === 0 ? -1 : 1);
+        const legOffset = col === 1 ? 0 : col === 0 ? -1 : 1;
 
-        // Body/robe (indigo)
         ctx.fillStyle = "#3b0764";
         ctx.fillRect(ox + 8, oy + 14, 16, 12);
 
-        // Belt
         ctx.fillStyle = "#e2b714";
         ctx.fillRect(ox + 8, oy + 20, 16, 2);
 
-        // Head (amber)
         ctx.fillStyle = "#d97706";
         ctx.fillRect(ox + 9, oy + 6, 14, 10);
 
-        // Hair
         ctx.fillStyle = "#1e1b4b";
         ctx.fillRect(ox + 9, oy + 4, 14, 4);
 
-        // Eyes (only for non-up-facing)
         if (dir.row !== 3) {
           ctx.fillStyle = "#ffffff";
           for (const [ex, ey] of dir.eyeOffsets) {
@@ -98,7 +82,6 @@ export class AgentSprite {
           }
         }
 
-        // Legs
         ctx.fillStyle = "#6b7280";
         ctx.fillRect(ox + 10 + legOffset, oy + 26, 4, 4);
         ctx.fillRect(ox + 18 - legOffset, oy + 26, 4, 4);
@@ -107,42 +90,66 @@ export class AgentSprite {
 
     canvas.refresh();
 
-    // Add spritesheet frame data (3 cols x 4 rows = 12 frames)
+    // Register named frames matching atlas format
     const texture = scene.textures.get(SPRITE_KEY);
-    let frameIndex = 0;
-    for (let row = 0; row < 4; row++) {
+    for (const dir of directions) {
       for (let col = 0; col < 3; col++) {
-        texture.add(frameIndex, 0, col * FRAME_W, row * FRAME_H, FRAME_W, FRAME_H);
-        frameIndex++;
+        const walkFrame = `${dir.label}-walk.00${col}`;
+        texture.add(walkFrame, 0, col * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
       }
+      // Frame 3 duplicates frame 1 (same as atlas)
+      const walk3 = `${dir.label}-walk.003`;
+      texture.add(walk3, 0, 1 * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
+      // Idle frame = col 1
+      texture.add(dir.label, 0, 1 * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
     }
   }
 
   private createAnimations() {
     const scene = this.scene;
 
-    // Walk animations (3 frames per direction)
+    // Walk animations using atlas named frames
     scene.anims.create({
       key: "walk-down",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [0, 1, 2, 1] }),
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "down-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 8,
       repeat: -1,
     });
     scene.anims.create({
       key: "walk-left",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [3, 4, 5, 4] }),
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "left-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 8,
       repeat: -1,
     });
     scene.anims.create({
       key: "walk-right",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [6, 7, 8, 7] }),
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "right-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 8,
       repeat: -1,
     });
     scene.anims.create({
       key: "walk-up",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [9, 10, 11, 10] }),
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "up-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 8,
       repeat: -1,
     });
@@ -150,7 +157,7 @@ export class AgentSprite {
     // Idle: facing down, single frame
     scene.anims.create({
       key: "idle",
-      frames: [{ key: SPRITE_KEY, frame: 1 }],
+      frames: [{ key: SPRITE_KEY, frame: "down" }],
       frameRate: 1,
       repeat: 0,
     });
@@ -158,31 +165,51 @@ export class AgentSprite {
     // Think: slow cycle facing down
     scene.anims.create({
       key: "think",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [1, 0, 1, 2] }),
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "down-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 3,
       repeat: -1,
     });
 
-    // At-computer: facing left, slow idle
+    // At-well: facing left, slow idle
     scene.anims.create({
-      key: "at-computer",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [3, 4, 5, 4] }),
+      key: "at-well",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "left-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 4,
       repeat: -1,
     });
 
-    // At-cabinet: facing right, slow idle
+    // At-signpost: facing right, slow idle
     scene.anims.create({
-      key: "at-cabinet",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [6, 7, 8, 7] }),
+      key: "at-signpost",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "right-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 4,
       repeat: -1,
     });
 
-    // At-desk: facing up, slow cycle
+    // At-bench: facing up, slow cycle
     scene.anims.create({
-      key: "at-desk",
-      frames: scene.anims.generateFrameNumbers(SPRITE_KEY, { frames: [9, 10, 11, 10] }),
+      key: "at-bench",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "up-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
       frameRate: 3,
       repeat: -1,
     });
@@ -203,7 +230,6 @@ export class AgentSprite {
       return;
     }
 
-    // Pick walk direction anim
     const walkAnim = dx < 0 ? "walk-left" : "walk-right";
     this.sprite.play(walkAnim);
 
@@ -243,6 +269,15 @@ export class AgentSprite {
       this.bobTween.stop();
       this.bobTween = null;
     }
+  }
+
+  cancelMovement() {
+    if (this.currentTween) {
+      this.currentTween.stop();
+      this.currentTween = null;
+    }
+    this.stopBob();
+    this.sprite.stop();
   }
 
   destroy() {

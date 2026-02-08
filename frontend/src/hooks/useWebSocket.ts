@@ -59,7 +59,7 @@ export function useWebSocket() {
         if (data.type === "step") {
           const tool = detectToolFromStep(data.content);
           if (tool) {
-            onToolDetectedRef.current(tool);
+            onToolDetectedRef.current(tool, data.content);
           }
 
           const stepMsg: ChatMessage = {

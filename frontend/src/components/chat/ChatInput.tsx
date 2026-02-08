@@ -33,13 +33,13 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           onKeyDown={handleKeyDown}
           disabled={disabled}
           placeholder={disabled ? "Waiting..." : "Type your message..."}
-          className="w-full bg-retro-bg text-retro-text font-pixel text-[9px] px-3 py-2 outline-none placeholder:text-retro-text/30 disabled:opacity-50"
+          className="w-full bg-retro-bg text-retro-text font-pixel text-[11px] px-3 py-2 outline-none placeholder:text-retro-text/30 disabled:opacity-50"
         />
       </div>
       <button
         type="submit"
         disabled={disabled || !value.trim()}
-        className="pixel-border-thin bg-retro-accent text-retro-border font-pixel text-[8px] px-4 py-2 hover:bg-retro-border hover:text-retro-bg transition-colors disabled:opacity-30 disabled:cursor-not-allowed uppercase tracking-wider"
+        className="pixel-border-thin bg-retro-accent text-retro-border font-pixel text-[10px] px-4 py-2 hover:bg-retro-border hover:text-retro-bg transition-colors disabled:opacity-30 disabled:cursor-not-allowed uppercase tracking-wider"
       >
         Send
       </button>

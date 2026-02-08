@@ -28,9 +28,10 @@ export type AgentAnimationState =
   | "idle"
   | "thinking"
   | "walking"
-  | "at-computer"
-  | "at-cabinet"
-  | "at-desk"
+  | "wandering"
+  | "at-well"
+  | "at-signpost"
+  | "at-bench"
   | "speaking";
 
 export type FacingDirection = "left" | "right";

@@ -22,7 +22,7 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
 - Tool execution with visual feedback (animated RPG avatar walks to tool stations in village)
-- **16 auto-discovered tools**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright), calendar (Google), email (Gmail)
+- **16 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright), calendar (Google), email (Gmail), task management (Things3 via MCP)
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
 - **Memory consolidation** — Background extraction of facts/preferences/decisions after each conversation
@@ -97,7 +97,7 @@ These were gaps in the original analysis that have since been implemented:
 | **Sandboxed execution** | No sandboxing | snekbox Docker sidecar (Phase 2) |
 | **Browser automation** | DuckDuckGo text search only | Playwright with headless Chromium (Phase 2) |
 | **Shell command execution** | No shell tool | snekbox-based sandboxed execution (Phase 2) |
-| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/`, 16 tools (Phase 2) |
+| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (16 native tools) + MCP integrations (Phase 2) |
 
 ---
 

@@ -1,6 +1,6 @@
 # Seraph AI Agent
 
-A proactive AI guardian with a retro 16-bit RPG village UI. An animated pixel-art avatar walks between tool stations in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity (soul file), long-term memory (vector embeddings), hierarchical goal/quest system, and 16 tools across web search, file I/O, shell execution, browser automation, calendar, and email.
+A proactive AI guardian with a retro 16-bit RPG village UI. An animated pixel-art avatar walks between tool stations in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity (soul file), long-term memory (vector embeddings), hierarchical goal/quest system, and 16 native tools + MCP integrations across web search, file I/O, shell execution, browser automation, calendar, email, and task management (Things3).
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ A proactive AI guardian with a retro 16-bit RPG village UI. An animated pixel-ar
 - **Frontend**: React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90
 - **Backend**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
 - **Database**: SQLModel + SQLite (aiosqlite), LanceDB (vector memory)
-- **Tools**: 16 auto-discovered tools — web search, file I/O, shell (snekbox sandbox), browser (Playwright), calendar (Google), email (Gmail), soul/memory, goals
+- **Tools**: 16 auto-discovered tools + MCP integrations (Things3) — web search, file I/O, shell (snekbox sandbox), browser (Playwright), calendar (Google), email (Gmail), soul/memory, goals, task management
 - **Infra**: Docker Compose (3 services: backend, frontend, snekbox sandbox), uv package manager
 
 ## Project Structure
@@ -50,7 +50,7 @@ backend/
 │   ├── models/schemas.py
 │   ├── api/             # REST + WebSocket endpoints (chat, sessions, goals, profile, tools)
 │   ├── agent/           # smolagents factory, onboarding agent, session manager
-│   ├── tools/           # 16 @tool implementations (auto-discovered)
+│   ├── tools/           # 16 @tool implementations (auto-discovered) + MCP tools
 │   ├── db/              # SQLModel engine + models (Session, Message, Goal, UserProfile, Memory)
 │   ├── memory/          # Soul file, LanceDB vector store, embedder, consolidator
 │   ├── goals/           # Hierarchical goal CRUD repository

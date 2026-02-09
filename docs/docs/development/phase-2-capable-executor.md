@@ -162,7 +162,7 @@ RUN uv run playwright install chromium
 - Extended wandering waypoints
 
 **Modified**: `frontend/src/lib/animationStateMachine.ts`
-- Full `TOOL_TARGETS` mapping for all 16 tools to village positions and animations
+- Full `TOOL_TARGETS` mapping for all 16 native tools + Things3 MCP tools to village positions and animations
 
 ---
 
@@ -185,7 +185,7 @@ RUN uv run playwright install chromium
 - [x] Drop a new `.py` tool file in `src/tools/`, verify auto-discovered
 - [x] New tools trigger correct village building animations
 - [x] 16 tools auto-discovered by plugin loader
-- [x] 19 routes registered (including `GET /api/tools`)
+- [x] 18 routes registered (including `GET /api/tools`)
 - [x] TypeScript compiles clean
 - [x] Lock file updated
 

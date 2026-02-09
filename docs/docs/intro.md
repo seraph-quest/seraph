@@ -55,7 +55,7 @@ backend/
 │   ├── models/schemas.py
 │   ├── api/             # REST + WebSocket endpoints (chat, sessions, goals, profile, tools)
 │   ├── agent/           # smolagents factory, onboarding agent, session manager
-│   ├── tools/           # 16 @tool implementations (auto-discovered)
+│   ├── tools/           # 16 @tool implementations (auto-discovered) + MCP tools
 │   ├── db/              # SQLModel engine + models (Session, Message, Goal, UserProfile, Memory)
 │   ├── memory/          # Soul file, LanceDB vector store, embedder, consolidator
 │   ├── goals/           # Hierarchical goal CRUD repository

@@ -23,11 +23,41 @@ type TimeOfDay = "day" | "night";
 const VILLAGE_ASSETS: Record<string, { day: string; night: string }> = {
   "grass-tile":       { day: "grass-tile-day",       night: "grass-tile-night" },
   "ground-tile":      { day: "ground-tile-day",      night: "ground-tile-night" },
+  "water-tile":       { day: "water-tile-day",       night: "water-tile-night" },
   "tree-1":           { day: "tree-1-day",           night: "tree-1-night" },
   "tree-2":           { day: "tree-2-day",           night: "tree-2-night" },
   "tree-3":           { day: "tree-3-day",           night: "tree-3-night" },
   "house-1":          { day: "house-1-day",          night: "house-1-night" },
   "house-2":          { day: "house-2-day",          night: "house-2-night" },
+  "church":           { day: "church-day",           night: "church-night" },
+  "forge":            { day: "forge-day",            night: "forge-night" },
+  "tower":            { day: "tower-day",            night: "tower-night" },
+  "clock":            { day: "clock-day",            night: "clock-night" },
+  "mailbox":          { day: "mailbox-day",          night: "mailbox-night" },
+  "fence-1":          { day: "fence-1-day",          night: "fence-1-night" },
+  "fence-2":          { day: "fence-2-day",          night: "fence-2-night" },
+  "bridge":           { day: "bridge-day",           night: "bridge-night" },
+  "pit":              { day: "pit-day",              night: "pit-night" },
+  "stairs":           { day: "stairs-day",           night: "stairs-night" },
+  "grass-detail-1":   { day: "grass-detail-1-day",   night: "grass-detail-1-night" },
+  "grass-detail-2":   { day: "grass-detail-2-day",   night: "grass-detail-2-night" },
+  "grass-detail-3":   { day: "grass-detail-3-day",   night: "grass-detail-3-night" },
+  "grass-detail-4":   { day: "grass-detail-4-day",   night: "grass-detail-4-night" },
+  "grass-detail-5":   { day: "grass-detail-5-day",   night: "grass-detail-5-night" },
+  "grass-detail-6":   { day: "grass-detail-6-day",   night: "grass-detail-6-night" },
+  "ground-detail-1":  { day: "ground-detail-1-day",  night: "ground-detail-1-night" },
+  "ground-detail-2":  { day: "ground-detail-2-day",  night: "ground-detail-2-night" },
+  "ground-detail-3":  { day: "ground-detail-3-day",  night: "ground-detail-3-night" },
+  "ground-detail-4":  { day: "ground-detail-4-day",  night: "ground-detail-4-night" },
+  "ground-detail-5":  { day: "ground-detail-5-day",  night: "ground-detail-5-night" },
+  "water-detail-1":   { day: "water-detail-1-day",   night: "water-detail-1-night" },
+  "water-detail-2":   { day: "water-detail-2-day",   night: "water-detail-2-night" },
+  "water-detail-3":   { day: "water-detail-3-day",   night: "water-detail-3-night" },
+  "water-detail-4":   { day: "water-detail-4-day",   night: "water-detail-4-night" },
+  "water-detail-5":   { day: "water-detail-5-day",   night: "water-detail-5-night" },
+  "terrain-set-1":    { day: "terrain-set-1-day",    night: "terrain-set-1-night" },
+  "terrain-set-2":    { day: "terrain-set-2-day",    night: "terrain-set-2-night" },
+  "terrain-set-5":    { day: "terrain-set-5-day",    night: "terrain-set-5-night" },
 };
 
 // Tool station sprites (no day/night variants — same image for both)
@@ -57,15 +87,88 @@ const TOOL_STATIONS: Array<{ x: number; y: number; key: string }> = [
 // Ground path segments forming a cross/T shape
 const PATH_SEGMENTS = [
   { x: 16,  y: 256, w: 992, h: 48 },      // Main horizontal path
+  { x: 448, y: 196, w: 128, h: 60 },       // Church courtyard (connects church to path)
   { x: 488, y: 304, w: 48,  h: 76 },       // Vertical south path from plaza
+  { x: 160, y: 244, w: 64,  h: 12 },       // House 1 entrance porch
+  { x: 776, y: 244, w: 112, h: 12 },       // House 2 entrance porch
 ];
 
 // Buildings (origin: bottom-center)
 const BUILDINGS = [
   { x: 192, y: 256, key: "house-1" },      // Left house — web_search
+  { x: 512, y: 196, key: "church" },        // Center church — fill_template (raised)
   { x: 832, y: 256, key: "house-2" },       // Right house — read/write
+  { x: 384, y: 316, key: "forge" },         // Forge/anvil — shell_execute
+  { x: 640, y: 192, key: "tower" },         // Tower — browse_webpage
 ];
 
+// Small props (origin: bottom-center)
+const PROPS = [
+  { x: 576, y: 348, key: "clock" },         // Town clock — calendar
+  { x: 128, y: 348, key: "mailbox" },       // Mailbox — email
+];
+
+// Water areas (tile-based rectangles)
+const WATER_AREAS = [
+  { x: 380, y: 388, cols: 16, rows: 7 },   // Large pond (256×112)
+];
+
+// Bridge over pond (origin: bottom-center)
+const BRIDGE_POS = { x: 512, y: 440 };
+
+// Village well / pit (origin: bottom-center)
+const WELL_POS = { x: 300, y: 356 };
+
+// Stone stairs (origin: bottom-center)
+const STAIRS_POS = { x: 720, y: 376 };
+
+// Terrain transition patches along path edges (origin: 0,0)
+const TERRAIN_PATCHES: Array<{ x: number; y: number; key: string }> = [
+  // Top edge of main path — grass-to-ground transitions
+  { x: 16,  y: 240, key: "terrain-set-1" },
+  { x: 80,  y: 240, key: "terrain-set-2" },
+  { x: 144, y: 240, key: "terrain-set-5" },
+  { x: 240, y: 240, key: "terrain-set-1" },
+  { x: 304, y: 240, key: "terrain-set-2" },
+  { x: 368, y: 240, key: "terrain-set-5" },
+  { x: 608, y: 240, key: "terrain-set-1" },
+  { x: 672, y: 240, key: "terrain-set-2" },
+  { x: 736, y: 240, key: "terrain-set-5" },
+  { x: 864, y: 240, key: "terrain-set-1" },
+  { x: 928, y: 240, key: "terrain-set-2" },
+  // Bottom edge of main path
+  { x: 16,  y: 304, key: "terrain-set-2" },
+  { x: 80,  y: 304, key: "terrain-set-5" },
+  { x: 144, y: 304, key: "terrain-set-1" },
+  { x: 240, y: 304, key: "terrain-set-2" },
+  { x: 368, y: 304, key: "terrain-set-5" },
+  { x: 608, y: 304, key: "terrain-set-1" },
+  { x: 672, y: 304, key: "terrain-set-5" },
+  { x: 864, y: 304, key: "terrain-set-2" },
+  { x: 928, y: 304, key: "terrain-set-1" },
+];
+
+// Fences — long decorative runs (origin: 0,0)
+const FENCE_POSITIONS: Array<{ x: number; y: number; type: number }> = [
+  // Garden fence left of house 1
+  { x: 96,  y: 160, type: 1 }, { x: 112, y: 160, type: 2 },
+  { x: 128, y: 160, type: 1 }, { x: 144, y: 160, type: 2 },
+  { x: 160, y: 160, type: 1 }, { x: 176, y: 160, type: 2 },
+  { x: 192, y: 160, type: 1 }, { x: 208, y: 160, type: 2 },
+  { x: 224, y: 160, type: 1 }, { x: 240, y: 160, type: 2 },
+  { x: 256, y: 160, type: 1 },
+  // Garden fence right of house 2
+  { x: 768, y: 160, type: 2 }, { x: 784, y: 160, type: 1 },
+  { x: 800, y: 160, type: 2 }, { x: 816, y: 160, type: 1 },
+  { x: 832, y: 160, type: 2 }, { x: 848, y: 160, type: 1 },
+  { x: 864, y: 160, type: 2 }, { x: 880, y: 160, type: 1 },
+  { x: 896, y: 160, type: 2 }, { x: 912, y: 160, type: 1 },
+  // Pond fence (partial, south side)
+  { x: 380, y: 500, type: 1 }, { x: 396, y: 500, type: 2 },
+  { x: 412, y: 500, type: 1 }, { x: 428, y: 500, type: 2 },
+  { x: 572, y: 500, type: 2 }, { x: 588, y: 500, type: 1 },
+  { x: 604, y: 500, type: 2 }, { x: 620, y: 500, type: 1 },
+];
 
 // Village trees — clusters and singles for organic feel
 const VILLAGE_TREES: Array<{ x: number; y: number; type: number }> = [
@@ -95,6 +198,57 @@ const VILLAGE_TREES: Array<{ x: number; y: number; type: number }> = [
   { x: 880, y: 486, type: 2 }, { x: 968, y: 478, type: 1 },
 ];
 
+// Dense grass details scattered everywhere
+const GRASS_DETAILS: Array<{ x: number; y: number; type: number }> = [
+  // Top area
+  { x: 60,  y: 70,  type: 1 }, { x: 160, y: 80,  type: 3 },
+  { x: 260, y: 68,  type: 5 }, { x: 360, y: 76,  type: 2 },
+  { x: 460, y: 64,  type: 4 }, { x: 560, y: 72,  type: 6 },
+  { x: 660, y: 68,  type: 1 }, { x: 760, y: 80,  type: 3 },
+  { x: 860, y: 70,  type: 5 }, { x: 940, y: 78,  type: 2 },
+  // Mid-upper area (between trees and buildings)
+  { x: 80,  y: 132, type: 4 }, { x: 180, y: 140, type: 6 },
+  { x: 340, y: 128, type: 2 }, { x: 500, y: 136, type: 1 },
+  { x: 640, y: 130, type: 5 }, { x: 760, y: 138, type: 3 },
+  { x: 900, y: 132, type: 6 },
+  // Around buildings
+  { x: 100, y: 200, type: 1 }, { x: 272, y: 208, type: 4 },
+  { x: 380, y: 196, type: 2 }, { x: 636, y: 200, type: 5 },
+  { x: 740, y: 204, type: 3 }, { x: 936, y: 196, type: 6 },
+  // South of path
+  { x: 40,  y: 316, type: 3 }, { x: 120, y: 328, type: 1 },
+  { x: 200, y: 320, type: 5 }, { x: 640, y: 316, type: 2 },
+  { x: 760, y: 324, type: 4 }, { x: 880, y: 312, type: 6 },
+  { x: 940, y: 328, type: 1 },
+  // Near water / south area
+  { x: 80,  y: 400, type: 2 }, { x: 180, y: 420, type: 6 },
+  { x: 260, y: 408, type: 4 }, { x: 660, y: 396, type: 1 },
+  { x: 800, y: 412, type: 5 }, { x: 920, y: 400, type: 3 },
+  // Bottom area
+  { x: 100, y: 456, type: 5 }, { x: 300, y: 448, type: 2 },
+  { x: 500, y: 460, type: 4 }, { x: 600, y: 452, type: 6 },
+  { x: 800, y: 444, type: 1 }, { x: 950, y: 456, type: 3 },
+];
+
+// Ground details scattered along paths
+const GROUND_DETAILS: Array<{ x: number; y: number; type: number }> = [
+  { x: 60,  y: 264, type: 1 }, { x: 160, y: 276, type: 3 },
+  { x: 280, y: 268, type: 2 }, { x: 400, y: 280, type: 5 },
+  { x: 620, y: 268, type: 4 }, { x: 740, y: 276, type: 1 },
+  { x: 860, y: 264, type: 3 }, { x: 960, y: 280, type: 2 },
+  // Courtyard details
+  { x: 472, y: 212, type: 4 }, { x: 540, y: 220, type: 5 },
+  // South path details
+  { x: 496, y: 320, type: 1 }, { x: 504, y: 352, type: 3 },
+];
+
+// Water details in the pond
+const WATER_DETAILS: Array<{ x: number; y: number; type: number }> = [
+  { x: 400, y: 400, type: 1 }, { x: 432, y: 420, type: 2 },
+  { x: 460, y: 444, type: 4 }, { x: 420, y: 460, type: 3 },
+  { x: 560, y: 408, type: 5 }, { x: 580, y: 440, type: 2 },
+  { x: 540, y: 468, type: 4 }, { x: 608, y: 456, type: 1 },
+];
 
 
 export class StudyScene extends Phaser.Scene {
@@ -108,6 +262,7 @@ export class StudyScene extends Phaser.Scene {
 
   private grassTileSprite!: Phaser.GameObjects.TileSprite;
   private groundPaths: Phaser.GameObjects.TileSprite[] = [];
+  private waterAreas: Phaser.GameObjects.TileSprite[] = [];
 
   // All env sprites for day/night swapping + repositioning
   private envSprites: Array<{ sprite: Phaser.GameObjects.Image; assetKey: string }> = [];
@@ -160,11 +315,56 @@ export class StudyScene extends Phaser.Scene {
     AgentSprite.preload(this);
     UserSprite.preload(this);
 
+    // Generate fallback textures for new Phase 2 buildings
+    // (will be used if sprite assets don't exist)
+    this.load.on("filecomplete", () => {
+      // handled in create
+    });
     this.load.on("loaderror", (_file: { key: string }) => {
-      // silently ignore missing assets
+      // silently ignore — fallbacks created in create()
     });
   }
 
+  private ensureFallbackTextures() {
+    // Forge — day/night
+    this.createBuildingFallback("forge-day", 32, 28, "#8B4513", "#CD853F", "#FF6600");
+    this.createBuildingFallback("forge-night", 32, 28, "#5A2D0E", "#8B6914", "#CC4400");
+    // Tower — day/night
+    this.createBuildingFallback("tower-day", 24, 48, "#708090", "#A9A9A9", "#4169E1");
+    this.createBuildingFallback("tower-night", 24, 48, "#3A4555", "#6A6A6A", "#2A3A8A");
+    // Clock — day/night (small prop)
+    this.createBuildingFallback("clock-day", 16, 24, "#8B7355", "#F5F5DC", "#333333");
+    this.createBuildingFallback("clock-night", 16, 24, "#5A4A35", "#AAAA99", "#222222");
+    // Mailbox — day/night (small prop)
+    this.createBuildingFallback("mailbox-day", 12, 16, "#4169E1", "#F5F5DC", "#FFD700");
+    this.createBuildingFallback("mailbox-night", 12, 16, "#2A3A8A", "#AAAA99", "#CC9900");
+  }
+
+  private createBuildingFallback(
+    key: string, w: number, h: number,
+    baseColor: string, detailColor: string, accentColor: string,
+  ) {
+    if (this.textures.exists(key)) return;
+    const canvas = this.textures.createCanvas(key, w, h);
+    if (!canvas) return;
+    const ctx = canvas.context;
+
+    // Base structure
+    ctx.fillStyle = baseColor;
+    ctx.fillRect(0, Math.floor(h * 0.3), w, Math.ceil(h * 0.7));
+
+    // Roof / top
+    ctx.fillStyle = detailColor;
+    ctx.fillRect(0, 0, w, Math.floor(h * 0.35));
+
+    // Accent detail (door/window)
+    ctx.fillStyle = accentColor;
+    const dw = Math.max(4, Math.floor(w * 0.3));
+    const dh = Math.max(4, Math.floor(h * 0.2));
+    ctx.fillRect(Math.floor((w - dw) / 2), Math.floor(h * 0.5), dw, dh);
+
+    canvas.refresh();
+  }
 
   // ─── Create ──────────────────────────────────────────
 
@@ -173,6 +373,7 @@ export class StudyScene extends Phaser.Scene {
     const canvasH = this.scale.height;
 
     this.currentTimeOfDay = this.getTimeOfDay();
+    this.ensureFallbackTextures();
 
     this.villageOffsetX = Math.floor((canvasW - SCENE.MAP_PIXEL_WIDTH) / 2);
     this.villageOffsetY = Math.floor((canvasH - SCENE.MAP_PIXEL_HEIGHT) / 2);
@@ -185,11 +386,25 @@ export class StudyScene extends Phaser.Scene {
     // --- Layer 1: Base grass ---
     this.createGrassBase(canvasW, canvasH);
 
-    // --- Layer 2: Ground paths ---
+    // --- Layer 2: Water areas ---
+    this.createWaterAreas();
+
+    // --- Layer 3: Ground paths ---
     this.createGroundPaths();
 
-    // --- Layer 3: Y-sorted objects (buildings, tool stations, village trees) ---
+    // --- Layer 4: Ground-level decorations ---
+    this.placeGrassDetails();
+    this.placeGroundDetails();
+    this.placeWaterDetails();
+    this.placeTerrainTransitions();
+    this.placeFences();
+
+    // --- Layer 5: Landmarks (pit, stairs, bridge) ---
+    this.placeLandmarks();
+
+    // --- Layer 6: Y-sorted objects (buildings, props, village trees) ---
     this.placeBuildings();
+    this.placeProps();
     this.placeToolStations();
     this.placeVillageTrees();
 
@@ -330,6 +545,20 @@ export class StudyScene extends Phaser.Scene {
     this.grassTileSprite.setDepth(-10);
   }
 
+  // ─── Water Areas ─────────────────────────────────────
+
+  private createWaterAreas() {
+    for (const area of WATER_AREAS) {
+      const w = area.cols * SCENE.TILE_SIZE;
+      const h = area.rows * SCENE.TILE_SIZE;
+      const wp = this.worldPos({ x: area.x, y: area.y });
+      const ts = this.add.tileSprite(wp.x, wp.y, w, h, this.texKey("water-tile"));
+      ts.setOrigin(0, 0);
+      ts.setDepth(-8);
+      this.waterAreas.push(ts);
+    }
+  }
+
   // ─── Ground Paths ───────────────────────────────────
 
   private createGroundPaths() {
@@ -342,6 +571,95 @@ export class StudyScene extends Phaser.Scene {
     }
   }
 
+  // ─── Terrain Transitions ─────────────────────────────
+
+  private placeTerrainTransitions() {
+    for (const t of TERRAIN_PATCHES) {
+      const wp = this.worldPos(t);
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(t.key));
+      sprite.setOrigin(0, 0);
+      sprite.setDepth(-2);
+      this.envSprites.push({ sprite, assetKey: t.key });
+    }
+  }
+
+  // ─── Grass Details ───────────────────────────────────
+
+  private placeGrassDetails() {
+    for (const g of GRASS_DETAILS) {
+      const wp = this.worldPos(g);
+      const key = `grass-detail-${g.type}`;
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(key));
+      sprite.setOrigin(0, 0);
+      sprite.setDepth(-4);
+      this.envSprites.push({ sprite, assetKey: key });
+    }
+  }
+
+  // ─── Ground Details ──────────────────────────────────
+
+  private placeGroundDetails() {
+    for (const g of GROUND_DETAILS) {
+      const wp = this.worldPos(g);
+      const key = `ground-detail-${g.type}`;
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(key));
+      sprite.setOrigin(0, 0);
+      sprite.setDepth(-3);
+      this.envSprites.push({ sprite, assetKey: key });
+    }
+  }
+
+  // ─── Water Details ───────────────────────────────────
+
+  private placeWaterDetails() {
+    for (const w of WATER_DETAILS) {
+      const wp = this.worldPos(w);
+      const key = `water-detail-${w.type}`;
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(key));
+      sprite.setOrigin(0, 0);
+      sprite.setDepth(-1.5);
+      this.envSprites.push({ sprite, assetKey: key });
+    }
+  }
+
+  // ─── Fences ──────────────────────────────────────────
+
+  private placeFences() {
+    for (const f of FENCE_POSITIONS) {
+      const wp = this.worldPos(f);
+      const key = `fence-${f.type}`;
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(key));
+      sprite.setOrigin(0, 0);
+      sprite.setDepth(-1);
+      this.envSprites.push({ sprite, assetKey: key });
+    }
+  }
+
+  // ─── Landmarks ───────────────────────────────────────
+
+  private placeLandmarks() {
+    // Village well (pit)
+    const wellWp = this.worldPos(WELL_POS);
+    const wellSprite = this.add.image(wellWp.x, wellWp.y, this.texKey("pit"));
+    wellSprite.setOrigin(0.5, 1);
+    wellSprite.setDepth(-0.3);
+    this.envSprites.push({ sprite: wellSprite, assetKey: "pit" });
+
+    // Stone stairs
+    const stairsWp = this.worldPos(STAIRS_POS);
+    const stairsSprite = this.add.image(stairsWp.x, stairsWp.y, this.texKey("stairs"));
+    stairsSprite.setOrigin(0.5, 1);
+    stairsSprite.setDepth(-0.3);
+    this.envSprites.push({ sprite: stairsSprite, assetKey: "stairs" });
+
+    // Bridge over pond
+    const bridgeWp = this.worldPos(BRIDGE_POS);
+    const bridgeSprite = this.add.image(bridgeWp.x, bridgeWp.y, this.texKey("bridge"));
+    bridgeSprite.setOrigin(0.5, 1);
+    bridgeSprite.setDepth(-0.2);
+    this.envSprites.push({ sprite: bridgeSprite, assetKey: "bridge" });
+  }
+
   // ─── Buildings (Y-sorted) ───────────────────────────
 
   private placeBuildings() {
@@ -351,6 +669,18 @@ export class StudyScene extends Phaser.Scene {
       sprite.setOrigin(0.5, 1);
       sprite.setDepth(b.y * 0.01); // Y-sort
       this.envSprites.push({ sprite, assetKey: b.key });
+    }
+  }
+
+  // ─── Props (small objects like clock, mailbox) ──────
+
+  private placeProps() {
+    for (const p of PROPS) {
+      const wp = this.worldPos(p);
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(p.key));
+      sprite.setOrigin(0.5, 1);
+      sprite.setDepth(p.y * 0.01);
+      this.envSprites.push({ sprite, assetKey: p.key });
     }
   }
 
@@ -456,6 +786,10 @@ export class StudyScene extends Phaser.Scene {
       ts.setTexture(VILLAGE_ASSETS["ground-tile"][tod]);
     }
 
+    for (const ts of this.waterAreas) {
+      ts.setTexture(VILLAGE_ASSETS["water-tile"][tod]);
+    }
+
     for (const entry of this.envSprites) {
       const variants = VILLAGE_ASSETS[entry.assetKey];
       if (variants) {
@@ -500,6 +834,12 @@ export class StudyScene extends Phaser.Scene {
     PATH_SEGMENTS.forEach((seg, i) => {
       const wp = this.worldPos({ x: seg.x, y: seg.y });
       this.groundPaths[i].setPosition(wp.x, wp.y);
+    });
+
+    // Reposition water areas
+    WATER_AREAS.forEach((area, i) => {
+      const wp = this.worldPos({ x: area.x, y: area.y });
+      this.waterAreas[i].setPosition(wp.x, wp.y);
     });
 
     // Move all env sprites by delta

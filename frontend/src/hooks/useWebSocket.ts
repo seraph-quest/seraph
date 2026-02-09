@@ -41,6 +41,14 @@ export function useWebSocket() {
     ws.onopen = () => {
       setConnectionStatus("connected");
       useChatStore.getState().fetchProfile();
+      useChatStore.getState().loadSessions();
+
+      // Restore last session if one was remembered
+      const stored = useChatStore.getState().sessionId;
+      if (stored && useChatStore.getState().messages.length === 0) {
+        useChatStore.getState().switchSession(stored);
+      }
+
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));

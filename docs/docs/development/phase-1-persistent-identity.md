@@ -160,6 +160,7 @@ frontend/src/components/quest/
   GoalTree.tsx
   DomainStats.tsx
 frontend/src/components/HudButtons.tsx
+frontend/src/components/SettingsPanel.tsx
 frontend/src/components/chat/DialogFrame.tsx
 ```
 
@@ -188,7 +189,8 @@ frontend/src/components/chat/DialogFrame.tsx
 - **DialogFrame** — Shared RPG frame component with optional maximize (▲/▼) and close (✕) buttons
 - **Maximize**: Chat panel expands to nearly full screen (16px margins) with smooth CSS transition
 - **Close**: Hides the panel; floating HUD buttons appear at bottom-left to reopen
-- **HudButtons** — RPG-styled "Chat" / "Quests" buttons visible when respective panels are closed
+- **HudButtons** — RPG-styled "Chat" / "Quests" / "Settings" buttons visible when respective panels are closed
+- **SettingsPanel** — Standalone overlay panel (bottom-right) with restart onboarding option and version info
 
 **Interaction**: Click Seraph sprite → chat panel toggle, Click User sprite → quest log toggle, or use ✕/HUD buttons
 

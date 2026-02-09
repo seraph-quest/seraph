@@ -18,6 +18,7 @@ interface ChatStore {
   ambientState: AmbientState;
   chatPanelOpen: boolean;
   questPanelOpen: boolean;
+  onboardingCompleted: boolean | null;
 
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -30,6 +31,10 @@ interface ChatStore {
   setAmbientState: (state: AmbientState) => void;
   setChatPanelOpen: (open: boolean) => void;
   setQuestPanelOpen: (open: boolean) => void;
+  setOnboardingCompleted: (completed: boolean) => void;
+  fetchProfile: () => Promise<void>;
+  skipOnboarding: () => Promise<void>;
+  restartOnboarding: () => Promise<void>;
   loadSessions: () => Promise<void>;
   switchSession: (sessionId: string) => Promise<void>;
   newSession: () => void;
@@ -53,6 +58,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   ambientState: "idle",
   chatPanelOpen: true,
   questPanelOpen: false,
+  onboardingCompleted: null,
 
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
@@ -81,6 +87,42 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setQuestPanelOpen: (open) =>
     set({ questPanelOpen: open, chatPanelOpen: open ? false : get().chatPanelOpen }),
+
+  setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
+
+  fetchProfile: async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/user/profile`);
+      if (res.ok) {
+        const data = await res.json();
+        set({ onboardingCompleted: data.onboarding_completed });
+      }
+    } catch (err) {
+      console.error("Failed to fetch profile:", err);
+    }
+  },
+
+  skipOnboarding: async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/user/onboarding/skip`, { method: "POST" });
+      if (res.ok) {
+        set({ onboardingCompleted: true });
+      }
+    } catch (err) {
+      console.error("Failed to skip onboarding:", err);
+    }
+  },
+
+  restartOnboarding: async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/user/onboarding/restart`, { method: "POST" });
+      if (res.ok) {
+        set({ onboardingCompleted: false, sessionId: null, messages: [] });
+      }
+    } catch (err) {
+      console.error("Failed to restart onboarding:", err);
+    }
+  },
 
   loadSessions: async () => {
     try {

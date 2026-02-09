@@ -8,7 +8,7 @@ from smolagents import ActionStep, ToolCall, FinalAnswerStep
 from src.agent.factory import create_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
-from src.api.profile import get_or_create_profile, mark_onboarding_complete
+from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
 from src.memory.soul import read_soul
 from src.memory.vector_store import search_formatted
 from src.models.schemas import WSMessage, WSResponse
@@ -47,6 +47,25 @@ async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
     await websocket.accept()
 
+    # Send welcome message if user hasn't completed onboarding
+    try:
+        profile = await get_or_create_profile()
+        if not profile.onboarding_completed:
+            await websocket.send_text(
+                WSResponse(
+                    type="proactive",
+                    content=(
+                        "Greetings, traveler! I am Seraph, your guide through these lands. "
+                        "Before we embark on our full journey together, let me get to know you a bit. "
+                        "I'll ask a few questions to tailor our adventure. "
+                        "If you'd prefer to skip ahead, just say the word!"
+                    ),
+                    intervention_type="advisory",
+                ).model_dump_json()
+            )
+    except Exception as e:
+        logger.warning("Failed to send welcome message: %s", e)
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -62,6 +81,19 @@ async def websocket_chat(websocket: WebSocket):
             if ws_msg.type == "ping":
                 await websocket.send_text(
                     WSResponse(type="pong", content="pong").model_dump_json()
+                )
+                continue
+
+            if ws_msg.type == "skip_onboarding":
+                await mark_onboarding_complete()
+                await websocket.send_text(
+                    WSResponse(
+                        type="final",
+                        content=(
+                            "No worries! Onboarding skipped. "
+                            "You now have access to all my abilities. How can I help you?"
+                        ),
+                    ).model_dump_json()
                 )
                 continue
 

@@ -12,7 +12,7 @@ export interface ChatMessage {
 }
 
 export interface WSMessage {
-  type: "message" | "ping";
+  type: "message" | "ping" | "skip_onboarding";
   message: string;
   session_id: string | null;
 }

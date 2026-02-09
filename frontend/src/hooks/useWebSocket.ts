@@ -40,6 +40,7 @@ export function useWebSocket() {
 
     ws.onopen = () => {
       setConnectionStatus("connected");
+      useChatStore.getState().fetchProfile();
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));
@@ -85,8 +86,9 @@ export function useWebSocket() {
           };
           addMessage(agentMsg);
 
-          // Refresh session list after a conversation turn
+          // Refresh session list and profile after a conversation turn
           useChatStore.getState().loadSessions();
+          useChatStore.getState().fetchProfile();
         } else if (data.type === "error") {
           setAgentBusy(false);
 
@@ -146,6 +148,12 @@ export function useWebSocket() {
     };
   }, [addMessage, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
+  const skipOnboarding = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: "skip_onboarding" }));
+    useChatStore.getState().setOnboardingCompleted(true);
+  }, []);
+
   const sendMessage = useCallback(
     (message: string) => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -182,5 +190,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { sendMessage };
+  return { sendMessage, skipOnboarding };
 }

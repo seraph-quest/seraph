@@ -4,10 +4,12 @@ import { useChatStore } from "../../stores/chatStore";
 export function SessionList() {
   const sessions = useChatStore((s) => s.sessions);
   const sessionId = useChatStore((s) => s.sessionId);
+  const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const newSession = useChatStore((s) => s.newSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
+  const restartOnboarding = useChatStore((s) => s.restartOnboarding);
 
   useEffect(() => {
     loadSessions();
@@ -48,6 +50,17 @@ export function SessionList() {
           </button>
         </div>
       ))}
+      {onboardingCompleted === true && (
+        <button
+          onClick={async () => {
+            await restartOnboarding();
+            loadSessions();
+          }}
+          className="text-[7px] text-retro-text/40 hover:text-retro-highlight text-left px-2 py-1 uppercase tracking-wider"
+        >
+          Restart intro
+        </button>
+      )}
     </div>
   );
 }

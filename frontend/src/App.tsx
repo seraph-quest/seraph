@@ -7,7 +7,7 @@ import { useChatStore } from "./stores/chatStore";
 import { EventBus } from "./game/EventBus";
 
 export default function App() {
-  const { sendMessage } = useWebSocket();
+  const { sendMessage, skipOnboarding } = useWebSocket();
   const phaserRef = useRef<IRefPhaserGame>(null);
   // Bridge Phaser EventBus → React panel toggles
   useEffect(() => {
@@ -34,7 +34,7 @@ export default function App() {
       <div id="game-viewport" className="fixed inset-0 z-0">
         <PhaserGame ref={phaserRef} />
       </div>
-      <ChatPanel onSend={sendMessage} />
+      <ChatPanel onSend={sendMessage} onSkipOnboarding={skipOnboarding} />
       <QuestPanel />
       <div className="crt-overlay" />
     </>

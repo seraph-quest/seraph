@@ -162,3 +162,17 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+/* ── Settings Overlay ───────────────────────────────── */
+.settings-overlay {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  width: 260px;
+  max-width: calc(100vw - 32px);
+  height: 240px;
+  max-height: 35vh;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+}

@@ -32,7 +32,7 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
         onClose={() => setChatPanelOpen(false)}
       >
         <ChatSidebar />
-        <div className="flex-1 min-h-0 flex flex-col">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
           {onboardingCompleted === false && onSkipOnboarding && (
             <button
               onClick={onSkipOnboarding}

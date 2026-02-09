@@ -19,7 +19,7 @@ interface ChatStore {
   chatPanelOpen: boolean;
   chatMaximized: boolean;
   questPanelOpen: boolean;
-  settingsOpen: boolean;
+  settingsPanelOpen: boolean;
   onboardingCompleted: boolean | null;
 
   addMessage: (message: ChatMessage) => void;
@@ -34,7 +34,7 @@ interface ChatStore {
   setChatPanelOpen: (open: boolean) => void;
   toggleChatMaximized: () => void;
   setQuestPanelOpen: (open: boolean) => void;
-  setSettingsOpen: (open: boolean) => void;
+  setSettingsPanelOpen: (open: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
@@ -67,7 +67,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   chatPanelOpen: true,
   chatMaximized: false,
   questPanelOpen: false,
-  settingsOpen: false,
+  settingsPanelOpen: false,
   onboardingCompleted: null,
 
   addMessage: (message) =>
@@ -103,7 +103,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setQuestPanelOpen: (open) =>
     set({ questPanelOpen: open, chatPanelOpen: open ? false : get().chatPanelOpen }),
 
-  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  setSettingsPanelOpen: (open) => set({ settingsPanelOpen: open }),
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
 

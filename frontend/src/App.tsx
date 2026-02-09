@@ -3,6 +3,7 @@ import { PhaserGame, type IRefPhaserGame } from "./game/PhaserGame";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { QuestPanel } from "./components/quest/QuestPanel";
 import { HudButtons } from "./components/HudButtons";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useChatStore } from "./stores/chatStore";
 import { EventBus } from "./game/EventBus";
@@ -37,6 +38,7 @@ export default function App() {
       </div>
       <ChatPanel onSend={sendMessage} onSkipOnboarding={skipOnboarding} />
       <QuestPanel />
+      <SettingsPanel />
       <HudButtons />
       <div className="crt-overlay" />
     </>

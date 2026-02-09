@@ -3,8 +3,10 @@ import { useChatStore } from "../stores/chatStore";
 export function HudButtons() {
   const chatPanelOpen = useChatStore((s) => s.chatPanelOpen);
   const questPanelOpen = useChatStore((s) => s.questPanelOpen);
+  const settingsPanelOpen = useChatStore((s) => s.settingsPanelOpen);
   const setChatPanelOpen = useChatStore((s) => s.setChatPanelOpen);
   const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
+  const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
 
   return (
     <div className="fixed bottom-4 left-4 z-50 flex gap-2">
@@ -24,6 +26,15 @@ export function HudButtons() {
           title="Open Quest Log"
         >
           Quests
+        </button>
+      )}
+      {!settingsPanelOpen && (
+        <button
+          onClick={() => setSettingsPanelOpen(true)}
+          className="rpg-frame px-3 py-2 text-[9px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
+          title="Open Settings"
+        >
+          Settings
         </button>
       )}
     </div>

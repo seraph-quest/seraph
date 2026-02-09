@@ -43,7 +43,8 @@ export class AgentSprite {
   }
 
   private createFallbackTexture(scene: Phaser.Scene) {
-    const canvas = scene.textures.createCanvas(SPRITE_KEY, 96, 128);
+    const WALK_COLS = 6;
+    const canvas = scene.textures.createCanvas(SPRITE_KEY, WALK_COLS * FRAME_W, 4 * FRAME_H);
     if (!canvas) return;
     const ctx = canvas.context;
 
@@ -55,10 +56,10 @@ export class AgentSprite {
     ];
 
     for (const dir of directions) {
-      for (let col = 0; col < 3; col++) {
+      for (let col = 0; col < WALK_COLS; col++) {
         const ox = col * 32;
         const oy = dir.row * 32;
-        const legOffset = col === 1 ? 0 : col === 0 ? -1 : 1;
+        const legOffset = col % 2 === 0 ? -1 : 1;
 
         ctx.fillStyle = "#3b0764";
         ctx.fillRect(ox + 8, oy + 14, 16, 12);
@@ -90,18 +91,14 @@ export class AgentSprite {
 
     canvas.refresh();
 
-    // Register named frames matching atlas format
     const texture = scene.textures.get(SPRITE_KEY);
     for (const dir of directions) {
-      for (let col = 0; col < 3; col++) {
-        const walkFrame = `${dir.label}-walk.00${col}`;
+      for (let col = 0; col < WALK_COLS; col++) {
+        const walkFrame = `${dir.label}-walk.${String(col).padStart(3, "0")}`;
         texture.add(walkFrame, 0, col * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
       }
-      // Frame 3 duplicates frame 1 (same as atlas)
-      const walk3 = `${dir.label}-walk.003`;
-      texture.add(walk3, 0, 1 * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
-      // Idle frame = col 1
-      texture.add(dir.label, 0, 1 * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
+      // Idle frame = col 0
+      texture.add(dir.label, 0, 0, dir.row * FRAME_H, FRAME_W, FRAME_H);
     }
   }
 
@@ -114,7 +111,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "down-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 8,
@@ -125,7 +122,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "left-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 8,
@@ -136,7 +133,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "right-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 8,
@@ -147,7 +144,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "up-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 8,
@@ -168,7 +165,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "down-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 3,
@@ -181,7 +178,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "left-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 4,
@@ -194,7 +191,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "right-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 4,
@@ -207,7 +204,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "up-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 3,
@@ -220,7 +217,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "down-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 5,
@@ -233,7 +230,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "up-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 4,
@@ -246,7 +243,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "right-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 3,
@@ -259,7 +256,7 @@ export class AgentSprite {
       frames: scene.anims.generateFrameNames(SPRITE_KEY, {
         prefix: "left-walk.",
         start: 0,
-        end: 3,
+        end: 5,
         zeroPad: 3,
       }),
       frameRate: 3,

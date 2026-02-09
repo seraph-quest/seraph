@@ -41,7 +41,7 @@ export const SCENE = {
   MAP_ROWS: 32,
   MAP_PIXEL_WIDTH: 1024,  // 64 * 16
   MAP_PIXEL_HEIGHT: 512,  // 32 * 16
-  SPRITE_SCALE: 1,
+  SPRITE_SCALE: 2,
   WALK_SPEED: 300,
 
   // Tool station positions (village-local coords — where agent walks to)
@@ -54,6 +54,7 @@ export const SCENE = {
     tower:   { x: 640, y: 200 },    // TOWER — browse_webpage
     clock:   { x: 576, y: 340 },    // CLOCK — calendar
     mailbox: { x: 128, y: 340 },    // MAILBOX — email
+    userHome: { x: 832, y: 340 },   // User avatar default position
   },
 
   COLORS: {

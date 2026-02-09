@@ -13,8 +13,8 @@ class SessionManager:
     async def get_or_create(self, session_id: str | None = None) -> Session:
         async with get_session() as db:
             if session_id:
-                result = await db.exec(select(Session).where(Session.id == session_id))
-                session = result.first()
+                result = await db.execute(select(Session).where(Session.id == session_id))
+                session = result.scalars().first()
                 if session:
                     db.expunge(session)
                     return session
@@ -28,43 +28,43 @@ class SessionManager:
 
     async def get(self, session_id: str) -> Session | None:
         async with get_session() as db:
-            result = await db.exec(select(Session).where(Session.id == session_id))
-            session = result.first()
+            result = await db.execute(select(Session).where(Session.id == session_id))
+            session = result.scalars().first()
             if session:
                 db.expunge(session)
             return session
 
     async def delete(self, session_id: str) -> bool:
         async with get_session() as db:
-            result = await db.exec(select(Session).where(Session.id == session_id))
-            session = result.first()
+            result = await db.execute(select(Session).where(Session.id == session_id))
+            session = result.scalars().first()
             if not session:
                 return False
             # Delete associated messages first
-            msgs = await db.exec(
+            msgs = await db.execute(
                 select(Message).where(Message.session_id == session_id)
             )
-            for msg in msgs.all():
+            for msg in msgs.scalars().all():
                 await db.delete(msg)
             await db.delete(session)
             return True
 
     async def list_sessions(self) -> list[dict]:
         async with get_session() as db:
-            result = await db.exec(
+            result = await db.execute(
                 select(Session).order_by(col(Session.updated_at).desc())
             )
-            sessions = result.all()
+            sessions = result.scalars().all()
             out = []
             for s in sessions:
                 # Get last message preview
-                msg_result = await db.exec(
+                msg_result = await db.execute(
                     select(Message)
                     .where(Message.session_id == s.id)
                     .order_by(col(Message.created_at).desc())
                     .limit(1)
                 )
-                last_msg = msg_result.first()
+                last_msg = msg_result.scalars().first()
                 out.append({
                     "id": s.id,
                     "title": s.title,
@@ -77,8 +77,8 @@ class SessionManager:
 
     async def update_title(self, session_id: str, title: str) -> bool:
         async with get_session() as db:
-            result = await db.exec(select(Session).where(Session.id == session_id))
-            session = result.first()
+            result = await db.execute(select(Session).where(Session.id == session_id))
+            session = result.scalars().first()
             if not session:
                 return False
             session.title = title
@@ -106,8 +106,8 @@ class SessionManager:
             )
             db.add(msg)
             # Update session timestamp
-            result = await db.exec(select(Session).where(Session.id == session_id))
-            session = result.first()
+            result = await db.execute(select(Session).where(Session.id == session_id))
+            session = result.scalars().first()
             if session:
                 session.updated_at = datetime.now(timezone.utc)
                 db.add(session)
@@ -119,14 +119,14 @@ class SessionManager:
         self, session_id: str, limit: int = 50
     ) -> str:
         async with get_session() as db:
-            result = await db.exec(
+            result = await db.execute(
                 select(Message)
                 .where(Message.session_id == session_id)
                 .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                 .order_by(col(Message.created_at).desc())
                 .limit(limit)
             )
-            messages = list(reversed(result.all()))
+            messages = list(reversed(result.scalars().all()))
             if not messages:
                 return ""
             lines = []
@@ -139,7 +139,7 @@ class SessionManager:
         self, session_id: str, limit: int = 100, offset: int = 0
     ) -> list[dict]:
         async with get_session() as db:
-            result = await db.exec(
+            result = await db.execute(
                 select(Message)
                 .where(Message.session_id == session_id)
                 .order_by(col(Message.created_at).asc())
@@ -155,18 +155,18 @@ class SessionManager:
                     "tool_used": m.tool_used,
                     "created_at": m.created_at.isoformat(),
                 }
-                for m in result.all()
+                for m in result.scalars().all()
             ]
 
     async def count_messages(self, session_id: str) -> int:
         """Count user+assistant messages in a session."""
         async with get_session() as db:
-            result = await db.exec(
+            result = await db.execute(
                 select(Message)
                 .where(Message.session_id == session_id)
                 .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
             )
-            return len(result.all())
+            return len(result.scalars().all())
 
 
 session_manager = SessionManager()

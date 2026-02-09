@@ -14,10 +14,10 @@ router = APIRouter()
 async def get_or_create_profile() -> UserProfile:
     """Get the singleton user profile, creating it if needed."""
     async with get_db() as db:
-        result = await db.exec(
+        result = await db.execute(
             select(UserProfile).where(UserProfile.id == "singleton")
         )
-        profile = result.first()
+        profile = result.scalars().first()
         if profile:
             return profile
 
@@ -32,10 +32,10 @@ async def mark_onboarding_complete() -> None:
     from datetime import datetime, timezone
 
     async with get_db() as db:
-        result = await db.exec(
+        result = await db.execute(
             select(UserProfile).where(UserProfile.id == "singleton")
         )
-        profile = result.first()
+        profile = result.scalars().first()
         if profile:
             profile.onboarding_completed = True
             profile.updated_at = datetime.now(timezone.utc)

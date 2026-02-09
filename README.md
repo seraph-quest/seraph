@@ -1,6 +1,6 @@
 # Seraph AI Agent
 
-An AI assistant with tool-calling capabilities, powered by smolagents and LiteLLM via OpenRouter.
+A proactive AI guardian with a retro 16-bit RPG village UI. An animated pixel-art avatar walks between tool stations in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity (soul file), long-term memory (vector embeddings), hierarchical goal/quest system, and 16 tools across web search, file I/O, shell execution, browser automation, calendar, and email.
 
 ## Quick Start
 
@@ -23,34 +23,41 @@ An AI assistant with tool-calling capabilities, powered by smolagents and LiteLL
 
 ## Architecture
 
-- **Frontend**: React 19, Vite 6, TypeScript, Tailwind CSS, Zustand
-- **Backend**: Python 3.12, FastAPI, uvicorn
-- **AI**: smolagents ToolCallingAgent + LiteLLM (OpenRouter)
-- **Tools**: File I/O, web search (DuckDuckGo), template filling
-- **Infra**: Docker Compose, uv package manager
+- **Frontend**: React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90
+- **Backend**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
+- **Database**: SQLModel + SQLite (aiosqlite), LanceDB (vector memory)
+- **Tools**: 16 auto-discovered tools — web search, file I/O, shell (snekbox sandbox), browser (Playwright), calendar (Google), email (Gmail), soul/memory, goals
+- **Infra**: Docker Compose (3 services: backend, frontend, snekbox sandbox), uv package manager
 
 ## Project Structure
 
 ```
 frontend/
 ├── src/
-│   ├── components/      # React components (scene, chat, ui)
+│   ├── game/            # Phaser 3 village scene, sprites, EventBus
+│   ├── components/      # React overlays (chat, quest, ui)
 │   ├── hooks/           # useWebSocket, useAgentAnimation
-│   ├── stores/          # Zustand state management
+│   ├── stores/          # Zustand stores (chat, quest)
 │   ├── lib/             # Tool parser, animation state machine
 │   ├── types/           # TypeScript interfaces
-│   └── config/          # Constants and env vars
+│   └── config/          # Constants, scene dimensions, tool names
 
 backend/
 ├── main.py              # Uvicorn entry point
 ├── config/settings.py   # Pydantic Settings (env vars)
 ├── src/
-│   ├── app.py           # FastAPI app factory
+│   ├── app.py           # FastAPI app factory (lifespan: DB init, soul file)
 │   ├── models/schemas.py
-│   ├── api/             # REST + WebSocket endpoints
-│   ├── agent/           # smolagents factory + sessions
-│   └── tools/           # @tool implementations
+│   ├── api/             # REST + WebSocket endpoints (chat, sessions, goals, profile, tools)
+│   ├── agent/           # smolagents factory, onboarding agent, session manager
+│   ├── tools/           # 16 @tool implementations (auto-discovered)
+│   ├── db/              # SQLModel engine + models (Session, Message, Goal, UserProfile, Memory)
+│   ├── memory/          # Soul file, LanceDB vector store, embedder, consolidator
+│   ├── goals/           # Hierarchical goal CRUD repository
+│   └── plugins/         # Tool auto-discovery loader + registry
 └── tests/
+
+docs/                    # Docusaurus docs site (vision, roadmap, phase specs)
 ```
 
 ## Management
@@ -62,4 +69,11 @@ backend/
 ./manage.sh -e dev build       # Rebuild
 ```
 
-See [backend/README.md](backend/README.md) for detailed API docs.
+## Status
+
+- **Phase 0** (Foundation): Complete — chat, Phaser village, basic tools
+- **Phase 1** (Persistent Identity): Complete — DB, soul/memory, goals, onboarding, quest UI
+- **Phase 2** (Capable Executor): Complete — shell, browser, calendar, email, plugin system
+- **Phase 3** (The Observer): Planned — scheduler, context awareness, proactive reasoning
+
+See [docs/](docs/) for full vision, roadmap, and phase specifications.

@@ -18,9 +18,7 @@ def get_model() -> LiteLLMModel:
 
 def get_tools() -> list:
     """Return all auto-discovered tools + MCP tools."""
-    tools = discover_tools()
-    tools.extend(mcp_manager.get_tools())
-    return tools
+    return discover_tools() + mcp_manager.get_tools()
 
 
 def create_agent(

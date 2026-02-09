@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     google_gmail_token_path: str = "/app/data/google_gmail_token.json"
 
     # MCP — External tool servers
-    things_mcp_url: str = ""  # e.g. "http://host.docker.internal:9100/sse"
+    things_mcp_url: str = ""  # e.g. "http://host.docker.internal:9100/mcp"
 
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True

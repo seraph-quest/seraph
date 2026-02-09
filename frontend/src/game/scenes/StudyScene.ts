@@ -77,6 +77,12 @@ const BUILDINGS = [
   { x: 832, y: 256, key: "house-2" },       // Right house — read/write
 ];
 
+// Tooltip labels for buildings
+const BUILDING_TOOLTIPS: Record<string, string> = {
+  "house-1": "West House",
+  "house-2": "East House",
+};
+
 
 // Village trees — clusters and singles for organic feel
 const VILLAGE_TREES: Array<{ x: number; y: number; type: number }> = [
@@ -163,6 +169,26 @@ export class StudyScene extends Phaser.Scene {
     };
   }
 
+  /** Attach a hover tooltip to any interactive game object. */
+  private attachTooltip(
+    obj: Phaser.GameObjects.Image | Phaser.GameObjects.Sprite,
+    label: string,
+  ) {
+    if (!obj.input) {
+      obj.setInteractive({ useHandCursor: true });
+    }
+    obj.on("pointerover", () => {
+      this.tooltipText.setText(label);
+      const pad = 6;
+      this.tooltipBg.setSize(this.tooltipText.width + pad * 2, this.tooltipText.height + pad * 2);
+      this.tooltip.setPosition(obj.x, obj.y - obj.displayHeight - 8);
+      this.tooltip.setVisible(true);
+    });
+    obj.on("pointerout", () => {
+      this.tooltip.setVisible(false);
+    });
+  }
+
   // ─── Preload ─────────────────────────────────────────
 
   preload() {
@@ -204,6 +230,20 @@ export class StudyScene extends Phaser.Scene {
     // --- Layer 2: Ground paths ---
     this.createGroundPaths();
 
+    // --- Hover tooltip (shared, repositioned on hover) ---
+    this.tooltipText = this.add.text(0, 0, "", {
+      fontFamily: '"Press Start 2P"',
+      fontSize: "7px",
+      color: "#ffffff",
+      padding: { x: 0, y: 0 },
+    });
+    this.tooltipText.setOrigin(0.5, 0.5);
+    this.tooltipBg = this.add.rectangle(0, 0, 1, 1, 0x000000, 0.75);
+    this.tooltipBg.setOrigin(0.5, 0.5);
+    this.tooltip = this.add.container(0, 0, [this.tooltipBg, this.tooltipText]);
+    this.tooltip.setDepth(100);
+    this.tooltip.setVisible(false);
+
     // --- Layer 3: Y-sorted objects (buildings, tool stations, village trees) ---
     this.placeBuildings();
     this.placeToolStations();
@@ -221,28 +261,17 @@ export class StudyScene extends Phaser.Scene {
     this.agent.sprite.on("pointerdown", () => {
       EventBus.emit("toggle-chat");
     });
+    this.attachTooltip(this.agent.sprite, "Seraph");
 
     // --- User Avatar (clickable — toggles quest log) ---
     const userPos = this.worldPos(SCENE.POSITIONS.userHome);
     this.userAvatar = new UserSprite(this, userPos.x, userPos.y);
 
+    this.attachTooltip(this.userAvatar.sprite, "You");
+
     // --- Speech Bubble ---
     this.speechBubble = new SpeechBubble(this, SCENE.MAP_PIXEL_WIDTH, this.villageOffsetX);
     this.speechBubble.setTarget(this.agent.sprite);
-
-    // --- Hover tooltip (shared, repositioned on hover) ---
-    this.tooltipText = this.add.text(0, 0, "", {
-      fontFamily: '"Press Start 2P"',
-      fontSize: "7px",
-      color: "#ffffff",
-      padding: { x: 0, y: 0 },
-    });
-    this.tooltipText.setOrigin(0.5, 0.5);
-    this.tooltipBg = this.add.rectangle(0, 0, 1, 1, 0x000000, 0.75);
-    this.tooltipBg.setOrigin(0.5, 0.5);
-    this.tooltip = this.add.container(0, 0, [this.tooltipBg, this.tooltipText]);
-    this.tooltip.setDepth(100);
-    this.tooltip.setVisible(false);
 
     // --- Village label ---
     this.label = this.add.text(canvasW / 2, 12, "Seraph's Village", {
@@ -381,6 +410,11 @@ export class StudyScene extends Phaser.Scene {
       sprite.setOrigin(0.5, 1);
       sprite.setDepth(b.y * 0.01); // Y-sort
       this.envSprites.push({ sprite, assetKey: b.key });
+
+      const label = BUILDING_TOOLTIPS[b.key];
+      if (label) {
+        this.attachTooltip(sprite, label);
+      }
     }
   }
 
@@ -395,17 +429,7 @@ export class StudyScene extends Phaser.Scene {
 
       const label = TOOL_STATION_TOOLTIPS[ts.key];
       if (label) {
-        sprite.setInteractive({ useHandCursor: true });
-        sprite.on("pointerover", () => {
-          this.tooltipText.setText(label);
-          const pad = 6;
-          this.tooltipBg.setSize(this.tooltipText.width + pad * 2, this.tooltipText.height + pad * 2);
-          this.tooltip.setPosition(sprite.x, sprite.y - sprite.displayHeight - 8);
-          this.tooltip.setVisible(true);
-        });
-        sprite.on("pointerout", () => {
-          this.tooltip.setVisible(false);
-        });
+        this.attachTooltip(sprite, label);
       }
 
       this.toolStationSprites.push(sprite);
@@ -422,6 +446,7 @@ export class StudyScene extends Phaser.Scene {
       sprite.setOrigin(0.5, 1);
       sprite.setDepth(t.y * 0.01); // Y-sort
       this.envSprites.push({ sprite, assetKey: key });
+      this.attachTooltip(sprite, "Tree");
     }
   }
 

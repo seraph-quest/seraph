@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from src.plugins.loader import discover_tools
+from src.agent.factory import get_tools
 from src.plugins.registry import get_all_metadata
 
 router = APIRouter()
@@ -9,7 +9,7 @@ router = APIRouter()
 @router.get("/tools")
 async def list_tools():
     """List all available tools with their metadata."""
-    tools = discover_tools()
+    tools = get_tools()
     metadata = get_all_metadata()
 
     result = []

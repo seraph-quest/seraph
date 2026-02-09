@@ -21,7 +21,7 @@ class MCPManager:
     def connect(self, url: str) -> None:
         """Connect to an MCP server via HTTP/SSE. Fails gracefully."""
         try:
-            self._client = MCPClient({"url": url})
+            self._client = MCPClient({"url": url, "transport": "streamable-http"})
             self._tools = self._client.get_tools()
             logger.info(f"Connected to MCP server: {len(self._tools)} tools loaded")
         except Exception:

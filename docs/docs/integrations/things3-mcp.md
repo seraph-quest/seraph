@@ -12,7 +12,7 @@ The things-mcp server runs on the **host Mac** (not inside Docker) because task 
 
 ```
 Host Mac:  uvx things-mcp  (HTTP transport, port 9100)
-              |  SSE/HTTP
+              |  Streamable HTTP
 Docker:    backend-dev  ->  MCPManager  ->  smolagents MCPClient
               |
            ToolCallingAgent (existing @tool functions + MCP tools)
@@ -34,14 +34,14 @@ The backend connects to the host via `host.docker.internal:9100` (Docker Desktop
 THINGS_MCP_TRANSPORT=http THINGS_MCP_PORT=9100 uvx things-mcp
 ```
 
-This starts the MCP server on port 9100 with HTTP/SSE transport. Leave this terminal running.
+This starts the MCP server on port 9100 with Streamable HTTP transport. Leave this terminal running.
 
 ### 2. Configure the backend
 
 The `THINGS_MCP_URL` environment variable is already set in `.env.dev`:
 
 ```
-THINGS_MCP_URL=http://host.docker.internal:9100/sse
+THINGS_MCP_URL=http://host.docker.internal:9100/mcp
 ```
 
 To disable Things3 integration, set it to an empty string:
@@ -73,7 +73,7 @@ Connected to MCP server: 22 tools loaded
 If things-mcp is not running or unreachable, you'll see a warning instead — the backend still starts, just without Things3 tools:
 
 ```
-WARNING - Failed to connect to MCP server at http://host.docker.internal:9100/sse
+WARNING - Failed to connect to MCP server at http://host.docker.internal:9100/mcp
 ```
 
 ## Usage
@@ -149,7 +149,7 @@ All Things3 tools map to the **church/bench** station (the tasks & goals area):
 
 **"Failed to connect to MCP server"**
 - Ensure things-mcp is running on the host: `THINGS_MCP_TRANSPORT=http THINGS_MCP_PORT=9100 uvx things-mcp`
-- Verify port 9100 is accessible: `curl http://localhost:9100/sse`
+- Verify port 9100 is accessible: `curl http://localhost:9100/mcp`
 - Check that Docker Desktop is running (provides `host.docker.internal`)
 
 **Things3 tools not appearing in agent**

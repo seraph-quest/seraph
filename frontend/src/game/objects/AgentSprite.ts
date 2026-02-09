@@ -213,6 +213,58 @@ export class AgentSprite {
       frameRate: 3,
       repeat: -1,
     });
+
+    // At-forge: facing down, medium cycle (hammering)
+    scene.anims.create({
+      key: "at-forge",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "down-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
+      frameRate: 5,
+      repeat: -1,
+    });
+
+    // At-tower: facing up, slow cycle (looking up/observing)
+    scene.anims.create({
+      key: "at-tower",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "up-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
+      frameRate: 4,
+      repeat: -1,
+    });
+
+    // At-clock: facing right, slow cycle (checking time)
+    scene.anims.create({
+      key: "at-clock",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "right-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
+      frameRate: 3,
+      repeat: -1,
+    });
+
+    // At-mailbox: facing left, slow cycle (reading letter)
+    scene.anims.create({
+      key: "at-mailbox",
+      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+        prefix: "left-walk.",
+        start: 0,
+        end: 3,
+        zeroPad: 3,
+      }),
+      frameRate: 3,
+      repeat: -1,
+    });
   }
 
   moveTo(x: number, y: number, onComplete?: () => void) {

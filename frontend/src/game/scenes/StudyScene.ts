@@ -2,6 +2,7 @@ import Phaser from "phaser";
 import { EventBus } from "../EventBus";
 import { AgentSprite } from "../objects/AgentSprite";
 import { SpeechBubble } from "../objects/SpeechBubble";
+import { UserSprite } from "../objects/UserSprite";
 import { SCENE } from "../../config/constants";
 
 interface ToolMovePayload {
@@ -29,6 +30,10 @@ const VILLAGE_ASSETS: Record<string, { day: string; night: string }> = {
   "house-1":          { day: "house-1-day",          night: "house-1-night" },
   "house-2":          { day: "house-2-day",          night: "house-2-night" },
   "church":           { day: "church-day",           night: "church-night" },
+  "forge":            { day: "forge-day",            night: "forge-night" },
+  "tower":            { day: "tower-day",            night: "tower-night" },
+  "clock":            { day: "clock-day",            night: "clock-night" },
+  "mailbox":          { day: "mailbox-day",          night: "mailbox-night" },
   "fence-1":          { day: "fence-1-day",          night: "fence-1-night" },
   "fence-2":          { day: "fence-2-day",          night: "fence-2-night" },
   "bridge":           { day: "bridge-day",           night: "bridge-night" },
@@ -71,6 +76,14 @@ const BUILDINGS = [
   { x: 192, y: 256, key: "house-1" },      // Left house — web_search
   { x: 512, y: 196, key: "church" },        // Center church — fill_template (raised)
   { x: 832, y: 256, key: "house-2" },       // Right house — read/write
+  { x: 384, y: 316, key: "forge" },         // Forge/anvil — shell_execute
+  { x: 640, y: 192, key: "tower" },         // Tower — browse_webpage
+];
+
+// Small props (origin: bottom-center)
+const PROPS = [
+  { x: 576, y: 348, key: "clock" },         // Town clock — calendar
+  { x: 128, y: 348, key: "mailbox" },       // Mailbox — email
 ];
 
 // Water areas (tile-based rectangles)
@@ -218,6 +231,7 @@ const WATER_DETAILS: Array<{ x: number; y: number; type: number }> = [
 
 export class StudyScene extends Phaser.Scene {
   private agent!: AgentSprite;
+  private userAvatar!: UserSprite;
   private speechBubble!: SpeechBubble;
   private label!: Phaser.GameObjects.Text;
 
@@ -274,6 +288,57 @@ export class StudyScene extends Phaser.Scene {
       this.load.image(variants.night, `assets/village/${variants.night}.png`);
     }
     AgentSprite.preload(this);
+    UserSprite.preload(this);
+
+    // Generate fallback textures for new Phase 2 buildings
+    // (will be used if sprite assets don't exist)
+    this.load.on("filecomplete", () => {
+      // handled in create
+    });
+    this.load.on("loaderror", (_file: { key: string }) => {
+      // silently ignore — fallbacks created in create()
+    });
+  }
+
+  private ensureFallbackTextures() {
+    // Forge — day/night
+    this.createBuildingFallback("forge-day", 32, 28, "#8B4513", "#CD853F", "#FF6600");
+    this.createBuildingFallback("forge-night", 32, 28, "#5A2D0E", "#8B6914", "#CC4400");
+    // Tower — day/night
+    this.createBuildingFallback("tower-day", 24, 48, "#708090", "#A9A9A9", "#4169E1");
+    this.createBuildingFallback("tower-night", 24, 48, "#3A4555", "#6A6A6A", "#2A3A8A");
+    // Clock — day/night (small prop)
+    this.createBuildingFallback("clock-day", 16, 24, "#8B7355", "#F5F5DC", "#333333");
+    this.createBuildingFallback("clock-night", 16, 24, "#5A4A35", "#AAAA99", "#222222");
+    // Mailbox — day/night (small prop)
+    this.createBuildingFallback("mailbox-day", 12, 16, "#4169E1", "#F5F5DC", "#FFD700");
+    this.createBuildingFallback("mailbox-night", 12, 16, "#2A3A8A", "#AAAA99", "#CC9900");
+  }
+
+  private createBuildingFallback(
+    key: string, w: number, h: number,
+    baseColor: string, detailColor: string, accentColor: string,
+  ) {
+    if (this.textures.exists(key)) return;
+    const canvas = this.textures.createCanvas(key, w, h);
+    if (!canvas) return;
+    const ctx = canvas.context;
+
+    // Base structure
+    ctx.fillStyle = baseColor;
+    ctx.fillRect(0, Math.floor(h * 0.3), w, Math.ceil(h * 0.7));
+
+    // Roof / top
+    ctx.fillStyle = detailColor;
+    ctx.fillRect(0, 0, w, Math.floor(h * 0.35));
+
+    // Accent detail (door/window)
+    ctx.fillStyle = accentColor;
+    const dw = Math.max(4, Math.floor(w * 0.3));
+    const dh = Math.max(4, Math.floor(h * 0.2));
+    ctx.fillRect(Math.floor((w - dw) / 2), Math.floor(h * 0.5), dw, dh);
+
+    canvas.refresh();
   }
 
   // ─── Create ──────────────────────────────────────────
@@ -283,6 +348,7 @@ export class StudyScene extends Phaser.Scene {
     const canvasH = this.scale.height;
 
     this.currentTimeOfDay = this.getTimeOfDay();
+    this.ensureFallbackTextures();
 
     this.villageOffsetX = Math.floor((canvasW - SCENE.MAP_PIXEL_WIDTH) / 2);
     this.villageOffsetY = Math.floor((canvasH - SCENE.MAP_PIXEL_HEIGHT) / 2);
@@ -311,16 +377,27 @@ export class StudyScene extends Phaser.Scene {
     // --- Layer 5: Landmarks (pit, stairs, bridge) ---
     this.placeLandmarks();
 
-    // --- Layer 6: Y-sorted objects (buildings, village trees) ---
+    // --- Layer 6: Y-sorted objects (buildings, props, village trees) ---
     this.placeBuildings();
+    this.placeProps();
     this.placeVillageTrees();
 
     // --- Forest (outside village) ---
     this.generateForest(canvasW, canvasH);
 
-    // --- Agent ---
+    // --- Agent (Seraph) ---
     const startPos = this.worldPos(SCENE.POSITIONS.bench);
     this.agent = new AgentSprite(this, startPos.x, startPos.y);
+
+    // Make Seraph clickable — opens chat panel
+    this.agent.sprite.setInteractive({ useHandCursor: true });
+    this.agent.sprite.on("pointerdown", () => {
+      EventBus.emit("open-chat");
+    });
+
+    // --- User Avatar (clickable — opens quest log) ---
+    const userPos = this.worldPos({ x: 832, y: 340 });
+    this.userAvatar = new UserSprite(this, userPos.x, userPos.y);
 
     // --- Speech Bubble ---
     this.speechBubble = new SpeechBubble(this, SCENE.MAP_PIXEL_WIDTH, this.villageOffsetX);
@@ -418,6 +495,7 @@ export class StudyScene extends Phaser.Scene {
     if (this.dayNightTimer) this.dayNightTimer.remove(false);
 
     this.agent.destroy();
+    this.userAvatar.destroy();
     this.speechBubble.destroy();
   }
 
@@ -553,6 +631,18 @@ export class StudyScene extends Phaser.Scene {
       sprite.setOrigin(0.5, 1);
       sprite.setDepth(b.y * 0.01); // Y-sort
       this.envSprites.push({ sprite, assetKey: b.key });
+    }
+  }
+
+  // ─── Props (small objects like clock, mailbox) ──────
+
+  private placeProps() {
+    for (const p of PROPS) {
+      const wp = this.worldPos(p);
+      const sprite = this.add.image(wp.x, wp.y, this.texKey(p.key));
+      sprite.setOrigin(0.5, 1);
+      sprite.setDepth(p.y * 0.01);
+      this.envSprites.push({ sprite, assetKey: p.key });
     }
   }
 
@@ -712,9 +802,11 @@ export class StudyScene extends Phaser.Scene {
     // Regenerate forest
     this.generateForest(canvasW, canvasH);
 
-    // Move agent
+    // Move agent and user avatar
     this.agent.sprite.x += dx;
     this.agent.sprite.y += dy;
+    this.userAvatar.sprite.x += dx;
+    this.userAvatar.sprite.y += dy;
 
     // Reposition label
     this.label.setX(canvasW / 2);

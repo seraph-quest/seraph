@@ -3,6 +3,7 @@ import { DialogFrame } from "./DialogFrame";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import { ThinkingIndicator } from "./ThinkingIndicator";
+import { SessionList } from "./SessionList";
 
 interface ChatPanelProps {
   onSend: (message: string) => void;
@@ -11,7 +12,10 @@ interface ChatPanelProps {
 export function ChatPanel({ onSend }: ChatPanelProps) {
   const isAgentBusy = useChatStore((s) => s.isAgentBusy);
   const connectionStatus = useChatStore((s) => s.connectionStatus);
+  const chatPanelOpen = useChatStore((s) => s.chatPanelOpen);
   const isConnected = connectionStatus === "connected";
+
+  if (!chatPanelOpen) return null;
 
   return (
     <div className="chat-overlay">
@@ -19,6 +23,8 @@ export function ChatPanel({ onSend }: ChatPanelProps) {
         title="Chat Log"
         className="flex-1 min-h-0 flex flex-col relative"
       >
+        <SessionList />
+        <div className="border-t border-retro-border/20 my-1" />
         <div className="flex-1 min-h-0 flex flex-col">
           <MessageList />
           {isAgentBusy && <ThinkingIndicator />}

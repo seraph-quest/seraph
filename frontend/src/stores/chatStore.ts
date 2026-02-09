@@ -1,23 +1,39 @@
 import { create } from "zustand";
+import { API_URL } from "../config/constants";
 import type {
   ChatMessage,
   ConnectionStatus,
   AgentVisualState,
+  AmbientState,
+  SessionInfo,
 } from "../types";
 
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
+  sessions: SessionInfo[];
   connectionStatus: ConnectionStatus;
   isAgentBusy: boolean;
   agentVisual: AgentVisualState;
+  ambientState: AmbientState;
+  chatPanelOpen: boolean;
+  questPanelOpen: boolean;
 
   addMessage: (message: ChatMessage) => void;
+  setMessages: (messages: ChatMessage[]) => void;
   setSessionId: (id: string) => void;
+  setSessions: (sessions: SessionInfo[]) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   setAgentBusy: (busy: boolean) => void;
   setAgentVisual: (visual: Partial<AgentVisualState>) => void;
   resetAgentVisual: () => void;
+  setAmbientState: (state: AmbientState) => void;
+  setChatPanelOpen: (open: boolean) => void;
+  setQuestPanelOpen: (open: boolean) => void;
+  loadSessions: () => Promise<void>;
+  switchSession: (sessionId: string) => Promise<void>;
+  newSession: () => void;
+  deleteSession: (sessionId: string) => Promise<void>;
 }
 
 const defaultVisual: AgentVisualState = {
@@ -27,17 +43,25 @@ const defaultVisual: AgentVisualState = {
   speechText: null,
 };
 
-export const useChatStore = create<ChatStore>((set) => ({
+export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   sessionId: null,
+  sessions: [],
   connectionStatus: "disconnected",
   isAgentBusy: false,
   agentVisual: { ...defaultVisual },
+  ambientState: "idle",
+  chatPanelOpen: true,
+  questPanelOpen: false,
 
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
 
+  setMessages: (messages) => set({ messages }),
+
   setSessionId: (id) => set({ sessionId: id }),
+
+  setSessions: (sessions) => set({ sessions }),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
@@ -49,4 +73,61 @@ export const useChatStore = create<ChatStore>((set) => ({
     })),
 
   resetAgentVisual: () => set({ agentVisual: { ...defaultVisual } }),
+
+  setAmbientState: (state) => set({ ambientState: state }),
+
+  setChatPanelOpen: (open) =>
+    set({ chatPanelOpen: open, questPanelOpen: open ? false : get().questPanelOpen }),
+
+  setQuestPanelOpen: (open) =>
+    set({ questPanelOpen: open, chatPanelOpen: open ? false : get().chatPanelOpen }),
+
+  loadSessions: async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions`);
+      if (res.ok) {
+        const sessions = await res.json();
+        set({ sessions });
+      }
+    } catch {
+      // ignore fetch errors
+    }
+  },
+
+  switchSession: async (sessionId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/messages`);
+      if (res.ok) {
+        const msgs = await res.json();
+        const chatMessages: ChatMessage[] = msgs.map((m: Record<string, unknown>) => ({
+          id: m.id as string,
+          role: m.role === "assistant" ? "agent" : m.role as string,
+          content: m.content as string,
+          timestamp: new Date(m.created_at as string).getTime(),
+          stepNumber: m.step_number as number | undefined,
+          toolUsed: m.tool_used as string | undefined,
+        }));
+        set({ sessionId, messages: chatMessages });
+      }
+    } catch {
+      // ignore
+    }
+  },
+
+  newSession: () => {
+    set({ sessionId: null, messages: [] });
+  },
+
+  deleteSession: async (sessionId: string) => {
+    try {
+      await fetch(`${API_URL}/api/sessions/${sessionId}`, { method: "DELETE" });
+      const { sessions, sessionId: currentId } = get();
+      set({ sessions: sessions.filter((s) => s.id !== sessionId) });
+      if (currentId === sessionId) {
+        set({ sessionId: null, messages: [] });
+      }
+    } catch {
+      // ignore
+    }
+  },
 }));

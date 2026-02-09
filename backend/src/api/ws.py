@@ -6,7 +6,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from smolagents import ActionStep, ToolCall, FinalAnswerStep
 
 from src.agent.factory import create_agent
+from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
+from src.api.profile import get_or_create_profile, mark_onboarding_complete
+from src.memory.soul import read_soul
+from src.memory.vector_store import search_formatted
 from src.models.schemas import WSMessage, WSResponse
 
 logger = logging.getLogger(__name__)
@@ -17,6 +21,25 @@ router = APIRouter()
 def _run_agent(agent, message: str) -> list:
     """Run agent with streaming, collecting all step objects."""
     return list(agent.run(message, stream=True))
+
+
+async def _build_agent(session_id: str, message: str):
+    """Build the appropriate agent (onboarding vs normal) for this request."""
+    profile = await get_or_create_profile()
+
+    if not profile.onboarding_completed:
+        return create_onboarding_agent(), True
+
+    history = await session_manager.get_history_text(session_id)
+    soul = read_soul()
+    memories = await asyncio.to_thread(search_formatted, message)
+
+    agent = create_agent(
+        additional_context=history,
+        soul_context=soul,
+        memory_context=memories,
+    )
+    return agent, False
 
 
 @router.websocket("/chat")
@@ -42,11 +65,10 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
-            session = session_manager.get_or_create(ws_msg.session_id)
-            session.add_message("user", ws_msg.message)
+            session = await session_manager.get_or_create(ws_msg.session_id)
+            await session_manager.add_message(session.id, "user", ws_msg.message)
 
-            history = session.get_history_text()
-            agent = create_agent(additional_context=history)
+            agent, is_onboarding = await _build_agent(session.id, ws_msg.message)
 
             step_num = 0
             final_result = ""
@@ -56,7 +78,6 @@ async def websocket_chat(websocket: WebSocket):
 
                 for step in steps:
                     if isinstance(step, ToolCall):
-                        # Tool invocation — skip final_answer tool calls
                         if step.name == "final_answer":
                             continue
                         step_num += 1
@@ -65,20 +86,19 @@ async def websocket_chat(websocket: WebSocket):
                             WSResponse(
                                 type="step",
                                 content=content,
-                                session_id=session.session_id,
+                                session_id=session.id,
                                 step=step_num,
                             ).model_dump_json()
                         )
 
                     elif isinstance(step, ActionStep):
-                        # Completed step with observations (skip final-answer steps)
                         if step.observations and not step.is_final_answer:
                             step_num += 1
                             await websocket.send_text(
                                 WSResponse(
                                     type="step",
                                     content=step.observations,
-                                    session_id=session.session_id,
+                                    session_id=session.id,
                                     step=step_num,
                                 ).model_dump_json()
                             )
@@ -92,19 +112,34 @@ async def websocket_chat(websocket: WebSocket):
                     WSResponse(
                         type="error",
                         content=f"Agent error: {e}",
-                        session_id=session.session_id,
+                        session_id=session.id,
                     ).model_dump_json()
                 )
                 continue
 
-            session.add_message("assistant", final_result)
+            await session_manager.add_message(session.id, "assistant", final_result)
             await websocket.send_text(
                 WSResponse(
                     type="final",
                     content=final_result,
-                    session_id=session.session_id,
+                    session_id=session.id,
                 ).model_dump_json()
             )
+
+            # After a few onboarding exchanges, mark complete
+            if is_onboarding:
+                history = await session_manager.get_history_text(session.id)
+                msg_count = history.count("\n") + 1
+                if msg_count >= 6:  # ~3 user messages + 3 agent responses
+                    await mark_onboarding_complete()
+                    logger.info("Onboarding completed")
+
+            # Trigger memory consolidation in background
+            try:
+                from src.memory.consolidator import consolidate_session
+                asyncio.create_task(consolidate_session(session.id))
+            except ImportError:
+                pass
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")

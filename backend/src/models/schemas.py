@@ -25,7 +25,14 @@ class WSMessage(BaseModel):
 
 
 class WSResponse(BaseModel):
-    type: str = Field(..., description="Response type: step | final | error")
+    type: str = Field(..., description="Response type: step | final | error | pong | proactive | ambient")
     content: str = ""
     session_id: str = ""
     step: int | None = None
+    # Phase 3 — Proactive messages
+    urgency: int | None = None
+    intervention_type: str | None = None
+    reasoning: str | None = None
+    # Phase 3 — Ambient state
+    state: str | None = None
+    tooltip: str | None = None

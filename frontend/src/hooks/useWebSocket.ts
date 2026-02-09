@@ -3,6 +3,7 @@ import { WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/co
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { useAgentAnimation } from "./useAgentAnimation";
+import { EventBus } from "../game/EventBus";
 import type { WSResponse, ChatMessage } from "../types";
 
 function makeId(): string {
@@ -19,11 +20,12 @@ export function useWebSocket() {
     setSessionId,
     setConnectionStatus,
     setAgentBusy,
+    setAmbientState,
+    setChatPanelOpen,
   } = useChatStore();
 
   const { onToolDetected, onFinalAnswer, onThinking } = useAgentAnimation();
 
-  // Store animation callbacks in refs so `connect` doesn't depend on them
   const onToolDetectedRef = useRef(onToolDetected);
   const onFinalAnswerRef = useRef(onFinalAnswer);
   onToolDetectedRef.current = onToolDetected;
@@ -82,6 +84,9 @@ export function useWebSocket() {
             timestamp: Date.now(),
           };
           addMessage(agentMsg);
+
+          // Refresh session list after a conversation turn
+          useChatStore.getState().loadSessions();
         } else if (data.type === "error") {
           setAgentBusy(false);
 
@@ -92,6 +97,37 @@ export function useWebSocket() {
             timestamp: Date.now(),
           };
           addMessage(errorMsg);
+        } else if (data.type === "proactive") {
+          // Phase 3: Proactive messages from Seraph
+          const proactiveMsg: ChatMessage = {
+            id: makeId(),
+            role: "proactive",
+            content: data.content,
+            timestamp: Date.now(),
+            urgency: data.urgency ?? undefined,
+            interventionType: data.intervention_type ?? undefined,
+          };
+
+          if (data.intervention_type === "alert" || data.intervention_type === "advisory") {
+            setChatPanelOpen(true);
+            addMessage(proactiveMsg);
+          } else if (data.intervention_type === "nudge") {
+            // Show as speech bubble, add to chat when opened
+            EventBus.emit("agent-nudge", { text: data.content });
+            addMessage(proactiveMsg);
+          } else {
+            // ambient — just store for later
+            addMessage(proactiveMsg);
+          }
+        } else if (data.type === "ambient") {
+          // Phase 3: Ambient state change
+          if (data.state) {
+            setAmbientState(data.state as "idle" | "has_insight" | "goal_behind" | "on_track" | "waiting");
+            EventBus.emit("agent-ambient-state", {
+              state: data.state,
+              tooltip: data.tooltip ?? "",
+            });
+          }
         }
       } catch {
         // ignore malformed messages
@@ -108,7 +144,7 @@ export function useWebSocket() {
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, setSessionId, setConnectionStatus, setAgentBusy]);
+  }, [addMessage, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
   const sendMessage = useCallback(
     (message: string) => {

@@ -1,7 +1,19 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
+from src.db import init_db, close_db
+from src.memory.soul import ensure_soul_exists
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    ensure_soul_exists()
+    yield
+    await close_db()
 
 
 def create_app() -> FastAPI:
@@ -9,6 +21,7 @@ def create_app() -> FastAPI:
         title="Seraph AI Assistant",
         version="0.1.0",
         debug=settings.debug,
+        lifespan=lifespan,
     )
 
     app.add_middleware(

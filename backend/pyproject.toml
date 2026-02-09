@@ -14,6 +14,20 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "ddgs>=7.0.0",
     "websockets>=14.0",
+    # Phase 1 — Persistent Identity
+    "sqlmodel>=0.0.22",
+    "aiosqlite>=0.21.0",
+    "alembic>=1.14.0",
+    "lancedb>=0.17.0",
+    "sentence-transformers>=3.4.0",
+    # Phase 2 — Capable Executor
+    "httpx>=0.28.0",
+    "playwright>=1.49.0",
+    "gcsa>=2.6.0",
+    "google-auth-oauthlib>=1.2.0",
+    "simplegmail>=4.1.0",
+    # Phase 3 — The Observer
+    "apscheduler>=3.11.0,<4.0.0",
 ]
 
 [dependency-groups]
@@ -25,3 +39,11 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

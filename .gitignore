@@ -106,6 +106,9 @@ dist
 
 # Docusaurus cache and generated files
 .docusaurus
+docs/build/
+docs/node_modules/
+docs/.docusaurus/
 
 # Serverless directories
 .serverless/
@@ -355,3 +358,4 @@ yarn-error.log*
 next-env.d.ts
 
 docker-data
+.claude/settings.local.json

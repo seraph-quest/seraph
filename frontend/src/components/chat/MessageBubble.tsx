@@ -9,6 +9,7 @@ const ROLE_STYLES: Record<string, string> = {
   agent: "bg-retro-agent/30 border-l-2 border-retro-highlight text-retro-text",
   step: "bg-retro-step/20 border-l-2 border-retro-step text-retro-text/70 text-[10px]",
   error: "bg-retro-error/20 border-l-2 border-retro-error text-red-300",
+  proactive: "bg-retro-border/10 border-l-2 border-retro-border text-retro-text",
 };
 
 const ROLE_LABELS: Record<string, string> = {
@@ -16,6 +17,7 @@ const ROLE_LABELS: Record<string, string> = {
   agent: "Seraph",
   step: "Step",
   error: "Error",
+  proactive: "Seraph",
 };
 
 export function MessageBubble({ message }: MessageBubbleProps) {

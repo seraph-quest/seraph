@@ -10,6 +10,7 @@ interface ToolTargetWithPixels {
 }
 
 const TOOL_TARGETS: Record<string, ToolTargetWithPixels> = {
+  // Phase 1 tools
   [TOOL_NAMES.WEB_SEARCH]: {
     tool: TOOL_NAMES.WEB_SEARCH,
     positionX: POSITIONS.well,
@@ -37,6 +38,91 @@ const TOOL_TARGETS: Record<string, ToolTargetWithPixels> = {
     animationState: "at-bench",
     pixelX: SCENE.POSITIONS.church.x,
     pixelY: SCENE.POSITIONS.church.y,
+  },
+  [TOOL_NAMES.VIEW_SOUL]: {
+    tool: TOOL_NAMES.VIEW_SOUL,
+    positionX: POSITIONS.bench,
+    animationState: "at-bench",
+    pixelX: SCENE.POSITIONS.church.x,
+    pixelY: SCENE.POSITIONS.church.y,
+  },
+  [TOOL_NAMES.UPDATE_SOUL]: {
+    tool: TOOL_NAMES.UPDATE_SOUL,
+    positionX: POSITIONS.bench,
+    animationState: "at-bench",
+    pixelX: SCENE.POSITIONS.church.x,
+    pixelY: SCENE.POSITIONS.church.y,
+  },
+  [TOOL_NAMES.CREATE_GOAL]: {
+    tool: TOOL_NAMES.CREATE_GOAL,
+    positionX: POSITIONS.bench,
+    animationState: "at-bench",
+    pixelX: SCENE.POSITIONS.church.x,
+    pixelY: SCENE.POSITIONS.church.y,
+  },
+  [TOOL_NAMES.UPDATE_GOAL]: {
+    tool: TOOL_NAMES.UPDATE_GOAL,
+    positionX: POSITIONS.bench,
+    animationState: "at-bench",
+    pixelX: SCENE.POSITIONS.church.x,
+    pixelY: SCENE.POSITIONS.church.y,
+  },
+  [TOOL_NAMES.GET_GOALS]: {
+    tool: TOOL_NAMES.GET_GOALS,
+    positionX: POSITIONS.bench,
+    animationState: "at-bench",
+    pixelX: SCENE.POSITIONS.church.x,
+    pixelY: SCENE.POSITIONS.church.y,
+  },
+  [TOOL_NAMES.GET_GOAL_PROGRESS]: {
+    tool: TOOL_NAMES.GET_GOAL_PROGRESS,
+    positionX: POSITIONS.bench,
+    animationState: "at-bench",
+    pixelX: SCENE.POSITIONS.church.x,
+    pixelY: SCENE.POSITIONS.church.y,
+  },
+  // Phase 2 tools
+  [TOOL_NAMES.SHELL_EXECUTE]: {
+    tool: TOOL_NAMES.SHELL_EXECUTE,
+    positionX: POSITIONS.forge,
+    animationState: "at-forge",
+    pixelX: SCENE.POSITIONS.forge.x,
+    pixelY: SCENE.POSITIONS.forge.y,
+  },
+  [TOOL_NAMES.BROWSE_WEBPAGE]: {
+    tool: TOOL_NAMES.BROWSE_WEBPAGE,
+    positionX: POSITIONS.tower,
+    animationState: "at-tower",
+    pixelX: SCENE.POSITIONS.tower.x,
+    pixelY: SCENE.POSITIONS.tower.y,
+  },
+  [TOOL_NAMES.GET_CALENDAR_EVENTS]: {
+    tool: TOOL_NAMES.GET_CALENDAR_EVENTS,
+    positionX: POSITIONS.clock,
+    animationState: "at-clock",
+    pixelX: SCENE.POSITIONS.clock.x,
+    pixelY: SCENE.POSITIONS.clock.y,
+  },
+  [TOOL_NAMES.CREATE_CALENDAR_EVENT]: {
+    tool: TOOL_NAMES.CREATE_CALENDAR_EVENT,
+    positionX: POSITIONS.clock,
+    animationState: "at-clock",
+    pixelX: SCENE.POSITIONS.clock.x,
+    pixelY: SCENE.POSITIONS.clock.y,
+  },
+  [TOOL_NAMES.READ_EMAILS]: {
+    tool: TOOL_NAMES.READ_EMAILS,
+    positionX: POSITIONS.mailbox,
+    animationState: "at-mailbox",
+    pixelX: SCENE.POSITIONS.mailbox.x,
+    pixelY: SCENE.POSITIONS.mailbox.y,
+  },
+  [TOOL_NAMES.SEND_EMAIL]: {
+    tool: TOOL_NAMES.SEND_EMAIL,
+    positionX: POSITIONS.mailbox,
+    animationState: "at-mailbox",
+    pixelX: SCENE.POSITIONS.mailbox.x,
+    pixelY: SCENE.POSITIONS.mailbox.y,
   },
 };
 

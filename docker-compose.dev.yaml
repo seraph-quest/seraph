@@ -25,6 +25,17 @@ services:
       - seraph-network-dev
     ports:
       - "8004:8003" # Non-standard port for dev
+    shm_size: "1gb"  # Required for Playwright/Chromium
+    depends_on:
+      - sandbox-dev
+
+  sandbox-dev:
+    container_name: sandbox-dev
+    image: ghcr.io/python-discord/snekbox:latest
+    ipc: none
+    networks:
+      - seraph-network-dev
+    # No ports exposed — backend connects via internal network
 
   frontend-dev:
     container_name: frontend-dev

@@ -141,3 +141,17 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+/* ── Quest Overlay ───────────────────────────────────── */
+.quest-overlay {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  height: 420px;
+  max-height: 55vh;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+}

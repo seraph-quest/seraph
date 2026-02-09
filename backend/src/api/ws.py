@@ -18,9 +18,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _run_agent(agent, message: str) -> list:
-    """Run agent with streaming, collecting all step objects."""
-    return list(agent.run(message, stream=True))
+_DONE = object()  # sentinel for queue completion
+
+
+def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    """Run agent with streaming, pushing each step into an asyncio queue."""
+    try:
+        for step in agent.run(message, stream=True):
+            loop.call_soon_threadsafe(queue.put_nowait, step)
+    except Exception as exc:
+        loop.call_soon_threadsafe(queue.put_nowait, exc)
+    finally:
+        loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
 
 async def _build_agent(session_id: str, message: str):
@@ -106,9 +115,17 @@ async def websocket_chat(websocket: WebSocket):
             final_result = ""
 
             try:
-                steps = await asyncio.to_thread(_run_agent, agent, ws_msg.message)
+                queue: asyncio.Queue = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
 
-                for step in steps:
+                while True:
+                    step = await queue.get()
+                    if step is _DONE:
+                        break
+                    if isinstance(step, Exception):
+                        raise step
+
                     if isinstance(step, ToolCall):
                         if step.name == "final_answer":
                             continue

@@ -31,7 +31,9 @@ services:
 
   sandbox-dev:
     container_name: sandbox-dev
+    platform: linux/amd64
     image: ghcr.io/python-discord/snekbox:latest
+    privileged: true
     ipc: none
     networks:
       - seraph-network-dev

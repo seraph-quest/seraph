@@ -40,6 +40,16 @@ async def update_session(session_id: str, body: SessionUpdate):
     return {"status": "ok"}
 
 
+@router.post("/sessions/{session_id}/generate-title")
+async def generate_session_title(session_id: str):
+    """Generate a short title for a session using LLM."""
+    session = await session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    title = await session_manager.generate_title(session_id)
+    return {"title": title or session.title}
+
+
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session and its messages."""

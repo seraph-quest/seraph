@@ -87,8 +87,17 @@ export function useWebSocket() {
           addMessage(agentMsg);
 
           // Refresh session list and profile after a conversation turn
-          useChatStore.getState().loadSessions();
           useChatStore.getState().fetchProfile();
+          useChatStore.getState().loadSessions().then(() => {
+            // Auto-name session if still "New Conversation"
+            if (data.session_id) {
+              const updated = useChatStore.getState();
+              const session = updated.sessions.find((s) => s.id === data.session_id);
+              if (session && session.title === "New Conversation") {
+                updated.generateSessionTitle(data.session_id);
+              }
+            }
+          });
         } else if (data.type === "error") {
           setAgentBusy(false);
 

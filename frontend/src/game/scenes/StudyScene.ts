@@ -41,6 +41,17 @@ const TOOL_STATION_ASSETS: Record<string, string> = {
   "pigeon-post":      "pigeon-post",
 };
 
+// Tooltip labels for tool stations
+const TOOL_STATION_TOOLTIPS: Record<string, string> = {
+  "well":             "Web Search",
+  "scroll-desk":      "File Reading & Writing",
+  "shrine":           "Soul & Goals",
+  "anvil":            "Shell Terminal",
+  "telescope-tower":  "Web Browser",
+  "sundial":          "Calendar",
+  "pigeon-post":      "Email",
+};
+
 // Tool station placements — positioned in front of their parent building
 const TOOL_STATIONS: Array<{ x: number; y: number; key: string }> = [
   { x: 192, y: 280, key: "well" },              // in front of house-1 (web_search)
@@ -112,6 +123,11 @@ export class StudyScene extends Phaser.Scene {
   // All env sprites for day/night swapping + repositioning
   private envSprites: Array<{ sprite: Phaser.GameObjects.Image; assetKey: string }> = [];
   private forestSprites: Array<{ sprite: Phaser.GameObjects.Image; treeType: number }> = [];
+
+  private toolStationSprites: Phaser.GameObjects.Image[] = [];
+  private tooltip!: Phaser.GameObjects.Container;
+  private tooltipText!: Phaser.GameObjects.Text;
+  private tooltipBg!: Phaser.GameObjects.Rectangle;
 
   private isWandering = false;
   private wanderTimer: Phaser.Time.TimerEvent | null = null;
@@ -213,6 +229,20 @@ export class StudyScene extends Phaser.Scene {
     // --- Speech Bubble ---
     this.speechBubble = new SpeechBubble(this, SCENE.MAP_PIXEL_WIDTH, this.villageOffsetX);
     this.speechBubble.setTarget(this.agent.sprite);
+
+    // --- Hover tooltip (shared, repositioned on hover) ---
+    this.tooltipText = this.add.text(0, 0, "", {
+      fontFamily: '"Press Start 2P"',
+      fontSize: "7px",
+      color: "#ffffff",
+      padding: { x: 0, y: 0 },
+    });
+    this.tooltipText.setOrigin(0.5, 0.5);
+    this.tooltipBg = this.add.rectangle(0, 0, 1, 1, 0x000000, 0.75);
+    this.tooltipBg.setOrigin(0.5, 0.5);
+    this.tooltip = this.add.container(0, 0, [this.tooltipBg, this.tooltipText]);
+    this.tooltip.setDepth(100);
+    this.tooltip.setVisible(false);
 
     // --- Village label ---
     this.label = this.add.text(canvasW / 2, 12, "Seraph's Village", {
@@ -362,6 +392,23 @@ export class StudyScene extends Phaser.Scene {
       const sprite = this.add.image(wp.x, wp.y, ts.key);
       sprite.setOrigin(0.5, 1);
       sprite.setDepth(ts.y * 0.01 + 0.1); // slightly in front of buildings
+
+      const label = TOOL_STATION_TOOLTIPS[ts.key];
+      if (label) {
+        sprite.setInteractive({ useHandCursor: true });
+        sprite.on("pointerover", () => {
+          this.tooltipText.setText(label);
+          const pad = 6;
+          this.tooltipBg.setSize(this.tooltipText.width + pad * 2, this.tooltipText.height + pad * 2);
+          this.tooltip.setPosition(sprite.x, sprite.y - sprite.displayHeight - 8);
+          this.tooltip.setVisible(true);
+        });
+        sprite.on("pointerout", () => {
+          this.tooltip.setVisible(false);
+        });
+      }
+
+      this.toolStationSprites.push(sprite);
     }
   }
 
@@ -506,6 +553,12 @@ export class StudyScene extends Phaser.Scene {
     for (const entry of this.envSprites) {
       entry.sprite.x += dx;
       entry.sprite.y += dy;
+    }
+
+    // Move tool station sprites by delta
+    for (const sprite of this.toolStationSprites) {
+      sprite.x += dx;
+      sprite.y += dy;
     }
 
     // Regenerate forest

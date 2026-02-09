@@ -18,6 +18,7 @@ interface ChatStore {
   ambientState: AmbientState;
   chatPanelOpen: boolean;
   questPanelOpen: boolean;
+  settingsOpen: boolean;
   onboardingCompleted: boolean | null;
 
   addMessage: (message: ChatMessage) => void;
@@ -31,6 +32,7 @@ interface ChatStore {
   setAmbientState: (state: AmbientState) => void;
   setChatPanelOpen: (open: boolean) => void;
   setQuestPanelOpen: (open: boolean) => void;
+  setSettingsOpen: (open: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
@@ -39,6 +41,8 @@ interface ChatStore {
   switchSession: (sessionId: string) => Promise<void>;
   newSession: () => void;
   deleteSession: (sessionId: string) => Promise<void>;
+  renameSession: (sessionId: string, title: string) => Promise<void>;
+  generateSessionTitle: (sessionId: string) => Promise<void>;
 }
 
 const defaultVisual: AgentVisualState = {
@@ -58,6 +62,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   ambientState: "idle",
   chatPanelOpen: true,
   questPanelOpen: false,
+  settingsOpen: false,
   onboardingCompleted: null,
 
   addMessage: (message) =>
@@ -87,6 +92,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setQuestPanelOpen: (open) =>
     set({ questPanelOpen: open, chatPanelOpen: open ? false : get().chatPanelOpen }),
+
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
 
@@ -170,6 +177,37 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     } catch (err) {
       console.error("Failed to delete session:", err);
+    }
+  },
+
+  renameSession: async (sessionId: string, title: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (res.ok) {
+        const { sessions } = get();
+        set({ sessions: sessions.map((s) => s.id === sessionId ? { ...s, title } : s) });
+      }
+    } catch (err) {
+      console.error("Failed to rename session:", err);
+    }
+  },
+
+  generateSessionTitle: async (sessionId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/sessions/${sessionId}/generate-title`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const { sessions } = get();
+        set({ sessions: sessions.map((s) => s.id === sessionId ? { ...s, title: data.title } : s) });
+      }
+    } catch (err) {
+      console.error("Failed to generate session title:", err);
     }
   },
 }));

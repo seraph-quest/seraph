@@ -1,10 +1,15 @@
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 
 from sqlmodel import select, col
 
+from config.settings import settings
 from src.db.engine import get_session
 from src.db.models import Session, Message
+
+logger = logging.getLogger(__name__)
 
 
 class SessionManager:
@@ -157,6 +162,51 @@ class SessionManager:
                 }
                 for m in result.scalars().all()
             ]
+
+    async def generate_title(self, session_id: str) -> str | None:
+        """Generate a short title for a session using LLM."""
+        session = await self.get(session_id)
+        if not session or session.title != "New Conversation":
+            return session.title if session else None
+
+        async with get_session() as db:
+            result = await db.execute(
+                select(Message)
+                .where(Message.session_id == session_id)
+                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                .order_by(col(Message.created_at).asc())
+                .limit(6)
+            )
+            messages = result.scalars().all()
+
+        if not messages:
+            return None
+
+        transcript = "\n".join(f"{m.role.capitalize()}: {m.content[:200]}" for m in messages)
+
+        try:
+            import litellm
+
+            response = await asyncio.to_thread(
+                litellm.completion,
+                model=settings.default_model,
+                messages=[{
+                    "role": "user",
+                    "content": f"Generate a very short title (3-6 words, no quotes) for this conversation. Respond with ONLY the title.\n\n{transcript}",
+                }],
+                api_key=settings.openrouter_api_key,
+                api_base="https://openrouter.ai/api/v1",
+                temperature=0.3,
+                max_tokens=20,
+            )
+
+            title = response.choices[0].message.content.strip().strip('"\'')
+            await self.update_title(session_id, title)
+            logger.info("Generated title for session %s: %s", session_id[:8], title)
+            return title
+        except Exception:
+            logger.exception("Failed to generate title for session %s", session_id[:8])
+            return None
 
     async def count_messages(self, session_id: str) -> int:
         """Count user+assistant messages in a session."""

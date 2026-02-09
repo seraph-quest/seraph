@@ -1,3 +1,7 @@
+---
+sidebar_position: 2
+---
+
 # Phase 2 — Capable Executor
 
 **Goal**: Seraph can do real things — browse, execute code, manage calendar/email.

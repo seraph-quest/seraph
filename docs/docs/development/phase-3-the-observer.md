@@ -1,3 +1,7 @@
+---
+sidebar_position: 3
+---
+
 # Phase 3 — The Observer
 
 **Goal**: Seraph understands what you're doing and starts thinking proactively.

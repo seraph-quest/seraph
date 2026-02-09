@@ -1,3 +1,7 @@
+---
+sidebar_position: 2
+---
+
 # OpenClaw vs Seraph — Feature Gap Analysis
 
 > **Date**: 2026-02-08

@@ -1,3 +1,7 @@
+---
+sidebar_position: 1
+---
+
 # Tauri Desktop App — Architecture Analysis
 
 An evaluation of migrating Seraph from Docker + native daemon to a Tauri desktop application.

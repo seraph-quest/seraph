@@ -1,3 +1,7 @@
+---
+sidebar_position: 1
+---
+
 # Seraph — Vision & Philosophy
 
 > *"The Seraphim stood above Him, each having six wings: with two he covered his face, with two he covered his feet, and with two he flew."* — Isaiah 6:2

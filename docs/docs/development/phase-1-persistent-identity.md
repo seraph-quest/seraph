@@ -1,3 +1,7 @@
+---
+sidebar_position: 1
+---
+
 # Phase 1 — Persistent Identity
 
 **Goal**: Seraph remembers. The human exists between sessions.

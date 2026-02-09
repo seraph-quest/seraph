@@ -1,3 +1,7 @@
+---
+sidebar_position: 2
+---
+
 # Seraph — Product Roadmap
 
 > Each phase builds on the previous. The trajectory moves from **reactive tool** → **persistent partner** → **proactive observer** → **strategic guardian** → **life operating system**.

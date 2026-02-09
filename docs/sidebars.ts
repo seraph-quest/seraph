@@ -1,0 +1,31 @@
+import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+
+const sidebars: SidebarsConfig = {
+  docsSidebar: [
+    'intro',
+    {
+      type: 'category',
+      label: 'Overview',
+      items: ['overview/vision', 'overview/roadmap'],
+    },
+    {
+      type: 'category',
+      label: 'Development Phases',
+      items: [
+        'development/phase-1-persistent-identity',
+        'development/phase-2-capable-executor',
+        'development/phase-3-the-observer',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Architecture',
+      items: [
+        'architecture/tauri-analysis',
+        'architecture/feature-comparison',
+      ],
+    },
+  ],
+};
+
+export default sidebars;

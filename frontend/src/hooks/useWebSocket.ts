@@ -129,8 +129,8 @@ export function useWebSocket() {
             });
           }
         }
-      } catch {
-        // ignore malformed messages
+      } catch (err) {
+        console.warn("Failed to parse WebSocket message:", err);
       }
     };
 

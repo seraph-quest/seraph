@@ -29,7 +29,7 @@ async def get_or_create_profile() -> UserProfile:
 
 async def mark_onboarding_complete() -> None:
     """Mark onboarding as completed."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     async with get_db() as db:
         result = await db.exec(
@@ -38,7 +38,7 @@ async def mark_onboarding_complete() -> None:
         profile = result.first()
         if profile:
             profile.onboarding_completed = True
-            profile.updated_at = datetime.utcnow()
+            profile.updated_at = datetime.now(timezone.utc)
             db.add(profile)
 
 

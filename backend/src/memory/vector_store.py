@@ -1,7 +1,8 @@
 import os
 import logging
+import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import lancedb
@@ -26,15 +27,18 @@ _SCHEMA = pa.schema([
 ])
 
 _db: Optional[lancedb.DBConnection] = None
+_db_lock = threading.Lock()
 
 
 def _get_db() -> lancedb.DBConnection:
-    """Lazy-open the LanceDB connection."""
+    """Lazy-open the LanceDB connection (thread-safe)."""
     global _db
     if _db is None:
-        os.makedirs(_LANCE_DIR, exist_ok=True)
-        _db = lancedb.connect(_LANCE_DIR)
-        logger.info("LanceDB connected at %s", _LANCE_DIR)
+        with _db_lock:
+            if _db is None:
+                os.makedirs(_LANCE_DIR, exist_ok=True)
+                _db = lancedb.connect(_LANCE_DIR)
+                logger.info("LanceDB connected at %s", _LANCE_DIR)
     return _db
 
 
@@ -62,7 +66,7 @@ def add_memory(
         "category": category,
         "source_session_id": source_session_id,
         "vector": vector,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }])
 
     logger.info("Added memory %s (category=%s)", memory_id[:8], category)

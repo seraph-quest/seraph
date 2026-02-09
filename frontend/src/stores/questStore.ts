@@ -46,21 +46,21 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
     try {
       const res = await fetch(`${API_URL}/api/goals${qs ? `?${qs}` : ""}`);
       if (res.ok) set({ goals: await res.json() });
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to load goals:", err); }
   },
 
   loadTree: async () => {
     try {
       const res = await fetch(`${API_URL}/api/goals/tree`);
       if (res.ok) set({ goalTree: await res.json() });
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to load goal tree:", err); }
   },
 
   loadDashboard: async () => {
     try {
       const res = await fetch(`${API_URL}/api/goals/dashboard`);
       if (res.ok) set({ dashboard: await res.json() });
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to load dashboard:", err); }
   },
 
   createGoal: async (goal) => {
@@ -71,7 +71,7 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
         body: JSON.stringify(goal),
       });
       await get().refresh();
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to create goal:", err); }
   },
 
   updateGoal: async (id, updates) => {
@@ -82,14 +82,14 @@ export const useQuestStore = create<QuestStore>((set, get) => ({
         body: JSON.stringify(updates),
       });
       await get().refresh();
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to update goal:", err); }
   },
 
   deleteGoal: async (id) => {
     try {
       await fetch(`${API_URL}/api/goals/${id}`, { method: "DELETE" });
       await get().refresh();
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to delete goal:", err); }
   },
 
   refresh: async () => {

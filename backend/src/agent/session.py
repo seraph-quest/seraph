@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlmodel import select, col
 
@@ -82,7 +82,7 @@ class SessionManager:
             if not session:
                 return False
             session.title = title
-            session.updated_at = datetime.utcnow()
+            session.updated_at = datetime.now(timezone.utc)
             db.add(session)
             return True
 
@@ -109,7 +109,7 @@ class SessionManager:
             result = await db.exec(select(Session).where(Session.id == session_id))
             session = result.first()
             if session:
-                session.updated_at = datetime.utcnow()
+                session.updated_at = datetime.now(timezone.utc)
                 db.add(session)
             await db.flush()
             db.expunge(msg)

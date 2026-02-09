@@ -3,10 +3,10 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-import asyncio
-
 from src.agent.factory import create_agent
+from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
+from src.api.profile import get_or_create_profile, mark_onboarding_complete
 from src.memory.soul import read_soul
 from src.memory.vector_store import search_formatted
 from src.models.schemas import ChatRequest, ChatResponse
@@ -22,14 +22,19 @@ async def chat(request: ChatRequest):
     session = await session_manager.get_or_create(request.session_id)
     await session_manager.add_message(session.id, "user", request.message)
 
-    history = await session_manager.get_history_text(session.id)
-    soul = read_soul()
-    memories = await asyncio.to_thread(search_formatted, request.message)
-    agent = create_agent(
-        additional_context=history,
-        soul_context=soul,
-        memory_context=memories,
-    )
+    # Check onboarding status
+    profile = await get_or_create_profile()
+    if not profile.onboarding_completed:
+        agent = create_onboarding_agent()
+    else:
+        history = await session_manager.get_history_text(session.id)
+        soul = read_soul()
+        memories = await asyncio.to_thread(search_formatted, request.message)
+        agent = create_agent(
+            additional_context=history,
+            soul_context=soul,
+            memory_context=memories,
+        )
 
     try:
         result = await asyncio.to_thread(agent.run, request.message)
@@ -39,6 +44,21 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=f"Agent error: {e}")
 
     await session_manager.add_message(session.id, "assistant", response_text)
+
+    # Check if onboarding should be marked complete
+    if not profile.onboarding_completed:
+        msg_count = await session_manager.count_messages(session.id)
+        if msg_count >= 6:
+            await mark_onboarding_complete()
+            logger.info("Onboarding completed via REST")
+
+    # Trigger memory consolidation in background
+    if response_text:
+        try:
+            from src.memory.consolidator import consolidate_session
+            asyncio.create_task(consolidate_session(session.id))
+        except ImportError:
+            pass
 
     return ChatResponse(
         response=response_text,

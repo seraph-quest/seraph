@@ -89,8 +89,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const sessions = await res.json();
         set({ sessions });
       }
-    } catch {
-      // ignore fetch errors
+    } catch (err) {
+      console.error("Failed to load sessions:", err);
     }
   },
 
@@ -109,8 +109,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }));
         set({ sessionId, messages: chatMessages });
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("Failed to switch session:", err);
     }
   },
 
@@ -126,8 +126,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (currentId === sessionId) {
         set({ sessionId: null, messages: [] });
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("Failed to delete session:", err);
     }
   },
 }));

@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 from typing import Optional
 
 from smolagents import tool
@@ -7,13 +8,12 @@ from src.goals.repository import goal_repository
 
 
 def _run(coro):
-    """Run an async coroutine from sync context (for smolagents tools)."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor() as pool:
+    """Run an async coroutine from sync context (for smolagents tools).
+
+    Always uses a thread pool to avoid creating nested event loops
+    that could conflict with the main FastAPI/SQLite event loop.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()
 
 

@@ -1,11 +1,15 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlmodel import select, col
 
 from src.db.engine import get_session
-from src.db.models import Goal, GoalStatus
+from src.db.models import Goal, GoalLevel, GoalDomain, GoalStatus
+
+_VALID_LEVELS = {e.value for e in GoalLevel}
+_VALID_DOMAINS = {e.value for e in GoalDomain}
+_VALID_STATUSES = {e.value for e in GoalStatus}
 
 
 class GoalRepository:
@@ -20,6 +24,10 @@ class GoalRepository:
         description: Optional[str] = None,
         due_date: Optional[datetime] = None,
     ) -> Goal:
+        if level not in _VALID_LEVELS:
+            raise ValueError(f"Invalid level '{level}'. Must be one of: {_VALID_LEVELS}")
+        if domain not in _VALID_DOMAINS:
+            raise ValueError(f"Invalid domain '{domain}'. Must be one of: {_VALID_DOMAINS}")
         async with get_session() as db:
             goal_id = uuid.uuid4().hex[:8]
 
@@ -67,6 +75,8 @@ class GoalRepository:
         status: Optional[str] = None,
         due_date: Optional[datetime] = None,
     ) -> Optional[Goal]:
+        if status is not None and status not in _VALID_STATUSES:
+            raise ValueError(f"Invalid status '{status}'. Must be one of: {_VALID_STATUSES}")
         async with get_session() as db:
             result = await db.exec(select(Goal).where(Goal.id == goal_id))
             goal = result.first()
@@ -80,7 +90,7 @@ class GoalRepository:
                 goal.status = status
             if due_date is not None:
                 goal.due_date = due_date
-            goal.updated_at = datetime.utcnow()
+            goal.updated_at = datetime.now(timezone.utc)
             db.add(goal)
             return goal
 

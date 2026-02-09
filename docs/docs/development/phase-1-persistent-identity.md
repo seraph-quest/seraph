@@ -77,9 +77,9 @@ async def lifespan(app: FastAPI):
 
 **Frontend**:
 - `frontend/src/components/chat/SessionList.tsx` — Sidebar showing past sessions
-- `frontend/src/stores/chatStore.ts` — `sessions[]`, `activeSessionId`, `loadSessions()`, `switchSession()`
-- `frontend/src/hooks/useWebSocket.ts` — Sends stored `session_id` on reconnect
-- `frontend/src/components/chat/ChatPanel.tsx` — Session switcher in dialog frame
+- `frontend/src/stores/chatStore.ts` — `sessions[]`, `activeSessionId`, `loadSessions()`, `switchSession()`; last selected session persisted to `localStorage` (`seraph_last_session_id`) and restored on WS connect
+- `frontend/src/hooks/useWebSocket.ts` — Sends stored `session_id` on reconnect; restores last session messages on connect
+- `frontend/src/components/chat/ChatPanel.tsx` — Session switcher in dialog frame, maximize (▲/▼) and close (✕) buttons
 
 ---
 
@@ -159,14 +159,16 @@ frontend/src/components/quest/
   QuestPanel.tsx
   GoalTree.tsx
   DomainStats.tsx
+frontend/src/components/HudButtons.tsx
+frontend/src/components/chat/DialogFrame.tsx
 ```
 
-**UserSprite**: Clickable avatar near house-2, blue tunic, hover glow, emits `"open-quest-log"`
+**UserSprite**: Clickable avatar near house-2, blue tunic, hover glow, emits `"toggle-quest-log"`
 
 **QuestPanel layout** (side panel, right side):
 ```
 ┌─────────────────────────┐
-│ QUEST LOG               │
+│ QUEST LOG          [▲][✕]│
 ├─────────────────────────┤
 │ ▸ Productivity  ████░ 72%│
 │ ▸ Performance   ███░░ 58%│
@@ -182,7 +184,13 @@ frontend/src/components/quest/
 └─────────────────────────┘
 ```
 
-**Interaction**: Click Seraph → chat panel, Click User avatar → quest log panel
+**Panel controls**:
+- **DialogFrame** — Shared RPG frame component with optional maximize (▲/▼) and close (✕) buttons
+- **Maximize**: Chat panel expands to nearly full screen (16px margins) with smooth CSS transition
+- **Close**: Hides the panel; floating HUD buttons appear at bottom-left to reopen
+- **HudButtons** — RPG-styled "Chat" / "Quests" buttons visible when respective panels are closed
+
+**Interaction**: Click Seraph sprite → chat panel toggle, Click User sprite → quest log toggle, or use ✕/HUD buttons
 
 ---
 

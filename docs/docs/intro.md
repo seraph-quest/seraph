@@ -75,6 +75,6 @@ backend/
 ## Current Status
 
 - **Phase 0** (Foundation): Complete
-- **Phase 1** (Persistent Identity): Complete — DB, soul/memory, goals, onboarding, quest UI, two-pane chat sidebar, session auto-naming, sprite tooltips
+- **Phase 1** (Persistent Identity): Complete — DB, soul/memory, goals, onboarding, quest UI, two-pane chat sidebar, session auto-naming, sprite tooltips, chat maximize/close controls, HUD panel buttons, session persistence (localStorage)
 - **Phase 2** (Capable Executor): Complete — shell, browser, calendar, email, plugin system
 - **Phase 3** (The Observer): Planned — scheduler, context awareness, proactive reasoning

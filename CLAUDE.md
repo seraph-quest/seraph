@@ -15,16 +15,17 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/game/objects/UserSprite.ts` - Phaser sprite for user avatar
   - `src/game/objects/SpeechBubble.ts` - Phaser speech bubble
   - `src/game/EventBus.ts` - Bridges Phaser events to React
-  - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connection, agent visual state, onboarding, ambient)
+  - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connection, agent visual state, onboarding, ambient, chatMaximized, session persistence via localStorage)
   - `src/stores/questStore.ts` - Zustand store (goal tree, domain progress dashboard)
   - `src/hooks/useWebSocket.ts` - Native WS connection to `ws://localhost:8004/ws/chat`, reconnect, ping, message dispatch
   - `src/hooks/useAgentAnimation.ts` - Walk-then-act state machine with timers
   - `src/lib/toolParser.ts` - Regex detection of tool names from step content (5 patterns + fallback)
   - `src/lib/animationStateMachine.ts` - Tool → village position mapping (pixel coords + percentage fallback)
   - `src/config/constants.ts` - Scene dimensions, tool names, village positions, wandering waypoints
-  - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator
+  - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel, GoalTree, DomainStats
-  - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame
+  - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest panels
+  - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
 ### Backend (`backend/`)
 - **Stack**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
@@ -99,6 +100,12 @@ Animation states: `idle`, `thinking`, `walking`, `wandering`, `at-well`, `at-sig
 - Day/night cycle (hours 6-17 = day, 18+ = night)
 - Agent wanders between 12 waypoints when idle
 - User avatar positioned at home (832, 340)
+
+## Chat Panel Controls
+- **Maximize/Minimize**: ▲/▼ button on DialogFrame expands chat overlay to nearly full screen (16px margins all sides) with CSS transition
+- **Close**: ✕ button on DialogFrame hides the panel
+- **Reopen**: Floating HudButtons at bottom-left appear when panels are closed ("Chat", "Quests")
+- **Session persistence**: Last selected `sessionId` stored in `localStorage` (`seraph_last_session_id`); restored on page load via `switchSession()` in WS `onopen`
 
 ## Design Decisions
 1. **Phaser 3 canvas** — Village scene rendered via Phaser with tile-based map. React overlays for chat/quest panels.

@@ -7,6 +7,7 @@ import { GoalTree } from "./GoalTree";
 
 export function QuestPanel() {
   const questPanelOpen = useChatStore((s) => s.questPanelOpen);
+  const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
   const { goalTree, dashboard, refresh, loading } = useQuestStore();
 
   useEffect(() => {
@@ -20,6 +21,7 @@ export function QuestPanel() {
       <DialogFrame
         title="Quest Log"
         className="flex-1 min-h-0 flex flex-col"
+        onClose={() => setQuestPanelOpen(false)}
       >
         <div className="flex-1 min-h-0 overflow-y-auto retro-scrollbar flex flex-col gap-2 pb-1">
           {dashboard && <DomainStats dashboard={dashboard} />}

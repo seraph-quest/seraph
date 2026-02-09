@@ -17,6 +17,7 @@ interface ChatStore {
   agentVisual: AgentVisualState;
   ambientState: AmbientState;
   chatPanelOpen: boolean;
+  chatMaximized: boolean;
   questPanelOpen: boolean;
   settingsOpen: boolean;
   onboardingCompleted: boolean | null;
@@ -31,6 +32,7 @@ interface ChatStore {
   resetAgentVisual: () => void;
   setAmbientState: (state: AmbientState) => void;
   setChatPanelOpen: (open: boolean) => void;
+  toggleChatMaximized: () => void;
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
@@ -45,6 +47,8 @@ interface ChatStore {
   generateSessionTitle: (sessionId: string) => Promise<void>;
 }
 
+const LAST_SESSION_KEY = "seraph_last_session_id";
+
 const defaultVisual: AgentVisualState = {
   animationState: "idle",
   positionX: 50,
@@ -54,13 +58,14 @@ const defaultVisual: AgentVisualState = {
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
-  sessionId: null,
+  sessionId: localStorage.getItem(LAST_SESSION_KEY),
   sessions: [],
   connectionStatus: "disconnected",
   isAgentBusy: false,
   agentVisual: { ...defaultVisual },
   ambientState: "idle",
   chatPanelOpen: true,
+  chatMaximized: false,
   questPanelOpen: false,
   settingsOpen: false,
   onboardingCompleted: null,
@@ -70,7 +75,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setMessages: (messages) => set({ messages }),
 
-  setSessionId: (id) => set({ sessionId: id }),
+  setSessionId: (id) => {
+    localStorage.setItem(LAST_SESSION_KEY, id);
+    set({ sessionId: id });
+  },
 
   setSessions: (sessions) => set({ sessions }),
 
@@ -89,6 +97,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setChatPanelOpen: (open) =>
     set({ chatPanelOpen: open, questPanelOpen: open ? false : get().questPanelOpen }),
+
+  toggleChatMaximized: () => set((state) => ({ chatMaximized: !state.chatMaximized })),
 
   setQuestPanelOpen: (open) =>
     set({ questPanelOpen: open, chatPanelOpen: open ? false : get().chatPanelOpen }),
@@ -124,6 +134,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const res = await fetch(`${API_URL}/api/user/onboarding/restart`, { method: "POST" });
       if (res.ok) {
+        localStorage.removeItem(LAST_SESSION_KEY);
         set({ onboardingCompleted: false, sessionId: null, messages: [] });
       }
     } catch (err) {
@@ -156,6 +167,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           stepNumber: m.step_number as number | undefined,
           toolUsed: m.tool_used as string | undefined,
         }));
+        localStorage.setItem(LAST_SESSION_KEY, sessionId);
         set({ sessionId, messages: chatMessages });
       }
     } catch (err) {
@@ -164,6 +176,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   newSession: () => {
+    localStorage.removeItem(LAST_SESSION_KEY);
     set({ sessionId: null, messages: [] });
   },
 
@@ -173,6 +186,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const { sessions, sessionId: currentId } = get();
       set({ sessions: sessions.filter((s) => s.id !== sessionId) });
       if (currentId === sessionId) {
+        localStorage.removeItem(LAST_SESSION_KEY);
         set({ sessionId: null, messages: [] });
       }
     } catch (err) {

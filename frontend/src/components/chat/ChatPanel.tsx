@@ -14,16 +14,22 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
   const isAgentBusy = useChatStore((s) => s.isAgentBusy);
   const connectionStatus = useChatStore((s) => s.connectionStatus);
   const chatPanelOpen = useChatStore((s) => s.chatPanelOpen);
+  const chatMaximized = useChatStore((s) => s.chatMaximized);
+  const toggleChatMaximized = useChatStore((s) => s.toggleChatMaximized);
+  const setChatPanelOpen = useChatStore((s) => s.setChatPanelOpen);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const isConnected = connectionStatus === "connected";
 
   if (!chatPanelOpen) return null;
 
   return (
-    <div className="chat-overlay">
+    <div className={`chat-overlay${chatMaximized ? " maximized" : ""}`}>
       <DialogFrame
         title="Chat Log"
         className="flex-1 min-h-0 flex flex-row relative"
+        onMaximize={toggleChatMaximized}
+        maximized={chatMaximized}
+        onClose={() => setChatPanelOpen(false)}
       >
         <ChatSidebar />
         <div className="flex-1 min-h-0 flex flex-col">

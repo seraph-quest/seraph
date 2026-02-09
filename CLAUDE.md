@@ -24,7 +24,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/config/constants.ts` - Scene dimensions, tool names, village positions, wandering waypoints
   - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel, GoalTree, DomainStats
-  - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest panels
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, version)
+  - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
 ### Backend (`backend/`)
@@ -75,7 +76,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - Welcome message sent on WS connect explaining the process
 - After ~3 exchanges (6 messages), onboarding auto-completes and full agent unlocks
 - Users can skip via "Skip intro >>" button or `skip_onboarding` WS message
-- Users can restart via "Restart intro" button in session list or `POST /api/user/onboarding/restart`
+- Users can restart via "Restart intro" in the Settings panel or `POST /api/user/onboarding/restart`
 
 ## Avatar Animation State Machine
 ```
@@ -104,7 +105,7 @@ Animation states: `idle`, `thinking`, `walking`, `wandering`, `at-well`, `at-sig
 ## Chat Panel Controls
 - **Maximize/Minimize**: ▲/▼ button on DialogFrame expands chat overlay to nearly full screen (16px margins all sides) with CSS transition
 - **Close**: ✕ button on DialogFrame hides the panel
-- **Reopen**: Floating HudButtons at bottom-left appear when panels are closed ("Chat", "Quests")
+- **Reopen**: Floating HudButtons at bottom-left appear when panels are closed ("Chat", "Quests", "Settings")
 - **Session persistence**: Last selected `sessionId` stored in `localStorage` (`seraph_last_session_id`); restored on page load via `switchSession()` in WS `onopen`
 
 ## Design Decisions

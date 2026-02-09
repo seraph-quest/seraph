@@ -28,13 +28,57 @@ The backend connects to the host via `host.docker.internal:9100` (Docker Desktop
 
 ## Setup
 
-### 1. Install and start things-mcp on the host
+### 1. Install things-mcp as a LaunchAgent (recommended)
+
+Things3 stores its database in `~/Library/Group Containers/`, which macOS protects with Full Disk Access (FDA). Rather than giving FDA to your entire terminal app, the recommended approach is to run things-mcp as a **macOS LaunchAgent** and grant FDA only to the `uvx` binary.
+
+```bash
+./scripts/install-things-mcp.sh
+```
+
+This script:
+- Creates a LaunchAgent plist at `~/Library/LaunchAgents/com.seraph.things-mcp.plist`
+- Starts things-mcp automatically on port 9100 with HTTP transport
+- Auto-restarts if it crashes (`KeepAlive`)
+- Logs to `~/Library/Logs/things-mcp/`
+
+After running the script, **grant Full Disk Access to `uvx`**:
+
+1. Open **System Settings → Privacy & Security → Full Disk Access**
+2. Click **+** and press **Cmd+Shift+G** to type a path
+3. Enter the path shown by the script (typically `/opt/homebrew/bin/uvx`)
+4. Toggle it **ON**
+5. Restart the service:
+   ```bash
+   launchctl kickstart -k gui/$(id -u)/com.seraph.things-mcp
+   ```
+
+No system restart required — the FDA grant takes effect immediately after restarting the service.
+
+#### Managing the LaunchAgent
+
+```bash
+# View logs
+tail -f ~/Library/Logs/things-mcp/stderr.log
+
+# Restart
+launchctl kickstart -k gui/$(id -u)/com.seraph.things-mcp
+
+# Stop
+launchctl bootout gui/$(id -u)/com.seraph.things-mcp
+
+# Uninstall
+launchctl bootout gui/$(id -u)/com.seraph.things-mcp
+rm ~/Library/LaunchAgents/com.seraph.things-mcp.plist
+```
+
+#### Alternative: run manually in a terminal
+
+If you prefer not to use a LaunchAgent, you can run things-mcp directly — but the terminal app (iTerm, Terminal.app, etc.) will need Full Disk Access:
 
 ```bash
 THINGS_MCP_TRANSPORT=http THINGS_MCP_PORT=9100 uvx things-mcp
 ```
-
-This starts the MCP server on port 9100 with Streamable HTTP transport. Leave this terminal running.
 
 ### 2. Configure the backend
 
@@ -148,9 +192,15 @@ All Things3 tools map to the **church/bench** station (the tasks & goals area):
 ## Troubleshooting
 
 **"Failed to connect to MCP server"**
-- Ensure things-mcp is running on the host: `THINGS_MCP_TRANSPORT=http THINGS_MCP_PORT=9100 uvx things-mcp`
-- Verify port 9100 is accessible: `curl http://localhost:9100/mcp`
+- Ensure things-mcp is running: `curl http://localhost:9100/mcp`
+- If using LaunchAgent: `launchctl print gui/$(id -u)/com.seraph.things-mcp`
 - Check that Docker Desktop is running (provides `host.docker.internal`)
+
+**"unable to open database file"**
+- Things3's database is protected by macOS Full Disk Access
+- If using LaunchAgent: grant FDA to `uvx` (see setup instructions above), then restart the service
+- If running manually: grant FDA to your terminal app (iTerm, Terminal.app, etc.)
+- No system restart needed — just restart the things-mcp process after granting FDA
 
 **Things3 tools not appearing in agent**
 - Check `THINGS_MCP_URL` is set in `.env.dev`

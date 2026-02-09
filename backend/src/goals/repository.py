@@ -34,18 +34,18 @@ class GoalRepository:
             # Build materialized path
             path = "/"
             if parent_id:
-                result = await db.exec(
+                result = await db.execute(
                     select(Goal).where(Goal.id == parent_id)
                 )
-                parent = result.first()
+                parent = result.scalars().first()
                 if parent:
                     path = f"{parent.path}{parent.id}/"
 
             # Get next sort_order for siblings
-            siblings = await db.exec(
+            siblings = await db.execute(
                 select(Goal).where(Goal.parent_id == parent_id)
             )
-            sort_order = len(siblings.all())
+            sort_order = len(siblings.scalars().all())
 
             goal = Goal(
                 id=goal_id,
@@ -64,8 +64,8 @@ class GoalRepository:
 
     async def get(self, goal_id: str) -> Optional[Goal]:
         async with get_session() as db:
-            result = await db.exec(select(Goal).where(Goal.id == goal_id))
-            return result.first()
+            result = await db.execute(select(Goal).where(Goal.id == goal_id))
+            return result.scalars().first()
 
     async def update(
         self,
@@ -78,8 +78,8 @@ class GoalRepository:
         if status is not None and status not in _VALID_STATUSES:
             raise ValueError(f"Invalid status '{status}'. Must be one of: {_VALID_STATUSES}")
         async with get_session() as db:
-            result = await db.exec(select(Goal).where(Goal.id == goal_id))
-            goal = result.first()
+            result = await db.execute(select(Goal).where(Goal.id == goal_id))
+            goal = result.scalars().first()
             if not goal:
                 return None
             if title is not None:
@@ -97,17 +97,17 @@ class GoalRepository:
     async def delete(self, goal_id: str) -> bool:
         """Delete a goal and all its descendants."""
         async with get_session() as db:
-            result = await db.exec(select(Goal).where(Goal.id == goal_id))
-            goal = result.first()
+            result = await db.execute(select(Goal).where(Goal.id == goal_id))
+            goal = result.scalars().first()
             if not goal:
                 return False
 
             # Delete descendants (path starts with this goal's full path)
             descendant_path = f"{goal.path}{goal.id}/"
-            descendants = await db.exec(
+            descendants = await db.execute(
                 select(Goal).where(col(Goal.path).startswith(descendant_path))
             )
-            for d in descendants.all():
+            for d in descendants.scalars().all():
                 await db.delete(d)
 
             await db.delete(goal)
@@ -131,8 +131,8 @@ class GoalRepository:
             if parent_id is not None:
                 query = query.where(Goal.parent_id == parent_id)
             query = query.order_by(Goal.sort_order, col(Goal.created_at).asc())
-            result = await db.exec(query)
-            return list(result.all())
+            result = await db.execute(query)
+            return list(result.scalars().all())
 
     async def get_children(self, goal_id: str) -> list[Goal]:
         return await self.list_goals(parent_id=goal_id)
@@ -140,10 +140,10 @@ class GoalRepository:
     async def get_tree(self) -> list[dict]:
         """Return the full goal tree as nested dicts."""
         async with get_session() as db:
-            result = await db.exec(
+            result = await db.execute(
                 select(Goal).order_by(Goal.sort_order, col(Goal.created_at).asc())
             )
-            all_goals = result.all()
+            all_goals = result.scalars().all()
 
         # Build tree structure
         goal_map = {}
@@ -174,8 +174,8 @@ class GoalRepository:
     async def get_dashboard(self) -> dict:
         """Return summary stats for the quest log UI."""
         async with get_session() as db:
-            result = await db.exec(select(Goal))
-            all_goals = result.all()
+            result = await db.execute(select(Goal))
+            all_goals = result.scalars().all()
 
         if not all_goals:
             return {"domains": {}, "active_count": 0, "completed_count": 0, "total_count": 0}

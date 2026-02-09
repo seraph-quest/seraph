@@ -11,10 +11,15 @@ export class UserSprite {
   sprite: Phaser.GameObjects.Sprite;
   private scene: Phaser.Scene;
   private bobTween: Phaser.Tweens.Tween | null = null;
+  private currentTween: Phaser.Tweens.Tween | null = null;
   private glowGraphics: Phaser.GameObjects.Graphics | null = null;
+  homeX: number;
+  homeY: number;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     this.scene = scene;
+    this.homeX = x;
+    this.homeY = y;
 
     if (!scene.textures.exists(SPRITE_KEY) || scene.textures.get(SPRITE_KEY).frameTotal <= 2) {
       if (scene.textures.exists(SPRITE_KEY)) {
@@ -31,20 +36,12 @@ export class UserSprite {
     this.createAnimations();
     this.sprite.play("user-idle");
 
-    // Idle bobbing
-    this.bobTween = scene.tweens.add({
-      targets: this.sprite,
-      y: y - 2,
-      duration: 1400,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
-    });
+    this.startBob();
 
     // Make clickable
     this.sprite.setInteractive({ useHandCursor: true });
     this.sprite.on("pointerdown", () => {
-      EventBus.emit("open-quest-log");
+      EventBus.emit("toggle-quest-log");
     });
 
     // Hover glow
@@ -82,7 +79,8 @@ export class UserSprite {
   }
 
   private createFallbackTexture(scene: Phaser.Scene) {
-    const canvas = scene.textures.createCanvas(SPRITE_KEY, 96, 128);
+    const WALK_COLS = 6;
+    const canvas = scene.textures.createCanvas(SPRITE_KEY, WALK_COLS * FRAME_W, 4 * FRAME_H);
     if (!canvas) return;
     const ctx = canvas.context;
 
@@ -94,28 +92,23 @@ export class UserSprite {
     ];
 
     for (const dir of directions) {
-      for (let col = 0; col < 3; col++) {
+      for (let col = 0; col < WALK_COLS; col++) {
         const ox = col * 32;
         const oy = dir.row * 32;
-        const legOffset = col === 1 ? 0 : col === 0 ? -1 : 1;
+        const legOffset = col % 2 === 0 ? -1 : 1;
 
-        // Body — blue tunic (different from Seraph's purple)
         ctx.fillStyle = "#1e40af";
         ctx.fillRect(ox + 8, oy + 14, 16, 12);
 
-        // Belt — silver
         ctx.fillStyle = "#94a3b8";
         ctx.fillRect(ox + 8, oy + 20, 16, 2);
 
-        // Head — lighter skin
         ctx.fillStyle = "#f5c078";
         ctx.fillRect(ox + 9, oy + 6, 14, 10);
 
-        // Hair — brown
         ctx.fillStyle = "#78350f";
         ctx.fillRect(ox + 9, oy + 4, 14, 4);
 
-        // Eyes
         if (dir.row !== 3) {
           ctx.fillStyle = "#ffffff";
           for (const [ex, ey] of dir.eyeOffsets) {
@@ -126,7 +119,6 @@ export class UserSprite {
           }
         }
 
-        // Legs — brown boots
         ctx.fillStyle = "#78350f";
         ctx.fillRect(ox + 10 + legOffset, oy + 26, 4, 4);
         ctx.fillRect(ox + 18 - legOffset, oy + 26, 4, 4);
@@ -137,13 +129,11 @@ export class UserSprite {
 
     const texture = scene.textures.get(SPRITE_KEY);
     for (const dir of directions) {
-      for (let col = 0; col < 3; col++) {
-        const walkFrame = `${dir.label}-walk.00${col}`;
+      for (let col = 0; col < WALK_COLS; col++) {
+        const walkFrame = `${dir.label}-walk.${String(col).padStart(3, "0")}`;
         texture.add(walkFrame, 0, col * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
       }
-      const walk3 = `${dir.label}-walk.003`;
-      texture.add(walk3, 0, 1 * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
-      texture.add(dir.label, 0, 1 * FRAME_W, dir.row * FRAME_H, FRAME_W, FRAME_H);
+      texture.add(dir.label, 0, 0, dir.row * FRAME_H, FRAME_W, FRAME_H);
     }
   }
 
@@ -157,18 +147,96 @@ export class UserSprite {
       repeat: 0,
     });
 
-    // Simple walk for potential future use
-    scene.anims.create({
-      key: "user-walk-down",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "down-walk.",
-        start: 0,
-        end: 3,
-        zeroPad: 3,
-      }),
-      frameRate: 6,
-      repeat: -1,
+    const dirs = ["down", "left", "right", "up"] as const;
+    for (const dir of dirs) {
+      scene.anims.create({
+        key: `user-walk-${dir}`,
+        frames: scene.anims.generateFrameNames(SPRITE_KEY, {
+          prefix: `${dir}-walk.`,
+          start: 0,
+          end: 5,
+          zeroPad: 3,
+        }),
+        frameRate: 8,
+        repeat: -1,
+      });
+    }
+  }
+
+  moveTo(x: number, y: number, onComplete?: () => void) {
+    if (this.currentTween) {
+      this.currentTween.stop();
+      this.currentTween = null;
+    }
+    this.stopBob();
+
+    const dx = x - this.sprite.x;
+    const dy = y - this.sprite.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < 4) {
+      onComplete?.();
+      return;
+    }
+
+    // Pick direction based on dominant axis
+    let walkAnim: string;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      walkAnim = dx < 0 ? "user-walk-left" : "user-walk-right";
+    } else {
+      walkAnim = dy < 0 ? "user-walk-up" : "user-walk-down";
+    }
+    this.sprite.play(walkAnim);
+
+    const duration = (distance / SCENE.WALK_SPEED) * 1000;
+
+    this.currentTween = this.scene.tweens.add({
+      targets: this.sprite,
+      x,
+      y,
+      duration,
+      ease: "Sine.easeInOut",
+      onComplete: () => {
+        this.currentTween = null;
+        onComplete?.();
+      },
     });
+  }
+
+  returnHome(onComplete?: () => void) {
+    this.moveTo(this.homeX, this.homeY, () => {
+      this.sprite.play("user-idle");
+      this.startBob();
+      onComplete?.();
+    });
+  }
+
+  cancelMovement() {
+    if (this.currentTween) {
+      this.currentTween.stop();
+      this.currentTween = null;
+    }
+    this.stopBob();
+    this.sprite.stop();
+  }
+
+  private startBob() {
+    this.stopBob();
+    this.bobTween = this.scene.tweens.add({
+      targets: this.sprite,
+      y: this.sprite.y - 2,
+      duration: 1400,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
+  }
+
+  private stopBob() {
+    if (this.bobTween) {
+      this.bobTween.stop();
+      this.bobTween = null;
+    }
   }
 
   updatePosition(x: number, y: number) {
@@ -176,7 +244,8 @@ export class UserSprite {
   }
 
   destroy() {
-    if (this.bobTween) this.bobTween.stop();
+    this.stopBob();
+    if (this.currentTween) this.currentTween.stop();
     this.glowGraphics?.destroy();
     this.sprite.destroy();
   }

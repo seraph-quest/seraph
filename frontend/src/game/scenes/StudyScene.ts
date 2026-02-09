@@ -60,6 +60,28 @@ const VILLAGE_ASSETS: Record<string, { day: string; night: string }> = {
   "terrain-set-5":    { day: "terrain-set-5-day",    night: "terrain-set-5-night" },
 };
 
+// Tool station sprites (no day/night variants — same image for both)
+const TOOL_STATION_ASSETS: Record<string, string> = {
+  "well":             "well",
+  "scroll-desk":      "scroll-desk",
+  "shrine":           "shrine",
+  "anvil":            "anvil",
+  "telescope-tower":  "telescope-tower",
+  "sundial":          "sundial",
+  "pigeon-post":      "pigeon-post",
+};
+
+// Tool station placements — positioned in front of their parent building
+const TOOL_STATIONS: Array<{ x: number; y: number; key: string }> = [
+  { x: 192, y: 280, key: "well" },              // in front of house-1 (web_search)
+  { x: 832, y: 280, key: "scroll-desk" },        // in front of house-2 (read/write)
+  { x: 512, y: 240, key: "shrine" },             // in front of church (soul/goals/template)
+  { x: 384, y: 330, key: "anvil" },              // in front of forge (shell_execute)
+  { x: 640, y: 210, key: "telescope-tower" },    // in front of tower (browse_webpage)
+  { x: 576, y: 350, key: "sundial" },            // clock area (calendar)
+  { x: 128, y: 350, key: "pigeon-post" },        // mailbox area (email)
+];
+
 // ─── Village Layout Data (all coords village-local) ──────
 
 // Ground path segments forming a cross/T shape
@@ -287,6 +309,9 @@ export class StudyScene extends Phaser.Scene {
       this.load.image(variants.day, `assets/village/${variants.day}.png`);
       this.load.image(variants.night, `assets/village/${variants.night}.png`);
     }
+    for (const [, filename] of Object.entries(TOOL_STATION_ASSETS)) {
+      this.load.image(filename, `assets/village/${filename}.png`);
+    }
     AgentSprite.preload(this);
     UserSprite.preload(this);
 
@@ -380,6 +405,7 @@ export class StudyScene extends Phaser.Scene {
     // --- Layer 6: Y-sorted objects (buildings, props, village trees) ---
     this.placeBuildings();
     this.placeProps();
+    this.placeToolStations();
     this.placeVillageTrees();
 
     // --- Forest (outside village) ---
@@ -389,14 +415,14 @@ export class StudyScene extends Phaser.Scene {
     const startPos = this.worldPos(SCENE.POSITIONS.bench);
     this.agent = new AgentSprite(this, startPos.x, startPos.y);
 
-    // Make Seraph clickable — opens chat panel
+    // Make Seraph clickable — toggles chat panel
     this.agent.sprite.setInteractive({ useHandCursor: true });
     this.agent.sprite.on("pointerdown", () => {
-      EventBus.emit("open-chat");
+      EventBus.emit("toggle-chat");
     });
 
-    // --- User Avatar (clickable — opens quest log) ---
-    const userPos = this.worldPos({ x: 832, y: 340 });
+    // --- User Avatar (clickable — toggles quest log) ---
+    const userPos = this.worldPos(SCENE.POSITIONS.userHome);
     this.userAvatar = new UserSprite(this, userPos.x, userPos.y);
 
     // --- Speech Bubble ---
@@ -422,6 +448,12 @@ export class StudyScene extends Phaser.Scene {
       this.agent.moveTo(pos.x, pos.y, () => {
         this.agent.playAnim("think");
       });
+
+      // User walks toward agent's thinking position, stopping short
+      const userTarget = { x: pos.x + 40, y: pos.y + 10 };
+      this.userAvatar.moveTo(userTarget.x, userTarget.y, () => {
+        this.userAvatar.sprite.play("user-idle");
+      });
     };
 
     this.handleToolMove = (payload: ToolMovePayload) => {
@@ -438,14 +470,18 @@ export class StudyScene extends Phaser.Scene {
 
     this.handleFinalAnswer = (payload: FinalAnswerPayload) => {
       this.stopWandering();
-      const pos = this.worldPos(SCENE.POSITIONS.bench);
-      this.agent.moveTo(pos.x, pos.y, () => {
+      // Seraph walks toward User's current position (stopping short)
+      const targetX = this.userAvatar.sprite.x - 40;
+      const targetY = this.userAvatar.sprite.y;
+      this.agent.moveTo(targetX, targetY, () => {
         this.agent.playAnim("idle");
         this.speechBubble.show(payload.text);
 
         this.time.delayedCall(6000, () => {
           this.speechBubble.hide();
           EventBus.emit("agent-speech-done");
+          // Both return: Seraph wanders, User goes home
+          this.userAvatar.returnHome();
           this.startWandering();
         });
       });
@@ -458,6 +494,7 @@ export class StudyScene extends Phaser.Scene {
         this.agent.playAnim("idle");
         this.startWandering();
       });
+      this.userAvatar.returnHome();
     };
 
     EventBus.on("agent-think", this.handleThink);
@@ -490,6 +527,7 @@ export class StudyScene extends Phaser.Scene {
 
     this.scale.off("resize", this.onResize, this);
     this.stopWandering();
+    this.userAvatar.cancelMovement();
 
     if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
     if (this.dayNightTimer) this.dayNightTimer.remove(false);
@@ -643,6 +681,17 @@ export class StudyScene extends Phaser.Scene {
       sprite.setOrigin(0.5, 1);
       sprite.setDepth(p.y * 0.01);
       this.envSprites.push({ sprite, assetKey: p.key });
+    }
+  }
+
+  // ─── Tool Stations (Y-sorted, in front of buildings) ─
+
+  private placeToolStations() {
+    for (const ts of TOOL_STATIONS) {
+      const wp = this.worldPos(ts);
+      const sprite = this.add.image(wp.x, wp.y, ts.key);
+      sprite.setOrigin(0.5, 1);
+      sprite.setDepth(ts.y * 0.01 + 0.1); // slightly in front of buildings
     }
   }
 

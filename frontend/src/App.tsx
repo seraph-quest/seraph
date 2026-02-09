@@ -9,22 +9,25 @@ import { EventBus } from "./game/EventBus";
 export default function App() {
   const { sendMessage } = useWebSocket();
   const phaserRef = useRef<IRefPhaserGame>(null);
-  const setChatPanelOpen = useChatStore((s) => s.setChatPanelOpen);
-  const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
-
   // Bridge Phaser EventBus → React panel toggles
   useEffect(() => {
-    const openChat = () => setChatPanelOpen(true);
-    const openQuest = () => setQuestPanelOpen(true);
+    const toggleChat = () => {
+      const s = useChatStore.getState();
+      s.setChatPanelOpen(!s.chatPanelOpen);
+    };
+    const toggleQuest = () => {
+      const s = useChatStore.getState();
+      s.setQuestPanelOpen(!s.questPanelOpen);
+    };
 
-    EventBus.on("open-chat", openChat);
-    EventBus.on("open-quest-log", openQuest);
+    EventBus.on("toggle-chat", toggleChat);
+    EventBus.on("toggle-quest-log", toggleQuest);
 
     return () => {
-      EventBus.off("open-chat", openChat);
-      EventBus.off("open-quest-log", openQuest);
+      EventBus.off("toggle-chat", toggleChat);
+      EventBus.off("toggle-quest-log", toggleQuest);
     };
-  }, [setChatPanelOpen, setQuestPanelOpen]);
+  }, []);
 
   return (
     <>

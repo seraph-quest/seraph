@@ -101,6 +101,38 @@ These were gaps in the original analysis that have since been implemented:
 
 ---
 
+## Recommended Roadmap
+
+### Phase 1 — Foundation (make the agent robust) — DONE
+
+1. ~~**Persistent sessions + chat history** — SQLite, survive restarts~~
+2. ~~**Persistent memory system** — Agent "soul" / long-term recall across sessions~~
+3. **Context management** — Compaction/summarization for long conversations
+4. **Model fallback chain** — Primary + fallback models, graceful degradation
+
+### Phase 2 — Capability Expansion — DONE
+
+5. ~~**Shell execution tool** — With sandboxing/allowlists~~
+6. ~~**Browser automation tool** — Playwright-based, huge capability unlock~~
+7. **Media support** — Image send/receive in chat
+8. ~~**Plugin/skill system** — User-installable tools without backend code changes~~
+
+### Phase 3 — Operational Maturity
+
+9. **Tool policies** — Allow/deny per session or user
+10. **Security sandboxing** — Docker-based tool execution (partially done via snekbox)
+11. **Settings UI** — In-app configuration panel
+12. **User auth** — Basic identity + session isolation
+
+### Phase 4 — Distribution & Polish
+
+13. **Telegram/Discord bot** — Alternative frontends leveraging existing backend
+14. **Scheduled/proactive tasks** — Heartbeat system for autonomous workflows
+15. **TTS** — Fits the RPG theme (avatar "speaking" with voice)
+16. **Structured logging** — Redaction, multiple output formats
+
+---
+
 ## Seraph's Unique Advantage
 
 OpenClaw is headless. Seraph's **visual RPG experience** has no equivalent:

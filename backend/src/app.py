@@ -6,13 +6,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.settings import settings
 from src.db import init_db, close_db
 from src.memory.soul import ensure_soul_exists
+from src.tools.mcp_manager import mcp_manager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     ensure_soul_exists()
+    if settings.things_mcp_url:
+        mcp_manager.connect(settings.things_mcp_url)
     yield
+    mcp_manager.disconnect()
     await close_db()
 
 

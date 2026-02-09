@@ -44,8 +44,9 @@ backend/src/plugins/
 **API endpoint**: `GET /api/tools` — returns available tools with village metadata
 
 **Modified**: `backend/src/agent/factory.py`
-- `get_tools()` now calls `discover_tools()` from plugin loader
+- `get_tools()` now calls `discover_tools()` from plugin loader + `mcp_manager.get_tools()` for MCP tools
 - No manual imports — all tools auto-discovered
+- MCP tools (e.g. Things3) are merged in at runtime if configured
 
 ---
 

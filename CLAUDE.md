@@ -40,7 +40,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Tools** (`src/tools/`):
   - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
   - Phase 2: `shell_execute`, `browse_webpage`, `get_calendar_events`, `create_calendar_event`, `read_emails`, `send_email`
-  - MCP stub: `src/tools/mcp_manager.py`
+  - MCP: `src/tools/mcp_manager.py` — connects to external MCP servers (e.g. Things3 via `things-mcp`) using `smolagents.MCPClient`; 22 Things3 tools loaded at startup if `THINGS_MCP_URL` is set
 - **Memory** (`src/memory/`):
   - `soul.py` — Persistent identity file (markdown in workspace)
   - `vector_store.py` — LanceDB vector store for long-term memory search
@@ -60,7 +60,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `sandbox-dev` — snekbox (sandboxed Python execution for `shell_execute`), `linux/amd64`, privileged, internal network only
   - `frontend-dev` (3000:5173) — Vite dev server
 - `manage.sh` - Docker management: `./manage.sh -e dev up -d`, `down`, `logs -f`, `build`
-- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR`
+- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, `THINGS_MCP_URL`, data/log paths, `WORKSPACE_DIR`
 
 ## WebSocket Protocol
 - **Client sends**: `{type: "message" | "ping" | "skip_onboarding", message, session_id}`
@@ -82,7 +82,7 @@ User sends message → THINKING at bench (center 50%, pixel 512,350)
   Tool detected in WS step:
   ├─ web_search         → WALKING → AT-WELL     (15%, house1: 192,280)
   ├─ read/write_file    → WALKING → AT-SIGNPOST  (85%, house2: 832,280)
-  ├─ fill_template/soul/goals → WALKING → AT-BENCH (50%, church: 512,240)
+  ├─ fill_template/soul/goals/things3 → WALKING → AT-BENCH (50%, church: 512,240)
   ├─ shell_execute      → WALKING → AT-FORGE    (35%, forge: 384,320)
   ├─ browse_webpage     → WALKING → AT-TOWER    (60%, tower: 640,200)
   ├─ calendar tools     → WALKING → AT-CLOCK    (55%, clock: 576,340)

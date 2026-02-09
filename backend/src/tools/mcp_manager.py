@@ -1,20 +1,47 @@
-"""Stub for future MCP (Model Context Protocol) server integration.
+"""MCP (Model Context Protocol) server integration.
 
-This module will eventually manage connections to MCP servers for
-extended tool capabilities. For MVP, tools are implemented directly
-using the @tool decorator from smolagents.
+Manages connections to external MCP servers (e.g. Things3) and exposes
+their tools for use by the smolagents ToolCallingAgent.
 """
+
+import logging
+
+from smolagents import MCPClient
+
+logger = logging.getLogger(__name__)
 
 
 class MCPManager:
-    """Placeholder for MCP server connection management."""
+    """Connects to MCP servers and provides their tools."""
 
     def __init__(self) -> None:
-        self._servers: dict[str, dict] = {}
+        self._client: MCPClient | None = None
+        self._tools: list = []
 
-    def register_server(self, name: str, config: dict) -> None:
-        """Register an MCP server configuration for future use."""
-        self._servers[name] = config
+    def connect(self, url: str) -> None:
+        """Connect to an MCP server via HTTP/SSE. Fails gracefully."""
+        try:
+            self._client = MCPClient({"url": url})
+            self._tools = self._client.get_tools()
+            logger.info(f"Connected to MCP server: {len(self._tools)} tools loaded")
+        except Exception:
+            logger.warning("Failed to connect to MCP server at %s", url, exc_info=True)
+            self._client = None
+            self._tools = []
 
-    def list_servers(self) -> list[str]:
-        return list(self._servers.keys())
+    def disconnect(self) -> None:
+        """Disconnect from the MCP server."""
+        if self._client:
+            try:
+                self._client.disconnect()
+            except Exception:
+                logger.warning("Error disconnecting MCP client", exc_info=True)
+            self._client = None
+            self._tools = []
+
+    def get_tools(self) -> list:
+        """Return tools loaded from the MCP server."""
+        return self._tools
+
+
+mcp_manager = MCPManager()

@@ -15,10 +15,10 @@ export function ChatSidebar() {
           <div className="flex-1 min-h-0 overflow-y-auto retro-scrollbar">
             <SessionList />
           </div>
-          <div className="border-t border-retro-border/20">
+          <div className="border-t border-retro-border/20 mt-2">
             <button
               onClick={() => setSettingsOpen(true)}
-              className="w-full text-[8px] text-retro-text/40 hover:text-retro-highlight text-left px-2 py-1.5 uppercase tracking-wider"
+              className="w-full text-[8px] text-retro-text/40 hover:text-retro-highlight text-left px-2 py-3 uppercase tracking-wider"
             >
               Settings
             </button>

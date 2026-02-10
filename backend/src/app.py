@@ -15,6 +15,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     ensure_soul_exists()
     init_scheduler()
+    try:
+        from src.observer.manager import context_manager
+        await context_manager.refresh()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     if settings.things_mcp_url:
         mcp_manager.connect("things", settings.things_mcp_url)
     if settings.github_mcp_url:

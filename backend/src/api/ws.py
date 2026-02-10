@@ -110,6 +110,11 @@ async def websocket_chat(websocket: WebSocket):
 
             session = await session_manager.get_or_create(ws_msg.session_id)
             await session_manager.add_message(session.id, "user", ws_msg.message)
+            try:
+                from src.observer.manager import context_manager
+                context_manager.update_last_interaction()
+            except Exception:
+                pass
 
             agent, is_onboarding = await _build_agent(session.id, ws_msg.message)
 

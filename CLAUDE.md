@@ -42,7 +42,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Tools** (`src/tools/`):
   - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
   - Phase 2: `shell_execute`, `browse_webpage`, `get_calendar_events`, `create_calendar_event`, `read_emails`, `send_email`
-  - MCP: `src/tools/mcp_manager.py` — connects to external MCP servers (e.g. Things3 via `things-mcp`) using `smolagents.MCPClient`; 22 Things3 tools loaded at startup if `THINGS_MCP_URL` is set
+  - MCP: `src/tools/mcp_manager.py` — multi-server MCP manager; connects to named external MCP servers using `smolagents.MCPClient`. Things3 (22 tools) loaded if `THINGS_MCP_URL` is set. GitHub MCP (22 tools, mapped to tower) registered but disabled pending stdio→HTTP proxy setup (`GITHUB_MCP_URL` commented out).
 - **Memory** (`src/memory/`):
   - `soul.py` — Persistent identity file (markdown in workspace)
   - `vector_store.py` — LanceDB vector store for long-term memory search
@@ -57,12 +57,13 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **CORS**: Allows `localhost:3000` and `localhost:5173`
 
 ### Infrastructure
-- `docker-compose.dev.yaml` - Three services:
+- `docker-compose.dev.yaml` - Three services (github-mcp commented out):
   - `backend-dev` (8004:8003) — FastAPI + uvicorn, depends on sandbox
   - `sandbox-dev` — snekbox (sandboxed Python execution for `shell_execute`), `linux/amd64`, privileged, internal network only
   - `frontend-dev` (3000:5173) — Vite dev server
+  - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
 - `manage.sh` - Docker management: `./manage.sh -e dev up -d`, `down`, `logs -f`, `build`
-- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, `THINGS_MCP_URL`, data/log paths, `WORKSPACE_DIR`
+- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, `THINGS_MCP_URL`, `GITHUB_MCP_URL` (disabled), data/log paths, `WORKSPACE_DIR`
 
 ## WebSocket Protocol
 - **Client sends**: `{type: "message" | "ping" | "skip_onboarding", message, session_id}`

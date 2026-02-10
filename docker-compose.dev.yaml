@@ -39,16 +39,17 @@ services:
       - seraph-network-dev
     # No ports exposed — backend connects via internal network
 
-  github-mcp:
-    container_name: github-mcp
-    image: ghcr.io/github/github-mcp-server:latest
-    command: ["http", "--port", "8090"]
-    environment:
-      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
-      GITHUB_TOOLSETS: ${GITHUB_MCP_TOOLSETS:-repos,issues,pull_requests,code_security}
-    networks:
-      - seraph-network-dev
-    restart: unless-stopped
+  # github-mcp:
+  #   container_name: github-mcp
+  #   image: ghcr.io/github/github-mcp-server:latest
+  #   # TODO: github-mcp-server only supports stdio mode; needs mcp-proxy
+  #   # or use GitHub's hosted endpoint at https://api.githubcopilot.com/mcp/
+  #   environment:
+  #     GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
+  #     GITHUB_TOOLSETS: ${GITHUB_MCP_TOOLSETS:-repos,issues,pull_requests,code_security}
+  #   networks:
+  #     - seraph-network-dev
+  #   restart: unless-stopped
 
   frontend-dev:
     container_name: frontend-dev

@@ -26,6 +26,13 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Contributing',
+      items: [
+        'contributing/git-workflow',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Architecture',
       items: [
         'architecture/tauri-analysis',

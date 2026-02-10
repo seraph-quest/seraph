@@ -11,10 +11,10 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://seraph.dev',
+  url: 'https://docs.seraph.quest',
   baseUrl: '/',
 
-  organizationName: 'neurion-ai',
+  organizationName: 'seraph-quest',
   projectName: 'seraph',
 
   onBrokenLinks: 'throw',
@@ -30,7 +30,8 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/neurion-ai/seraph/tree/main/docs/',
+          editUrl: 'https://github.com/seraph-quest/seraph/tree/main/docs/',
+          routeBasePath: '/',
         },
         blog: false,
         theme: {
@@ -55,12 +56,12 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          to: '/docs/overview/roadmap',
+          to: '/overview/roadmap',
           label: 'Roadmap',
           position: 'left',
         },
         {
-          href: 'https://github.com/neurion-ai/seraph',
+          href: 'https://github.com/seraph-quest/seraph',
           label: 'GitHub',
           position: 'right',
         },
@@ -74,15 +75,15 @@ const config: Config = {
           items: [
             {
               label: 'Getting Started',
-              to: '/docs/intro',
+              to: '/intro',
             },
             {
               label: 'Vision',
-              to: '/docs/overview/vision',
+              to: '/overview/vision',
             },
             {
               label: 'Roadmap',
-              to: '/docs/overview/roadmap',
+              to: '/overview/roadmap',
             },
           ],
         },
@@ -91,15 +92,15 @@ const config: Config = {
           items: [
             {
               label: 'Phase 1 — Persistent Identity',
-              to: '/docs/development/phase-1-persistent-identity',
+              to: '/development/phase-1-persistent-identity',
             },
             {
               label: 'Phase 2 — Capable Executor',
-              to: '/docs/development/phase-2-capable-executor',
+              to: '/development/phase-2-capable-executor',
             },
             {
               label: 'Phase 3 — The Observer',
-              to: '/docs/development/phase-3-the-observer',
+              to: '/development/phase-3-the-observer',
             },
           ],
         },
@@ -108,7 +109,7 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/neurion-ai/seraph',
+              href: 'https://github.com/seraph-quest/seraph',
             },
           ],
         },

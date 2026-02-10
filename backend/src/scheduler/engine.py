@@ -1,0 +1,105 @@
+import asyncio
+import logging
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+_scheduler: AsyncIOScheduler | None = None
+
+
+def _async_job_wrapper(coro_func):
+    """Wrap an async job function so APScheduler 3.x can run it."""
+    def wrapper():
+        loop = asyncio.get_event_loop()
+        loop.create_task(coro_func())
+    return wrapper
+
+
+def init_scheduler() -> AsyncIOScheduler | None:
+    """Create and start the background scheduler with all configured jobs.
+
+    Returns None if scheduler is disabled via settings.
+    """
+    global _scheduler
+
+    if not settings.scheduler_enabled:
+        logger.info("Scheduler disabled (SCHEDULER_ENABLED=false)")
+        return None
+
+    _scheduler = AsyncIOScheduler()
+
+    from src.scheduler.jobs.memory_consolidation import run_memory_consolidation
+    from src.scheduler.jobs.goal_check import run_goal_check
+    from src.scheduler.jobs.calendar_scan import run_calendar_scan
+    from src.scheduler.jobs.strategist_tick import run_strategist_tick
+    from src.scheduler.jobs.daily_briefing import run_daily_briefing
+    from src.scheduler.jobs.evening_review import run_evening_review
+
+    jobs = [
+        {
+            "func": _async_job_wrapper(run_memory_consolidation),
+            "trigger": IntervalTrigger(minutes=settings.memory_consolidation_interval_min),
+            "id": "memory_consolidation",
+            "name": "Memory consolidation",
+        },
+        {
+            "func": _async_job_wrapper(run_goal_check),
+            "trigger": IntervalTrigger(hours=settings.goal_check_interval_hours),
+            "id": "goal_check",
+            "name": "Goal check",
+        },
+        {
+            "func": _async_job_wrapper(run_calendar_scan),
+            "trigger": IntervalTrigger(minutes=settings.calendar_scan_interval_min),
+            "id": "calendar_scan",
+            "name": "Calendar scan",
+        },
+        {
+            "func": _async_job_wrapper(run_strategist_tick),
+            "trigger": IntervalTrigger(minutes=settings.strategist_interval_min),
+            "id": "strategist_tick",
+            "name": "Strategist tick",
+        },
+        {
+            "func": _async_job_wrapper(run_daily_briefing),
+            "trigger": CronTrigger(
+                hour=settings.morning_briefing_hour,
+                timezone=settings.user_timezone,
+            ),
+            "id": "daily_briefing",
+            "name": "Daily briefing",
+        },
+        {
+            "func": _async_job_wrapper(run_evening_review),
+            "trigger": CronTrigger(
+                hour=settings.evening_review_hour,
+                timezone=settings.user_timezone,
+            ),
+            "id": "evening_review",
+            "name": "Evening review",
+        },
+    ]
+
+    for job in jobs:
+        try:
+            _scheduler.add_job(**job, replace_existing=True)
+        except Exception:
+            logger.exception("Failed to register job: %s", job["id"])
+
+    _scheduler.start()
+    logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
+    return _scheduler
+
+
+def shutdown_scheduler() -> None:
+    """Gracefully shut down the scheduler if running."""
+    global _scheduler
+    if _scheduler and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+        logger.info("Scheduler shut down")
+        _scheduler = None

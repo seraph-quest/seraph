@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.settings import settings
 from src.db import init_db, close_db
 from src.memory.soul import ensure_soul_exists
+from src.scheduler.engine import init_scheduler, shutdown_scheduler
 from src.tools.mcp_manager import mcp_manager
 
 
@@ -13,11 +14,13 @@ from src.tools.mcp_manager import mcp_manager
 async def lifespan(app: FastAPI):
     await init_db()
     ensure_soul_exists()
+    init_scheduler()
     if settings.things_mcp_url:
         mcp_manager.connect("things", settings.things_mcp_url)
     if settings.github_mcp_url:
         mcp_manager.connect("github", settings.github_mcp_url)
     yield
+    shutdown_scheduler()
     mcp_manager.disconnect_all()
     await close_db()
 

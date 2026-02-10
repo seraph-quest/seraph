@@ -12,6 +12,7 @@ from src.api.profile import get_or_create_profile, mark_onboarding_complete, res
 from src.memory.soul import read_soul
 from src.memory.vector_store import search_formatted
 from src.models.schemas import WSMessage, WSResponse
+from src.scheduler.connection_manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ async def _build_agent(session_id: str, message: str):
 async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
     await websocket.accept()
+    ws_manager.connect(websocket)
 
     # Send welcome message if user hasn't completed onboarding
     try:
@@ -191,4 +193,5 @@ async def websocket_chat(websocket: WebSocket):
                     pass
 
     except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")

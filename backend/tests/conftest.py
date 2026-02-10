@@ -20,6 +20,7 @@ _PATCH_TARGETS = [
     "src.agent.session.get_session",
     "src.goals.repository.get_session",
     "src.api.profile.get_db",  # aliased: `import get_session as get_db`
+    "src.scheduler.jobs.memory_consolidation.get_session",
 ]
 
 

@@ -34,11 +34,17 @@ class CurrentContext:
     active_window: Optional[str] = None
     screen_context: Optional[str] = None
 
+    # Phase 3.3 — State machine tracking
+    previous_user_state: str = "available"
+    attention_budget_last_reset: Optional[datetime] = None
+
     def to_dict(self) -> dict:
         """Serialize for API responses."""
         data = asdict(self)
         if data["last_interaction"]:
             data["last_interaction"] = data["last_interaction"].isoformat()
+        if data["attention_budget_last_reset"]:
+            data["attention_budget_last_reset"] = data["attention_budget_last_reset"].isoformat()
         return data
 
     def to_prompt_block(self) -> str:
@@ -70,5 +76,7 @@ class CurrentContext:
             delta = datetime.now(timezone.utc) - self.last_interaction
             minutes_ago = int(delta.total_seconds() / 60)
             lines.append(f"Last interaction: {minutes_ago}m ago")
+
+        lines.append(f"User state: {self.user_state} | Mode: {self.interruption_mode} | Budget: {self.attention_budget_remaining}")
 
         return "\n".join(lines)

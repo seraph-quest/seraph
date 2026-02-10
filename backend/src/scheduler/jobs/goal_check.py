@@ -31,7 +31,7 @@ async def run_goal_check() -> None:
     completed = dashboard.get("completed_count", 0)
     completion_rate = completed / total if total else 0
 
-    from src.scheduler.connection_manager import ws_manager
+    from src.observer.delivery import deliver_or_queue
 
     if completion_rate < 0.3:
         state = "goal_behind"
@@ -40,10 +40,11 @@ async def run_goal_check() -> None:
         state = "on_track"
         tooltip = f"Goals are {int(completion_rate * 100)}% complete. Keep it up!"
 
-    await ws_manager.broadcast(
+    await deliver_or_queue(
         WSResponse(
             type="ambient",
             content="",
+            intervention_type="ambient",
             state=state,
             tooltip=tooltip,
         )

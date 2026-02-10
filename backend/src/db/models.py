@@ -123,5 +123,19 @@ class UserProfile(SQLModel, table=True):
     soul_text: Optional[str] = Field(default=None)
     preferences_json: Optional[str] = Field(default=None)
     onboarding_completed: bool = Field(default=False)
+    interruption_mode: str = Field(default="balanced")
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+# ─── QueuedInsight ──────────────────────────────────────
+
+class QueuedInsight(SQLModel, table=True):
+    __tablename__ = "queued_insights"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    content: str
+    intervention_type: str = Field(default="advisory")
+    urgency: int = Field(default=3)
+    reasoning: str = Field(default="")
+    created_at: datetime = Field(default_factory=_now)

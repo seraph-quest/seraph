@@ -14,6 +14,16 @@ from src.tools.mcp_manager import mcp_manager
 async def lifespan(app: FastAPI):
     await init_db()
     ensure_soul_exists()
+    # Load persisted interruption mode before scheduler starts
+    try:
+        from src.api.profile import get_or_create_profile
+        from src.observer.manager import context_manager
+        profile = await get_or_create_profile()
+        if profile.interruption_mode:
+            context_manager.update_interruption_mode(profile.interruption_mode)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Failed to load persisted interruption mode", exc_info=True)
     init_scheduler()
     try:
         from src.observer.manager import context_manager

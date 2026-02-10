@@ -5,8 +5,13 @@ import logging
 from datetime import datetime, timezone
 
 from src.observer.context import CurrentContext
+from src.observer.user_state import UserState, user_state_machine
 
 logger = logging.getLogger(__name__)
+
+# States considered "blocked" for transition detection
+_BLOCKED_STATES = {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}
+_UNBLOCKED_STATES = {UserState.available.value, UserState.transitioning.value}
 
 
 class ContextManager:
@@ -23,6 +28,7 @@ class ContextManager:
 
         Preserves externally-managed fields (screen_context, last_interaction).
         Each source is wrapped in try/except so one failure doesn't block others.
+        After gathering sources, derives user state and checks for transitions.
         """
         async with self._lock:
             old = self._context
@@ -61,6 +67,23 @@ class ContextManager:
             except Exception:
                 logger.exception("Goal source failed")
 
+            # Derive user state from gathered sources
+            new_user_state = user_state_machine.derive_state(
+                current_event=calendar_data.get("current_event"),
+                previous_state=old.user_state,
+                time_of_day=time_data.get("time_of_day", "unknown"),
+                is_working_hours=time_data.get("is_working_hours", False),
+                last_interaction=old.last_interaction,
+                active_window=old.active_window,
+            )
+
+            # Check for daily budget reset
+            budget = old.attention_budget_remaining
+            last_reset = old.attention_budget_last_reset
+            budget, last_reset = self._maybe_reset_budget(
+                old.interruption_mode, budget, last_reset,
+            )
+
             self._context = CurrentContext(
                 time_of_day=time_data.get("time_of_day", "unknown"),
                 day_of_week=time_data.get("day_of_week", "unknown"),
@@ -71,14 +94,63 @@ class ContextManager:
                 active_goals_summary=goal_data.get("active_goals_summary", ""),
                 # Preserve externally-managed fields from old context
                 last_interaction=old.last_interaction,
-                user_state=old.user_state,
+                user_state=new_user_state,
                 interruption_mode=old.interruption_mode,
-                attention_budget_remaining=old.attention_budget_remaining,
+                attention_budget_remaining=budget,
                 active_window=old.active_window,
                 screen_context=old.screen_context,
+                # Phase 3.3 tracking
+                previous_user_state=old.user_state,
+                attention_budget_last_reset=last_reset,
             )
 
+            # Detect blocked → unblocked transition and deliver queued bundle
+            if old.user_state in _BLOCKED_STATES and new_user_state in _UNBLOCKED_STATES:
+                logger.info(
+                    "State transition %s → %s — delivering queued bundle",
+                    old.user_state, new_user_state,
+                )
+                asyncio.create_task(self._deliver_bundle())
+
             return self._context
+
+    async def _deliver_bundle(self) -> None:
+        """Background task to deliver queued bundle after state transition."""
+        try:
+            from src.observer.delivery import deliver_queued_bundle
+            await deliver_queued_bundle()
+        except Exception:
+            logger.exception("Failed to deliver queued bundle")
+
+    def _maybe_reset_budget(
+        self,
+        mode: str,
+        current_budget: int,
+        last_reset: datetime | None,
+    ) -> tuple[int, datetime | None]:
+        """Reset attention budget at morning_briefing_hour if not yet reset today."""
+        from config.settings import settings
+
+        now = datetime.now(timezone.utc)
+        reset_hour = settings.morning_briefing_hour
+
+        if last_reset is None:
+            # First time — set budget to default and record reset
+            default = user_state_machine.get_default_budget(mode)
+            return default, now
+
+        # Check if we've passed the reset hour today and haven't reset yet
+        today_reset = last_reset.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
+        if last_reset < today_reset <= now:
+            default = user_state_machine.get_default_budget(mode)
+            return default, now
+
+        # Check next-day rollover
+        if now.date() > last_reset.date() and now.hour >= reset_hour:
+            default = user_state_machine.get_default_budget(mode)
+            return default, now
+
+        return current_budget, last_reset
 
     def update_last_interaction(self) -> None:
         """Stamp the current time as last user interaction."""
@@ -88,6 +160,19 @@ class ContextManager:
         """Update screen context from native daemon POST."""
         self._context.active_window = active_window
         self._context.screen_context = screen_context
+
+    def decrement_attention_budget(self) -> None:
+        """Reduce attention budget by 1 (minimum 0)."""
+        self._context.attention_budget_remaining = max(
+            0, self._context.attention_budget_remaining - 1
+        )
+
+    def update_interruption_mode(self, mode: str) -> None:
+        """Change interruption mode and reset budget to mode default."""
+        self._context.interruption_mode = mode
+        self._context.attention_budget_remaining = user_state_machine.get_default_budget(mode)
+        self._context.attention_budget_last_reset = datetime.now(timezone.utc)
+        logger.info("Interruption mode set to %s (budget=%d)", mode, self._context.attention_budget_remaining)
 
 
 context_manager = ContextManager()

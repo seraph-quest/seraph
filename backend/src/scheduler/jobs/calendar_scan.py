@@ -38,12 +38,12 @@ async def run_calendar_scan() -> None:
     if not alerts:
         return
 
-    from src.scheduler.connection_manager import ws_manager
+    from src.observer.delivery import deliver_or_queue
 
     event_list = ", ".join(alerts)
     content = f"Heads up! Starting soon: {event_list}"
 
-    await ws_manager.broadcast(
+    await deliver_or_queue(
         WSResponse(
             type="proactive",
             content=content,

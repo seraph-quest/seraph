@@ -77,14 +77,20 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 ### Native Daemon (`daemon/`)
 - **Stack**: Python 3.12, PyObjC, httpx
 - **Entry**: `seraph_daemon.py` — runs natively on macOS (outside Docker)
+- **Dual-loop architecture**: window polling (every 5s) + optional OCR loop (every 30s, `--ocr` flag)
 - Polls frontmost app name (`NSWorkspace`, no permission) + window title (AppleScript, Accessibility permission) + idle seconds (`Quartz.CGEventSourceSecondsSinceLastEventType`, no permission)
-- **Change detection**: skips POST if `active_window` unchanged since last POST
-- **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300)
-- POSTs to `POST /api/observer/context` with `{"active_window": "App — Title", "screen_context": null}`
-- CLI args: `--url` (default `http://localhost:8004`), `--interval` (default `5`), `--idle-timeout` (default `300`), `--verbose`
+- **Change detection**: skips POST if `active_window` unchanged since last POST; OCR loop also skips if extracted text unchanged
+- **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300); both loops respect idle
+- POSTs to `POST /api/observer/context` — window loop sends `{"active_window": "App — Title"}`, OCR loop sends `{"screen_context": "extracted text"}` (partial updates, neither clobbers the other)
+- **CLI args**: `--url` (default `http://localhost:8004`), `--interval` (default `5`), `--idle-timeout` (default `300`), `--verbose`
+- **OCR CLI args** (opt-in): `--ocr` (enable), `--ocr-provider` (`apple-vision` | `openrouter`), `--ocr-interval` (default `30`), `--ocr-model` (default `google/gemini-2.0-flash-lite-001`), `--openrouter-api-key` (or `OPENROUTER_API_KEY` env var)
+- **OCR providers** (`daemon/ocr/`): pluggable provider pattern — `base.py` (ABC + `OCRResult` dataclass), `screenshot.py` (Quartz screenshot capture), `apple_vision.py` (local VNRecognizeTextRequest, ~200ms), `openrouter.py` (cloud vision model, ~$0.09/mo)
+- **Permissions**: Accessibility (window titles, one-time grant) + Screen Recording (only for `--ocr`, Sequoia monthly nag)
+- **Privacy**: screenshots exist only as in-memory bytes, never written to disk
 - Graceful shutdown on SIGINT/SIGTERM, handles backend-down with warning + retry
 - Research on future upgrades (OCR, VLMs, cloud APIs): `docs/docs/development/screen-daemon-research.md`
 - **Quick start**: `./daemon/run.sh` (creates venv, installs deps, starts daemon)
+- **Quick start with OCR**: `./daemon/run.sh --ocr --verbose`
 - **Manual run**: `cd daemon && uv pip install -r requirements.txt && uv run python seraph_daemon.py --verbose`
 
 ### Infrastructure
@@ -147,33 +153,34 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 
 ## Screen Daemon Data Flow
 ```
-┌──────────────────────────────────────────────────┐
-│  daemon/seraph_daemon.py (native macOS process)  │
-│                                                  │
-│  NSWorkspace.frontmostApplication → app name     │
-│  osascript (AppleScript) → window title          │
-│  CGEventSource → idle seconds                    │
-│                                                  │
-│  Change detection: skip if same as last POST     │
-│  Idle detection: skip if idle > 5 min            │
-└────────────────────┬─────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  daemon/seraph_daemon.py (native macOS process)       │
+│                                                      │
+│  poll_loop (every 5s):                                │
+│    NSWorkspace → app name                            │
+│    osascript → window title                          │
+│    POST {"active_window": "VS Code — main.py"}       │
+│                                                      │
+│  ocr_loop (every 30s, if --ocr):                     │
+│    CGWindowListCreateImage → PNG bytes               │
+│    → OCR provider (apple-vision or openrouter)       │
+│    POST {"screen_context": "extracted text..."}       │
+└────────────────────┬─────────────────────────────────┘
                      │ POST /api/observer/context
-                     │ {"active_window": "VS Code — main.py"}
                      ▼
-┌──────────────────────────────────────────────────┐
-│  Backend (Docker, localhost:8004)                 │
-│                                                  │
-│  context_manager.update_screen_context()         │
-│  → CurrentContext.active_window updated           │
-│  → preserved across refresh() cycles              │
-│  → passed to derive_state(active_window=...)      │
-│  → included in to_prompt_block() for strategist   │
-│                                                  │
-│  UserStateMachine.derive_state() [enhanced]:     │
-│  if active_window matches IDE → deep_work        │
-│  → delivery gate queues proactive messages        │
-│  → ambient state pushed to frontend               │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Backend (Docker, localhost:8004)                      │
+│                                                      │
+│  update_screen_context() [partial update]             │
+│  → active_window + screen_context both preserved      │
+│  → to_prompt_block() includes "Screen content:…"     │
+│  → strategist sees what's on screen                   │
+│                                                      │
+│  UserStateMachine.derive_state() [enhanced]:          │
+│  if active_window matches IDE → deep_work             │
+│  → delivery gate queues proactive messages             │
+│  → ambient state pushed to frontend                    │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## Village Scene (Phaser)

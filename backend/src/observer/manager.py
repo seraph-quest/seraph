@@ -157,9 +157,15 @@ class ContextManager:
         self._context.last_interaction = datetime.now(timezone.utc)
 
     def update_screen_context(self, active_window: str | None, screen_context: str | None) -> None:
-        """Update screen context from native daemon POST."""
-        self._context.active_window = active_window
-        self._context.screen_context = screen_context
+        """Update screen context from native daemon POST.
+
+        Supports partial updates — only overwrites fields that are non-None,
+        so the window loop and OCR loop don't clobber each other's data.
+        """
+        if active_window is not None:
+            self._context.active_window = active_window
+        if screen_context is not None:
+            self._context.screen_context = screen_context
 
     def decrement_attention_budget(self) -> None:
         """Reduce attention budget by 1 (minimum 0)."""

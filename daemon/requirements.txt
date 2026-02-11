@@ -1,3 +1,4 @@
 pyobjc-framework-Cocoa>=11.0
 pyobjc-framework-Quartz>=11.0
+pyobjc-framework-Vision>=11.0
 httpx>=0.27.0

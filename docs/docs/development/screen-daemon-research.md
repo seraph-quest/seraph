@@ -37,14 +37,14 @@ Monthly cost estimates for an 8-hour workday (22 working days/month), assuming ~
 
 | Model | Cost/Image | 1/min ($$/mo) | 1/5min ($$/mo) | 1/30min ($$/mo) |
 |-------|-----------|---------------:|----------------:|----------------:|
-| Gemini Flash-Lite | $0.000042 | $0.44 | $0.09 | $0.01 |
+| Gemini 2.0 Flash Lite | $0.000042 | $0.44 | $0.09 | $0.01 |
 | GPT-4o (low detail) | $0.000213 | $2.25 | $0.45 | $0.08 |
 | Claude 3.5 Haiku | $0.001488 | $15.63 | $3.13 | $0.52 |
 | Claude 3.5 Sonnet | $0.004800 | $50.69 | $10.14 | $1.69 |
 
 **Calculation basis:** 8 hours x 60 min = 480 calls/day at 1/min. 22 days/month.
 
-**Takeaway:** Gemini Flash-Lite is essentially free even at 1/min. GPT-4o low is ~$2/mo. Cloud VLMs are viable for infrequent polling (1/5min or less).
+**Takeaway:** Gemini 2.0 Flash Lite (`google/gemini-2.0-flash-lite-001`) is essentially free even at 1/min. GPT-4o low is ~$2/mo. Cloud VLMs are viable for infrequent polling (1/5min or less).
 
 ## OCR-Only Approach
 
@@ -115,8 +115,8 @@ macOS 15+ shows a monthly system notification: _"[App] has been recording your s
 
 | Level | Capability | Permission | Daemon Changes |
 |-------|-----------|------------|----------------|
-| **0 (current)** | App name + window title | Accessibility | `seraph_daemon.py` as shipped |
-| **1** | + OCR text extraction | + Screen Recording | Add `VNRecognizeTextRequest` capture, POST `screen_context` with extracted text |
+| **0** | App name + window title | Accessibility | `seraph_daemon.py` (default, no `--ocr` flag) |
+| **1 (implemented)** | + OCR text extraction | + Screen Recording | `--ocr` flag, pluggable providers: `apple-vision` (local) or `openrouter` (cloud) |
 | **2** | + Local VLM descriptions | + Screen Recording | Add FastVLM/Moondream inference, structured activity summary |
 | **3** | + Cloud VLM (on-demand) | + Screen Recording | Add cloud API call for complex scenes, hybrid with local VLM |
 

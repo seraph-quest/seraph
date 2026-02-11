@@ -72,6 +72,10 @@ class CurrentContext:
         if self.active_window:
             lines.append(f"User is in: {self.active_window}")
 
+        if self.screen_context:
+            sc = self.screen_context[:500] + "..." if len(self.screen_context) > 500 else self.screen_context
+            lines.append(f"Screen content: {sc}")
+
         if self.last_interaction:
             delta = datetime.now(timezone.utc) - self.last_interaction
             minutes_ago = int(delta.total_seconds() / 60)

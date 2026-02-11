@@ -105,13 +105,30 @@ class TestContextManagerUpdates:
         assert ctx.active_window == "Safari"
         assert ctx.screen_context == "Reading docs"
 
-    def test_update_screen_context_none(self):
+    def test_update_screen_context_partial_preserves_fields(self):
+        """None means 'don't touch' — partial updates don't clobber each other."""
         mgr = ContextManager()
         mgr.update_screen_context("Safari", "Reading docs")
         mgr.update_screen_context(None, None)
         ctx = mgr.get_context()
-        assert ctx.active_window is None
-        assert ctx.screen_context is None
+        assert ctx.active_window == "Safari"
+        assert ctx.screen_context == "Reading docs"
+
+    def test_update_screen_context_partial_window_only(self):
+        mgr = ContextManager()
+        mgr.update_screen_context("Safari", "Reading docs")
+        mgr.update_screen_context("VS Code", None)
+        ctx = mgr.get_context()
+        assert ctx.active_window == "VS Code"
+        assert ctx.screen_context == "Reading docs"
+
+    def test_update_screen_context_partial_screen_only(self):
+        mgr = ContextManager()
+        mgr.update_screen_context("Safari", "Reading docs")
+        mgr.update_screen_context(None, "New OCR text")
+        ctx = mgr.get_context()
+        assert ctx.active_window == "Safari"
+        assert ctx.screen_context == "New OCR text"
 
 
 class TestCurrentContextSerialization:

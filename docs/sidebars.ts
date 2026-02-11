@@ -17,6 +17,7 @@ const sidebars: SidebarsConfig = {
         'development/phase-2-capable-executor',
         'development/phase-3-the-observer',
         'development/phase-4-the-network',
+        'development/phase-5-security',
         'development/screen-daemon-research',
       ],
     },

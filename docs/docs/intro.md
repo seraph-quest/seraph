@@ -7,24 +7,9 @@ slug: /
 
 Seraph is a proactive AI guardian with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar walks between tool stations (well for web search, forge for shell, mailbox for email, etc.) while you chat via an RPG-style dialog box. The agent has persistent identity, long-term memory, and a hierarchical goal/quest system.
 
-## Quick Start
+## Setup
 
-1. Set your OpenRouter API key in `.env.dev`:
-   ```
-   OPENROUTER_API_KEY=your-key-here
-   ```
-
-2. Start with Docker:
-   ```bash
-   ./manage.sh -e dev up -d
-   ```
-
-3. Verify:
-   ```bash
-   curl http://localhost:8004/health
-   # Open http://localhost:3000 for the retro chat UI
-   # Open http://localhost:8004/docs for Swagger UI
-   ```
+See the **[Setup Guide](./setup)** for complete installation and configuration instructions.
 
 ## Architecture
 

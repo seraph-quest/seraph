@@ -327,6 +327,13 @@ async def main() -> None:
         args.url,
     )
 
+    async def heartbeat_loop(interval: float = 300) -> None:
+        """Log a periodic heartbeat to confirm daemon is alive."""
+        while True:
+            await asyncio.sleep(interval)
+            logger.info("heartbeat — daemon alive (poll every %gs)", args.interval)
+
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
     poll_task = asyncio.create_task(
         poll_loop(args.url, args.interval, args.idle_timeout, args.verbose)
     )
@@ -358,14 +365,16 @@ async def main() -> None:
 
     await stop_event.wait()
 
+    heartbeat_task.cancel()
     poll_task.cancel()
     if ocr_task is not None:
         ocr_task.cancel()
 
-    try:
-        await poll_task
-    except asyncio.CancelledError:
-        pass
+    for t in (heartbeat_task, poll_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
     if ocr_task is not None:
         try:

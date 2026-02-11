@@ -23,6 +23,21 @@ def _async_job_wrapper(coro_func, loop: asyncio.AbstractEventLoop):
     return wrapper
 
 
+def _validate_timezone(tz_name: str) -> str:
+    """Validate timezone string, falling back to UTC with a warning."""
+    try:
+        import zoneinfo
+        zoneinfo.ZoneInfo(tz_name)
+        return tz_name
+    except (KeyError, Exception):
+        logger.warning(
+            "Invalid USER_TIMEZONE %r — falling back to UTC. "
+            "See: python -c 'import zoneinfo; print(sorted(zoneinfo.available_timezones()))'",
+            tz_name,
+        )
+        return "UTC"
+
+
 def init_scheduler() -> AsyncIOScheduler | None:
     """Create and start the background scheduler with all configured jobs.
 
@@ -35,6 +50,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
         return None
 
     _scheduler = AsyncIOScheduler()
+    validated_tz = _validate_timezone(settings.user_timezone)
 
     loop = asyncio.get_running_loop()
 
@@ -74,7 +90,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "func": _async_job_wrapper(run_daily_briefing, loop),
             "trigger": CronTrigger(
                 hour=settings.morning_briefing_hour,
-                timezone=settings.user_timezone,
+                timezone=validated_tz,
             ),
             "id": "daily_briefing",
             "name": "Daily briefing",
@@ -83,7 +99,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "func": _async_job_wrapper(run_evening_review, loop),
             "trigger": CronTrigger(
                 hour=settings.evening_review_hour,
-                timezone=settings.user_timezone,
+                timezone=validated_tz,
             ),
             "id": "evening_review",
             "name": "Evening review",

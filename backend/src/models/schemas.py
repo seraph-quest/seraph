@@ -29,6 +29,7 @@ class WSResponse(BaseModel):
     content: str = ""
     session_id: str = ""
     step: int | None = None
+    seq: int | None = None
     # Phase 3 — Proactive messages
     urgency: int | None = None
     intervention_type: str | None = None

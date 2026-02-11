@@ -10,10 +10,13 @@ function makeId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+const WS_BACKOFF_MAX_MS = 30_000;
+
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backoffRef = useRef(WS_RECONNECT_DELAY_MS);
 
   const {
     addMessage,
@@ -40,14 +43,16 @@ export function useWebSocket() {
 
     ws.onopen = () => {
       setConnectionStatus("connected");
+      backoffRef.current = WS_RECONNECT_DELAY_MS; // reset on successful connect
       useChatStore.getState().fetchProfile();
-      useChatStore.getState().loadSessions();
 
-      // Restore last session if one was remembered
-      const stored = useChatStore.getState().sessionId;
-      if (stored && useChatStore.getState().messages.length === 0) {
-        useChatStore.getState().switchSession(stored);
-      }
+      // Await sessions load before restoring last session to avoid race
+      useChatStore.getState().loadSessions().then(() => {
+        const stored = useChatStore.getState().sessionId;
+        if (stored && useChatStore.getState().messages.length === 0) {
+          useChatStore.getState().switchSession(stored);
+        }
+      });
 
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -157,7 +162,8 @@ export function useWebSocket() {
     ws.onclose = () => {
       setConnectionStatus("disconnected");
       if (pingRef.current) clearInterval(pingRef.current);
-      reconnectRef.current = setTimeout(connect, WS_RECONNECT_DELAY_MS);
+      reconnectRef.current = setTimeout(connect, backoffRef.current);
+      backoffRef.current = Math.min(backoffRef.current * 2, WS_BACKOFF_MAX_MS);
     };
 
     ws.onerror = () => {

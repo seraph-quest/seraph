@@ -57,6 +57,12 @@ async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for streaming chat responses."""
     await websocket.accept()
     ws_manager.connect(websocket)
+    _seq = 0
+
+    def _next_seq() -> int:
+        nonlocal _seq
+        _seq += 1
+        return _seq
 
     # Send welcome message if user hasn't completed onboarding
     try:
@@ -72,6 +78,7 @@ async def websocket_chat(websocket: WebSocket):
                         "If you'd prefer to skip ahead, just say the word!"
                     ),
                     intervention_type="advisory",
+                    seq=_next_seq(),
                 ).model_dump_json()
             )
     except Exception as e:
@@ -85,7 +92,7 @@ async def websocket_chat(websocket: WebSocket):
                 ws_msg = WSMessage(**data)
             except (json.JSONDecodeError, Exception) as e:
                 await websocket.send_text(
-                    WSResponse(type="error", content=f"Invalid message: {e}").model_dump_json()
+                    WSResponse(type="error", content=f"Invalid message: {e}", seq=_next_seq()).model_dump_json()
                 )
                 continue
 
@@ -104,6 +111,7 @@ async def websocket_chat(websocket: WebSocket):
                             "No worries! Onboarding skipped. "
                             "You now have access to all my abilities. How can I help you?"
                         ),
+                        seq=_next_seq(),
                     ).model_dump_json()
                 )
                 continue
@@ -144,6 +152,7 @@ async def websocket_chat(websocket: WebSocket):
                                 content=content,
                                 session_id=session.id,
                                 step=step_num,
+                                seq=_next_seq(),
                             ).model_dump_json()
                         )
 
@@ -156,6 +165,7 @@ async def websocket_chat(websocket: WebSocket):
                                     content=step.observations,
                                     session_id=session.id,
                                     step=step_num,
+                                    seq=_next_seq(),
                                 ).model_dump_json()
                             )
 
@@ -169,6 +179,7 @@ async def websocket_chat(websocket: WebSocket):
                         type="error",
                         content=f"Agent error: {e}",
                         session_id=session.id,
+                        seq=_next_seq(),
                     ).model_dump_json()
                 )
                 continue
@@ -179,6 +190,7 @@ async def websocket_chat(websocket: WebSocket):
                     type="final",
                     content=final_result,
                     session_id=session.id,
+                    seq=_next_seq(),
                 ).model_dump_json()
             )
 

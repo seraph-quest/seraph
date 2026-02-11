@@ -22,6 +22,7 @@ export interface WSResponse {
   content: string;
   session_id: string;
   step: number | null;
+  seq: number | null;
   urgency?: number;
   intervention_type?: string;
   reasoning?: string;

@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     working_hours_start: int = 9
     working_hours_end: int = 17
     observer_git_repo_path: str = ""
+    deep_work_apps: str = ""  # comma-separated extra app keywords for deep work detection
 
     model_config = {"env_file": ".env.dev", "env_file_encoding": "utf-8"}
 

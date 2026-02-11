@@ -38,6 +38,9 @@ class CurrentContext:
     previous_user_state: str = "available"
     attention_budget_last_reset: Optional[datetime] = None
 
+    # Data quality — "good" if all sources succeeded, "degraded" if some failed, "stale" if all failed
+    data_quality: str = "good"
+
     def to_dict(self) -> dict:
         """Serialize for API responses."""
         data = asdict(self)

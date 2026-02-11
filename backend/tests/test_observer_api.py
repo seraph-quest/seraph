@@ -34,7 +34,8 @@ class TestObserverAPI:
         assert mgr.get_context().screen_context == "Running tests"
 
     @pytest.mark.asyncio
-    async def test_post_screen_context_null(self, client):
+    async def test_post_screen_context_null_preserves(self, client):
+        """Posting None fields should not overwrite existing values (partial update)."""
         mgr = ContextManager()
         mgr.update_screen_context("VS Code", "Editing")
         with patch("src.api.observer.context_manager", mgr):
@@ -44,7 +45,9 @@ class TestObserverAPI:
             })
 
         assert resp.status_code == 200
-        assert mgr.get_context().active_window is None
+        # None means "don't overwrite" — previous values preserved
+        assert mgr.get_context().active_window == "VS Code"
+        assert mgr.get_context().screen_context == "Editing"
 
     @pytest.mark.asyncio
     async def test_post_refresh(self, client):

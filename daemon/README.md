@@ -92,6 +92,35 @@ Example with all options:
 python seraph_daemon.py --url http://localhost:8004 --interval 3 --idle-timeout 600 --verbose
 ```
 
+### OCR Options
+
+OCR is opt-in and requires the Screen Recording permission.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ocr` | off | Enable OCR screen text extraction |
+| `--ocr-provider` | `apple-vision` | OCR provider: `apple-vision` (local) or `openrouter` (cloud) |
+| `--ocr-interval` | `30` | OCR capture interval in seconds |
+| `--ocr-model` | `google/gemini-2.0-flash-lite-001` | Model for OpenRouter provider |
+| `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
+
+Examples:
+
+```bash
+# Local OCR — Apple Vision framework (free, offline, ~200ms per capture)
+./daemon/run.sh --ocr --verbose
+
+# Local OCR with faster capture interval (every 15s instead of 30s)
+./daemon/run.sh --ocr --ocr-interval 15 --verbose
+
+# Cloud OCR — OpenRouter with Gemini Flash 1.5 8B (default model, ~$0.09/mo at 1/30s)
+OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
+
+# Cloud OCR with explicit model selection
+OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter \
+  --ocr-model google/gemini-2.0-flash-lite-001 --verbose
+```
+
 ## Permissions
 
 ### Accessibility (required for window titles)
@@ -106,9 +135,19 @@ The daemon uses AppleScript to read the frontmost window title, which requires t
 
 This is a one-time grant — macOS will not nag you about it again.
 
-### What is NOT needed
+### Screen Recording (required for `--ocr`)
 
-- **Screen Recording** — not needed. The daemon never captures screenshots or pixel data.
+OCR mode captures screenshots to extract visible text. This requires the Screen Recording permission.
+
+**To grant:**
+1. Open **System Settings > Privacy & Security > Screen & System Audio Recording** (or **Screen Recording** on older macOS)
+2. Click the **+** button
+3. Add your terminal app
+4. Toggle it **on**
+
+**Note:** Starting with macOS Sequoia (15.0), the system shows a monthly confirmation prompt: *"[App] has been recording your screen. Do you want to continue allowing this?"* This cannot be suppressed. If permission is revoked, the daemon logs a warning and continues in window-only mode.
+
+### What is NOT needed (without `--ocr`)
 - **Full Disk Access** — not needed.
 - **Input Monitoring** — not needed. Idle detection uses `CGEventSourceSecondsSinceLastEventType` which only returns a duration, not individual keystrokes.
 
@@ -120,7 +159,7 @@ This is a one-time grant — macOS will not nag you about it again.
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** screenshots, keystrokes, screen content, clipboard, file contents.
+**Not captured:** keystrokes, clipboard, file contents. Screenshots are only captured in memory when `--ocr` is enabled and are never written to disk.
 
 The daemon posts to `POST /api/observer/context`:
 ```json

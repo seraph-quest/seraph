@@ -105,11 +105,13 @@ Seraph can search the web, run code, manage your calendar, handle email, take no
 
 **Theme**: Seraph watches (with consent) and understands what the human is doing.
 
-### 3.1 Context Awareness Layer
-- **Active application detection** — What app/site is the user on?
+**Status**: Core infrastructure implemented (Phases 3.1–3.4). Background scheduler, context awareness, user state machine, strategist agent, daily briefing, evening review, and frontend ambient/nudge feedback are operational. Screen capture daemon, pattern detection, state inference, and avatar state reflection remain planned.
+
+### 3.1 Context Awareness Layer ✅
+- **Active application detection** — What app/site is the user on? *(API contract documented, daemon deferred)*
 - **Calendar awareness** — What's coming up? What just ended?
 - **Git activity monitoring** — Commits, branches, build status
-- **Idle/active detection** — Is the user at their machine?
+- **Idle/active detection** — Is the user at their machine? *(basic: last interaction tracking)*
 - All observation is opt-in, configurable per source, locally processed
 
 ### 3.2 Screen Context (Optional, Opt-In)
@@ -118,11 +120,15 @@ Seraph can search the web, run code, manage your calendar, handle email, take no
 - Never stores raw screenshots — only extracted semantic context
 - User controls frequency (never / every 5 min / every minute)
 
+*Status: Planned. Backend endpoint and `ContextManager.update_screen_context()` are ready. Native daemon deferred.*
+
 ### 3.3 Working Memory System
 - Real-time context buffer: what the user is doing *right now*
 - Combines: active task, recent messages, calendar, observations
 - Pruned aggressively — only the relevant survives
 - Fed to Strategist as "current situation" context
+
+*Status: Partially implemented via `CurrentContext.to_prompt_block()` — aggregates time, calendar, git, goals, screen context, and user state into a text block for agent injection.*
 
 ### 3.4 Pattern Detection Engine
 - Tracks over time: work hours, break patterns, productivity cycles
@@ -130,10 +136,14 @@ Seraph can search the web, run code, manage your calendar, handle email, take no
 - Identifies: recurring behaviors, habit formation/decay, stress signals
 - Stores patterns in long-term memory, not raw data
 
+*Status: Planned.*
+
 ### 3.5 State Inference
 - Estimates current human state: focused / distracted / stressed / energized / idle
 - Uses: typing speed, app switching frequency, time of day, calendar density
 - Feeds into Advisor's interruption intelligence
+
+*Status: Partially implemented. User state machine derives state from calendar + time + activity, but not from behavioral signals like typing speed or app switching.*
 
 ### 3.6 Avatar Reflects Human State
 - Avatar's idle behavior changes based on inferred state:
@@ -142,6 +152,8 @@ Seraph can search the web, run code, manage your calendar, handle email, take no
   - **Energized**: Avatar practices sword forms, bright scene
   - **Idle/resting**: Avatar sleeps, fireflies in scene
   - **Distracted**: Avatar looks around nervously
+
+*Status: Planned. Frontend ambient indicator dot and nudge speech bubble are implemented (Phase 3.4), but Phaser-level avatar animation changes are not yet wired.*
 
 ### Milestone
 Seraph sees what you're doing, understands your patterns, and its avatar mirrors your state.

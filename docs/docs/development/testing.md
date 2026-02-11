@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Testing Guide
 
-Seraph has 182 automated tests (127 backend, 55 frontend) with CI running on every push and PR.
+Seraph has 207 automated tests (152 backend, 55 frontend) with CI running on every push and PR.
 
 ## Running Tests
 
@@ -60,6 +60,13 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_tool_registry.py` | 4 | Tool metadata registry — lookup, required fields, copy safety |
 | `test_tools.py` | 9 | Filesystem tools, template tool, web search |
 | `test_websocket.py` | 3 | WebSocket — ping/pong, invalid JSON, skip onboarding |
+| `test_delivery.py` | 9 | Delivery coordinator — deliver/queue/drop routing, budget decrement, bundle formatting |
+| `test_insight_queue.py` | 9 | Insight queue — enqueue, drain, peek, ordering, expiry |
+| `test_observer_manager.py` | 5 | ContextManager — refresh, state transitions, budget reset |
+| `test_user_state.py` | 9 | User state machine — derive_state, should_deliver, budget management |
+| `test_strategist.py` | 12 | Strategist agent — JSON parsing (valid, fenced, invalid, empty, partial), agent creation |
+| `test_daily_briefing.py` | 5 | Daily briefing — happy path, context/LLM failure, empty data, events in prompt |
+| `test_evening_review.py` | 8 | Evening review — happy path, no goals/messages, DB/LLM failure, date filtering |
 
 ### Frontend (`frontend/src/`)
 

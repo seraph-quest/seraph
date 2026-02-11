@@ -6,7 +6,7 @@ sidebar_position: 3
 
 **Goal**: Seraph understands what you're doing and starts thinking proactively.
 
-**Status**: Planned
+**Status**: Phases 3.1–3.4 implemented
 
 ---
 
@@ -155,11 +155,13 @@ class CurrentContext:
 
 ## 3.4 Native macOS Screen Capture Daemon
 
-**Separate project / directory**: `daemon/` at repo root
+**Status**: Deferred — API contract documented in `backend/src/observer/sources/screen_source.py`, backend endpoint and `ContextManager.update_screen_context()` are implemented and ready. Daemon implementation is a future phase.
+
+**Separate project / directory**: `daemon/` at repo root (not yet created)
 
 **Stack**: Python (familiar, debuggable) with PyObjC for macOS APIs
 
-**Files**:
+**Files** (planned):
 ```
 daemon/
   seraph_daemon.py               # Main entry point
@@ -200,28 +202,41 @@ daemon/
 
 ## 3.5 Proactive Reasoning Engine (Strategist)
 
+**Status**: Implemented (Phase 3.4)
+
 **Files**:
 ```
-backend/src/strategist/
-  __init__.py
-  engine.py                        # Main reasoning loop
-  prompts.py                       # System prompts for different contexts
-  interventions.py                 # Intervention types + urgency scoring
-  queue.py                         # Insight queue (accumulate during focus, deliver at breaks)
+backend/src/agent/strategist.py      # Agent factory + response parser
+backend/src/scheduler/jobs/
+  strategist_tick.py                 # Scheduler job (every 15 min)
+  daily_briefing.py                  # Morning briefing (cron 8 AM)
+  evening_review.py                  # Evening review (cron 9 PM)
+backend/src/observer/
+  delivery.py                        # deliver_or_queue() — routes through attention guardian
+  insight_queue.py                   # DB-backed queue (24h expiry)
 ```
 
-**Reasoning engine** (`engine.py`):
-- Triggered by scheduler every 15 min AND by significant context changes
-- Inputs: CurrentContext + UserProfile + relevant memories + goal state
-- Process: Calls LLM (cheap model) with strategist prompt:
-  ```
-  Given everything you know about this human and their current context,
-  what is the single highest-leverage insight right now?
-  Rate urgency 1-5. If nothing useful, return null.
-  Consider: Is this worth spending one of their N remaining attention budget points today?
-  ```
-- Output: `Intervention(type, message, urgency, reasoning)` or null
-- Respects interruption mode and attention budget before delivering
+**Strategist agent** (`src/agent/strategist.py`):
+- Restricted smolagents `ToolCallingAgent` with tools: `view_soul`, `get_goals`, `get_goal_progress`
+- Temperature 0.4, max_steps 5 — lightweight reasoning
+- System prompt includes `proactivity_level` (1-5) and current context block
+- Returns structured JSON: `{should_intervene, content, intervention_type, urgency, reasoning}`
+- `parse_strategist_response()` strips markdown fences, falls back to `should_intervene=False` on parse failure
+
+**Strategist tick** (`strategist_tick.py`):
+- Triggered by scheduler every 15 min
+- Refreshes context → creates strategist agent → runs in thread → parses decision
+- Routes through `deliver_or_queue()` which applies the attention guardian gate
+
+**Daily briefing** (`daily_briefing.py`):
+- Uses LiteLLM directly (lighter than full agent)
+- Gathers: soul file, calendar events, active goals, relevant memories
+- Delivers with `is_scheduled=True` — bypasses delivery gate
+
+**Evening review** (`evening_review.py`):
+- Uses LiteLLM directly
+- Gathers: soul file, today's message count, completed goals today, git activity
+- Delivers with `is_scheduled=True` — bypasses delivery gate
 
 **Intervention types**:
 ```python
@@ -381,13 +396,13 @@ Queued insights I held back today: 0
 
 ## Implementation Order
 
-1. **Background scheduler** (APScheduler setup) — infrastructure for everything
-2. **Context awareness** (sources: calendar, git, time) — observation inputs
-3. **User state machine + interruption modes** — the attention guardian
-4. **Proactive reasoning engine + insight queue** — the strategist brain
-5. **Intervention delivery** (WS protocol, frontend display, bundles) — output pipeline
-6. **Morning briefing + evening review** (scheduled jobs) — first proactive features
-7. **Avatar state reflection** (ambient animations) — visual polish
+1. ~~**Background scheduler** (APScheduler setup) — infrastructure for everything~~ ✅ Phase 3.1
+2. ~~**Context awareness** (sources: calendar, git, time, goals) — observation inputs~~ ✅ Phase 3.2
+3. ~~**User state machine + interruption modes** — the attention guardian~~ ✅ Phase 3.3
+4. ~~**Proactive reasoning engine + strategist agent + insight queue**~~ ✅ Phase 3.4
+5. ~~**Morning briefing + evening review** (scheduled LiteLLM jobs)~~ ✅ Phase 3.4
+6. ~~**Frontend ambient indicator + nudge speech bubble**~~ ✅ Phase 3.4
+7. **Avatar state reflection** (ambient Phaser animations) — visual polish
 8. **Native macOS daemon** (window tracking, screen OCR) — OS-level observation
 9. **Interruption mode UI** (frontend toggle, suggestions) — user control
 
@@ -395,14 +410,18 @@ Queued insights I held back today: 0
 
 ## Verification Checklist
 
-- [ ] APScheduler starts with backend, runs jobs on schedule
-- [ ] Calendar scan detects meetings and updates user state
-- [ ] Morning briefing appears in chat at configured time
-- [ ] Evening review summarizes the day accurately
-- [ ] Insights queue during Focus mode, deliver as bundle at transition
-- [ ] Attention budget limits mid-day interruptions to 3-5
-- [ ] Deep work calendar blocks → zero interruptions
-- [ ] Strategist generates useful insights from context
+- [x] APScheduler starts with backend, runs jobs on schedule (Phase 3.1)
+- [x] Calendar scan detects meetings and updates user state (Phase 3.2)
+- [x] User state machine derives state from context sources (Phase 3.3)
+- [x] Delivery gate routes messages: deliver / queue / drop (Phase 3.3)
+- [x] Attention budget limits mid-day interruptions (Phase 3.3)
+- [x] Insights queue during blocked states, deliver as bundle on transition (Phase 3.3)
+- [x] Strategist agent generates decisions from context (Phase 3.4)
+- [x] Morning briefing generates narrative and delivers with `is_scheduled=True` (Phase 3.4)
+- [x] Evening review generates reflection and delivers with `is_scheduled=True` (Phase 3.4)
+- [x] Frontend ambient indicator dot in HudButtons (Phase 3.4)
+- [x] Frontend nudge speech bubble on agent sprite for 5s (Phase 3.4)
+- [x] Alert/advisory proactive messages open chat panel (Phase 3.4)
 - [ ] Avatar changes behavior when it has pending insights
 - [ ] Click Seraph in `has_insight` state → chat opens with queued insights
 - [ ] Native daemon sends active window info to backend

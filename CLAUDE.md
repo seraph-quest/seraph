@@ -15,7 +15,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/game/objects/UserSprite.ts` - Phaser sprite for user avatar
   - `src/game/objects/SpeechBubble.ts` - Phaser speech bubble
   - `src/game/EventBus.ts` - Bridges Phaser events to React
-  - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connection, agent visual state, onboarding, ambient, chatMaximized, session persistence via localStorage)
+  - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connection, agent visual state, onboarding, ambient, ambientTooltip, chatMaximized, session persistence via localStorage)
   - `src/stores/questStore.ts` - Zustand store (goal tree, domain progress dashboard)
   - `src/hooks/useWebSocket.ts` - Native WS connection to `ws://localhost:8004/ws/chat`, reconnect, ping, message dispatch
   - `src/hooks/useAgentAnimation.ts` - Walk-then-act state machine with timers
@@ -25,7 +25,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel, GoalTree, DomainStats
   - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, version)
-  - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels
+  - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
 ### Backend (`backend/`)
@@ -52,8 +52,25 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Agent** (`src/agent/`):
   - `factory.py` — Creates full agent with all tools + context (history, soul, memories)
   - `onboarding.py` — Specialized onboarding agent (limited to soul/goal tools, 5-point discovery)
+  - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `session.py` — Async session manager (SQLite-backed)
-- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile`, `Session`, `Message`, `Goal`, `Memory`
+- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile`, `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`
+- **Scheduler** (`src/scheduler/`):
+  - `engine.py` — APScheduler setup, job registration on app lifespan
+  - `connection_manager.py` — WebSocket broadcast manager (`ws_manager`)
+  - `jobs/memory_consolidation.py` — Consolidate recent sessions into long-term memory (every 30 min)
+  - `jobs/goal_check.py` — Check goal progress, detect stalled goals (every 4 hours)
+  - `jobs/calendar_scan.py` — Poll calendar for upcoming events (every 15 min)
+  - `jobs/strategist_tick.py` — Periodic strategic reasoning via restricted agent; refreshes context, runs strategist agent, parses decision, routes through `deliver_or_queue` (every 15 min)
+  - `jobs/daily_briefing.py` — Morning briefing via LiteLLM; gathers soul/calendar/goals/memories, delivers with `is_scheduled=True` (cron 8 AM)
+  - `jobs/evening_review.py` — Evening reflection via LiteLLM; counts today's messages/completed goals, delivers with `is_scheduled=True` (cron 9 PM)
+- **Observer** (`src/observer/`):
+  - `context.py` — `CurrentContext` dataclass (time, calendar, git, goals, user state, screen, attention budget) + `to_prompt_block()`
+  - `manager.py` — `ContextManager` singleton; refreshes all sources, derives user state, detects state transitions, delivers queued bundles
+  - `user_state.py` — User state machine (available/deep_work/in_meeting/transitioning/away/winding_down), delivery gate (`should_deliver()`), attention budget management
+  - `delivery.py` — `deliver_or_queue()` routes proactive messages through the attention guardian; `deliver_queued_bundle()` drains queue on state transitions
+  - `insight_queue.py` — DB-backed queue for insights held during blocked states (24h expiry)
+  - `sources/` — `time_source.py`, `calendar_source.py`, `git_source.py`, `goal_source.py`, `screen_source.py` (daemon API contract documented, daemon deferred)
 - **CORS**: Allows `localhost:3000` and `localhost:5173`
 
 ### Infrastructure
@@ -94,6 +111,25 @@ User sends message → THINKING at bench (center 50%, pixel 512,350)
   WS "final" received → WALKING back → SPEAKING (3s) → IDLE → WANDERING
 ```
 Animation states: `idle`, `thinking`, `walking`, `wandering`, `at-well`, `at-signpost`, `at-bench`, `at-tower`, `at-forge`, `at-clock`, `at-mailbox`, `speaking`
+
+## Proactive Message Flow
+```
+Scheduler jobs (strategist_tick / daily_briefing / evening_review)
+  │ WSResponse
+  ▼
+deliver_or_queue()  ← attention guardian (Phase 3.3)
+  ├─ DELIVER → ws_manager.broadcast()
+  │   ├─ proactive (alert/advisory) → opens chat + addMessage
+  │   ├─ proactive (nudge) → EventBus "agent-nudge" → SpeechBubble 5s
+  │   └─ ambient → setAmbientState + setAmbientTooltip → HudButtons dot
+  ├─ QUEUE → insight_queue (DB) → bundle on state transition
+  └─ DROP → log only
+```
+- `strategist_tick`: runs restricted smolagents agent, parses JSON decision, routes via `deliver_or_queue`
+- `daily_briefing`: gathers context + soul + memories, calls LiteLLM, delivers with `is_scheduled=True` (bypasses gate)
+- `evening_review`: counts today's messages/completed goals, calls LiteLLM, delivers with `is_scheduled=True`
+- Frontend ambient indicator: colored dot in HudButtons (`goal_behind`=red pulsing, `on_track`=green, `has_insight`=yellow pulsing, `waiting`=blue pulsing)
+- Frontend nudge: `agent-nudge` EventBus → SpeechBubble shows for 5s then auto-hides (with timer cleanup)
 
 ## Village Scene (Phaser)
 - 64x32 tile map (1024x512px at 16px tiles), scaled 2x

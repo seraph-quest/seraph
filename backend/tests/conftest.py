@@ -7,6 +7,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
@@ -38,6 +39,7 @@ async def async_db():
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

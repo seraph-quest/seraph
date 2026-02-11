@@ -24,10 +24,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/.venv"
 
-# Sync dependencies via uv
+# Create venv if it doesn't exist
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating virtual environment..."
+    uv venv "$VENV_DIR"
+fi
+
+# Sync dependencies
 echo "Syncing dependencies..."
-uv pip install -q -r "$SCRIPT_DIR/requirements.txt" --directory "$SCRIPT_DIR"
+uv pip install -q -r "$SCRIPT_DIR/requirements.txt" -p "$VENV_DIR/bin/python"
 
 # Run the daemon, passing through all arguments
-exec uv run --directory "$SCRIPT_DIR" python "$SCRIPT_DIR/seraph_daemon.py" "$@"
+exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/seraph_daemon.py" "$@"

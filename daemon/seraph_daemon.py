@@ -184,12 +184,16 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
-        level=level,
+        level=logging.INFO,
         format="%(message)s",
         stream=sys.stdout,
     )
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    # Suppress noisy httpx/httpcore debug logs
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # Clean shutdown on signals
     loop = asyncio.get_running_loop()

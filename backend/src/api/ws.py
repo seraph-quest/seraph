@@ -207,8 +207,8 @@ async def websocket_chat(websocket: WebSocket):
                     from src.memory.consolidator import consolidate_session
                     from src.utils.background import track_task
                     track_task(consolidate_session(session.id), name=f"consolidate-{session.id[:8]}")
-                except ImportError:
-                    pass
+                except Exception:
+                    logger.debug("Failed to schedule memory consolidation", exc_info=True)
 
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)

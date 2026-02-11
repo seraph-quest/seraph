@@ -56,6 +56,8 @@ def _make_sync_client_with_db():
     patches = [patch(t, _get_session) for t in targets]
     patches.append(patch("src.app.init_db", _test_init_db))
     patches.append(patch("src.app.close_db", _test_close_db))
+    patches.append(patch("src.app.init_scheduler", return_value=None))
+    patches.append(patch("src.app.shutdown_scheduler"))
     for p in patches:
         p.start()
 

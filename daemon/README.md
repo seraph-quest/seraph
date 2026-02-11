@@ -2,22 +2,79 @@
 
 Lightweight polling daemon that captures the active window (app name + window title) and posts it to the Seraph backend. Runs natively on macOS — outside Docker.
 
+## Running the Full Project
+
+Seraph has three components: **backend + frontend** (Docker) and the **screen daemon** (native macOS).
+
+### Prerequisites
+
+- Docker Desktop
+- [uv](https://docs.astral.sh/uv/) package manager
+- An [OpenRouter](https://openrouter.ai/) API key (set in `.env.dev`)
+
+### 1. Configure environment
+
+Copy and edit the env file — at minimum set your `OPENROUTER_API_KEY`:
+
+```bash
+# .env.dev already exists with defaults — edit the API key
+vim .env.dev
+```
+
+### 2. Start backend + frontend (Docker)
+
+```bash
+./manage.sh -e dev up -d
+```
+
+This starts three containers:
+- **backend-dev** (`localhost:8004`) — FastAPI + uvicorn
+- **sandbox-dev** — snekbox (sandboxed shell execution)
+- **frontend-dev** (`localhost:3000`) — Vite dev server
+
+### 3. Start the screen daemon (native macOS, separate terminal)
+
+```bash
+./daemon/run.sh --verbose
+```
+
+The daemon runs outside Docker and posts active window context to the backend every few seconds.
+
+### Optional: Things3 MCP integration
+
+If you use Things3 for task management, start the MCP server on your host:
+
+```bash
+THINGS_MCP_TRANSPORT=http THINGS_MCP_PORT=9100 uvx things-mcp
+```
+
+The backend connects to it via `http://host.docker.internal:9100/mcp` (configured in `.env.dev`).
+
 ## Prerequisites
 
 - macOS 13+ (Ventura or later)
 - Python 3.12+
+- [uv](https://docs.astral.sh/uv/) package manager
 
-## Install
+## Quick Start
+
+```bash
+./daemon/run.sh
+```
+
+This syncs dependencies and starts the daemon in one command.
+
+## Manual Install
 
 ```bash
 cd daemon
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ## Run
 
 ```bash
-python seraph_daemon.py
+uv run python seraph_daemon.py
 ```
 
 ### Options
@@ -122,5 +179,5 @@ launchctl load ~/Library/LaunchAgents/ai.seraph.daemon.plist
 |---------|-------|-----|
 | "No window title" / title is always None | Accessibility permission not granted | Grant permission in System Settings (see above) |
 | "Backend not reachable" warnings | Backend not running or wrong URL | Start backend with `./manage.sh -e dev up -d` |
-| Daemon exits immediately | Python missing PyObjC | Run `pip install -r requirements.txt` |
+| Daemon exits immediately | Python missing PyObjC | Run `uv pip install -r requirements.txt` |
 | High CPU usage | Interval too low | Increase `--interval` (default 5s is fine) |

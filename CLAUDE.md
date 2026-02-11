@@ -70,8 +70,22 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `user_state.py` — User state machine (available/deep_work/in_meeting/transitioning/away/winding_down), delivery gate (`should_deliver()`), attention budget management
   - `delivery.py` — `deliver_or_queue()` routes proactive messages through the attention guardian; `deliver_queued_bundle()` drains queue on state transitions
   - `insight_queue.py` — DB-backed queue for insights held during blocked states (24h expiry)
-  - `sources/` — `time_source.py`, `calendar_source.py`, `git_source.py`, `goal_source.py`, `screen_source.py` (daemon API contract documented, daemon deferred)
+  - `user_state.py` also includes `_DEEP_WORK_APPS` — IDE/terminal app names that trigger `deep_work` state when detected in `active_window` (priority between calendar and transition detection)
+  - `sources/` — `time_source.py`, `calendar_source.py`, `git_source.py`, `goal_source.py`, `screen_source.py` (daemon API contract + implementation status)
 - **CORS**: Allows `localhost:3000` and `localhost:5173`
+
+### Native Daemon (`daemon/`)
+- **Stack**: Python 3.12, PyObjC, httpx
+- **Entry**: `seraph_daemon.py` — runs natively on macOS (outside Docker)
+- Polls frontmost app name (`NSWorkspace`, no permission) + window title (AppleScript, Accessibility permission) + idle seconds (`Quartz.CGEventSourceSecondsSinceLastEventType`, no permission)
+- **Change detection**: skips POST if `active_window` unchanged since last POST
+- **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300)
+- POSTs to `POST /api/observer/context` with `{"active_window": "App — Title", "screen_context": null}`
+- CLI args: `--url` (default `http://localhost:8004`), `--interval` (default `5`), `--idle-timeout` (default `300`), `--verbose`
+- Graceful shutdown on SIGINT/SIGTERM, handles backend-down with warning + retry
+- Research on future upgrades (OCR, VLMs, cloud APIs): `docs/docs/development/screen-daemon-research.md`
+- **Quick start**: `./daemon/run.sh` (creates venv, installs deps, starts daemon)
+- **Manual run**: `cd daemon && uv pip install -r requirements.txt && uv run python seraph_daemon.py --verbose`
 
 ### Infrastructure
 - `docker-compose.dev.yaml` - Three services (github-mcp commented out):
@@ -130,6 +144,37 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 - `evening_review`: counts today's messages/completed goals, calls LiteLLM, delivers with `is_scheduled=True`
 - Frontend ambient indicator: colored dot in HudButtons (`goal_behind`=red pulsing, `on_track`=green, `has_insight`=yellow pulsing, `waiting`=blue pulsing)
 - Frontend nudge: `agent-nudge` EventBus → SpeechBubble shows for 5s then auto-hides (with timer cleanup)
+
+## Screen Daemon Data Flow
+```
+┌──────────────────────────────────────────────────┐
+│  daemon/seraph_daemon.py (native macOS process)  │
+│                                                  │
+│  NSWorkspace.frontmostApplication → app name     │
+│  osascript (AppleScript) → window title          │
+│  CGEventSource → idle seconds                    │
+│                                                  │
+│  Change detection: skip if same as last POST     │
+│  Idle detection: skip if idle > 5 min            │
+└────────────────────┬─────────────────────────────┘
+                     │ POST /api/observer/context
+                     │ {"active_window": "VS Code — main.py"}
+                     ▼
+┌──────────────────────────────────────────────────┐
+│  Backend (Docker, localhost:8004)                 │
+│                                                  │
+│  context_manager.update_screen_context()         │
+│  → CurrentContext.active_window updated           │
+│  → preserved across refresh() cycles              │
+│  → passed to derive_state(active_window=...)      │
+│  → included in to_prompt_block() for strategist   │
+│                                                  │
+│  UserStateMachine.derive_state() [enhanced]:     │
+│  if active_window matches IDE → deep_work        │
+│  → delivery gate queues proactive messages        │
+│  → ambient state pushed to frontend               │
+└──────────────────────────────────────────────────┘
+```
 
 ## Village Scene (Phaser)
 - 64x32 tile map (1024x512px at 16px tiles), scaled 2x

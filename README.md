@@ -1,79 +1,144 @@
-# Seraph AI Agent
+<h1 align="center">Seraph</h1>
 
-A proactive AI guardian with a retro 16-bit RPG village UI. An animated pixel-art avatar walks between tool stations in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity (soul file), long-term memory (vector embeddings), hierarchical goal/quest system, and 16 native tools + MCP integrations across web search, file I/O, shell execution, browser automation, calendar, email, and task management (Things3).
+<p align="center">
+  <strong>A proactive AI guardian with a retro 16-bit RPG village UI</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/seraph-quest/seraph/actions"><img src="https://github.com/seraph-quest/seraph/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12" />
+  <img src="https://img.shields.io/badge/react-19-61dafb" alt="React 19" />
+  <img src="https://img.shields.io/badge/phaser-3.90-orange" alt="Phaser 3.90" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
+</p>
+
+<p align="center">
+  An animated pixel-art avatar walks between tool stations in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration.
+</p>
+
+---
 
 ## Quick Start
 
-1. Set your OpenRouter API key in `.env.dev`:
-   ```
-   OPENROUTER_API_KEY=your-key-here
-   ```
+```bash
+# 1. Configure
+cp .env.dev.example .env.dev
+# Edit .env.dev and set OPENROUTER_API_KEY=your-key-here
 
-2. Start with Docker:
-   ```bash
-   ./manage.sh -e dev up -d
-   ```
+# 2. Launch
+./manage.sh -e dev up -d
 
-3. Verify:
-   ```bash
-   curl http://localhost:8004/health
-   # Open http://localhost:3000 for the retro chat UI
-   # Open http://localhost:8004/docs for Swagger UI
-   ```
+# 3. Open
+open http://localhost:3000        # Retro village UI
+open http://localhost:8004/docs   # Swagger API docs
+
+# 4. (Optional) Screen awareness daemon
+./daemon/run.sh                   # Window tracking
+./daemon/run.sh --ocr             # + OCR via Apple Vision
+```
+
+---
 
 ## Architecture
 
-- **Frontend**: React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90
-- **Backend**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
-- **Database**: SQLModel + SQLite (aiosqlite), LanceDB (vector memory)
-- **Tools**: 16 auto-discovered tools + MCP integrations (Things3) — web search, file I/O, shell (snekbox sandbox), browser (Playwright), calendar (Google), email (Gmail), soul/memory, goals, task management
-- **Infra**: Docker Compose (3 services: backend, frontend, snekbox sandbox), uv package manager
+| Layer | Stack |
+|-------|-------|
+| **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90 |
+| **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
+| **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
+| **Tools** | 12 native tools (auto-discovered) + plug-and-play MCP servers |
+| **Scheduler** | APScheduler — briefings, reviews, strategist ticks, memory consolidation |
+| **Daemon** | Native macOS — window tracking, optional OCR (Apple Vision / OpenRouter) |
+| **Infra** | Docker Compose (backend + frontend + snekbox sandbox), uv |
+
+---
 
 ## Project Structure
 
 ```
-frontend/
-├── src/
-│   ├── game/            # Phaser 3 village scene, sprites, EventBus
-│   ├── components/      # React overlays (chat, quest, ui)
-│   ├── hooks/           # useWebSocket, useAgentAnimation
-│   ├── stores/          # Zustand stores (chat, quest)
-│   ├── lib/             # Tool parser, animation state machine
-│   ├── types/           # TypeScript interfaces
-│   └── config/          # Constants, scene dimensions, tool names
+frontend/src/
+  game/              Phaser 3 village scene, sprites, EventBus
+  components/        React overlays — chat, quest panel, settings
+  hooks/             useWebSocket, useAgentAnimation
+  stores/            Zustand stores — chat, quest
+  lib/               Tool parser, animation state machine
+  config/            Constants, building positions, waypoints
 
-backend/
-├── main.py              # Uvicorn entry point
-├── config/settings.py   # Pydantic Settings (env vars)
-├── src/
-│   ├── app.py           # FastAPI app factory (lifespan: DB init, soul file)
-│   ├── models/schemas.py
-│   ├── api/             # REST + WebSocket endpoints (chat, sessions, goals, profile, tools)
-│   ├── agent/           # smolagents factory, onboarding agent, session manager
-│   ├── tools/           # 16 @tool implementations (auto-discovered) + MCP tools
-│   ├── db/              # SQLModel engine + models (Session, Message, Goal, UserProfile, Memory)
-│   ├── memory/          # Soul file, LanceDB vector store, embedder, consolidator
-│   ├── goals/           # Hierarchical goal CRUD repository
-│   └── plugins/         # Tool auto-discovery loader + registry
-└── tests/
+backend/src/
+  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, mcp)
+  agent/             smolagents factory, onboarding, strategist, session manager
+  tools/             @tool implementations + MCP manager
+  memory/            Soul file, LanceDB vector store, embedder, consolidator
+  goals/             Hierarchical goal CRUD
+  plugins/           Tool auto-discovery + registry
+  scheduler/         APScheduler jobs (briefing, review, strategist, consolidation)
+  observer/          Context manager, user state machine, delivery engine
 
-docs/                    # Docusaurus docs site (vision, roadmap, phase specs)
+daemon/              Native macOS screen daemon (window tracking + OCR)
+docs/                Docusaurus docs site
 ```
 
-## Management
+---
+
+## Village & Avatar
+
+```
+User sends message  -->  THINKING at bench
+  Tool detected:
+    web_search       -->  walks to WELL
+    shell_execute    -->  walks to FORGE
+    browse_webpage   -->  walks to TOWER
+    read/write_file  -->  walks to SIGNPOST
+    soul/goals       -->  walks to CHURCH
+    MCP tools        -->  walks to assigned building
+  Response ready     -->  walks back  -->  SPEAKING  -->  IDLE  -->  WANDERING
+```
+
+MCP tools automatically animate to their assigned village building.
+
+---
+
+## MCP Servers
+
+Add external tool servers with zero code changes:
 
 ```bash
-./manage.sh -e dev up -d      # Start dev
-./manage.sh -e dev down        # Stop
-./manage.sh -e dev logs -f     # Tail logs
-./manage.sh -e dev build       # Rebuild
+./mcp.sh add things3 http://host.docker.internal:9100/mcp \
+  --building church --desc "Things3 task manager"
+
+./mcp.sh list              # View configured servers
+./mcp.sh test things3      # Test connection
+./mcp.sh disable things3   # Toggle without removing
+./mcp.sh remove things3    # Remove entirely
 ```
 
-## Status
+Also available via the **Settings UI** in the browser or the **REST API** (`/api/mcp/servers`).
 
-- **Phase 0** (Foundation): Complete — chat, Phaser village, basic tools
-- **Phase 1** (Persistent Identity): Complete — DB, soul/memory, goals, onboarding, quest UI
-- **Phase 2** (Capable Executor): Complete — shell, browser, calendar, email, plugin system
-- **Phase 3** (The Observer): Planned — scheduler, context awareness, proactive reasoning
+Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
+
+Available buildings: `house-1` `church` `house-2` `forge` `tower` `clock` `mailbox`
+
+---
+
+## Docker Management
+
+```bash
+./manage.sh -e dev up -d       # Start
+./manage.sh -e dev down         # Stop
+./manage.sh -e dev logs -f      # Tail logs
+./manage.sh -e dev build        # Rebuild
+```
+
+---
+
+## Development Status
+
+| Phase | Name | Status |
+|-------|------|--------|
+| 1 | **Persistent Identity** — soul, memory, goals, onboarding, quest UI | Complete |
+| 2 | **Capable Executor** — shell, browser, plugin system | Complete |
+| 3 | **The Observer** — scheduler, context awareness, proactive reasoning, screen daemon | Complete |
+| 4 | **The Network** — MCP integration, skills, channels, workflows, voice | In Progress |
+| 5 | **Security** — credential injection, leak detection, OAuth 2.1, capabilities | Planned |
 
 See [docs/](docs/) for full vision, roadmap, and phase specifications.

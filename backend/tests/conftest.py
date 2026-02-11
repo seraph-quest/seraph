@@ -23,6 +23,7 @@ _PATCH_TARGETS = [
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.observer.insight_queue.get_session",
+    "src.scheduler.jobs.evening_review.get_db_session",
 ]
 
 

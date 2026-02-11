@@ -142,6 +142,7 @@ export function useWebSocket() {
           // Phase 3: Ambient state change
           if (data.state) {
             setAmbientState(data.state as "idle" | "has_insight" | "goal_behind" | "on_track" | "waiting");
+            useChatStore.getState().setAmbientTooltip(data.tooltip ?? "");
             EventBus.emit("agent-ambient-state", {
               state: data.state,
               tooltip: data.tooltip ?? "",

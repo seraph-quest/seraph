@@ -137,6 +137,7 @@ export class StudyScene extends Phaser.Scene {
 
   private isWandering = false;
   private wanderTimer: Phaser.Time.TimerEvent | null = null;
+  private nudgeTimer: Phaser.Time.TimerEvent | null = null;
 
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private dayNightTimer: Phaser.Time.TimerEvent | null = null;
@@ -146,6 +147,8 @@ export class StudyScene extends Phaser.Scene {
   private handleToolMove!: (payload: ToolMovePayload) => void;
   private handleFinalAnswer!: (payload: FinalAnswerPayload) => void;
   private handleReturnIdle!: () => void;
+  private handleNudge!: (payload: { text: string }) => void;
+  private handleAmbientState!: (payload: { state: string; tooltip: string }) => void;
 
   constructor() {
     super("StudyScene");
@@ -341,10 +344,29 @@ export class StudyScene extends Phaser.Scene {
       this.userAvatar.returnHome();
     };
 
+    this.handleNudge = (payload: { text: string }) => {
+      if (this.nudgeTimer) {
+        this.nudgeTimer.remove(false);
+        this.nudgeTimer = null;
+      }
+      this.speechBubble.show(payload.text);
+      this.nudgeTimer = this.time.delayedCall(5000, () => {
+        this.speechBubble.hide();
+        this.nudgeTimer = null;
+      });
+    };
+
+    this.handleAmbientState = () => {
+      // No-op in Phaser scene — visual indicator is in React HudButtons layer.
+      // Registered for future Phaser-level effects (e.g., glow, particles).
+    };
+
     EventBus.on("agent-think", this.handleThink);
     EventBus.on("agent-move-to-tool", this.handleToolMove);
     EventBus.on("agent-final-answer", this.handleFinalAnswer);
     EventBus.on("agent-return-idle", this.handleReturnIdle);
+    EventBus.on("agent-nudge", this.handleNudge);
+    EventBus.on("agent-ambient-state", this.handleAmbientState);
 
     this.scale.on("resize", this.onResize, this);
 
@@ -368,6 +390,8 @@ export class StudyScene extends Phaser.Scene {
     EventBus.off("agent-move-to-tool", this.handleToolMove);
     EventBus.off("agent-final-answer", this.handleFinalAnswer);
     EventBus.off("agent-return-idle", this.handleReturnIdle);
+    EventBus.off("agent-nudge", this.handleNudge);
+    EventBus.off("agent-ambient-state", this.handleAmbientState);
 
     this.scale.off("resize", this.onResize, this);
     this.stopWandering();
@@ -375,6 +399,7 @@ export class StudyScene extends Phaser.Scene {
 
     if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
     if (this.dayNightTimer) this.dayNightTimer.remove(false);
+    if (this.nudgeTimer) this.nudgeTimer.remove(false);
 
     this.agent.destroy();
     this.userAvatar.destroy();

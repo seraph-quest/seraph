@@ -16,6 +16,7 @@ interface ChatStore {
   isAgentBusy: boolean;
   agentVisual: AgentVisualState;
   ambientState: AmbientState;
+  ambientTooltip: string;
   chatPanelOpen: boolean;
   chatMaximized: boolean;
   questPanelOpen: boolean;
@@ -31,6 +32,7 @@ interface ChatStore {
   setAgentVisual: (visual: Partial<AgentVisualState>) => void;
   resetAgentVisual: () => void;
   setAmbientState: (state: AmbientState) => void;
+  setAmbientTooltip: (tooltip: string) => void;
   setChatPanelOpen: (open: boolean) => void;
   toggleChatMaximized: () => void;
   setQuestPanelOpen: (open: boolean) => void;
@@ -64,6 +66,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   isAgentBusy: false,
   agentVisual: { ...defaultVisual },
   ambientState: "idle",
+  ambientTooltip: "",
   chatPanelOpen: true,
   chatMaximized: false,
   questPanelOpen: false,
@@ -94,6 +97,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   resetAgentVisual: () => set({ agentVisual: { ...defaultVisual } }),
 
   setAmbientState: (state) => set({ ambientState: state }),
+
+  setAmbientTooltip: (tooltip) => set({ ambientTooltip: tooltip }),
 
   setChatPanelOpen: (open) =>
     set({ chatPanelOpen: open, questPanelOpen: open ? false : get().questPanelOpen }),

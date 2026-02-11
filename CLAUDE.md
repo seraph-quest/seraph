@@ -106,6 +106,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `frontend-dev` (3000:5173) — Vite dev server
   - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
 - `manage.sh` - Docker management: `./manage.sh -e dev up -d`, `down`, `logs -f`, `build`
+- `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--building B] [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Valid buildings: `house-1`, `church`, `house-2`, `forge`, `tower`, `clock`, `mailbox`. Requires `jq` (`brew install jq`).
 - `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
 
 ## WebSocket Protocol

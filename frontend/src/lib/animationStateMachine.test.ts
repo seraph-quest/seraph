@@ -21,26 +21,20 @@ describe("getToolTarget", () => {
     expect(target!.animationState).toBe("at-forge");
   });
 
-  it("returns target for send_email", () => {
-    const target = getToolTarget("send_email");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-mailbox");
-  });
-
-  it("returns target for get_calendar_events", () => {
-    const target = getToolTarget("get_calendar_events");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-clock");
-  });
-
   it("returns target for browse_webpage", () => {
     const target = getToolTarget("browse_webpage");
     expect(target).not.toBeNull();
     expect(target!.animationState).toBe("at-tower");
   });
 
-  it("maps Things3 tools to bench", () => {
-    const target = getToolTarget("get_inbox");
+  it("returns target for read_file", () => {
+    const target = getToolTarget("read_file");
+    expect(target).not.toBeNull();
+    expect(target!.animationState).toBe("at-signpost");
+  });
+
+  it("returns target for view_soul", () => {
+    const target = getToolTarget("view_soul");
     expect(target).not.toBeNull();
     expect(target!.animationState).toBe("at-bench");
   });

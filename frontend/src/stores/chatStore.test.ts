@@ -31,6 +31,7 @@ function resetStore() {
     questPanelOpen: false,
     settingsPanelOpen: false,
     onboardingCompleted: null,
+    toolRegistry: [],
   });
 }
 

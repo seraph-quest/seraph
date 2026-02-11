@@ -88,7 +88,8 @@ class TestOnboardingEdgeCases:
                 ])
                 return agent
 
-            with patch("src.api.ws.create_onboarding_agent", side_effect=_make_agent):
+            with patch("src.api.ws.create_onboarding_agent", side_effect=_make_agent), \
+                 patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
                     _ = ws.receive_text()  # welcome
 

@@ -50,6 +50,17 @@ THINGS_MCP_TRANSPORT=http THINGS_MCP_PORT=9100 uvx things-mcp
 
 The backend connects to it via `http://host.docker.internal:9100/mcp` (configured in `.env.dev`).
 
+### Resetting everything
+
+To start completely fresh (useful for testing onboarding), run from the project root:
+
+```bash
+./reset.sh        # Resets dev environment (default)
+./reset.sh prod   # Resets prod environment
+```
+
+This stops all containers, prunes Docker images/volumes, deletes all persistent data (database, memories, soul file, logs), and rebuilds from scratch. You'll also want to clear browser localStorage (`localStorage.clear()` in DevTools).
+
 ## Prerequisites
 
 - macOS 13+ (Ventura or later)

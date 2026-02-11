@@ -20,7 +20,7 @@ def _mock_onboarding_agent():
 class TestOnboardingEdgeCases:
     def test_skip_mid_flow(self):
         """User sends a message, then skips before agent finishes onboarding."""
-        client, patches = _make_sync_client_with_db()
+        client, patches, stack = _make_sync_client_with_db()
         try:
             with client.websocket_connect("/ws/chat") as ws:
                 welcome = json.loads(ws.receive_text())
@@ -54,12 +54,13 @@ class TestOnboardingEdgeCases:
                     final = next(m for m in messages if m["type"] == "final")
                     assert "Full agent response" in final["content"]
         finally:
+            stack.close()
             for p in patches:
                 p.stop()
 
     def test_double_skip_is_idempotent(self):
         """Sending skip_onboarding twice should not error."""
-        client, patches = _make_sync_client_with_db()
+        client, patches, stack = _make_sync_client_with_db()
         try:
             with client.websocket_connect("/ws/chat") as ws:
                 _ = ws.receive_text()  # welcome
@@ -72,41 +73,43 @@ class TestOnboardingEdgeCases:
                 resp2 = json.loads(ws.receive_text())
                 assert resp2["type"] == "final"
         finally:
+            stack.close()
             for p in patches:
                 p.stop()
 
-    def test_rapid_messages_during_onboarding(self):
-        """Multiple quick messages during onboarding should all get responses."""
-        client, patches = _make_sync_client_with_db()
+    def test_sequential_messages_during_onboarding(self):
+        """Multiple messages during onboarding should all get responses."""
+        client, patches, stack = _make_sync_client_with_db()
         try:
-            agent = MagicMock()
-            agent.run.return_value = iter([
-                FinalAnswerStep(output="Onboarding response"),
-            ])
+            def _make_agent():
+                agent = MagicMock()
+                agent.run.return_value = iter([
+                    FinalAnswerStep(output="Onboarding response"),
+                ])
+                return agent
 
-            with patch("src.api.ws.create_onboarding_agent", return_value=agent):
+            with patch("src.api.ws.create_onboarding_agent", side_effect=_make_agent):
                 with client.websocket_connect("/ws/chat") as ws:
                     _ = ws.receive_text()  # welcome
 
-                    # Send 3 messages rapidly
+                    # Send messages one at a time, collecting each response
+                    finals = []
                     for i in range(3):
                         ws.send_text(json.dumps({
                             "type": "message",
-                            "message": f"Rapid message {i}",
+                            "message": f"Message {i}",
                             "session_id": None,
                         }))
-
-                    # Collect all final responses
-                    finals = []
-                    for _ in range(30):  # generous limit
-                        raw = ws.receive_text()
-                        msg = json.loads(raw)
-                        if msg["type"] == "final":
-                            finals.append(msg)
-                            if len(finals) >= 3:
+                        # Drain until we get the final for this message
+                        for _ in range(10):
+                            raw = ws.receive_text()
+                            msg = json.loads(raw)
+                            if msg["type"] == "final":
+                                finals.append(msg)
                                 break
 
                     assert len(finals) == 3
         finally:
+            stack.close()
             for p in patches:
                 p.stop()

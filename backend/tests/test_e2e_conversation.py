@@ -32,7 +32,7 @@ def _make_agent_steps():
 class TestE2EConversation:
     def test_full_message_flow(self):
         """Verify: user message → step events → final answer with correct types and session ID."""
-        client, patches = _make_sync_client_with_db()
+        client, patches, stack = _make_sync_client_with_db()
         try:
             mock_agent = MagicMock()
             mock_agent.run.return_value = iter(_make_agent_steps())
@@ -81,12 +81,13 @@ class TestE2EConversation:
                         if m["type"] not in ("pong",):
                             assert m.get("seq") is not None, f"Missing seq in {m['type']} message"
         finally:
+            stack.close()
             for p in patches:
                 p.stop()
 
     def test_seq_numbers_monotonically_increase(self):
         """Verify sequence numbers increase across all messages."""
-        client, patches = _make_sync_client_with_db()
+        client, patches, stack = _make_sync_client_with_db()
         try:
             mock_agent = MagicMock()
             mock_agent.run.return_value = iter(_make_agent_steps())
@@ -117,12 +118,13 @@ class TestE2EConversation:
                     for i in range(1, len(seqs)):
                         assert seqs[i] > seqs[i - 1], f"seq not monotonic: {seqs}"
         finally:
+            stack.close()
             for p in patches:
                 p.stop()
 
     def test_tool_name_in_step_content(self):
         """Verify tool calls appear in step content for frontend detection."""
-        client, patches = _make_sync_client_with_db()
+        client, patches, stack = _make_sync_client_with_db()
         try:
             mock_agent = MagicMock()
             mock_agent.run.return_value = iter(_make_agent_steps())
@@ -153,5 +155,6 @@ class TestE2EConversation:
                     assert any("web_search" in s["content"] for s in steps), \
                         f"No step mentions web_search: {[s['content'] for s in steps]}"
         finally:
+            stack.close()
             for p in patches:
                 p.stop()

@@ -6,6 +6,17 @@ const SPRITE_KEY = "user-avatar";
 const FRAME_W = 32;
 const FRAME_H = 32;
 
+const STATUS_FONT_SIZE = 7;
+const STATUS_PADDING = 4;
+const STATUS_TAIL = 4;
+
+const STATE_VISUALS: Record<string, { color: number; label: string }> = {
+  goal_behind: { color: 0xef4444, label: "Behind!" },
+  on_track:    { color: 0x22c55e, label: "On Track" },
+  has_insight:  { color: 0xeab308, label: "Insight" },
+  waiting:     { color: 0x3b82f6, label: "Waiting..." },
+};
+
 /** Clickable user avatar positioned at "home" in the village. */
 export class UserSprite {
   sprite: Phaser.GameObjects.Sprite;
@@ -13,6 +24,11 @@ export class UserSprite {
   private bobTween: Phaser.Tweens.Tween | null = null;
   private currentTween: Phaser.Tweens.Tween | null = null;
   private glowGraphics: Phaser.GameObjects.Graphics | null = null;
+  private statusContainer: Phaser.GameObjects.Container | null = null;
+  private statusBg: Phaser.GameObjects.Graphics | null = null;
+  private statusText: Phaser.GameObjects.Text | null = null;
+  private statusPulseTween: Phaser.Tweens.Tween | null = null;
+  private currentAmbientState: string = "idle";
   homeX: number;
   homeY: number;
 
@@ -243,9 +259,127 @@ export class UserSprite {
     this.sprite.setPosition(x, y);
   }
 
+  /** Show or hide the ambient state bubble above the avatar. */
+  setAmbientState(state: string, _tooltip?: string) {
+    if (state === this.currentAmbientState) return;
+    this.currentAmbientState = state;
+
+    // Hide for idle or unknown states
+    const visuals = STATE_VISUALS[state];
+    if (!visuals) {
+      this.hideStatusBubble();
+      return;
+    }
+
+    this.showStatusBubble(visuals.color, visuals.label, state);
+  }
+
+  private showStatusBubble(color: number, label: string, state: string) {
+    // Create container lazily
+    if (!this.statusContainer) {
+      this.statusBg = this.scene.add.graphics();
+      this.statusText = this.scene.add.text(0, 0, "", {
+        fontFamily: '"Press Start 2P"',
+        fontSize: `${STATUS_FONT_SIZE}px`,
+        color: "#ffffff",
+        stroke: "#000000",
+        strokeThickness: 2,
+      });
+      this.statusText.setOrigin(0, 0);
+      this.statusContainer = this.scene.add.container(0, 0, [
+        this.statusBg,
+        this.statusText,
+      ]);
+      this.statusContainer.setDepth(21);
+    }
+
+    // Update text
+    this.statusText!.setText(label);
+    const textW = this.statusText!.width;
+    const textH = this.statusText!.height;
+    const bubbleW = textW + STATUS_PADDING * 2;
+    const bubbleH = textH + STATUS_PADDING * 2;
+
+    // Draw background
+    this.statusBg!.clear();
+
+    // Shadow
+    this.statusBg!.fillStyle(0x000000, 0.3);
+    this.statusBg!.fillRoundedRect(1, 1, bubbleW, bubbleH, 3);
+
+    // Colored background
+    this.statusBg!.fillStyle(color, 0.9);
+    this.statusBg!.fillRoundedRect(0, 0, bubbleW, bubbleH, 3);
+
+    // Border
+    this.statusBg!.lineStyle(1, 0xffffff, 0.5);
+    this.statusBg!.strokeRoundedRect(0, 0, bubbleW, bubbleH, 3);
+
+    // Tail
+    this.statusBg!.fillStyle(color, 0.9);
+    this.statusBg!.fillTriangle(
+      bubbleW / 2 - STATUS_TAIL,
+      bubbleH,
+      bubbleW / 2 + STATUS_TAIL,
+      bubbleH,
+      bubbleW / 2,
+      bubbleH + STATUS_TAIL,
+    );
+
+    this.statusText!.setPosition(STATUS_PADDING, STATUS_PADDING);
+    this.statusContainer.setSize(bubbleW, bubbleH + STATUS_TAIL);
+    this.statusContainer.setVisible(true);
+    this.statusContainer.setAlpha(1);
+
+    // Position above sprite
+    this.updateStatusPosition();
+
+    // Pulse animation for attention-drawing states
+    if (this.statusPulseTween) {
+      this.statusPulseTween.stop();
+      this.statusPulseTween = null;
+    }
+    const shouldPulse = state === "goal_behind" || state === "has_insight" || state === "waiting";
+    if (shouldPulse) {
+      this.statusPulseTween = this.scene.tweens.add({
+        targets: this.statusContainer,
+        scaleX: 1.08,
+        scaleY: 1.08,
+        duration: 800,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+    }
+  }
+
+  private hideStatusBubble() {
+    if (this.statusPulseTween) {
+      this.statusPulseTween.stop();
+      this.statusPulseTween = null;
+    }
+    if (this.statusContainer) {
+      this.statusContainer.setVisible(false);
+      this.statusContainer.setScale(1);
+    }
+  }
+
+  /** Call from scene update() to keep the bubble tracking the sprite. */
+  updateStatusPosition() {
+    if (!this.statusContainer || !this.statusContainer.visible) return;
+    const bubbleW = this.statusContainer.width || 60;
+    const bubbleH = this.statusContainer.height || 20;
+    this.statusContainer.setPosition(
+      this.sprite.x - bubbleW / 2,
+      this.sprite.y - this.sprite.displayHeight - bubbleH - 2,
+    );
+  }
+
   destroy() {
     this.stopBob();
     if (this.currentTween) this.currentTween.stop();
+    if (this.statusPulseTween) this.statusPulseTween.stop();
+    this.statusContainer?.destroy();
     this.glowGraphics?.destroy();
     this.sprite.destroy();
   }

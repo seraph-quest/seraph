@@ -356,9 +356,8 @@ export class StudyScene extends Phaser.Scene {
       });
     };
 
-    this.handleAmbientState = () => {
-      // No-op in Phaser scene — visual indicator is in React HudButtons layer.
-      // Registered for future Phaser-level effects (e.g., glow, particles).
+    this.handleAmbientState = (payload: { state: string; tooltip: string }) => {
+      this.userAvatar.setAmbientState(payload.state, payload.tooltip);
     };
 
     EventBus.on("agent-think", this.handleThink);
@@ -383,6 +382,7 @@ export class StudyScene extends Phaser.Scene {
 
   update() {
     this.speechBubble.updatePosition();
+    this.userAvatar.updateStatusPosition();
   }
 
   shutdown() {

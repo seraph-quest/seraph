@@ -1,4 +1,5 @@
 import { TOOL_NAMES } from "../config/constants";
+import { useChatStore } from "../stores/chatStore";
 
 const TOOL_PATTERNS = [
   /ToolCall\(\s*name\s*=\s*['"](\w+)['"]/i,
@@ -8,20 +9,32 @@ const TOOL_PATTERNS = [
   /"tool"\s*:\s*"(\w+)"/i,
 ];
 
-const KNOWN_TOOLS: Set<string> = new Set(Object.values(TOOL_NAMES));
+// Static fallback set from native tool names
+const STATIC_TOOLS: Set<string> = new Set(Object.values(TOOL_NAMES));
+
+function getKnownTools(): Set<string> {
+  const registry = useChatStore.getState().toolRegistry;
+  if (registry.length > 0) {
+    // Dynamic set from API — includes both native and MCP tools
+    return new Set(registry.map((t) => t.name));
+  }
+  return STATIC_TOOLS;
+}
 
 export function detectToolFromStep(stepContent: string): string | null {
+  const knownTools = getKnownTools();
+
   for (const pattern of TOOL_PATTERNS) {
     const match = stepContent.match(pattern);
     if (match && match[1]) {
       const toolName = match[1].toLowerCase();
-      if (KNOWN_TOOLS.has(toolName)) {
+      if (knownTools.has(toolName)) {
         return toolName;
       }
     }
   }
 
-  for (const tool of KNOWN_TOOLS) {
+  for (const tool of knownTools) {
     if (stepContent.toLowerCase().includes(tool)) {
       return tool;
     }

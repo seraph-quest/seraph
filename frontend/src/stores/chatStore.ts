@@ -6,6 +6,7 @@ import type {
   AgentVisualState,
   AmbientState,
   SessionInfo,
+  ToolMeta,
 } from "../types";
 
 interface ChatStore {
@@ -22,6 +23,7 @@ interface ChatStore {
   questPanelOpen: boolean;
   settingsPanelOpen: boolean;
   onboardingCompleted: boolean | null;
+  toolRegistry: ToolMeta[];
 
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -38,6 +40,8 @@ interface ChatStore {
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsPanelOpen: (open: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
+  setToolRegistry: (tools: ToolMeta[]) => void;
+  fetchToolRegistry: () => Promise<void>;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
   restartOnboarding: () => Promise<void>;
@@ -73,6 +77,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   questPanelOpen: false,
   settingsPanelOpen: false,
   onboardingCompleted: null,
+  toolRegistry: [],
 
   addMessage: (message) =>
     set((state) => {
@@ -116,6 +121,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setSettingsPanelOpen: (open) => set({ settingsPanelOpen: open }),
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
+
+  setToolRegistry: (tools) => set({ toolRegistry: tools }),
+
+  fetchToolRegistry: async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/tools`);
+      if (res.ok) {
+        const data = await res.json();
+        // API returns array directly (or {tools: [...]})
+        const tools = Array.isArray(data) ? data : data.tools ?? [];
+        set({
+          toolRegistry: tools.map((t: Record<string, unknown>) => ({
+            name: t.name as string,
+            description: (t.description ?? "") as string,
+            building: (t.building ?? null) as string | null,
+            pixelX: (t.pixel_x ?? null) as number | null,
+            pixelY: (t.pixel_y ?? null) as number | null,
+            animation: (t.animation ?? null) as string | null,
+          })),
+        });
+      }
+    } catch (err) {
+      console.error("Failed to fetch tool registry:", err);
+    }
+  },
 
   fetchProfile: async () => {
     try {

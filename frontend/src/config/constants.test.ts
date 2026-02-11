@@ -2,9 +2,10 @@ import { describe, it, expect } from "vitest";
 import { TOOL_NAMES, POSITIONS, SCENE } from "./constants";
 
 describe("TOOL_NAMES", () => {
-  it("has expected count of tools", () => {
+  it("has expected count of native tools", () => {
     const count = Object.keys(TOOL_NAMES).length;
-    expect(count).toBeGreaterThanOrEqual(28);
+    // 12 native tools (MCP tools loaded dynamically from API)
+    expect(count).toBeGreaterThanOrEqual(12);
   });
 });
 

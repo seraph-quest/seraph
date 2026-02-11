@@ -20,14 +20,6 @@ class Settings(BaseSettings):
     sandbox_url: str = "http://sandbox:8060"
     sandbox_timeout: int = 35
     browser_timeout: int = 30
-    google_credentials_path: str = "/app/config/google_credentials.json"
-    google_calendar_token_path: str = "/app/data/google_calendar_token.json"
-    google_gmail_token_path: str = "/app/data/google_gmail_token.json"
-
-    # MCP — External tool servers
-    things_mcp_url: str = ""  # e.g. "http://host.docker.internal:9100/mcp"
-    github_mcp_url: str = ""  # e.g. "http://github-mcp:8090/mcp"
-    github_mcp_toolsets: str = "repos,issues,pull_requests,code_security"
 
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True

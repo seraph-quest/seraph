@@ -1,28 +1,32 @@
-"""Calendar context source — Google Calendar via gcsa."""
+"""Calendar context source — Google Calendar via gcsa.
+
+Note: Calendar tools were removed in favour of MCP servers. This observer
+source remains for proactive context gathering. If Google credentials are
+not present, it silently returns empty data.
+"""
 
 import asyncio
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config.settings import settings
-
 logger = logging.getLogger(__name__)
+
+# Default credential paths (match Docker mount layout)
+_CREDENTIALS_PATH = Path("/app/config/google_credentials.json")
+_CALENDAR_TOKEN_PATH = Path("/app/data/google_calendar_token.json")
 
 
 def _fetch_events() -> dict:
     """Synchronous calendar fetch (run via asyncio.to_thread)."""
     from gcsa.google_calendar import GoogleCalendar
 
-    credentials_path = Path(settings.google_credentials_path)
-    token_path = Path(settings.google_calendar_token_path)
-
-    if not credentials_path.exists():
+    if not _CREDENTIALS_PATH.exists():
         return {"upcoming_events": [], "current_event": None}
 
     calendar = GoogleCalendar(
-        credentials_path=str(credentials_path),
-        token_path=str(token_path),
+        credentials_path=str(_CREDENTIALS_PATH),
+        token_path=str(_CALENDAR_TOKEN_PATH),
     )
 
     now = datetime.now()
@@ -52,8 +56,7 @@ def _fetch_events() -> dict:
 
 async def gather_calendar() -> dict:
     """Async wrapper — returns empty dict if credentials missing or error."""
-    credentials_path = Path(settings.google_credentials_path)
-    if not credentials_path.exists():
+    if not _CREDENTIALS_PATH.exists():
         return {"upcoming_events": [], "current_event": None}
 
     try:

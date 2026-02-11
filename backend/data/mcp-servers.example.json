@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "things3": {
+      "url": "http://host.docker.internal:9100/mcp",
+      "enabled": true,
+      "building": "church",
+      "description": "Things3 task manager"
+    },
+    "github": {
+      "url": "http://github-mcp:8090/mcp",
+      "enabled": false,
+      "building": "tower",
+      "description": "GitHub integration"
+    }
+  }
+}

@@ -101,3 +101,12 @@ export interface DomainProgress {
   completed: number;
   percentage: number;
 }
+
+export interface ToolMeta {
+  name: string;
+  description: string;
+  building: string | null;
+  pixelX: number | null;
+  pixelY: number | null;
+  animation: string | null;
+}

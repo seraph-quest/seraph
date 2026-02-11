@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -36,10 +37,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         import logging
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    if settings.things_mcp_url:
-        mcp_manager.connect("things", settings.things_mcp_url)
-    if settings.github_mcp_url:
-        mcp_manager.connect("github", settings.github_mcp_url)
+    mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
+    mcp_manager.load_config(mcp_config)
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()

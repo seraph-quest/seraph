@@ -45,6 +45,7 @@ export function useWebSocket() {
       setConnectionStatus("connected");
       backoffRef.current = WS_RECONNECT_DELAY_MS; // reset on successful connect
       useChatStore.getState().fetchProfile();
+      useChatStore.getState().fetchToolRegistry();
 
       // Await sessions load before restoring last session to avoid race
       useChatStore.getState().loadSessions().then(() => {

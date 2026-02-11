@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from src.api.chat import router as chat_router
 from src.api.goals import router as goals_router
+from src.api.mcp import router as mcp_router
 from src.api.profile import router as profile_router
 from src.api.sessions import router as sessions_router
 from src.api.observer import router as observer_router
@@ -16,6 +17,7 @@ api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
+api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
 api_router.include_router(observer_router, prefix="/api", tags=["observer"])
 api_router.include_router(settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])

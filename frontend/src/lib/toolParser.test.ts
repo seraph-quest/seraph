@@ -56,18 +56,4 @@ describe("detectToolFromStep", () => {
   it("detects goal tools", () => {
     expect(detectToolFromStep("Calling tool: 'create_goal'")).toBe("create_goal");
   });
-
-  // Phase 2 tools
-  it("detects calendar tools", () => {
-    expect(detectToolFromStep("Using tool: get_calendar_events")).toBe("get_calendar_events");
-  });
-
-  it("detects email tools", () => {
-    expect(detectToolFromStep("ToolCall(name='send_email')")).toBe("send_email");
-  });
-
-  // Things3 MCP tools
-  it("detects Things3 tools via substring", () => {
-    expect(detectToolFromStep("Getting today's tasks via get_today")).toBe("get_today");
-  });
 });

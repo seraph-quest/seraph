@@ -1,4 +1,19 @@
-"""Tool metadata registry — maps tool names to village positions and animations."""
+"""Tool metadata registry — maps tool names to village positions and animations.
+
+Native tools have static entries in TOOL_METADATA. MCP tools without static
+entries get metadata dynamically from their server's building assignment.
+"""
+
+# Building name → default pixel coords and animation state
+BUILDING_DEFAULTS: dict[str, dict] = {
+    "house-1":  {"pixel_x": 192, "pixel_y": 280, "animation": "at-well"},
+    "church":   {"pixel_x": 512, "pixel_y": 240, "animation": "at-bench"},
+    "house-2":  {"pixel_x": 832, "pixel_y": 280, "animation": "at-signpost"},
+    "forge":    {"pixel_x": 384, "pixel_y": 320, "animation": "at-forge"},
+    "tower":    {"pixel_x": 640, "pixel_y": 200, "animation": "at-tower"},
+    "clock":    {"pixel_x": 576, "pixel_y": 340, "animation": "at-clock"},
+    "mailbox":  {"pixel_x": 128, "pixel_y": 340, "animation": "at-mailbox"},
+}
 
 TOOL_METADATA: dict[str, dict] = {
     # Phase 1 tools
@@ -88,359 +103,53 @@ TOOL_METADATA: dict[str, dict] = {
         "animation": "at-tower",
         "description": "Browse and extract content from a webpage",
     },
-    "get_calendar_events": {
-        "building": "clock",
-        "pixel_x": 576,
-        "pixel_y": 340,
-        "animation": "at-clock",
-        "description": "Get upcoming calendar events",
-    },
-    "create_calendar_event": {
-        "building": "clock",
-        "pixel_x": 576,
-        "pixel_y": 340,
-        "animation": "at-clock",
-        "description": "Create a new calendar event",
-    },
-    "read_emails": {
-        "building": "mailbox",
-        "pixel_x": 128,
-        "pixel_y": 340,
-        "animation": "at-mailbox",
-        "description": "Read emails from inbox",
-    },
-    "send_email": {
-        "building": "mailbox",
-        "pixel_x": 128,
-        "pixel_y": 340,
-        "animation": "at-mailbox",
-        "description": "Send an email",
-    },
-    # Things3 MCP tools (mapped to church — tasks & goals area)
-    "get_inbox": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things inbox tasks",
-    },
-    "get_today": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things today tasks",
-    },
-    "get_upcoming": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things upcoming tasks",
-    },
-    "get_anytime": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things anytime tasks",
-    },
-    "get_someday": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things someday tasks",
-    },
-    "get_logbook": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things logbook",
-    },
-    "get_trash": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things trash",
-    },
-    "get_todos": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things todos",
-    },
-    "get_projects": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things projects",
-    },
-    "get_areas": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things areas",
-    },
-    "get_tags": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things tags",
-    },
-    "get_tagged_items": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get items with a specific tag",
-    },
-    "get_headings": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get Things headings",
-    },
-    "search_todos": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Search Things todos",
-    },
-    "search_advanced": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Advanced search in Things",
-    },
-    "get_recent": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Get recently modified Things items",
-    },
-    "add_todo": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Add a todo to Things",
-    },
-    "add_project": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Add a project to Things",
-    },
-    "update_todo": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Update a Things todo",
-    },
-    "update_project": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Update a Things project",
-    },
-    "show_item": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Show a Things item",
-    },
-    "search_items": {
-        "building": "church",
-        "pixel_x": 512,
-        "pixel_y": 240,
-        "animation": "at-bench",
-        "description": "Search Things items via URL scheme",
-    },
-    # GitHub MCP tools (mapped to tower — code review / looking outward)
-    "get_me": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Get authenticated GitHub user info",
-    },
-    "get_file_contents": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Get file contents from a GitHub repository",
-    },
-    "create_or_update_file": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Create or update a file in a GitHub repository",
-    },
-    "search_repositories": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Search GitHub repositories",
-    },
-    "search_code": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Search code on GitHub",
-    },
-    "create_issue": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Create a GitHub issue",
-    },
-    "list_issues": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "List GitHub issues",
-    },
-    "get_issue": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Get a GitHub issue",
-    },
-    "update_issue": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Update a GitHub issue",
-    },
-    "add_issue_comment": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Add a comment to a GitHub issue",
-    },
-    "create_pull_request": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Create a GitHub pull request",
-    },
-    "get_pull_request": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Get a GitHub pull request",
-    },
-    "list_pull_requests": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "List GitHub pull requests",
-    },
-    "merge_pull_request": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Merge a GitHub pull request",
-    },
-    "get_pull_request_diff": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Get the diff of a GitHub pull request",
-    },
-    "list_commits": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "List commits in a GitHub repository",
-    },
-    "create_branch": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Create a branch in a GitHub repository",
-    },
-    "list_branches": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "List branches in a GitHub repository",
-    },
-    "push_files": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Push files to a GitHub repository",
-    },
-    "create_repository": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Create a GitHub repository",
-    },
-    "fork_repository": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Fork a GitHub repository",
-    },
-    "get_code_scanning_alert": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "Get a code scanning alert",
-    },
-    "list_code_scanning_alerts": {
-        "building": "tower",
-        "pixel_x": 640,
-        "pixel_y": 200,
-        "animation": "at-tower",
-        "description": "List code scanning alerts",
-    },
 }
 
 
+def _building_to_metadata(building: str) -> dict | None:
+    """Convert a building name to tool metadata with default coords."""
+    defaults = BUILDING_DEFAULTS.get(building)
+    if not defaults:
+        return None
+    return {"building": building, **defaults}
+
+
 def get_tool_metadata(tool_name: str) -> dict | None:
-    """Get metadata for a tool by name."""
-    return TOOL_METADATA.get(tool_name)
+    """Get metadata for a tool by name.
+
+    Checks static registry first, then falls back to MCP building assignment.
+    """
+    # 1. Check static registry
+    if tool_name in TOOL_METADATA:
+        return TOOL_METADATA[tool_name]
+
+    # 2. Check MCP building assignment
+    from src.tools.mcp_manager import mcp_manager
+    for server_name, tools in mcp_manager._tools.items():
+        if any(t.name == tool_name for t in tools):
+            building = mcp_manager.get_server_building(server_name)
+            if building:
+                return _building_to_metadata(building)
+            break
+
+    return None
 
 
 def get_all_metadata() -> dict[str, dict]:
-    """Get all tool metadata."""
-    return TOOL_METADATA.copy()
+    """Get all tool metadata — static entries plus dynamic MCP entries."""
+    result = TOOL_METADATA.copy()
+
+    # Add dynamic entries for MCP tools not in static registry
+    from src.tools.mcp_manager import mcp_manager
+    for server_name, tools in mcp_manager._tools.items():
+        building = mcp_manager.get_server_building(server_name)
+        if not building:
+            continue
+        meta = _building_to_metadata(building)
+        if not meta:
+            continue
+        for tool in tools:
+            if tool.name not in result:
+                result[tool.name] = meta
+
+    return result

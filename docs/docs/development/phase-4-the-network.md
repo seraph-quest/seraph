@@ -249,9 +249,9 @@ MODEL_PROFILES = {
 
 ---
 
-## 4.6 Enhanced Security & Sandboxing
+## 4.6 Enhanced Security, MCP Security Layer & Sandboxing
 
-Move beyond snekbox to granular tool-level permissions and Docker-based isolation.
+Move beyond snekbox to granular tool-level permissions, Docker-based isolation, and secure MCP server integration. Incorporates research from IronClaw (OAuth 2.1 + DCR + credential injection + leak detection + WASM sandbox).
 
 **Files**:
 ```
@@ -260,13 +260,16 @@ backend/src/security/
   permissions.py         # Tool allow/deny policies
   sandbox.py             # Docker sandbox manager
   audit.py               # Security audit logging
+  credentials.py         # Encrypted credential storage + injection
+  leak_detector.py       # Aho-Corasick pattern scanner for tool outputs
+  oauth.py               # OAuth 2.1 + PKCE + Dynamic Client Registration
 ```
 
 **Tool permissions**:
 - Allow/deny policies per agent, per channel, per session
 - Deny always wins over allow
 - Built-in profiles: `minimal` (read-only), `standard` (no shell/email), `full` (unrestricted)
-- Sensitive tools require confirmation: `send_email`, `shell_execute`, `write_file`
+- Sensitive tools require confirmation: `shell_execute`, `write_file`
 
 **Docker sandbox improvements**:
 - Replace snekbox with configurable Docker sandbox:
@@ -282,6 +285,27 @@ backend/src/security/
 - Flag suspicious patterns (rapid file writes, network access attempts)
 - `GET /api/security/audit` — review recent tool usage
 - Redaction of sensitive values in logs (API keys, passwords)
+
+### 4.6.1 Credential Injection at Boundaries
+- MCP tools never see raw credentials
+- Inject auth headers at the transport layer (MCPManager intercepts outbound requests)
+- Credentials stored encrypted in DB (AES-256-GCM), master key in macOS Keychain
+- Pattern: tool declares host needs → MCPManager maps host → injects Bearer/API-key header
+
+### 4.6.2 Leak Detection on Tool Outputs
+- Aho-Corasick multi-pattern scanner on all tool responses before they enter LLM context
+- Default patterns: OpenAI keys, Anthropic keys, AWS keys, GitHub tokens, PEM keys, high-entropy hex strings
+- Actions: Block (reject), Redact (replace with `[REDACTED]`), Warn (log)
+
+### 4.6.3 OAuth 2.1 + Dynamic Client Registration for Hosted MCP
+- Support hosted MCP servers (e.g., `api.githubcopilot.com/mcp/`) with full OAuth 2.1 + PKCE flow
+- Dynamic Client Registration: discover `/.well-known/oauth-protected-resource`, register Seraph as public client
+- Token refresh, encrypted token storage, localhost callback listener
+
+### 4.6.4 Capability-Based Tool Permissions
+- Per-MCP-server capability declarations in config: `allowed_hosts`, `allowed_paths`, `can_write`, `can_network`
+- Default = read-only, no network egress
+- UI: permission review before activating a new MCP server
 
 **DM access control** (for multi-channel, 4.2):
 - **Pairing**: Unknown senders receive a one-time code

@@ -39,22 +39,15 @@ class AppleVisionProvider(OCRProvider):
         start = time.monotonic()
         try:
             import Vision
-            from AppKit import NSImage
+            from Foundation import NSData
 
-            # Load PNG into NSImage → CGImage
-            ns_image = NSImage.alloc().initWithData_(png_bytes)
-            if ns_image is None:
+            # Pass PNG bytes directly to Vision — avoids the NSImage → CGImage
+            # roundtrip which can produce empty pixel buffers on macOS 15+/Tahoe
+            ns_data = NSData.dataWithBytes_length_(png_bytes, len(png_bytes))
+            if ns_data is None:
                 return OCRResult(
                     text="", provider=self.name, duration_ms=0,
-                    success=False, error="Failed to load PNG into NSImage",
-                )
-
-            # Get CGImage from NSImage
-            cg_image = ns_image.CGImageForProposedRect_context_hints_(None, None, None)
-            if cg_image is None:
-                return OCRResult(
-                    text="", provider=self.name, duration_ms=0,
-                    success=False, error="Failed to get CGImage from NSImage",
+                    success=False, error="Failed to create NSData from PNG bytes",
                 )
 
             # Create and configure text recognition request
@@ -62,9 +55,9 @@ class AppleVisionProvider(OCRProvider):
             request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
             request.setUsesLanguageCorrection_(True)
 
-            # Run the request
-            handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(
-                cg_image, None,
+            # Use initWithData:options: to feed raw PNG directly (macOS 13+)
+            handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(
+                ns_data, None,
             )
             success, error = handler.performRequests_error_([request], None)
 

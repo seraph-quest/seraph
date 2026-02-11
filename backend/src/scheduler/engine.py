@@ -12,11 +12,14 @@ logger = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
 
 
-def _async_job_wrapper(coro_func):
-    """Wrap an async job function so APScheduler 3.x can run it."""
+def _async_job_wrapper(coro_func, loop: asyncio.AbstractEventLoop):
+    """Wrap an async job function so APScheduler 3.x can run it.
+
+    APScheduler 3.x runs jobs in a ThreadPoolExecutor, so we need to schedule
+    the coroutine back onto the main event loop captured at init time.
+    """
     def wrapper():
-        loop = asyncio.get_event_loop()
-        loop.create_task(coro_func())
+        asyncio.run_coroutine_threadsafe(coro_func(), loop)
     return wrapper
 
 
@@ -33,6 +36,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
     _scheduler = AsyncIOScheduler()
 
+    loop = asyncio.get_running_loop()
+
     from src.scheduler.jobs.memory_consolidation import run_memory_consolidation
     from src.scheduler.jobs.goal_check import run_goal_check
     from src.scheduler.jobs.calendar_scan import run_calendar_scan
@@ -42,31 +47,31 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
     jobs = [
         {
-            "func": _async_job_wrapper(run_memory_consolidation),
+            "func": _async_job_wrapper(run_memory_consolidation, loop),
             "trigger": IntervalTrigger(minutes=settings.memory_consolidation_interval_min),
             "id": "memory_consolidation",
             "name": "Memory consolidation",
         },
         {
-            "func": _async_job_wrapper(run_goal_check),
+            "func": _async_job_wrapper(run_goal_check, loop),
             "trigger": IntervalTrigger(hours=settings.goal_check_interval_hours),
             "id": "goal_check",
             "name": "Goal check",
         },
         {
-            "func": _async_job_wrapper(run_calendar_scan),
+            "func": _async_job_wrapper(run_calendar_scan, loop),
             "trigger": IntervalTrigger(minutes=settings.calendar_scan_interval_min),
             "id": "calendar_scan",
             "name": "Calendar scan",
         },
         {
-            "func": _async_job_wrapper(run_strategist_tick),
+            "func": _async_job_wrapper(run_strategist_tick, loop),
             "trigger": IntervalTrigger(minutes=settings.strategist_interval_min),
             "id": "strategist_tick",
             "name": "Strategist tick",
         },
         {
-            "func": _async_job_wrapper(run_daily_briefing),
+            "func": _async_job_wrapper(run_daily_briefing, loop),
             "trigger": CronTrigger(
                 hour=settings.morning_briefing_hour,
                 timezone=settings.user_timezone,
@@ -75,7 +80,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "name": "Daily briefing",
         },
         {
-            "func": _async_job_wrapper(run_evening_review),
+            "func": _async_job_wrapper(run_evening_review, loop),
             "trigger": CronTrigger(
                 hour=settings.evening_review_hour,
                 timezone=settings.user_timezone,

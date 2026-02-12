@@ -37,6 +37,14 @@ export class Pathfinder {
   }
 
   /**
+   * Replace the collision grid (used when entering/exiting buildings).
+   */
+  setGrid(collisionGrid: number[][]) {
+    this.grid = collisionGrid;
+    this.easystar.setGrid(collisionGrid);
+  }
+
+  /**
    * Find a path from pixel coords to pixel coords.
    * Returns array of pixel-center positions, or null if no path found.
    */

@@ -1,5 +1,5 @@
 import type { TiledMap, TiledTileLayer, TiledObjectLayer, TiledTilesetRef, TiledTileDef } from "../types/map";
-import type { LoadedTileset, MapObject, TileAnimationGroup, TileAnimationEntry } from "../types/editor";
+import type { LoadedTileset, MapObject, TileAnimationGroup, TileAnimationEntry, BuildingDef } from "../types/editor";
 
 const TILED_VERSION = "1.10.2";
 const MAP_VERSION = "1.10";
@@ -89,6 +89,7 @@ export function serializeMap(
   tilesets: LoadedTileset[],
   objects: MapObject[],
   animationGroups?: TileAnimationGroup[],
+  buildings?: BuildingDef[],
 ): TiledMap {
   const tileLayers: TiledTileLayer[] = layerNames.map((name, i) => ({
     id: i + 1,
@@ -196,30 +197,40 @@ export function serializeMap(
 
   // Collect magic effect groups for map-level property
   const magicEffects = (animationGroups ?? []).filter((g) => g.isMagicEffect);
-  const properties: TiledMap["properties"] = magicEffects.length > 0
-    ? [{
-        name: "magic_effects",
-        type: "string",
-        value: JSON.stringify(
-          magicEffects.map((g) => {
-            const ts = tilesets[g.tilesetIndex];
-            return {
-              id: g.id,
-              name: g.name,
-              tilesetName: ts?.name ?? "",
-              tileWidth: ts?.tileWidth ?? 16,
-              tileHeight: ts?.tileHeight ?? 16,
-              columns: ts?.columns ?? 1,
-              frameDuration: g.frameDuration,
-              entries: g.entries.map((e) => ({
-                anchorLocalId: e.anchorLocalId,
-                frames: e.frames,
-              })),
-            };
-          })
-        ),
-      }]
-    : undefined;
+  const properties: TiledMap["properties"] = [];
+
+  if (magicEffects.length > 0) {
+    properties.push({
+      name: "magic_effects",
+      type: "string",
+      value: JSON.stringify(
+        magicEffects.map((g) => {
+          const ts = tilesets[g.tilesetIndex];
+          return {
+            id: g.id,
+            name: g.name,
+            tilesetName: ts?.name ?? "",
+            tileWidth: ts?.tileWidth ?? 16,
+            tileHeight: ts?.tileHeight ?? 16,
+            columns: ts?.columns ?? 1,
+            frameDuration: g.frameDuration,
+            entries: g.entries.map((e) => ({
+              anchorLocalId: e.anchorLocalId,
+              frames: e.frames,
+            })),
+          };
+        })
+      ),
+    });
+  }
+
+  if (buildings && buildings.length > 0) {
+    properties.push({
+      name: "buildings",
+      type: "string",
+      value: JSON.stringify(buildings),
+    });
+  }
 
   return {
     width: mapWidth,
@@ -233,7 +244,7 @@ export function serializeMap(
     type: "map",
     layers: [...tileLayers, objectLayer],
     tilesets: tilesetRefs,
-    ...(properties ? { properties } : {}),
+    ...(properties.length > 0 ? { properties } : {}),
   };
 }
 
@@ -254,6 +265,7 @@ export function parseMapFromJson(json: string): {
   width: number;
   height: number;
   animationGroups: TileAnimationGroup[];
+  buildings: BuildingDef[];
 } | null {
   try {
     const map: TiledMap = JSON.parse(json);
@@ -371,8 +383,19 @@ export function parseMapFromJson(json: string): {
       }
     }
 
+    // Restore buildings from map-level properties
+    let buildings: BuildingDef[] = [];
+    const buildingsProp = map.properties?.find((p) => p.name === "buildings");
+    if (buildingsProp && typeof buildingsProp.value === "string") {
+      try {
+        buildings = JSON.parse(buildingsProp.value) as BuildingDef[];
+      } catch {
+        // Ignore malformed buildings
+      }
+    }
+
     // Also restore walkability from tileset tile properties
-    return { layers, objects, width: map.width, height: map.height, animationGroups };
+    return { layers, objects, width: map.width, height: map.height, animationGroups, buildings };
   } catch {
     return null;
   }

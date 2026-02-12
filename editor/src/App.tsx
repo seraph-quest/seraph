@@ -8,6 +8,7 @@ import { TilesetPanel } from "./components/TilesetPanel";
 import { LayerPanel } from "./components/LayerPanel";
 import { ObjectPanel } from "./components/ObjectPanel";
 import { NPCBrowser } from "./components/NPCBrowser";
+import { BuildingPanel } from "./components/BuildingPanel";
 
 function LoadingScreen() {
   const { loaded, total, currentName } = useTilesetStore((s) => s.loadProgress);
@@ -89,6 +90,7 @@ export default function App() {
   // Heights for the fixed-height sections; tileset takes remaining space
   const [layerH, setLayerH] = useState(140);
   const [objectH, setObjectH] = useState(160);
+  const [buildingH, setBuildingH] = useState(160);
   const [npcH, setNpcH] = useState(200);
   const [npcCollapsed, setNpcCollapsed] = useState(false);
 
@@ -165,6 +167,13 @@ export default function App() {
           </div>
 
           <HDivider onDrag={(dy) => setObjectH((h) => Math.max(MIN_SECTION_H, h + dy))} />
+
+          {/* Buildings section */}
+          <div className="overflow-auto flex-shrink-0" style={{ height: buildingH }}>
+            <BuildingPanel />
+          </div>
+
+          <HDivider onDrag={(dy) => setBuildingH((h) => Math.max(MIN_SECTION_H, h + dy))} />
 
           {/* NPCs section */}
           <div

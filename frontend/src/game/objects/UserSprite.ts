@@ -33,6 +33,8 @@ export class UserSprite {
   private currentAmbientState: string = "idle";
   homeX: number;
   homeY: number;
+  currentBuilding: string | null = null;
+  currentFloor: number = 0;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     this.scene = scene;

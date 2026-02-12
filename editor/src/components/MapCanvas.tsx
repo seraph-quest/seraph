@@ -4,6 +4,7 @@ import { useTilesetStore } from "../stores/tilesetStore";
 import { renderMap } from "../lib/canvas-renderer";
 import { useCanvasInteraction } from "../hooks/useCanvasInteraction";
 import { getSpriteBasePath } from "../lib/sprite-registry";
+import { resolveTileGid, getTileSourceRect } from "../lib/tileset-loader";
 import type { TiledTileLayer } from "../types/map";
 import type { NPC } from "../types/editor";
 
@@ -65,6 +66,14 @@ export function MapCanvas() {
       ts,
       store.showAnimations,
     );
+
+    // Draw building zone overlays (world mode)
+    if (!store.activeBuildingId) {
+      drawBuildingZones(ctx, store);
+    } else {
+      // Interior-edit mode: draw mask over non-zone area and portal markers
+      drawInteriorOverlay(ctx, store, tilesetStore);
+    }
 
     // Draw objects on top
     drawObjects(ctx, store, tilesetStore.spriteImageCache, ts);
@@ -233,4 +242,130 @@ function drawNPC(
   ctx.font = `${Math.max(8, 10 * zoom)}px sans-serif`;
   ctx.textAlign = "center";
   ctx.fillText(npc.name, x + scale / 2, y - 4);
+}
+
+function drawBuildingZones(
+  ctx: CanvasRenderingContext2D,
+  store: ReturnType<typeof useEditorStore.getState>,
+) {
+  const { viewportOffsetX: ox, viewportOffsetY: oy, viewportZoom: zoom, tileSize, buildings } = store;
+  const scaledTile = tileSize * zoom;
+
+  for (const b of buildings) {
+    const x = ox + b.zoneCol * scaledTile;
+    const y = oy + b.zoneRow * scaledTile;
+    const w = b.zoneW * scaledTile;
+    const h = b.zoneH * scaledTile;
+
+    // Semi-transparent fill
+    ctx.fillStyle = "rgba(234, 179, 8, 0.08)";
+    ctx.fillRect(x, y, w, h);
+
+    // Border
+    ctx.strokeStyle = "rgba(234, 179, 8, 0.6)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
+
+    // Label
+    ctx.fillStyle = "rgba(234, 179, 8, 0.8)";
+    ctx.font = `${Math.max(8, 10 * zoom)}px sans-serif`;
+    ctx.textAlign = "left";
+    ctx.fillText(b.name, x + 3, y - 3);
+  }
+  ctx.textAlign = "left";
+}
+
+function drawInteriorOverlay(
+  ctx: CanvasRenderingContext2D,
+  store: ReturnType<typeof useEditorStore.getState>,
+  tilesetStore: ReturnType<typeof useTilesetStore.getState>,
+) {
+  const { viewportOffsetX: ox, viewportOffsetY: oy, viewportZoom: zoom, tileSize, buildings, activeBuildingId, activeFloorIndex, mapWidth, mapHeight } = store;
+  const scaledTile = tileSize * zoom;
+
+  const building = buildings.find((b) => b.id === activeBuildingId);
+  if (!building) return;
+
+  const floor = building.floors[activeFloorIndex];
+  if (!floor) return;
+
+  // Dim the area outside the building zone
+  const zx = ox + building.zoneCol * scaledTile;
+  const zy = oy + building.zoneRow * scaledTile;
+  const zw = building.zoneW * scaledTile;
+  const zh = building.zoneH * scaledTile;
+  const totalW = mapWidth * scaledTile;
+  const totalH = mapHeight * scaledTile;
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  // Top strip
+  ctx.fillRect(ox, oy, totalW, building.zoneRow * scaledTile);
+  // Bottom strip
+  const bottomY = zy + zh;
+  ctx.fillRect(ox, bottomY, totalW, oy + totalH - bottomY);
+  // Left strip
+  ctx.fillRect(ox, zy, building.zoneCol * scaledTile, zh);
+  // Right strip
+  const rightX = zx + zw;
+  ctx.fillRect(rightX, zy, ox + totalW - rightX, zh);
+
+  // Draw interior tiles over the zone
+  for (let li = 0; li < floor.layers.length; li++) {
+    if (!store.layerVisibility[li]) continue;
+    const isActive = li === store.activeLayerIndex;
+    ctx.globalAlpha = isActive ? 1.0 : 0.7;
+
+    const layerData = floor.layers[li];
+    for (let lr = 0; lr < building.zoneH; lr++) {
+      for (let lc = 0; lc < building.zoneW; lc++) {
+        const gid = layerData[lr * building.zoneW + lc];
+        if (gid <= 0) continue;
+
+        const resolved = resolveTileGid(gid, tilesetStore.tilesets);
+        if (!resolved) continue;
+
+        const { sx, sy, sw, sh } = getTileSourceRect(resolved.localId, resolved.tileset);
+        const dx = ox + (building.zoneCol + lc) * scaledTile;
+        const dy = oy + (building.zoneRow + lr) * scaledTile;
+        ctx.drawImage(resolved.tileset.image, sx, sy, sw, sh, dx, dy, scaledTile, scaledTile);
+      }
+    }
+  }
+  ctx.globalAlpha = 1.0;
+
+  // Draw portal markers
+  for (const p of floor.portals) {
+    const px = ox + (building.zoneCol + p.localCol) * scaledTile;
+    const py = oy + (building.zoneRow + p.localRow) * scaledTile;
+
+    ctx.fillStyle =
+      p.kind === "entry" ? "rgba(34, 197, 94, 0.5)" :
+      p.kind === "stairs_up" ? "rgba(59, 130, 246, 0.5)" :
+      "rgba(249, 115, 22, 0.5)";
+    ctx.fillRect(px, py, scaledTile, scaledTile);
+
+    ctx.strokeStyle =
+      p.kind === "entry" ? "#22c55e" :
+      p.kind === "stairs_up" ? "#3b82f6" :
+      "#f97316";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(px, py, scaledTile, scaledTile);
+
+    // Icon text
+    ctx.fillStyle = "#fff";
+    ctx.font = `${Math.max(8, 12 * zoom)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const icon = p.kind === "entry" ? "D" : p.kind === "stairs_up" ? "\u2191" : "\u2193";
+    ctx.fillText(icon, px + scaledTile / 2, py + scaledTile / 2);
+    ctx.textBaseline = "alphabetic";
+  }
+  ctx.textAlign = "left";
+
+  // Zone highlight border
+  ctx.strokeStyle = "#eab308";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(zx, zy, zw, zh);
 }

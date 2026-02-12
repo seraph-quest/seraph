@@ -70,7 +70,39 @@ export function useCanvasInteraction(canvasRef: React.RefObject<HTMLCanvasElemen
     (col: number, row: number) => {
       const store = useEditorStore.getState();
       const tilesetStore = useTilesetStore.getState();
-      const { activeTool, activeLayerIndex } = store;
+      const { activeTool, activeLayerIndex, activeBuildingId } = store;
+
+      // Interior-edit mode: route to setInteriorTile
+      if (activeBuildingId) {
+        const building = store.buildings.find((b) => b.id === activeBuildingId);
+        if (!building) return;
+        const localCol = col - building.zoneCol;
+        const localRow = row - building.zoneRow;
+        if (localCol < 0 || localCol >= building.zoneW || localRow < 0 || localRow >= building.zoneH) return;
+
+        if (activeTool === "brush") {
+          const gids = tilesetStore.getSelectedGids();
+          if (gids.length === 0) return;
+          if (gids.length === 1) {
+            store.setInteriorTile(activeLayerIndex, localCol, localRow, gids[0]);
+          } else {
+            const sel = tilesetStore.selectedTiles;
+            if (!sel) return;
+            const selW = Math.abs(sel.endCol - sel.startCol) + 1;
+            const selH = Math.ceil(gids.length / selW);
+            for (let r = 0; r < selH; r++) {
+              for (let c = 0; c < selW; c++) {
+                const gid = gids[r * selW + c];
+                if (gid === undefined) continue;
+                store.setInteriorTile(activeLayerIndex, localCol + c, localRow + r, gid);
+              }
+            }
+          }
+        } else if (activeTool === "eraser") {
+          store.setInteriorTile(activeLayerIndex, localCol, localRow, 0);
+        }
+        return;
+      }
 
       if (activeTool === "brush") {
         const gids = tilesetStore.getSelectedGids();

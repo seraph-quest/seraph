@@ -12,6 +12,8 @@ export class AgentSprite {
   private currentTween: Phaser.Tweens.Tween | null = null;
   private bobTween: Phaser.Tweens.Tween | null = null;
   private pathCancelled = false;
+  currentBuilding: string | null = null;
+  currentFloor: number = 0;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     this.scene = scene;

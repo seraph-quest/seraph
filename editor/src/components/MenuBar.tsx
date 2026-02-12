@@ -13,9 +13,9 @@ export function MenuBar() {
   }, [store]);
 
   const handleSave = useCallback(() => {
-    const { layers, layerNames, mapWidth, mapHeight, tileSize, objects } = useEditorStore.getState();
+    const { layers, layerNames, mapWidth, mapHeight, tileSize, objects, buildings } = useEditorStore.getState();
     const { tilesets, animationGroups } = useTilesetStore.getState();
-    const map = serializeMap(layers, layerNames, mapWidth, mapHeight, tileSize, tilesets, objects, animationGroups);
+    const map = serializeMap(layers, layerNames, mapWidth, mapHeight, tileSize, tilesets, objects, animationGroups, buildings);
     saveMapToFile(map, "village.json");
   }, []);
 
@@ -29,12 +29,16 @@ export function MenuBar() {
       const text = await file.text();
       const parsed = parseMapFromJson(text);
       if (parsed) {
-        useEditorStore.getState().loadMapData(
+        const editorState = useEditorStore.getState();
+        editorState.loadMapData(
           parsed.layers,
           parsed.objects,
           parsed.width,
           parsed.height
         );
+        if (parsed.buildings.length > 0) {
+          useEditorStore.setState({ buildings: parsed.buildings });
+        }
         if (parsed.animationGroups.length > 0) {
           useTilesetStore.getState().setAnimationGroups(parsed.animationGroups);
         }
@@ -46,9 +50,9 @@ export function MenuBar() {
   }, []);
 
   const handleSaveToDisk = useCallback(async () => {
-    const { layers, layerNames, mapWidth, mapHeight, tileSize, objects } = useEditorStore.getState();
+    const { layers, layerNames, mapWidth, mapHeight, tileSize, objects, buildings } = useEditorStore.getState();
     const { tilesets, animationGroups } = useTilesetStore.getState();
-    const map = serializeMap(layers, layerNames, mapWidth, mapHeight, tileSize, tilesets, objects, animationGroups);
+    const map = serializeMap(layers, layerNames, mapWidth, mapHeight, tileSize, tilesets, objects, animationGroups, buildings);
     const json = JSON.stringify(map, null, 2);
 
     // Try to save directly to frontend/public/maps/village.json via download
@@ -91,6 +95,17 @@ export function MenuBar() {
         </button>
       </Tooltip>
       <div className="flex-1" />
+      {useEditorStore((s) => {
+        if (!s.activeBuildingId) return null;
+        const building = s.buildings.find((b) => b.id === s.activeBuildingId);
+        if (!building) return null;
+        const floor = building.floors[s.activeFloorIndex];
+        return (
+          <span className="text-yellow-300 text-[10px] mr-2 bg-yellow-900/40 px-2 py-0.5 rounded">
+            Editing: {building.name} / {floor?.name ?? `Floor ${s.activeFloorIndex}`}
+          </span>
+        );
+      })}
       <span className="text-gray-600 text-[10px]">
         {store.mapWidth}x{store.mapHeight} | Ctrl+Z: Undo | Ctrl+Shift+Z: Redo
       </span>

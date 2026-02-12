@@ -79,6 +79,39 @@ export type AnimationLookup = Map<
   { frames: { gid: number; duration: number }[]; totalDuration: number }
 >;
 
+/** A portal connects building exterior to interior or floors to each other */
+export interface BuildingPortal {
+  /** Tile position within the building zone */
+  localCol: number;
+  localRow: number;
+  /** "entry" = door from outside, "stairs_up", "stairs_down" */
+  kind: "entry" | "stairs_up" | "stairs_down";
+}
+
+/** One floor of a building interior */
+export interface BuildingFloor {
+  /** Display name, e.g. "Ground Floor", "Upstairs" */
+  name: string;
+  /** Tile data layers for this floor interior (same dimensions as zone) */
+  layers: number[][]; // 5 layers, each zoneW * zoneH
+  /** Portals on this floor */
+  portals: BuildingPortal[];
+}
+
+/** A building definition anchored to a rectangular zone on the map */
+export interface BuildingDef {
+  id: string;
+  name: string;
+  /** Top-left tile of the building zone on the world map */
+  zoneCol: number;
+  zoneRow: number;
+  /** Zone dimensions in tiles */
+  zoneW: number;
+  zoneH: number;
+  /** Interior floors (index 0 = ground floor) */
+  floors: BuildingFloor[];
+}
+
 export interface LoadedTileset {
   name: string;
   image: HTMLImageElement;

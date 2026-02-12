@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { EditorTool, MapDelta, MapObject } from "../types/editor";
+import type { EditorTool, MapDelta, MapObject, BuildingDef, BuildingFloor } from "../types/editor";
 import { floodFill } from "../lib/flood-fill";
 import { UndoManager } from "../lib/undo";
 
@@ -16,6 +16,11 @@ interface EditorStore {
   layers: number[][];
   layerNames: string[];
   objects: MapObject[];
+
+  // Buildings
+  buildings: BuildingDef[];
+  activeBuildingId: string | null;
+  activeFloorIndex: number;
 
   // Editor state
   activeTool: EditorTool;
@@ -55,6 +60,14 @@ interface EditorStore {
   removeObject: (index: number) => void;
   updateObject: (index: number, obj: MapObject) => void;
 
+  // Buildings
+  addBuilding: (building: BuildingDef) => void;
+  removeBuilding: (id: string) => void;
+  updateBuilding: (id: string, partial: Partial<BuildingDef>) => void;
+  setActiveBuilding: (id: string | null) => void;
+  setActiveFloor: (index: number) => void;
+  setInteriorTile: (layerIndex: number, localCol: number, localRow: number, gid: number) => void;
+
   // Viewport
   setViewport: (offsetX: number, offsetY: number, zoom: number) => void;
   panViewport: (dx: number, dy: number) => void;
@@ -86,6 +99,10 @@ export const useEditorStore = create<EditorStore>()(
   ),
   layerNames: [...TILE_LAYER_NAMES],
   objects: [],
+
+  buildings: [],
+  activeBuildingId: null,
+  activeFloorIndex: 0,
 
   activeTool: "brush",
   activeLayerIndex: 0,
@@ -213,6 +230,49 @@ export const useEditorStore = create<EditorStore>()(
       objects: s.objects.map((o, i) => (i === index ? obj : o)),
     })),
 
+  addBuilding: (building) =>
+    set((s) => ({ buildings: [...s.buildings, building] })),
+
+  removeBuilding: (id) =>
+    set((s) => ({
+      buildings: s.buildings.filter((b) => b.id !== id),
+      activeBuildingId: s.activeBuildingId === id ? null : s.activeBuildingId,
+    })),
+
+  updateBuilding: (id, partial) =>
+    set((s) => ({
+      buildings: s.buildings.map((b) => (b.id === id ? { ...b, ...partial } : b)),
+    })),
+
+  setActiveBuilding: (id) =>
+    set({ activeBuildingId: id, activeFloorIndex: 0 }),
+
+  setActiveFloor: (index) =>
+    set({ activeFloorIndex: index }),
+
+  setInteriorTile: (layerIndex, localCol, localRow, gid) => {
+    const { buildings, activeBuildingId, activeFloorIndex } = get();
+    if (!activeBuildingId) return;
+    const bIdx = buildings.findIndex((b) => b.id === activeBuildingId);
+    if (bIdx < 0) return;
+    const building = buildings[bIdx];
+    const floor = building.floors[activeFloorIndex];
+    if (!floor) return;
+    if (localCol < 0 || localCol >= building.zoneW || localRow < 0 || localRow >= building.zoneH) return;
+    const idx = localRow * building.zoneW + localCol;
+    if (floor.layers[layerIndex]?.[idx] === gid) return;
+
+    const newFloorLayers = floor.layers.map((l, i) =>
+      i === layerIndex ? [...l.slice(0, idx), gid, ...l.slice(idx + 1)] : l
+    );
+    const newFloor: BuildingFloor = { ...floor, layers: newFloorLayers };
+    const newFloors = building.floors.map((f, i) => (i === activeFloorIndex ? newFloor : f));
+    const newBuildings = buildings.map((b, i) =>
+      i === bIdx ? { ...b, floors: newFloors } : b
+    );
+    set({ buildings: newBuildings });
+  },
+
   setViewport: (offsetX, offsetY, zoom) =>
     set({ viewportOffsetX: offsetX, viewportOffsetY: offsetY, viewportZoom: zoom }),
 
@@ -279,6 +339,9 @@ export const useEditorStore = create<EditorStore>()(
       mapHeight: height,
       layers,
       objects: [],
+      buildings: [],
+      activeBuildingId: null,
+      activeFloorIndex: 0,
       layerVisibility: TILE_LAYER_NAMES.map(() => true),
       activeLayerIndex: 0,
     });
@@ -291,6 +354,8 @@ export const useEditorStore = create<EditorStore>()(
       mapHeight: height,
       layers,
       objects,
+      activeBuildingId: null,
+      activeFloorIndex: 0,
       layerVisibility: layers.map(() => true),
       activeLayerIndex: 0,
     });
@@ -306,6 +371,7 @@ export const useEditorStore = create<EditorStore>()(
         layers: state.layers,
         layerNames: state.layerNames,
         objects: state.objects,
+        buildings: state.buildings,
         activeLayerIndex: state.activeLayerIndex,
         layerVisibility: state.layerVisibility,
         activeTool: state.activeTool,

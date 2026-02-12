@@ -8,6 +8,29 @@ import { Pathfinder } from "../lib/Pathfinder";
 import { SCENE } from "../../config/constants";
 import type { MagicEffectDef } from "../../types";
 
+/** Building types matching editor's BuildingDef (serialized in map JSON) */
+interface BuildingPortalDef {
+  localCol: number;
+  localRow: number;
+  kind: "entry" | "stairs_up" | "stairs_down";
+}
+
+interface BuildingFloorDef {
+  name: string;
+  layers: number[][]; // 5 layers, each zoneW * zoneH
+  portals: BuildingPortalDef[];
+}
+
+interface BuildingDef {
+  id: string;
+  name: string;
+  zoneCol: number;
+  zoneRow: number;
+  zoneW: number;
+  zoneH: number;
+  floors: BuildingFloorDef[];
+}
+
 interface CastEffectPayload {
   tool: string;
   effectIndex: number;
@@ -56,6 +79,19 @@ export class VillageScene extends Phaser.Scene {
   // Wander zone
   private wanderZone: { x: number; y: number; width: number; height: number } | null = null;
 
+  // Buildings
+  private buildings: BuildingDef[] = [];
+  private currentBuilding: BuildingDef | null = null;
+  private currentFloor = 0;
+  private interiorContainer: Phaser.GameObjects.Container | null = null;
+  private savedExteriorGrid: number[][] | null = null;
+  private hiddenExteriorTiles: Array<{
+    layer: Phaser.Tilemaps.TilemapLayer;
+    tiles: Array<{ col: number; row: number; origIndex: number }>;
+  }> = [];
+  private mapRef!: Phaser.Tilemaps.Tilemap;
+  private tilesetsRef: Phaser.Tilemaps.Tileset[] = [];
+
   private tooltip!: Phaser.GameObjects.Container;
   private tooltipText!: Phaser.GameObjects.Text;
   private tooltipBg!: Phaser.GameObjects.Rectangle;
@@ -103,12 +139,15 @@ export class VillageScene extends Phaser.Scene {
     // Build tilemap
     const map = this.make.tilemap({ key: "village-map" });
 
+    this.mapRef = map;
+
     // Add tilesets
     const tilesets: Phaser.Tilemaps.Tileset[] = [];
     for (const name of TILESET_FILES) {
       const ts = map.addTilesetImage(name, name);
       if (ts) tilesets.push(ts);
     }
+    this.tilesetsRef = tilesets;
 
     // Create tile layers
     for (const layerData of map.layers) {
@@ -127,6 +166,9 @@ export class VillageScene extends Phaser.Scene {
 
     // Parse magic effects from map custom properties
     this.parseMagicEffects(map);
+
+    // Parse building definitions from map custom properties
+    this.parseBuildings(map);
 
     // Camera setup
     this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
@@ -301,6 +343,9 @@ export class VillageScene extends Phaser.Scene {
 
     this.speechBubble.updatePosition();
     this.userAvatar.updateStatusPosition();
+
+    // Portal detection for agent sprite
+    this.checkPortalCollision();
   }
 
   shutdown() {
@@ -505,6 +550,271 @@ export class VillageScene extends Phaser.Scene {
       const effect = this.activeMagicEffect;
       this.activeMagicEffect = null;
       effect.fadeOut();
+    }
+  }
+
+  // ─── Buildings ──────────────────────────────────────
+
+  private parseBuildings(map: Phaser.Tilemaps.Tilemap) {
+    const props = (map as unknown as { properties?: Array<{ name: string; value: unknown }> }).properties;
+    if (!props) return;
+
+    const buildingsProp = props.find((p) => p.name === "buildings");
+    if (!buildingsProp || typeof buildingsProp.value !== "string") return;
+
+    try {
+      this.buildings = JSON.parse(buildingsProp.value) as BuildingDef[];
+    } catch {
+      // Ignore malformed buildings
+    }
+  }
+
+  enterBuilding(buildingId: string, floorIndex = 0) {
+    const building = this.buildings.find((b) => b.id === buildingId);
+    if (!building || !building.floors[floorIndex]) return;
+
+    this.stopWandering();
+    this.currentBuilding = building;
+    this.currentFloor = floorIndex;
+
+    // Save the current collision grid for restoration
+    this.savedExteriorGrid = this.pathfinder
+      ? JSON.parse(JSON.stringify((this.pathfinder as unknown as { grid: number[][] }).grid))
+      : null;
+
+    // Hide exterior tiles within the zone (buildings, decorations, treetops layers)
+    this.hiddenExteriorTiles = [];
+    const hideLayers = ["buildings", "decorations", "treetops"];
+    for (const layerName of hideLayers) {
+      const layer = this.mapRef.getLayer(layerName);
+      if (!layer?.tilemapLayer) continue;
+      const tilemapLayer = layer.tilemapLayer;
+      const savedTiles: Array<{ col: number; row: number; origIndex: number }> = [];
+
+      for (let r = 0; r < building.zoneH; r++) {
+        for (let c = 0; c < building.zoneW; c++) {
+          const col = building.zoneCol + c;
+          const row = building.zoneRow + r;
+          const tile = this.mapRef.getTileAt(col, row, true, layerName);
+          if (tile && tile.index >= 0) {
+            savedTiles.push({ col, row, origIndex: tile.index });
+            tilemapLayer.putTileAt(-1, col, row);
+          }
+        }
+      }
+
+      if (savedTiles.length > 0) {
+        this.hiddenExteriorTiles.push({ layer: tilemapLayer, tiles: savedTiles });
+      }
+    }
+
+    // Render interior tiles
+    this.renderInteriorFloor(building, floorIndex);
+
+    // Rebuild collision grid for the zone using all-walkable within zone
+    this.rebuildCollisionGridForInterior(building, floorIndex);
+
+    // Center camera on zone
+    const zoneCenterX = (building.zoneCol + building.zoneW / 2) * this.mapRef.tileWidth;
+    const zoneCenterY = (building.zoneRow + building.zoneH / 2) * this.mapRef.tileHeight;
+    this.cameras.main.centerOn(zoneCenterX, zoneCenterY);
+
+    // Update character building state
+    this.agent.currentBuilding = buildingId;
+    this.agent.currentFloor = floorIndex;
+
+    // Hide user avatar if not in same building
+    if (this.userAvatar.currentBuilding !== buildingId) {
+      this.userAvatar.sprite.setVisible(false);
+    }
+  }
+
+  exitBuilding() {
+    if (!this.currentBuilding) return;
+
+    // Destroy interior container
+    if (this.interiorContainer) {
+      this.interiorContainer.destroy(true);
+      this.interiorContainer = null;
+    }
+
+    // Restore hidden exterior tiles
+    for (const entry of this.hiddenExteriorTiles) {
+      for (const t of entry.tiles) {
+        entry.layer.putTileAt(t.origIndex, t.col, t.row);
+      }
+    }
+    this.hiddenExteriorTiles = [];
+
+    // Restore collision grid
+    if (this.savedExteriorGrid) {
+      this.pathfinder.setGrid(this.savedExteriorGrid);
+      this.savedExteriorGrid = null;
+    }
+
+    // Reset building state
+    this.currentBuilding = null;
+    this.currentFloor = 0;
+    this.agent.currentBuilding = null;
+    this.agent.currentFloor = 0;
+
+    // Show user avatar
+    this.userAvatar.sprite.setVisible(true);
+
+    // Re-center camera
+    this.cameras.main.centerOn(
+      this.mapRef.widthInPixels / 2,
+      this.mapRef.heightInPixels / 2
+    );
+
+    this.startWandering();
+  }
+
+  changeFloor(newFloorIndex: number) {
+    if (!this.currentBuilding) return;
+    const building = this.currentBuilding;
+    if (!building.floors[newFloorIndex]) return;
+
+    // Destroy current interior
+    if (this.interiorContainer) {
+      this.interiorContainer.destroy(true);
+      this.interiorContainer = null;
+    }
+
+    this.currentFloor = newFloorIndex;
+    this.agent.currentFloor = newFloorIndex;
+
+    // Render new floor
+    this.renderInteriorFloor(building, newFloorIndex);
+
+    // Rebuild collision grid for new floor
+    this.rebuildCollisionGridForInterior(building, newFloorIndex);
+  }
+
+  private renderInteriorFloor(building: BuildingDef, floorIndex: number) {
+    if (this.interiorContainer) {
+      this.interiorContainer.destroy(true);
+    }
+
+    const floor = building.floors[floorIndex];
+    if (!floor) return;
+
+    this.interiorContainer = this.add.container(0, 0);
+    this.interiorContainer.setDepth(2.5); // Between buildings (2) and decorations (3)
+
+    const tileWidth = this.mapRef.tileWidth;
+    const tileHeight = this.mapRef.tileHeight;
+
+    for (let li = 0; li < floor.layers.length; li++) {
+      const layerData = floor.layers[li];
+      if (!layerData) continue;
+
+      for (let r = 0; r < building.zoneH; r++) {
+        for (let c = 0; c < building.zoneW; c++) {
+          const gid = layerData[r * building.zoneW + c];
+          if (gid <= 0) continue;
+
+          // Resolve GID to tileset
+          let resolvedTileset: Phaser.Tilemaps.Tileset | null = null;
+          let localId = 0;
+          for (let ti = this.tilesetsRef.length - 1; ti >= 0; ti--) {
+            if (gid >= this.tilesetsRef[ti].firstgid) {
+              resolvedTileset = this.tilesetsRef[ti];
+              localId = gid - resolvedTileset.firstgid;
+              break;
+            }
+          }
+          if (!resolvedTileset) continue;
+
+          const worldX = (building.zoneCol + c) * tileWidth + tileWidth / 2;
+          const worldY = (building.zoneRow + r) * tileHeight + tileHeight / 2;
+
+          const img = this.add.image(worldX, worldY, resolvedTileset.name, localId);
+          img.setOrigin(0.5, 0.5);
+          this.interiorContainer.add(img);
+        }
+      }
+    }
+  }
+
+  private rebuildCollisionGridForInterior(building: BuildingDef, floorIndex: number) {
+    if (!this.savedExteriorGrid) return;
+
+    // Clone the exterior grid
+    const grid = this.savedExteriorGrid.map((row) => [...row]);
+
+    // Make all zone tiles walkable by default
+    for (let r = 0; r < building.zoneH; r++) {
+      for (let c = 0; c < building.zoneW; c++) {
+        const gr = building.zoneRow + r;
+        const gc = building.zoneCol + c;
+        if (gr >= 0 && gr < grid.length && gc >= 0 && gc < grid[0].length) {
+          grid[gr][gc] = 0;
+        }
+      }
+    }
+
+    // Block everything outside the zone
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[0].length; c++) {
+        if (
+          r < building.zoneRow ||
+          r >= building.zoneRow + building.zoneH ||
+          c < building.zoneCol ||
+          c >= building.zoneCol + building.zoneW
+        ) {
+          grid[r][c] = 1;
+        }
+      }
+    }
+
+    this.pathfinder.setGrid(grid);
+  }
+
+  private checkPortalCollision() {
+    if (this.buildings.length === 0) return;
+
+    const agentCol = Math.floor(this.agent.sprite.x / this.mapRef.tileWidth);
+    const agentRow = Math.floor((this.agent.sprite.y - 1) / this.mapRef.tileHeight); // -1 because origin is bottom
+
+    if (this.currentBuilding) {
+      // Inside a building — check current floor portals
+      const floor = this.currentBuilding.floors[this.currentFloor];
+      if (!floor) return;
+
+      const localCol = agentCol - this.currentBuilding.zoneCol;
+      const localRow = agentRow - this.currentBuilding.zoneRow;
+
+      for (const portal of floor.portals) {
+        if (portal.localCol === localCol && portal.localRow === localRow) {
+          if (portal.kind === "entry") {
+            this.exitBuilding();
+            return;
+          } else if (portal.kind === "stairs_up" && this.currentFloor < this.currentBuilding.floors.length - 1) {
+            this.changeFloor(this.currentFloor + 1);
+            return;
+          } else if (portal.kind === "stairs_down" && this.currentFloor > 0) {
+            this.changeFloor(this.currentFloor - 1);
+            return;
+          }
+        }
+      }
+    } else {
+      // Outside — check entry portals on ground floor of all buildings
+      for (const building of this.buildings) {
+        const floor = building.floors[0];
+        if (!floor) continue;
+
+        for (const portal of floor.portals) {
+          if (portal.kind !== "entry") continue;
+          const portalWorldCol = building.zoneCol + portal.localCol;
+          const portalWorldRow = building.zoneRow + portal.localRow;
+          if (agentCol === portalWorldCol && agentRow === portalWorldRow) {
+            this.enterBuilding(building.id, 0);
+            return;
+          }
+        }
+      }
     }
   }
 

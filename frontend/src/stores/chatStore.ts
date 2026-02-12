@@ -25,6 +25,7 @@ interface ChatStore {
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
   magicEffectPoolSize: number;
+  debugWalkability: boolean;
 
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -43,6 +44,7 @@ interface ChatStore {
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
   setMagicEffectPoolSize: (size: number) => void;
+  setDebugWalkability: (on: boolean) => void;
   fetchToolRegistry: () => Promise<void>;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
@@ -81,6 +83,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   onboardingCompleted: null,
   toolRegistry: [],
   magicEffectPoolSize: 0,
+  debugWalkability: false,
 
   addMessage: (message) =>
     set((state) => {
@@ -128,6 +131,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setToolRegistry: (tools) => set({ toolRegistry: tools }),
 
   setMagicEffectPoolSize: (size) => set({ magicEffectPoolSize: size }),
+
+  setDebugWalkability: (on) => set({ debugWalkability: on }),
 
   fetchToolRegistry: async () => {
     try {

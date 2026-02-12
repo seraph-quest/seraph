@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
+import { EventBus } from "../game/EventBus";
 import { DialogFrame } from "./chat/DialogFrame";
 
 interface McpServer {
@@ -161,6 +162,8 @@ export function SettingsPanel() {
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restartOnboarding = useChatStore((s) => s.restartOnboarding);
   const loadSessions = useChatStore((s) => s.loadSessions);
+  const debugWalkability = useChatStore((s) => s.debugWalkability);
+  const setDebugWalkability = useChatStore((s) => s.setDebugWalkability);
 
   const [servers, setServers] = useState<McpServer[]>([]);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -250,6 +253,24 @@ export function SettingsPanel() {
               </button>
             )}
           </div>
+
+          {import.meta.env.DEV && (
+            <div className="px-1">
+              <div className="text-[8px] uppercase tracking-wider text-retro-border font-bold mb-1">
+                Debug
+              </div>
+              <button
+                onClick={() => {
+                  const next = !debugWalkability;
+                  setDebugWalkability(next);
+                  EventBus.emit("toggle-debug-walkability", next);
+                }}
+                className="text-[8px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
+              >
+                {debugWalkability ? "\u2611" : "\u2610"} Show walkability grid
+              </button>
+            </div>
+          )}
 
           <div className="px-1">
             <div className="text-[8px] uppercase tracking-wider text-retro-border font-bold mb-1">

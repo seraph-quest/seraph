@@ -195,6 +195,13 @@ export class Pathfinder {
   }
 
   /**
+   * Expose the collision grid (0 = walkable, 1 = blocked).
+   */
+  getGrid(): readonly number[][] {
+    return this.grid;
+  }
+
+  /**
    * Check if a pixel position is on a walkable tile.
    */
   isWalkable(px: number, py: number): boolean {

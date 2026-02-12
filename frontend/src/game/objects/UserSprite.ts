@@ -2,10 +2,12 @@ import Phaser from "phaser";
 import { SCENE } from "../../config/constants";
 import { EventBus } from "../EventBus";
 import type { Pathfinder } from "../lib/Pathfinder";
+import type { SpriteConfig } from "./AgentSprite";
 
 const SPRITE_KEY = "user-avatar";
 const FRAME_W = 32;
 const FRAME_H = 32;
+const CHAR_SHEET_COLS = 16;
 
 const STATUS_FONT_SIZE = 7;
 const STATUS_PADDING = 4;
@@ -36,24 +38,32 @@ export class UserSprite {
   currentBuilding: string | null = null;
   currentFloor: number = 0;
 
-  constructor(scene: Phaser.Scene, x: number, y: number) {
+  constructor(scene: Phaser.Scene, x: number, y: number, spriteConfig?: SpriteConfig) {
     this.scene = scene;
     this.homeX = x;
     this.homeY = y;
 
-    if (!scene.textures.exists(SPRITE_KEY) || scene.textures.get(SPRITE_KEY).frameTotal <= 2) {
-      if (scene.textures.exists(SPRITE_KEY)) {
-        scene.textures.remove(SPRITE_KEY);
+    if (spriteConfig && scene.textures.exists(spriteConfig.key)) {
+      this.sprite = scene.add.sprite(x, y, spriteConfig.key, spriteConfig.colOffset);
+      this.sprite.setScale(SCENE.SPRITE_SCALE);
+      this.sprite.setOrigin(0.5, 1);
+      this.sprite.setDepth(10);
+      this.createCharSheetAnimations(spriteConfig);
+    } else {
+      if (!scene.textures.exists(SPRITE_KEY) || scene.textures.get(SPRITE_KEY).frameTotal <= 2) {
+        if (scene.textures.exists(SPRITE_KEY)) {
+          scene.textures.remove(SPRITE_KEY);
+        }
+        this.createFallbackTexture(scene);
       }
-      this.createFallbackTexture(scene);
+
+      this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
+      this.sprite.setScale(SCENE.SPRITE_SCALE);
+      this.sprite.setOrigin(0.5, 1);
+      this.sprite.setDepth(10);
+      this.createAnimations();
     }
 
-    this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
-    this.sprite.setScale(SCENE.SPRITE_SCALE);
-    this.sprite.setOrigin(0.5, 1);
-    this.sprite.setDepth(10);
-
-    this.createAnimations();
     this.sprite.play("user-idle");
 
     this.startBob();
@@ -177,6 +187,39 @@ export class UserSprite {
           end: 5,
           zeroPad: 3,
         }),
+        frameRate: 8,
+        repeat: -1,
+      });
+    }
+  }
+
+  private createCharSheetAnimations(config: SpriteConfig) {
+    const scene = this.scene;
+    const { key, colOffset } = config;
+    const cols = CHAR_SHEET_COLS;
+
+    scene.anims.create({
+      key: "user-idle",
+      frames: [{ key, frame: colOffset }],
+      frameRate: 1,
+      repeat: 0,
+    });
+
+    const dirMap: Array<{ dir: string; row: number }> = [
+      { dir: "down", row: 0 },
+      { dir: "left", row: 1 },
+      { dir: "right", row: 2 },
+      { dir: "up", row: 3 },
+    ];
+
+    for (const { dir, row } of dirMap) {
+      const frames: Phaser.Types.Animations.AnimationFrame[] = [];
+      for (let i = 0; i < 4; i++) {
+        frames.push({ key, frame: row * cols + colOffset + i });
+      }
+      scene.anims.create({
+        key: `user-walk-${dir}`,
+        frames,
         frameRate: 8,
         repeat: -1,
       });

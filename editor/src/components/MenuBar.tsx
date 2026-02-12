@@ -9,7 +9,13 @@ export function MenuBar() {
 
   const handleNew = useCallback(() => {
     if (!confirm("Create a new map? Unsaved changes will be lost.")) return;
-    store.newMap(64, 40);
+    const widthStr = prompt("Map width (16–256 tiles):", "64");
+    if (widthStr === null) return;
+    const heightStr = prompt("Map height (16–256 tiles):", "40");
+    if (heightStr === null) return;
+    const w = Math.max(16, Math.min(256, Math.round(Number(widthStr) || 64)));
+    const h = Math.max(16, Math.min(256, Math.round(Number(heightStr) || 40)));
+    store.newMap(w, h);
   }, [store]);
 
   const handleSave = useCallback(() => {
@@ -71,7 +77,7 @@ export function MenuBar() {
         Village Editor
       </span>
       <div className="w-px h-4 bg-gray-700" />
-      <Tooltip text="New Map" desc="Create a blank 64x40 map. Unsaved changes will be lost." side="bottom">
+      <Tooltip text="New Map" desc="Create a new map with custom dimensions. Unsaved changes will be lost." side="bottom">
         <button onClick={handleNew} className="px-2 py-0.5 hover:bg-gray-700 rounded text-gray-300">
           New
         </button>

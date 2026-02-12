@@ -1,6 +1,6 @@
 import Phaser from "phaser";
 import { EventBus } from "../EventBus";
-import { AgentSprite } from "../objects/AgentSprite";
+import { AgentSprite, type SpriteConfig } from "../objects/AgentSprite";
 import { MagicEffect } from "../objects/MagicEffect";
 import { SpeechBubble } from "../objects/SpeechBubble";
 import { UserSprite } from "../objects/UserSprite";
@@ -75,6 +75,16 @@ export class VillageScene extends Phaser.Scene {
   // Spawn points
   private agentSpawn = { x: 512, y: 350 };
   private userSpawn = { x: 832, y: 340 };
+
+  // Character sheet sprite configs (parsed from spawn point properties)
+  private agentSpriteConfig: (SpriteConfig & { file: string }) | null = null;
+  private userSpriteConfig: (SpriteConfig & { file: string }) | null = null;
+
+  // WASD / arrow key movement
+  private cursors: Phaser.Types.Input.Keyboard.CursorKeys | null = null;
+  private wasd: Record<string, Phaser.Input.Keyboard.Key> | null = null;
+  private userMoving = false;
+  private userMoveTween: Phaser.Tweens.Tween | null = null;
 
   // Wander zone
   private wanderZone: { x: number; y: number; width: number; height: number } | null = null;
@@ -161,10 +171,24 @@ export class VillageScene extends Phaser.Scene {
     // Build collision grid from tile properties
     this.buildCollisionGrid(map);
 
-    // Parse object layer
+    // Parse object layer (reads spawn points + sprite_sheet properties)
     this.parseObjectLayer(map);
 
-    // Parse magic effects from map custom properties
+    // Queue character sheet loads if sprite_sheet was specified
+    let needsSpriteLoad = false;
+    const queuedKeys = new Set<string>();
+    for (const cfg of [this.agentSpriteConfig, this.userSpriteConfig]) {
+      if (cfg && !queuedKeys.has(cfg.key) && !this.textures.exists(cfg.key)) {
+        this.load.spritesheet(cfg.key, `assets/characters/${cfg.file}`, {
+          frameWidth: 24,
+          frameHeight: 24,
+        });
+        queuedKeys.add(cfg.key);
+        needsSpriteLoad = true;
+      }
+    }
+
+    // Parse magic effects from map custom properties (may also queue loads + call start)
     this.parseMagicEffects(map);
 
     // Parse building definitions from map custom properties
@@ -172,18 +196,7 @@ export class VillageScene extends Phaser.Scene {
 
     // Camera setup
     this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
-
-    // Center the map in the viewport
-    const canvasW = this.scale.width;
-    const canvasH = this.scale.height;
-    if (map.widthInPixels < canvasW || map.heightInPixels < canvasH) {
-      // Map is smaller than canvas — center it
-      this.cameras.main.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
-    } else {
-      this.cameras.main.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
-    }
-
-    // Background color
+    this.cameras.main.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
     this.cameras.main.setBackgroundColor("#4a8c3f");
 
     // ─── Tooltip ─────────────────────────────────────
@@ -200,8 +213,39 @@ export class VillageScene extends Phaser.Scene {
     this.tooltip.setDepth(100);
     this.tooltip.setVisible(false);
 
+    // ─── Keyboard Input ──────────────────────────────
+    if (this.input.keyboard) {
+      this.cursors = this.input.keyboard.createCursorKeys();
+      this.wasd = this.input.keyboard.addKeys("W,A,S,D") as Record<
+        string,
+        Phaser.Input.Keyboard.Key
+      >;
+    }
+
+    // Defer sprite creation if character sheets need loading
+    if (needsSpriteLoad) {
+      this.load.once("complete", () => this.initSpritesAndEvents(map));
+      this.load.start();
+    } else {
+      this.initSpritesAndEvents(map);
+    }
+  }
+
+  // ─── Deferred Sprite + Event Init ─────────────────
+
+  private initSpritesAndEvents(map: Phaser.Tilemaps.Tilemap) {
+    // Validate sprite configs — fall back to atlas if texture failed to load
+    const agentCfg =
+      this.agentSpriteConfig && this.textures.exists(this.agentSpriteConfig.key)
+        ? { key: this.agentSpriteConfig.key, colOffset: this.agentSpriteConfig.colOffset }
+        : undefined;
+    const userCfg =
+      this.userSpriteConfig && this.textures.exists(this.userSpriteConfig.key)
+        ? { key: this.userSpriteConfig.key, colOffset: this.userSpriteConfig.colOffset }
+        : undefined;
+
     // ─── Agent (Seraph) ──────────────────────────────
-    this.agent = new AgentSprite(this, this.agentSpawn.x, this.agentSpawn.y);
+    this.agent = new AgentSprite(this, this.agentSpawn.x, this.agentSpawn.y, agentCfg);
     this.agent.sprite.setInteractive({ useHandCursor: true });
     this.agent.sprite.on("pointerdown", () => {
       EventBus.emit("toggle-chat");
@@ -209,8 +253,11 @@ export class VillageScene extends Phaser.Scene {
     this.attachTooltip(this.agent.sprite, "Seraph");
 
     // ─── User Avatar ─────────────────────────────────
-    this.userAvatar = new UserSprite(this, this.userSpawn.x, this.userSpawn.y);
+    this.userAvatar = new UserSprite(this, this.userSpawn.x, this.userSpawn.y, userCfg);
     this.attachTooltip(this.userAvatar.sprite, "You");
+
+    // ─── Camera Follow ───────────────────────────────
+    this.cameras.main.startFollow(this.userAvatar.sprite, true, 0.1, 0.1);
 
     // ─── Speech Bubble ───────────────────────────────
     this.speechBubble = new SpeechBubble(
@@ -233,6 +280,7 @@ export class VillageScene extends Phaser.Scene {
 
     // ─── EventBus handlers ───────────────────────────
     this.handleThink = () => {
+      this.cancelUserMove();
       this.stopWandering();
       this.speechBubble.hide();
       this.agent.moveAlongPath(this.pathfinder, this.agentSpawn.x, this.agentSpawn.y, () => {
@@ -335,14 +383,17 @@ export class VillageScene extends Phaser.Scene {
     }
     if (this.userAvatar) {
       this.userAvatar.sprite.setDepth(5 + this.userAvatar.sprite.y * 0.001);
+
+      // WASD / arrow key movement
+      this.handlePlayerInput();
+      this.userAvatar.updateStatusPosition();
     }
 
     if (this.activeMagicEffect) {
       this.activeMagicEffect.setPosition(this.agent.sprite.x, this.agent.sprite.y);
     }
 
-    this.speechBubble.updatePosition();
-    this.userAvatar.updateStatusPosition();
+    if (this.speechBubble) this.speechBubble.updatePosition();
 
     // Portal detection for agent sprite
     this.checkPortalCollision();
@@ -359,14 +410,15 @@ export class VillageScene extends Phaser.Scene {
     this.scale.off("resize", this.onResize, this);
     this.stopWandering();
     this.clearMagicEffect();
-    this.userAvatar.cancelMovement();
+    this.cancelUserMove();
 
+    if (this.userAvatar) this.userAvatar.cancelMovement();
     if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
     if (this.nudgeTimer) this.nudgeTimer.remove(false);
 
-    this.agent.destroy();
-    this.userAvatar.destroy();
-    this.speechBubble.destroy();
+    if (this.agent) this.agent.destroy();
+    if (this.userAvatar) this.userAvatar.destroy();
+    if (this.speechBubble) this.speechBubble.destroy();
   }
 
   // ─── Collision Grid ────────────────────────────────
@@ -419,10 +471,15 @@ export class VillageScene extends Phaser.Scene {
       const getProp = (name: string) => props?.find((p) => p.name === name)?.value;
 
       if (obj.type === "spawn_point") {
+        const spriteSheet = getProp("sprite_sheet") as string | undefined;
+        const cfg = spriteSheet ? this.parseSpriteSheetName(spriteSheet) : null;
+
         if (obj.name === "agent_spawn") {
           this.agentSpawn = { x: obj.x!, y: obj.y! };
+          if (cfg) this.agentSpriteConfig = cfg;
         } else if (obj.name === "user_spawn") {
           this.userSpawn = { x: obj.x!, y: obj.y! };
+          if (cfg) this.userSpriteConfig = cfg;
         }
       } else if (obj.type === "wander_zone") {
         this.wanderZone = {
@@ -433,6 +490,21 @@ export class VillageScene extends Phaser.Scene {
         };
       }
     }
+  }
+
+  private parseSpriteSheetName(
+    name: string
+  ): (SpriteConfig & { file: string }) | null {
+    const match = name.match(/^(Character_\d{3})_(\d+)$/);
+    if (!match) return null;
+    const sheetName = match[1];
+    const charNum = parseInt(match[2], 10); // 1-based
+    if (charNum < 1 || charNum > 4) return null;
+    return {
+      key: sheetName,
+      file: `${sheetName}.png`,
+      colOffset: (charNum - 1) * 4,
+    };
   }
 
   // ─── Tooltip ───────────────────────────────────────
@@ -815,6 +887,80 @@ export class VillageScene extends Phaser.Scene {
           }
         }
       }
+    }
+  }
+
+  // ─── Player Input (WASD / Arrow Keys) ────────────
+
+  private handlePlayerInput() {
+    if (this.userMoving || !this.cursors || !this.wasd) return;
+
+    let dx = 0;
+    let dy = 0;
+    let dir: string | null = null;
+
+    if (this.cursors.left.isDown || this.wasd["A"].isDown) {
+      dx = -1; dir = "left";
+    } else if (this.cursors.right.isDown || this.wasd["D"].isDown) {
+      dx = 1; dir = "right";
+    } else if (this.cursors.up.isDown || this.wasd["W"].isDown) {
+      dy = -1; dir = "up";
+    } else if (this.cursors.down.isDown || this.wasd["S"].isDown) {
+      dy = 1; dir = "down";
+    }
+
+    if (!dir) return;
+
+    const ts = this.mapRef.tileWidth;
+    const col = Math.floor(this.userAvatar.sprite.x / ts);
+    const row = Math.floor((this.userAvatar.sprite.y - 1) / ts);
+    const tc = col + dx;
+    const tr = row + dy;
+    const tx = tc * ts + ts / 2;
+    const ty = tr * ts + ts / 2;
+
+    if (!this.pathfinder.isWalkable(tx, ty)) return;
+
+    this.userMoving = true;
+    this.userAvatar.cancelMovement();
+    this.userAvatar.sprite.play(`user-walk-${dir}`);
+
+    const duration = Math.max((ts / SCENE.WALK_SPEED) * 1000, 100);
+    this.userMoveTween = this.tweens.add({
+      targets: this.userAvatar.sprite,
+      x: tx,
+      y: ty,
+      duration,
+      ease: "Linear",
+      onComplete: () => {
+        this.userMoveTween = null;
+        this.userMoving = false;
+        if (!this.isAnyMoveKeyDown()) {
+          this.userAvatar.sprite.play("user-idle");
+        }
+      },
+    });
+  }
+
+  private isAnyMoveKeyDown(): boolean {
+    if (!this.cursors || !this.wasd) return false;
+    return (
+      this.cursors.left.isDown ||
+      this.cursors.right.isDown ||
+      this.cursors.up.isDown ||
+      this.cursors.down.isDown ||
+      this.wasd["A"].isDown ||
+      this.wasd["D"].isDown ||
+      this.wasd["W"].isDown ||
+      this.wasd["S"].isDown
+    );
+  }
+
+  private cancelUserMove() {
+    this.userMoving = false;
+    if (this.userMoveTween) {
+      this.userMoveTween.stop();
+      this.userMoveTween = null;
     }
   }
 

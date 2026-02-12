@@ -5,6 +5,12 @@ import type { Pathfinder } from "../lib/Pathfinder";
 const SPRITE_KEY = "agent";
 const FRAME_W = 32;
 const FRAME_H = 32;
+const CHAR_SHEET_COLS = 16;
+
+export interface SpriteConfig {
+  key: string;       // Spritesheet texture key (e.g. "Character_010")
+  colOffset: number; // Column offset within the sheet (0, 4, 8, or 12)
+}
 
 export class AgentSprite {
   sprite: Phaser.GameObjects.Sprite;
@@ -15,26 +21,34 @@ export class AgentSprite {
   currentBuilding: string | null = null;
   currentFloor: number = 0;
 
-  constructor(scene: Phaser.Scene, x: number, y: number) {
+  constructor(scene: Phaser.Scene, x: number, y: number, spriteConfig?: SpriteConfig) {
     this.scene = scene;
 
-    const hasValidFrames =
-      scene.textures.exists(SPRITE_KEY) &&
-      scene.textures.get(SPRITE_KEY).frameTotal > 2;
+    if (spriteConfig && scene.textures.exists(spriteConfig.key)) {
+      this.sprite = scene.add.sprite(x, y, spriteConfig.key, spriteConfig.colOffset);
+      this.sprite.setScale(SCENE.SPRITE_SCALE);
+      this.sprite.setOrigin(0.5, 1);
+      this.sprite.setDepth(10);
+      this.createCharSheetAnimations(spriteConfig);
+    } else {
+      const hasValidFrames =
+        scene.textures.exists(SPRITE_KEY) &&
+        scene.textures.get(SPRITE_KEY).frameTotal > 2;
 
-    if (!hasValidFrames) {
-      if (scene.textures.exists(SPRITE_KEY)) {
-        scene.textures.remove(SPRITE_KEY);
+      if (!hasValidFrames) {
+        if (scene.textures.exists(SPRITE_KEY)) {
+          scene.textures.remove(SPRITE_KEY);
+        }
+        this.createFallbackTexture(scene);
       }
-      this.createFallbackTexture(scene);
+
+      this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
+      this.sprite.setScale(SCENE.SPRITE_SCALE);
+      this.sprite.setOrigin(0.5, 1);
+      this.sprite.setDepth(10);
+      this.createAnimations();
     }
 
-    this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
-    this.sprite.setScale(SCENE.SPRITE_SCALE);
-    this.sprite.setOrigin(0.5, 1);
-    this.sprite.setDepth(10);
-
-    this.createAnimations();
     this.playAnim("idle");
   }
 
@@ -266,6 +280,52 @@ export class AgentSprite {
       frameRate: 3,
       repeat: -1,
     });
+  }
+
+  private createCharSheetAnimations(config: SpriteConfig) {
+    const scene = this.scene;
+    const { key, colOffset } = config;
+    const cols = CHAR_SHEET_COLS;
+
+    const dirMap: Array<{ dir: string; row: number }> = [
+      { dir: "down", row: 0 },
+      { dir: "left", row: 1 },
+      { dir: "right", row: 2 },
+      { dir: "up", row: 3 },
+    ];
+
+    const framesByDir: Record<string, Phaser.Types.Animations.AnimationFrame[]> = {};
+
+    for (const { dir, row } of dirMap) {
+      const frames: Phaser.Types.Animations.AnimationFrame[] = [];
+      for (let i = 0; i < 4; i++) {
+        frames.push({ key, frame: row * cols + colOffset + i });
+      }
+      framesByDir[dir] = frames;
+
+      scene.anims.create({
+        key: `walk-${dir}`,
+        frames,
+        frameRate: 8,
+        repeat: -1,
+      });
+    }
+
+    scene.anims.create({
+      key: "idle",
+      frames: [{ key, frame: colOffset }],
+      frameRate: 1,
+      repeat: 0,
+    });
+
+    scene.anims.create({ key: "think", frames: framesByDir["down"], frameRate: 3, repeat: -1 });
+    scene.anims.create({ key: "at-well", frames: framesByDir["left"], frameRate: 4, repeat: -1 });
+    scene.anims.create({ key: "at-mailbox", frames: framesByDir["left"], frameRate: 3, repeat: -1 });
+    scene.anims.create({ key: "at-signpost", frames: framesByDir["right"], frameRate: 4, repeat: -1 });
+    scene.anims.create({ key: "at-clock", frames: framesByDir["right"], frameRate: 3, repeat: -1 });
+    scene.anims.create({ key: "at-bench", frames: framesByDir["up"], frameRate: 3, repeat: -1 });
+    scene.anims.create({ key: "at-tower", frames: framesByDir["up"], frameRate: 4, repeat: -1 });
+    scene.anims.create({ key: "at-forge", frames: framesByDir["down"], frameRate: 5, repeat: -1 });
   }
 
   moveTo(x: number, y: number, onComplete?: () => void) {

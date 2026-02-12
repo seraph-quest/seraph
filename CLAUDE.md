@@ -10,10 +10,12 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Entry**: `src/main.tsx` → `src/App.tsx`
 - **Key files**:
   - `src/game/PhaserGame.tsx` - React wrapper for Phaser instance
-  - `src/game/scenes/StudyScene.ts` - Village scene (64x32 tile map, buildings, forest, day/night cycle)
+  - `src/game/scenes/VillageScene.ts` - Village scene (dynamic Tiled JSON map, buildings with interiors, forest, day/night cycle, magic effects)
   - `src/game/objects/AgentSprite.ts` - Phaser sprite for Seraph avatar
   - `src/game/objects/UserSprite.ts` - Phaser sprite for user avatar
   - `src/game/objects/SpeechBubble.ts` - Phaser speech bubble
+  - `src/game/objects/MagicEffect.ts` - Animated spell overlay (pool-cycled, spawned during tool use, faded on idle)
+  - `src/game/lib/Pathfinder.ts` - A* pathfinding wrapper (easystarjs); diagonal movement, path simplification, grid swap for interiors
   - `src/game/EventBus.ts` - Bridges Phaser events to React
   - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connection, agent visual state, onboarding, ambient, ambientTooltip, chatMaximized, toolRegistry, session persistence via localStorage)
   - `src/stores/questStore.ts` - Zustand store (goal tree, domain progress dashboard)
@@ -27,6 +29,34 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, MCP server management UI, version)
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
+
+### Village Map Editor (`editor/`)
+- **Stack**: React 19 + Vite 6 + TypeScript 5.6 + Tailwind CSS 3 + Zustand 5
+- **Entry**: `src/main.tsx` → `src/App.tsx`
+- **Layout**: 3-column (ToolBar | MapCanvas | panels: LayerPanel, TilesetPanel, ObjectPanel, BuildingPanel)
+- **Key directories**:
+  - `src/components/` — MapCanvas, ToolBar, LayerPanel, TilesetPanel, ObjectPanel, NPCBrowser, AnimationDefiner, MenuBar, BuildingPanel, Tooltip
+  - `src/stores/editorStore.ts` — Map data (`layers: CellStack[][]`), editor state, viewport, undo/redo (100 levels)
+  - `src/stores/tilesetStore.ts` — Tileset loading, animation groups/lookup, walkability flags, sprite cache, recent selections
+  - `src/hooks/` — useCanvasInteraction, useKeyboardShortcuts
+  - `src/lib/` — canvas-renderer, flood-fill, map-io (Tiled JSON 1.10 import/export), sprite-registry, stamps, tileset-loader, undo
+  - `src/types/editor.ts` — `CellStack` (`number[]`), `BuildingDef`, `BuildingFloor`, `BuildingPortal`, `TileAnimationGroup`
+  - `src/types/map.ts` — Tiled JSON schema types
+- **Features**:
+  - 6 tools: Hand, Brush, Eraser, Fill, Object, Walkability + 3 view toggles
+  - 5 tile layers (ground, terrain, buildings, decorations, treetops) + 1 object layer
+  - 33 tilesets (16px tiles) organized by category (Village, World, Dungeon, Interior, Animations)
+  - Tile stacking: `CellStack = number[]` — multiple tiles per cell per layer, serialized as Tiled sublayers (`layer__N`)
+  - Tile animations: define frame sequences per anchor tile, optional `isMagicEffect` flag for spell pool
+  - Object placement + NPC browser (212 characters + 53 enemies)
+  - Building interiors: multi-floor editor with portal placement (entry, stairs_up, stairs_down)
+  - Per-tile walkability painting, persisted per tileset
+  - Undo/redo (100 levels)
+- **Map I/O**: Tiled JSON 1.10 compatible; sublayer serialization for stacked cells; custom properties for buildings, magic effects, spawn points
+- **Assets**: Proxied from `../frontend/public/assets/` (tilesets, spritesheets shared with game)
+- **Session persistence**: Zustand persist middleware → localStorage
+- **Quick start**: `cd editor && npm install && npm run dev` → `http://localhost:3001`
+- See `editor/README.md` for detailed documentation
 
 ### Backend (`backend/`)
 - **Stack**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
@@ -134,11 +164,14 @@ User sends message → THINKING at bench (center 50%, pixel 512,350)
   ├─ browse_webpage     → WALKING → AT-TOWER    (tower: 640,200)
   ├─ MCP tools          → WALKING → building assigned in mcp-servers.json
   └─ no tool / unknown  → stays THINKING
+  Tool with magic_effect → MagicEffect overlay spawned at agent (cycled from pool)
   WS "final" received → WALKING back → SPEAKING (3s) → IDLE → WANDERING
 ```
 - Native tools have static targets in `animationStateMachine.ts`
 - MCP tools resolved dynamically from `toolRegistry` (fetched from `GET /api/tools` on WS connect)
+- Tool station positions now defined via map object spawn points (not hardcoded); percentage-based fallback still exists
 - Building→coords mapping: `BUILDING_DEFAULTS` in backend `registry.py`, `BUILDING_POSITIONS` in frontend `constants.ts`
+- Magic effects: `MagicEffect` instances spawned from `magicEffectPool` (loaded from map), destroyed/faded on final answer
 Animation states: `idle`, `thinking`, `walking`, `wandering`, `at-well`, `at-signpost`, `at-bench`, `at-tower`, `at-forge`, `at-clock`, `at-mailbox`, `speaking`
 
 ## Proactive Message Flow
@@ -193,12 +226,17 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 ```
 
 ## Village Scene (Phaser)
-- 64x32 tile map (1024x512px at 16px tiles), scaled 2x
+- Dynamic map size loaded from Tiled JSON (default 64x40, camera bounds set from `map.widthInPixels`/`heightInPixels`), scaled 2x
+- Tile stacking via sublayers: layer names with `__N` suffix (e.g. `terrain__2`) share base layer depth; all sublayers checked for collision
 - Buildings: House 1 (west), Church (center), House 2 (east), Forge, Tower, Clock, Mailbox
+- **Building interiors**: `enterBuilding()` hides exterior zone tiles, `renderInteriorFloor()` creates interior container at depth 2.5, `changeFloor()` switches floors, `exitBuilding()` restores exterior; portal detection (`checkPortalCollision()`) in update loop for entry/stairs
+- **Magic effects**: `magicEffectPool` loaded from map custom property `magic_effects`; `parseMagicEffects()` loads animation spritesheets; `handleCastEffect()` spawns overlay at agent position; destroyed/faded on final answer
+- **WASD/arrow key movement**: User avatar moves tile-by-tile with collision checking (`handlePlayerInput()` in update loop); blocked during tween
+- **Character sprite assignment**: Spawn point objects with `sprite_sheet` property (format `Character_XXX_Y`) parsed to `SpriteConfig { key, colOffset }`; `createCharSheetAnimations()` builds directional animations from 16-column sheets
 - Procedural forest (density 0.45, max 300 trees)
 - Day/night cycle (hours 6-17 = day, 18+ = night)
-- Agent wanders between 12 waypoints when idle
-- User avatar positioned at home (832, 340)
+- Agent wanders between walkable tiles when idle (A* pathfinding via `Pathfinder`)
+- User avatar positioned at home spawn point
 
 ## Chat Panel Controls
 - **Maximize/Minimize**: ▲/▼ button on DialogFrame expands chat overlay to nearly full screen (16px margins all sides) with CSS transition
@@ -208,8 +246,10 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 
 ## Design Decisions
 1. **Phaser 3 canvas** — Village scene rendered via Phaser with tile-based map. React overlays for chat/quest panels.
-2. **Placeholder art** — Sprite sheet format defined (32x32 frames) for future art drop-in via PixelLab.
+2. **Pixel art pipeline** — Sprite sheet format defined (16-column sheets, 32x32 frames). PixelLab MCP integration available for character/tile generation.
 3. **Tool detection via regex** — 5 patterns + fallback string match on step content. Dynamic tool set from API, static fallback for native tools.
 4. **No SSR, no router** — Single-view SPA, Vite dev server only.
 5. **SQLite + LanceDB** — Lightweight persistence. SQLModel for structured data, LanceDB for vector similarity search.
 6. **Onboarding agent** — Separate agent instance with restricted tool set for first-time user discovery.
+7. **Tile stacking via CellStack** — `number[]` per cell per layer allows overlapping tiles (e.g. decoration on terrain). Serialized as Tiled sublayers (`layer__N`) for format compatibility.
+8. **Editor as standalone app** — Separate Vite app (`editor/`) with own stores and components; shares tileset/sprite assets from `frontend/public/assets/` via proxy. Outputs Tiled JSON consumed directly by VillageScene.

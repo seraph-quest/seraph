@@ -51,16 +51,17 @@ interface NpcDef {
   frameCol: number;
 }
 
-/** Tileset file names to load */
-const TILESET_FILES = [
-  "CuteRPG_Field_Tiles",
-  "CuteRPG_Village",
-  "CuteRPG_Forest",
-  "CuteRPG_Houses_A",
-  "CuteRPG_Houses_B",
-  "CuteRPG_Houses_C",
-  "CuteRPG_Harbor",
-];
+/** Tracks an animated tile definition for manual frame cycling */
+interface AnimatedTileDef {
+  /** All tiles sharing this animation (same layer, same base index) */
+  tiles: Phaser.Tilemaps.Tile[];
+  /** Animation frames: each has a global tile index and duration */
+  frames: Array<{ gid: number; duration: number }>;
+  /** Current frame index */
+  currentFrame: number;
+  /** Time elapsed on current frame (ms) */
+  elapsed: number;
+}
 
 /** Layer depth mapping */
 const LAYER_DEPTHS: Record<string, number> = {
@@ -121,6 +122,7 @@ export class VillageScene extends Phaser.Scene {
   private tooltipBg!: Phaser.GameObjects.Rectangle;
 
   private debugGridGraphics: Phaser.GameObjects.Graphics | null = null;
+  private animatedTiles: AnimatedTileDef[] = [];
 
   private isWandering = false;
   private wanderTimer: Phaser.Time.TimerEvent | null = null;
@@ -146,10 +148,20 @@ export class VillageScene extends Phaser.Scene {
     // Load Tiled JSON map
     this.load.tilemapTiledJSON("village-map", SCENE.MAP_FILE);
 
-    // Load tileset images
-    for (const name of TILESET_FILES) {
-      this.load.image(name, `assets/tilesets/${name}.png`);
-    }
+    // Once map JSON is parsed, dynamically queue ALL tileset images
+    this.load.on("filecomplete-tilemapJSON-village-map", () => {
+      const mapData = this.cache.tilemap.get("village-map");
+      if (mapData?.data?.tilesets) {
+        for (const ts of mapData.data.tilesets) {
+          if (ts.image) {
+            // Map paths are relative to map file: "../assets/tilesets/X.png"
+            // Strip leading "../" to get path relative to public/
+            const imagePath = ts.image.replace(/^\.\.\//, "");
+            this.load.image(ts.name, imagePath);
+          }
+        }
+      }
+    });
 
     // Load character sprites
     AgentSprite.preload(this);
@@ -168,10 +180,10 @@ export class VillageScene extends Phaser.Scene {
 
     this.mapRef = map;
 
-    // Add tilesets
+    // Add tilesets (dynamically from map data)
     const tilesets: Phaser.Tilemaps.Tileset[] = [];
-    for (const name of TILESET_FILES) {
-      const ts = map.addTilesetImage(name, name);
+    for (const tsData of map.tilesets) {
+      const ts = map.addTilesetImage(tsData.name, tsData.name);
       if (ts) tilesets.push(ts);
     }
     this.tilesetsRef = tilesets;
@@ -185,6 +197,9 @@ export class VillageScene extends Phaser.Scene {
         layer.setDepth(depth);
       }
     }
+
+    // Build animated tile registry for manual frame cycling
+    this.initAnimatedTiles(map);
 
     // Build collision grid from tile properties
     this.buildCollisionGrid(map);
@@ -425,7 +440,10 @@ export class VillageScene extends Phaser.Scene {
     EventBus.emit("current-scene-ready", this);
   }
 
-  update() {
+  update(_time: number, delta: number) {
+    // Cycle animated tile frames
+    this.updateAnimatedTiles(delta);
+
     // Y-sort characters: depth = 5 + normalized y
     if (this.agent) {
       this.agent.sprite.setDepth(5 + this.agent.sprite.y * 0.001);
@@ -477,6 +495,86 @@ export class VillageScene extends Phaser.Scene {
     if (this.agent) this.agent.destroy();
     if (this.userAvatar) this.userAvatar.destroy();
     if (this.speechBubble) this.speechBubble.destroy();
+  }
+
+  // ─── Animated Tiles ─────────────────────────────────
+
+  private initAnimatedTiles(map: Phaser.Tilemaps.Tilemap) {
+    this.animatedTiles = [];
+
+    // Build a map of base GID → animation frames for all tilesets
+    // tileData stores animation keyed by local tile ID
+    const animMap = new Map<number, Array<{ gid: number; duration: number }>>();
+
+    for (const tileset of this.tilesetsRef) {
+      const tileData = (tileset as unknown as { tileData: Record<string, { animation?: Array<{ tileid: number; duration: number }> }> }).tileData;
+      if (!tileData) continue;
+
+      for (const [localIdStr, data] of Object.entries(tileData)) {
+        if (!data.animation || data.animation.length === 0) continue;
+        const localId = parseInt(localIdStr, 10);
+        const baseGid = tileset.firstgid + localId;
+        const frames = data.animation.map((f) => ({
+          gid: tileset.firstgid + f.tileid,
+          duration: f.duration,
+        }));
+        animMap.set(baseGid, frames);
+      }
+    }
+
+    if (animMap.size === 0) return;
+
+    // Scan all tile layers and collect tiles whose index matches an animated base GID
+    // Group by (layer + baseGid) so we update them together
+    const groupKey = (layerName: string, baseGid: number) => `${layerName}:${baseGid}`;
+    const groups = new Map<string, { tiles: Phaser.Tilemaps.Tile[]; frames: Array<{ gid: number; duration: number }> }>();
+
+    for (const layerData of map.layers) {
+      const tilemapLayer = layerData.tilemapLayer;
+      if (!tilemapLayer) continue;
+
+      for (let row = 0; row < map.height; row++) {
+        for (let col = 0; col < map.width; col++) {
+          const tile = tilemapLayer.getTileAt(col, row);
+          if (!tile || tile.index < 0) continue;
+
+          const frames = animMap.get(tile.index);
+          if (!frames) continue;
+
+          const key = groupKey(layerData.name, tile.index);
+          let group = groups.get(key);
+          if (!group) {
+            group = { tiles: [], frames };
+            groups.set(key, group);
+          }
+          group.tiles.push(tile);
+        }
+      }
+    }
+
+    for (const group of groups.values()) {
+      this.animatedTiles.push({
+        tiles: group.tiles,
+        frames: group.frames,
+        currentFrame: 0,
+        elapsed: 0,
+      });
+    }
+  }
+
+  private updateAnimatedTiles(delta: number) {
+    for (const anim of this.animatedTiles) {
+      anim.elapsed += delta;
+      const frame = anim.frames[anim.currentFrame];
+      if (anim.elapsed >= frame.duration) {
+        anim.elapsed -= frame.duration;
+        anim.currentFrame = (anim.currentFrame + 1) % anim.frames.length;
+        const newGid = anim.frames[anim.currentFrame].gid;
+        for (const tile of anim.tiles) {
+          tile.index = newGid;
+        }
+      }
+    }
   }
 
   // ─── Collision Grid ────────────────────────────────

@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { SCENE } from "../../config/constants";
 import { EventBus } from "../EventBus";
+import type { Pathfinder } from "../lib/Pathfinder";
 
 const SPRITE_KEY = "user-avatar";
 const FRAME_W = 32;
@@ -23,6 +24,7 @@ export class UserSprite {
   private scene: Phaser.Scene;
   private bobTween: Phaser.Tweens.Tween | null = null;
   private currentTween: Phaser.Tweens.Tween | null = null;
+  private pathCancelled = false;
   private glowGraphics: Phaser.GameObjects.Graphics | null = null;
   private statusContainer: Phaser.GameObjects.Container | null = null;
   private statusBg: Phaser.GameObjects.Graphics | null = null;
@@ -219,6 +221,41 @@ export class UserSprite {
     });
   }
 
+  async moveAlongPath(
+    pathfinder: Pathfinder,
+    targetX: number,
+    targetY: number,
+    onComplete?: () => void
+  ) {
+    this.cancelMovement();
+    this.pathCancelled = false;
+
+    const path = await pathfinder.findPath(
+      this.sprite.x,
+      this.sprite.y,
+      targetX,
+      targetY
+    );
+
+    if (this.pathCancelled) return;
+
+    if (!path || path.length === 0) {
+      this.moveTo(targetX, targetY, onComplete);
+      return;
+    }
+
+    const walkSegment = (index: number) => {
+      if (this.pathCancelled || index >= path.length) {
+        onComplete?.();
+        return;
+      }
+      const target = path[index];
+      this.moveTo(target.x, target.y, () => walkSegment(index + 1));
+    };
+
+    walkSegment(0);
+  }
+
   returnHome(onComplete?: () => void) {
     this.moveTo(this.homeX, this.homeY, () => {
       this.sprite.play("user-idle");
@@ -228,6 +265,7 @@ export class UserSprite {
   }
 
   cancelMovement() {
+    this.pathCancelled = true;
     if (this.currentTween) {
       this.currentTween.stop();
       this.currentTween = null;

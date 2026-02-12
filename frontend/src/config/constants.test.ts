@@ -11,24 +11,21 @@ describe("TOOL_NAMES", () => {
 
 describe("POSITIONS", () => {
   it("all values are in 0-100 range", () => {
-    for (const [key, value] of Object.entries(POSITIONS)) {
+    for (const [, value] of Object.entries(POSITIONS)) {
       expect(value).toBeGreaterThanOrEqual(0);
       expect(value).toBeLessThanOrEqual(100);
     }
   });
 });
 
-describe("SCENE.POSITIONS", () => {
-  it("has all required station keys", () => {
-    const required = ["house1", "church", "house2", "bench", "forge", "tower", "clock", "mailbox"];
-    for (const key of required) {
-      expect(SCENE.POSITIONS).toHaveProperty(key);
-    }
+describe("SCENE", () => {
+  it("has map file path", () => {
+    expect(SCENE.MAP_FILE).toBeDefined();
+    expect(SCENE.MAP_FILE).toContain("village.json");
   });
-});
 
-describe("SCENE.WANDERING", () => {
-  it("has at least 10 waypoints", () => {
-    expect(SCENE.WANDERING.WAYPOINTS.length).toBeGreaterThanOrEqual(10);
+  it("has wandering timing", () => {
+    expect(SCENE.WANDERING.MIN_DELAY_MS).toBeGreaterThan(0);
+    expect(SCENE.WANDERING.MAX_DELAY_MS).toBeGreaterThan(SCENE.WANDERING.MIN_DELAY_MS);
   });
 });

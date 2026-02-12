@@ -12,6 +12,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "easystarjs": "^0.4.4",
     "phaser": "3.90",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

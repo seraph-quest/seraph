@@ -9,6 +9,12 @@ import type {
   ToolMeta,
 } from "../types";
 
+interface ToolStationPosition {
+  x: number;
+  y: number;
+  animation: string;
+}
+
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
@@ -24,6 +30,7 @@ interface ChatStore {
   settingsPanelOpen: boolean;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
+  toolStationPositions: Record<string, ToolStationPosition>;
 
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -41,6 +48,7 @@ interface ChatStore {
   setSettingsPanelOpen: (open: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
+  setToolStationPositions: (positions: Record<string, ToolStationPosition>) => void;
   fetchToolRegistry: () => Promise<void>;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
@@ -78,6 +86,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   settingsPanelOpen: false,
   onboardingCompleted: null,
   toolRegistry: [],
+  toolStationPositions: {},
 
   addMessage: (message) =>
     set((state) => {
@@ -123,6 +132,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
 
   setToolRegistry: (tools) => set({ toolRegistry: tools }),
+
+  setToolStationPositions: (positions) => set({ toolStationPositions: positions }),
 
   fetchToolRegistry: async () => {
     try {

@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { StudyScene } from "./scenes/StudyScene";
+import { VillageScene } from "./scenes/VillageScene";
 
 export function StartGame(parent: string): Phaser.Game {
   return new Phaser.Game({
@@ -13,6 +13,6 @@ export function StartGame(parent: string): Phaser.Game {
       height: "100%",
       autoCenter: Phaser.Scale.NO_CENTER,
     },
-    scene: [StudyScene],
+    scene: [VillageScene],
   });
 }

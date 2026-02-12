@@ -6,6 +6,7 @@ export const SPEECH_DISPLAY_MS = 3000;
 export const WS_RECONNECT_DELAY_MS = 3000;
 export const WS_PING_INTERVAL_MS = 30000;
 
+// Percentage-based positions for animation state machine (fallback)
 export const POSITIONS = {
   mailbox: 10,
   well: 15,
@@ -33,6 +34,8 @@ export const TOOL_NAMES = {
 } as const;
 
 // Building name → pixel coords + animation state for dynamic MCP tools
+// These are the FALLBACK positions used when the map hasn't loaded yet.
+// VillageScene will emit "tool-stations-loaded" with positions from the map.
 export const BUILDING_POSITIONS: Record<string, { pixelX: number; pixelY: number; animation: string }> = {
   "house-1": { pixelX: 192, pixelY: 280, animation: "at-well" },
   "church":  { pixelX: 512, pixelY: 240, animation: "at-bench" },
@@ -46,24 +49,14 @@ export const BUILDING_POSITIONS: Record<string, { pixelX: number; pixelY: number
 export const SCENE = {
   TILE_SIZE: 16,
   MAP_COLS: 64,
-  MAP_ROWS: 32,
+  MAP_ROWS: 40,
   MAP_PIXEL_WIDTH: 1024,  // 64 * 16
-  MAP_PIXEL_HEIGHT: 512,  // 32 * 16
+  MAP_PIXEL_HEIGHT: 640,  // 40 * 16
   SPRITE_SCALE: 2,
   WALK_SPEED: 300,
 
-  // Tool station positions (village-local coords — where agent walks to)
-  POSITIONS: {
-    house1:  { x: 192, y: 280 },    // HOUSE 1 — web_search
-    church:  { x: 512, y: 240 },    // CHURCH  — fill_template / soul / goals
-    house2:  { x: 832, y: 280 },    // HOUSE 2 — read/write file
-    bench:   { x: 512, y: 350 },    // idle / thinking spot (south path)
-    forge:   { x: 384, y: 320 },    // FORGE — shell_execute
-    tower:   { x: 640, y: 200 },    // TOWER — browse_webpage
-    clock:   { x: 576, y: 340 },    // CLOCK — calendar
-    mailbox: { x: 128, y: 340 },    // MAILBOX — email
-    userHome: { x: 832, y: 340 },   // User avatar default position
-  },
+  /** Tiled JSON map file path (relative to public/) */
+  MAP_FILE: "maps/village.json",
 
   COLORS: {
     bubbleBg: 0xe0e0e0,
@@ -72,32 +65,7 @@ export const SCENE = {
   },
 
   WANDERING: {
-    WAYPOINTS: [
-      { x: 192, y: 280 },   // in front of house 1
-      { x: 350, y: 280 },   // path left-center
-      { x: 512, y: 240 },   // church courtyard
-      { x: 670, y: 280 },   // path right-center
-      { x: 832, y: 280 },   // in front of house 2
-      { x: 512, y: 350 },   // south path (bench)
-      { x: 300, y: 340 },   // near the well
-      { x: 720, y: 340 },   // near the stairs
-      { x: 384, y: 320 },   // near the forge
-      { x: 640, y: 200 },   // near the tower
-      { x: 576, y: 340 },   // near the clock
-      { x: 128, y: 340 },   // near the mailbox
-    ],
     MIN_DELAY_MS: 3000,
     MAX_DELAY_MS: 6000,
   },
-
-  FOREST: {
-    TILE_SPACING: 80,
-    BUFFER_TILES: 3,
-    DENSITY: 0.45,
-    MAX_TREES: 300,
-  },
-
-  // Day/night: hours 6-17 = day, 18-5 = night
-  DAY_START_HOUR: 6,
-  DAY_END_HOUR: 18,
 } as const;

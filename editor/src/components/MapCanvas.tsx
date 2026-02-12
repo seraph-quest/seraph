@@ -133,10 +133,11 @@ function drawObjects(
         const img = spriteCache.get(imgPath);
         const frameW = 24;
         const frameH = 24;
-        // Crop 16x16 content from center of 24x24 frame (4px left, 8px top margin)
-        const cropX = 4;
-        const cropY = 8;
-        const cropSize = 16;
+        // Render full 24x24 frame at native zoom, anchored at tile bottom-left.
+        // Offset left by 4px to center visible content on the tile.
+        const destW = frameW * zoom;
+        const destH = frameH * zoom;
+        const spriteOffsetX = 4 * zoom;
 
         // Animate through first 4 columns (walk cycle) when showAnimations
         let srcCol = 0;
@@ -147,7 +148,7 @@ function drawObjects(
 
         if (img) {
           ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(img, srcCol * frameW + cropX, srcRow * frameH + cropY, cropSize, cropSize, x, y, scale, scale);
+          ctx.drawImage(img, srcCol * frameW, srcRow * frameH, frameW, frameH, x - spriteOffsetX, y + scale - destH, destW, destH);
           ctx.imageSmoothingEnabled = true;
         } else {
           // Fallback circle while loading
@@ -201,10 +202,11 @@ function drawNPC(
 
   const frameW = 24;
   const frameH = 24;
-  // Crop 16x16 content from center of 24x24 frame (4px left, 8px top margin)
-  const cropX = 4;
-  const cropY = 8;
-  const cropSize = 16;
+  // Render full 24x24 frame at native zoom, anchored at tile bottom-left.
+  // Offset left by 4px to center visible content on the tile.
+  const destW = frameW * zoom;
+  const destH = frameH * zoom;
+  const spriteOffsetX = 4 * zoom;
 
   if (img) {
     let srcCol = npc.frameCol;
@@ -217,11 +219,11 @@ function drawNPC(
       srcCol = baseCol + Math.floor(timestamp / 200) % animCols;
     }
 
-    const sx = srcCol * frameW + cropX;
-    const sy = srcRow * frameH + cropY;
+    const sx = srcCol * frameW;
+    const sy = srcRow * frameH;
 
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(img, sx, sy, cropSize, cropSize, x, y, scale, scale);
+    ctx.drawImage(img, sx, sy, frameW, frameH, x - spriteOffsetX, y + scale - destH, destW, destH);
     ctx.imageSmoothingEnabled = true;
   } else {
     // Fallback: purple rectangle while sprite loads

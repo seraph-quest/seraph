@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { SCENE } from "../../config/constants";
+import type { Pathfinder } from "../lib/Pathfinder";
 
 const SPRITE_KEY = "agent";
 const FRAME_W = 32;
@@ -10,6 +11,7 @@ export class AgentSprite {
   private scene: Phaser.Scene;
   private currentTween: Phaser.Tweens.Tween | null = null;
   private bobTween: Phaser.Tweens.Tween | null = null;
+  private pathCancelled = false;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     this.scene = scene;
@@ -272,14 +274,21 @@ export class AgentSprite {
     this.stopBob();
 
     const dx = x - this.sprite.x;
-    const distance = Math.abs(dx);
+    const dy = y - this.sprite.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
 
     if (distance < 4) {
       onComplete?.();
       return;
     }
 
-    const walkAnim = dx < 0 ? "walk-left" : "walk-right";
+    // Pick walk direction based on dominant axis
+    let walkAnim: string;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      walkAnim = dx < 0 ? "walk-left" : "walk-right";
+    } else {
+      walkAnim = dy < 0 ? "walk-up" : "walk-down";
+    }
     this.sprite.play(walkAnim);
 
     const duration = (distance / SCENE.WALK_SPEED) * 1000;
@@ -295,6 +304,47 @@ export class AgentSprite {
         onComplete?.();
       },
     });
+  }
+
+  /**
+   * Move along a pathfinding route. Falls back to direct tween if no path found.
+   */
+  async moveAlongPath(
+    pathfinder: Pathfinder,
+    targetX: number,
+    targetY: number,
+    onComplete?: () => void
+  ) {
+    this.cancelMovement();
+    this.pathCancelled = false;
+
+    const path = await pathfinder.findPath(
+      this.sprite.x,
+      this.sprite.y,
+      targetX,
+      targetY
+    );
+
+    if (this.pathCancelled) return;
+
+    if (!path || path.length === 0) {
+      // Fallback: direct move
+      this.moveTo(targetX, targetY, onComplete);
+      return;
+    }
+
+    // Walk along path waypoints sequentially
+    const walkSegment = (index: number) => {
+      if (this.pathCancelled || index >= path.length) {
+        onComplete?.();
+        return;
+      }
+
+      const target = path[index];
+      this.moveTo(target.x, target.y, () => walkSegment(index + 1));
+    };
+
+    walkSegment(0);
   }
 
   playAnim(key: string) {
@@ -321,6 +371,7 @@ export class AgentSprite {
   }
 
   cancelMovement() {
+    this.pathCancelled = true;
     if (this.currentTween) {
       this.currentTween.stop();
       this.currentTween = null;

@@ -360,3 +360,4 @@ next-env.d.ts
 docker-data
 .claude/settings.local.json
 backend/data/mcp-servers.json
+seraph-quest.github.io/

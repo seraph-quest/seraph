@@ -22,12 +22,18 @@ export default function App() {
       s.setQuestPanelOpen(!s.questPanelOpen);
     };
 
+    const onToolStationsLoaded = (positions: Record<string, { x: number; y: number; animation: string }>) => {
+      useChatStore.getState().setToolStationPositions(positions);
+    };
+
     EventBus.on("toggle-chat", toggleChat);
     EventBus.on("toggle-quest-log", toggleQuest);
+    EventBus.on("tool-stations-loaded", onToolStationsLoaded);
 
     return () => {
       EventBus.off("toggle-chat", toggleChat);
       EventBus.off("toggle-quest-log", toggleQuest);
+      EventBus.off("tool-stations-loaded", onToolStationsLoaded);
     };
   }, []);
 

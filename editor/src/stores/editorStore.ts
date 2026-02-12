@@ -40,6 +40,14 @@ interface EditorStore {
   viewportOffsetY: number;
   viewportZoom: number;
 
+  // Panel layout
+  panelWidth: number;
+  layerH: number;
+  objectH: number;
+  buildingH: number;
+  npcH: number;
+  npcCollapsed: boolean;
+
   // Actions
   setActiveTool: (tool: EditorTool) => void;
   setActiveLayer: (index: number) => void;
@@ -77,6 +85,14 @@ interface EditorStore {
   setViewport: (offsetX: number, offsetY: number, zoom: number) => void;
   panViewport: (dx: number, dy: number) => void;
   zoomViewport: (delta: number, centerX: number, centerY: number) => void;
+
+  // Panel layout
+  setPanelWidth: (w: number) => void;
+  setLayerH: (h: number) => void;
+  setObjectH: (h: number) => void;
+  setBuildingH: (h: number) => void;
+  setNpcH: (h: number) => void;
+  setNpcCollapsed: (collapsed: boolean) => void;
 
   // Undo/Redo
   undo: () => void;
@@ -130,6 +146,13 @@ export const useEditorStore = create<EditorStore>()(
   viewportOffsetX: 0,
   viewportOffsetY: 0,
   viewportZoom: 2,
+
+  panelWidth: 320,
+  layerH: 140,
+  objectH: 160,
+  buildingH: 160,
+  npcH: 200,
+  npcCollapsed: false,
 
   _undoManager: new UndoManager(),
   _pendingDelta: null,
@@ -318,6 +341,13 @@ export const useEditorStore = create<EditorStore>()(
       };
     }),
 
+  setPanelWidth: (w) => set({ panelWidth: w }),
+  setLayerH: (h) => set({ layerH: h }),
+  setObjectH: (h) => set({ objectH: h }),
+  setBuildingH: (h) => set({ buildingH: h }),
+  setNpcH: (h) => set({ npcH: h }),
+  setNpcCollapsed: (collapsed) => set({ npcCollapsed: collapsed }),
+
   undo: () => {
     const { _undoManager, layers, mapWidth } = get();
     const delta = _undoManager.undo(layers);
@@ -407,6 +437,12 @@ export const useEditorStore = create<EditorStore>()(
         viewportOffsetX: state.viewportOffsetX,
         viewportOffsetY: state.viewportOffsetY,
         viewportZoom: state.viewportZoom,
+        panelWidth: state.panelWidth,
+        layerH: state.layerH,
+        objectH: state.objectH,
+        buildingH: state.buildingH,
+        npcH: state.npcH,
+        npcCollapsed: state.npcCollapsed,
       }),
       migrate: (persisted: unknown, version: number) => {
         if (version < 2) {

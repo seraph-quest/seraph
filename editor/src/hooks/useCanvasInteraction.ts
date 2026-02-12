@@ -208,6 +208,7 @@ export function useCanvasInteraction(canvasRef: React.RefObject<HTMLCanvasElemen
     if (isPainting.current) {
       isPainting.current = false;
       useEditorStore.getState().endStroke();
+      useTilesetStore.getState().addRecentSelection();
     }
   }, []);
 

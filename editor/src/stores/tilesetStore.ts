@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { LoadedTileset, TileSelection, TileAnimationGroup, AnimationLookup } from "../types/editor";
+import type { LoadedTileset, TileSelection, TileAnimationGroup, AnimationLookup, RecentTileSelection } from "../types/editor";
 import { loadAllTilesets, type TilesetCategory } from "../lib/tileset-loader";
 
 interface TilesetStore {
@@ -24,6 +24,9 @@ interface TilesetStore {
   /** Whether the animation definer panel is open */
   animDefinerOpen: boolean;
 
+  /** Recently used tile selections (most recent first) */
+  recentSelections: RecentTileSelection[];
+
   /** Persisted walkability data (parallel to tilesets[]) */
   tilesetWalkability: boolean[][];
 
@@ -41,6 +44,7 @@ interface TilesetStore {
   removeAnimationGroup: (id: string) => void;
   setAnimDefinerOpen: (open: boolean) => void;
   setAnimationGroups: (groups: TileAnimationGroup[]) => void;
+  addRecentSelection: () => void;
   _rebuildAnimationLookup: () => void;
 }
 
@@ -58,6 +62,7 @@ export const useTilesetStore = create<TilesetStore>()(
   animationGroups: [],
   animationLookup: new Map(),
   animDefinerOpen: false,
+  recentSelections: [],
   tilesetWalkability: [],
 
   loadTilesets: async (basePath: string) => {
@@ -188,6 +193,26 @@ export const useTilesetStore = create<TilesetStore>()(
 
   setAnimDefinerOpen: (open) => set({ animDefinerOpen: open }),
 
+  addRecentSelection: () => {
+    const { activeTilesetIndex, selectedTiles, recentSelections } = get();
+    if (!selectedTiles) return;
+    const entry: RecentTileSelection = {
+      tilesetIndex: activeTilesetIndex,
+      selection: { ...selectedTiles },
+      usedAt: Date.now(),
+    };
+    // Deduplicate: remove existing entry with same tileset + selection
+    const filtered = recentSelections.filter(
+      (r) =>
+        r.tilesetIndex !== entry.tilesetIndex ||
+        r.selection.startCol !== entry.selection.startCol ||
+        r.selection.startRow !== entry.selection.startRow ||
+        r.selection.endCol !== entry.selection.endCol ||
+        r.selection.endRow !== entry.selection.endRow
+    );
+    set({ recentSelections: [entry, ...filtered].slice(0, 20) });
+  },
+
   setAnimationGroups: (groups) => {
     set({ animationGroups: groups });
     get()._rebuildAnimationLookup();
@@ -223,6 +248,7 @@ export const useTilesetStore = create<TilesetStore>()(
       partialize: (state) => ({
         animationGroups: state.animationGroups,
         activeTilesetIndex: state.activeTilesetIndex,
+        recentSelections: state.recentSelections,
         tilesetWalkability: state.tilesetWalkability,
       }),
     }

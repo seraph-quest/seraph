@@ -3,9 +3,9 @@ import { useTilesetStore } from "../stores/tilesetStore";
 import { useEditorStore } from "../stores/editorStore";
 import { Tooltip } from "./Tooltip";
 import { renderTilesetPreview } from "../lib/canvas-renderer";
-import { CATEGORIES, getTilesetConfigs } from "../lib/tileset-loader";
+import { getTileSourceRect, CATEGORIES, getTilesetConfigs } from "../lib/tileset-loader";
 import { AnimationDefiner } from "./AnimationDefiner";
-import type { TileAnimationGroup } from "../types/editor";
+import type { TileAnimationGroup, RecentTileSelection } from "../types/editor";
 
 const TILESET_SCALE = 2;
 
@@ -16,7 +16,7 @@ const TILESET_HINTS: Record<string, string> = Object.fromEntries(
 
 export function TilesetPanel() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { tilesets, activeTilesetIndex, selectedTiles, activeCategory, animDefinerOpen, animationGroups } = useTilesetStore();
+  const { tilesets, activeTilesetIndex, selectedTiles, activeCategory, animDefinerOpen, animationGroups, recentSelections } = useTilesetStore();
   const showWalkability = useEditorStore((s) => s.showWalkability);
   const activeTool = useEditorStore((s) => s.activeTool);
   const isDragging = useRef(false);
@@ -235,6 +235,16 @@ export function TilesetPanel() {
         </div>
       )}
 
+      {/* Recent tile selections */}
+      {!animDefinerOpen && recentSelections.length > 0 && (
+        <RecentStrip
+          recentSelections={recentSelections}
+          tilesets={tilesets}
+          activeTilesetIndex={activeTilesetIndex}
+          selectedTiles={selectedTiles}
+        />
+      )}
+
       {/* Show AnimationDefiner or tileset canvas */}
       {animDefinerOpen ? (
         <div className="flex-1 min-h-0"><AnimationDefiner /></div>
@@ -261,5 +271,126 @@ export function TilesetPanel() {
         </>
       )}
     </div>
+  );
+}
+
+function RecentStrip({
+  recentSelections,
+  tilesets,
+  activeTilesetIndex,
+  selectedTiles,
+}: {
+  recentSelections: RecentTileSelection[];
+  tilesets: import("../types/editor").LoadedTileset[];
+  activeTilesetIndex: number;
+  selectedTiles: import("../types/editor").TileSelection | null;
+}) {
+  const selectRecent = useCallback((entry: RecentTileSelection) => {
+    const store = useTilesetStore.getState();
+    if (entry.tilesetIndex !== store.activeTilesetIndex) {
+      store.setActiveTileset(entry.tilesetIndex);
+    }
+    store.setSelectedTiles(entry.selection);
+    useEditorStore.getState().setActiveTool("brush");
+  }, []);
+
+  return (
+    <div className="border-b border-gray-700 px-1 py-1">
+      <div className="text-[9px] text-gray-500 mb-0.5">Recent:</div>
+      <div className="flex gap-1 overflow-x-auto pb-0.5">
+        {recentSelections.map((entry, i) => {
+          const ts = tilesets[entry.tilesetIndex];
+          if (!ts) return null;
+          const isActive =
+            entry.tilesetIndex === activeTilesetIndex &&
+            selectedTiles !== null &&
+            selectedTiles.startCol === entry.selection.startCol &&
+            selectedTiles.startRow === entry.selection.startRow &&
+            selectedTiles.endCol === entry.selection.endCol &&
+            selectedTiles.endRow === entry.selection.endRow;
+          return (
+            <RecentThumb
+              key={`${entry.tilesetIndex}-${entry.selection.startCol}-${entry.selection.startRow}-${entry.selection.endCol}-${entry.selection.endRow}-${i}`}
+              entry={entry}
+              tileset={ts}
+              isActive={isActive}
+              onClick={() => selectRecent(entry)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RecentThumb({
+  entry,
+  tileset,
+  isActive,
+  onClick,
+}: {
+  entry: RecentTileSelection;
+  tileset: import("../types/editor").LoadedTileset;
+  isActive: boolean;
+  onClick: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const sel = entry.selection;
+  const minCol = Math.min(sel.startCol, sel.endCol);
+  const maxCol = Math.max(sel.startCol, sel.endCol);
+  const minRow = Math.min(sel.startRow, sel.endRow);
+  const maxRow = Math.max(sel.startRow, sel.endRow);
+  const cols = maxCol - minCol + 1;
+  const rows = maxRow - minRow + 1;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const thumbSize = 28;
+    const scale = Math.min(thumbSize / (cols * tileset.tileWidth), thumbSize / (rows * tileset.tileHeight));
+    const w = Math.ceil(cols * tileset.tileWidth * scale);
+    const h = Math.ceil(rows * tileset.tileHeight * scale);
+    canvas.width = w;
+    canvas.height = h;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, w, h);
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const localId = (minRow + r) * tileset.columns + (minCol + c);
+        const { sx, sy, sw, sh } = getTileSourceRect(localId, tileset);
+        ctx.drawImage(
+          tileset.image,
+          sx, sy, sw, sh,
+          c * tileset.tileWidth * scale,
+          r * tileset.tileHeight * scale,
+          tileset.tileWidth * scale,
+          tileset.tileHeight * scale
+        );
+      }
+    }
+  }, [entry, tileset, cols, rows, minCol, minRow]);
+
+  const label = tileset.name.replace("CuteRPG_", "");
+
+  return (
+    <Tooltip text={`${label} (${cols}x${rows})`} desc="Click to re-select this tile." side="bottom">
+      <button
+        onClick={onClick}
+        className={`flex-shrink-0 p-0.5 rounded ${
+          isActive
+            ? "ring-2 ring-yellow-400 bg-yellow-900/40"
+            : "hover:bg-gray-600 bg-gray-800"
+        }`}
+      >
+        <canvas
+          ref={canvasRef}
+          style={{ imageRendering: "pixelated", width: 28, height: 28 }}
+        />
+      </button>
+    </Tooltip>
   );
 }

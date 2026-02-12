@@ -48,6 +48,14 @@ export interface NPC {
 
 export type MapObject = SpawnPoint | NPC;
 
+/** A recently used tile selection for quick re-selection */
+export interface RecentTileSelection {
+  tilesetIndex: number;
+  selection: TileSelection;
+  /** Timestamp for ordering (most recent first) */
+  usedAt: number;
+}
+
 /** A single tile that participates in an animation — the anchor local ID + its frame sequence */
 export interface TileAnimationEntry {
   anchorLocalId: number;

@@ -2,6 +2,7 @@ import Phaser from "phaser";
 import { EventBus } from "../EventBus";
 import { AgentSprite, type SpriteConfig } from "../objects/AgentSprite";
 import { MagicEffect } from "../objects/MagicEffect";
+import { NpcSprite } from "../objects/NpcSprite";
 import { SpeechBubble } from "../objects/SpeechBubble";
 import { UserSprite } from "../objects/UserSprite";
 import { Pathfinder } from "../lib/Pathfinder";
@@ -39,6 +40,15 @@ interface CastEffectPayload {
 
 interface FinalAnswerPayload {
   text: string;
+}
+
+interface NpcDef {
+  name: string;
+  x: number;
+  y: number;
+  spriteSheet: string;
+  spriteType: string; // "enemy" | "character"
+  frameCol: number;
 }
 
 /** Tileset file names to load */
@@ -89,6 +99,10 @@ export class VillageScene extends Phaser.Scene {
   // Wander zone
   private wanderZone: { x: number; y: number; width: number; height: number } | null = null;
 
+  // NPCs
+  private npcDefs: NpcDef[] = [];
+  private npcs: NpcSprite[] = [];
+
   // Buildings
   private buildings: BuildingDef[] = [];
   private currentBuilding: BuildingDef | null = null;
@@ -106,6 +120,8 @@ export class VillageScene extends Phaser.Scene {
   private tooltipText!: Phaser.GameObjects.Text;
   private tooltipBg!: Phaser.GameObjects.Rectangle;
 
+  private debugGridGraphics: Phaser.GameObjects.Graphics | null = null;
+
   private isWandering = false;
   private wanderTimer: Phaser.Time.TimerEvent | null = null;
   private nudgeTimer: Phaser.Time.TimerEvent | null = null;
@@ -118,6 +134,7 @@ export class VillageScene extends Phaser.Scene {
   private handleReturnIdle!: () => void;
   private handleNudge!: (payload: { text: string }) => void;
   private handleAmbientState!: (payload: { state: string; tooltip: string }) => void;
+  private handleToggleDebugWalkability!: (on: boolean) => void;
 
   constructor() {
     super("VillageScene");
@@ -185,6 +202,15 @@ export class VillageScene extends Phaser.Scene {
           frameHeight: 24,
         });
         queuedKeys.add(cfg.key);
+        needsSpriteLoad = true;
+      }
+    }
+
+    // Queue NPC sprite sheet loads
+    for (const npcDef of this.npcDefs) {
+      if (!queuedKeys.has(npcDef.spriteSheet) && !this.textures.exists(npcDef.spriteSheet)) {
+        NpcSprite.loadSheet(this, npcDef.spriteSheet, npcDef.spriteType);
+        queuedKeys.add(npcDef.spriteSheet);
         needsSpriteLoad = true;
       }
     }
@@ -257,6 +283,17 @@ export class VillageScene extends Phaser.Scene {
     this.userAvatar = new UserSprite(this, this.userSpawn.x, this.userSpawn.y, userCfg);
     this.attachTooltip(this.userAvatar.sprite, "You");
 
+    // ─── NPCs ─────────────────────────────────────────
+    for (const def of this.npcDefs) {
+      if (!this.textures.exists(def.spriteSheet)) continue;
+      const npc = new NpcSprite(this, def.x, def.y, {
+        key: def.spriteSheet,
+        spriteType: def.spriteType,
+        frameCol: def.frameCol,
+      });
+      this.npcs.push(npc);
+    }
+
     // ─── Camera Follow ───────────────────────────────
     this.cameras.main.startFollow(this.userAvatar.sprite, true, 0.1, 0.1);
 
@@ -278,6 +315,8 @@ export class VillageScene extends Phaser.Scene {
     });
     this.label.setOrigin(0.5, 0);
     this.label.setDepth(25);
+
+    this.fitCamera();
 
     // ─── EventBus handlers ───────────────────────────
     this.handleThink = () => {
@@ -364,16 +403,25 @@ export class VillageScene extends Phaser.Scene {
       this.userAvatar.setAmbientState(payload.state, payload.tooltip);
     };
 
+    this.handleToggleDebugWalkability = (on: boolean) => {
+      if (on) this.drawDebugGrid();
+      else this.clearDebugGrid();
+    };
+
     EventBus.on("agent-think", this.handleThink);
     EventBus.on("agent-cast-effect", this.handleCastEffect);
     EventBus.on("agent-final-answer", this.handleFinalAnswer);
     EventBus.on("agent-return-idle", this.handleReturnIdle);
     EventBus.on("agent-nudge", this.handleNudge);
     EventBus.on("agent-ambient-state", this.handleAmbientState);
+    EventBus.on("toggle-debug-walkability", this.handleToggleDebugWalkability);
 
     this.scale.on("resize", this.onResize, this);
 
     this.startWandering();
+    for (const npc of this.npcs) {
+      npc.startWandering(this.pathfinder, this.wanderZone ?? undefined);
+    }
     EventBus.emit("current-scene-ready", this);
   }
 
@@ -388,6 +436,10 @@ export class VillageScene extends Phaser.Scene {
       // WASD / arrow key movement
       this.handlePlayerInput();
       this.userAvatar.updateStatusPosition();
+    }
+
+    for (const npc of this.npcs) {
+      npc.sprite.setDepth(5 + npc.sprite.y * 0.001);
     }
 
     if (this.activeMagicEffect) {
@@ -407,15 +459,20 @@ export class VillageScene extends Phaser.Scene {
     EventBus.off("agent-return-idle", this.handleReturnIdle);
     EventBus.off("agent-nudge", this.handleNudge);
     EventBus.off("agent-ambient-state", this.handleAmbientState);
+    EventBus.off("toggle-debug-walkability", this.handleToggleDebugWalkability);
 
     this.scale.off("resize", this.onResize, this);
     this.stopWandering();
     this.clearMagicEffect();
+    this.clearDebugGrid();
     this.cancelUserMove();
 
     if (this.userAvatar) this.userAvatar.cancelMovement();
     if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
     if (this.nudgeTimer) this.nudgeTimer.remove(false);
+
+    for (const npc of this.npcs) npc.destroy();
+    this.npcs = [];
 
     if (this.agent) this.agent.destroy();
     if (this.userAvatar) this.userAvatar.destroy();
@@ -490,6 +547,20 @@ export class VillageScene extends Phaser.Scene {
           width: obj.width!,
           height: obj.height!,
         };
+      } else if (obj.type === "npc") {
+        const sheet = getProp("sprite_sheet") as string | undefined;
+        const sType = (getProp("sprite_type") as string) || "enemy";
+        const fCol = (getProp("frame_col") as number) ?? 0;
+        if (sheet) {
+          this.npcDefs.push({
+            name: obj.name ?? sheet,
+            x: obj.x!,
+            y: obj.y!,
+            spriteSheet: sheet,
+            spriteType: sType,
+            frameCol: fCol,
+          });
+        }
       }
     }
   }
@@ -538,9 +609,19 @@ export class VillageScene extends Phaser.Scene {
   private onResize(_gameSize: Phaser.Structs.Size) {
     if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
     this.resizeDebounceTimer = setTimeout(() => {
-      // Camera auto-adjusts with bounds — just re-center label
-      this.label.setX(this.cameras.main.midPoint.x);
+      this.fitCamera();
     }, 100);
+  }
+
+  private fitCamera() {
+    const mapW = this.mapRef.widthInPixels;
+    const mapH = this.mapRef.heightInPixels;
+    const viewW = this.scale.width;
+    const viewH = this.scale.height;
+    const zoom = Math.max(viewW / mapW, viewH / mapH, SCENE.SPRITE_SCALE);
+    this.cameras.main.setZoom(zoom);
+    this.cameras.main.centerOn(mapW / 2, mapH / 2);
+    this.label.setX(mapW / 2);
   }
 
   // ─── Magic Effects ──────────────────────────────────
@@ -964,6 +1045,34 @@ export class VillageScene extends Phaser.Scene {
     if (this.userMoveTween) {
       this.userMoveTween.stop();
       this.userMoveTween = null;
+    }
+  }
+
+  // ─── Debug Walkability Grid ──────────────────────
+
+  private drawDebugGrid() {
+    this.clearDebugGrid();
+
+    const grid = this.pathfinder.getGrid();
+    const ts = this.mapRef.tileWidth;
+    const gfx = this.add.graphics();
+    gfx.setDepth(50);
+
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        const color = grid[r][c] === 0 ? 0x00ff00 : 0xff0000;
+        gfx.fillStyle(color, 0.3);
+        gfx.fillRect(c * ts, r * ts, ts, ts);
+      }
+    }
+
+    this.debugGridGraphics = gfx;
+  }
+
+  private clearDebugGrid() {
+    if (this.debugGridGraphics) {
+      this.debugGridGraphics.destroy();
+      this.debugGridGraphics = null;
     }
   }
 

@@ -45,7 +45,6 @@ export class UserSprite {
 
     if (spriteConfig && scene.textures.exists(spriteConfig.key)) {
       this.sprite = scene.add.sprite(x, y, spriteConfig.key, spriteConfig.colOffset);
-      this.sprite.setScale(SCENE.SPRITE_SCALE);
       this.sprite.setOrigin(0.5, 1);
       this.sprite.setDepth(10);
       this.createCharSheetAnimations(spriteConfig);
@@ -58,7 +57,6 @@ export class UserSprite {
       }
 
       this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
-      this.sprite.setScale(SCENE.SPRITE_SCALE);
       this.sprite.setOrigin(0.5, 1);
       this.sprite.setDepth(10);
       this.createAnimations();
@@ -258,7 +256,7 @@ export class UserSprite {
       x,
       y,
       duration,
-      ease: "Sine.easeInOut",
+      ease: "Linear",
       onComplete: () => {
         this.currentTween = null;
         onComplete?.();

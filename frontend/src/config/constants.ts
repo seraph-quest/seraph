@@ -40,7 +40,7 @@ export const SCENE = {
   MAP_PIXEL_WIDTH: 1024,  // 64 * 16
   MAP_PIXEL_HEIGHT: 640,  // 40 * 16
   SPRITE_SCALE: 2,
-  WALK_SPEED: 300,
+  WALK_SPEED: 64,
 
   /** Tiled JSON map file path (relative to public/) */
   MAP_FILE: "maps/village.json",

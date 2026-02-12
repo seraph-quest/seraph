@@ -23,6 +23,13 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Tools',
+      items: [
+        'tools/village-editor',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Integrations',
       items: [
         'integrations/things3-mcp',

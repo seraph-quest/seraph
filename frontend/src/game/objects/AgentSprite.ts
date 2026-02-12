@@ -26,7 +26,6 @@ export class AgentSprite {
 
     if (spriteConfig && scene.textures.exists(spriteConfig.key)) {
       this.sprite = scene.add.sprite(x, y, spriteConfig.key, spriteConfig.colOffset);
-      this.sprite.setScale(SCENE.SPRITE_SCALE);
       this.sprite.setOrigin(0.5, 1);
       this.sprite.setDepth(10);
       this.createCharSheetAnimations(spriteConfig);
@@ -43,7 +42,6 @@ export class AgentSprite {
       }
 
       this.sprite = scene.add.sprite(x, y, SPRITE_KEY, "down");
-      this.sprite.setScale(SCENE.SPRITE_SCALE);
       this.sprite.setOrigin(0.5, 1);
       this.sprite.setDepth(10);
       this.createAnimations();

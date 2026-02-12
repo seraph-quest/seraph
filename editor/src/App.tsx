@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useCallback, useRef } from "react";
+import { useEditorStore } from "./stores/editorStore";
 import { useTilesetStore } from "./stores/tilesetStore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { MenuBar } from "./components/MenuBar";
@@ -84,15 +85,19 @@ function HDivider({ onDrag }: { onDrag: (dy: number) => void }) {
 
 export default function App() {
   const loaded = useTilesetStore((s) => s.loaded);
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_W);
+  const panelWidth = useEditorStore((s) => s.panelWidth);
+  const setPanelWidth = useEditorStore((s) => s.setPanelWidth);
+  const layerH = useEditorStore((s) => s.layerH);
+  const setLayerH = useEditorStore((s) => s.setLayerH);
+  const objectH = useEditorStore((s) => s.objectH);
+  const setObjectH = useEditorStore((s) => s.setObjectH);
+  const buildingH = useEditorStore((s) => s.buildingH);
+  const setBuildingH = useEditorStore((s) => s.setBuildingH);
+  const npcH = useEditorStore((s) => s.npcH);
+  const setNpcH = useEditorStore((s) => s.setNpcH);
+  const npcCollapsed = useEditorStore((s) => s.npcCollapsed);
+  const setNpcCollapsed = useEditorStore((s) => s.setNpcCollapsed);
   const dragging = useRef(false);
-
-  // Heights for the fixed-height sections; tileset takes remaining space
-  const [layerH, setLayerH] = useState(140);
-  const [objectH, setObjectH] = useState(160);
-  const [buildingH, setBuildingH] = useState(160);
-  const [npcH, setNpcH] = useState(200);
-  const [npcCollapsed, setNpcCollapsed] = useState(false);
 
   useKeyboardShortcuts();
 
@@ -125,7 +130,7 @@ export default function App() {
     document.body.style.userSelect = "none";
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-  }, [panelWidth]);
+  }, [panelWidth, setPanelWidth]);
 
   if (!loaded) {
     return <LoadingScreen />;
@@ -159,21 +164,30 @@ export default function App() {
             <LayerPanel />
           </div>
 
-          <HDivider onDrag={(dy) => setLayerH((h) => Math.max(MIN_SECTION_H, h + dy))} />
+          <HDivider onDrag={(dy) => {
+            const h = useEditorStore.getState().layerH;
+            setLayerH(Math.max(MIN_SECTION_H, h + dy));
+          }} />
 
           {/* Objects section */}
           <div className="overflow-auto flex-shrink-0" style={{ height: objectH }}>
             <ObjectPanel />
           </div>
 
-          <HDivider onDrag={(dy) => setObjectH((h) => Math.max(MIN_SECTION_H, h + dy))} />
+          <HDivider onDrag={(dy) => {
+            const h = useEditorStore.getState().objectH;
+            setObjectH(Math.max(MIN_SECTION_H, h + dy));
+          }} />
 
           {/* Buildings section */}
           <div className="overflow-auto flex-shrink-0" style={{ height: buildingH }}>
             <BuildingPanel />
           </div>
 
-          <HDivider onDrag={(dy) => setBuildingH((h) => Math.max(MIN_SECTION_H, h + dy))} />
+          <HDivider onDrag={(dy) => {
+            const h = useEditorStore.getState().buildingH;
+            setBuildingH(Math.max(MIN_SECTION_H, h + dy));
+          }} />
 
           {/* NPCs section */}
           <div
@@ -182,12 +196,15 @@ export default function App() {
           >
             <NPCBrowser
               collapsed={npcCollapsed}
-              onToggle={() => setNpcCollapsed((c) => !c)}
+              onToggle={() => setNpcCollapsed(!npcCollapsed)}
             />
           </div>
 
           {!npcCollapsed && (
-            <HDivider onDrag={(dy) => setNpcH((h) => Math.max(MIN_SECTION_H, h + dy))} />
+            <HDivider onDrag={(dy) => {
+              const h = useEditorStore.getState().npcH;
+              setNpcH(Math.max(MIN_SECTION_H, h + dy));
+            }} />
           )}
 
           {/* Tileset section — takes remaining space */}

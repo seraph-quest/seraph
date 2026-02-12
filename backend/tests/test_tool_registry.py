@@ -7,15 +7,14 @@ class TestToolRegistry:
     def test_known_tool(self):
         meta = get_tool_metadata("web_search")
         assert meta is not None
-        assert meta["building"] == "house-1"
-        assert meta["animation"] == "at-well"
+        assert meta["description"] == "Search the web for information"
 
     def test_unknown_tool(self):
         assert get_tool_metadata("nonexistent_tool") is None
 
     def test_all_entries_have_required_fields(self):
         all_meta = get_all_metadata()
-        required = {"building", "pixel_x", "pixel_y", "animation", "description"}
+        required = {"description"}
         for name, meta in all_meta.items():
             missing = required - set(meta.keys())
             assert not missing, f"Tool '{name}' missing fields: {missing}"

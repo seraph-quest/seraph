@@ -226,6 +226,9 @@ export function TilesetPanel() {
                 className="px-1.5 py-0.5 text-[10px] rounded bg-purple-800 text-purple-200 hover:bg-purple-600"
               >
                 {group.name}
+                {group.isMagicEffect && (
+                  <span className="ml-1 text-[8px] text-fuchsia-300">FX</span>
+                )}
               </button>
             ))}
           </div>

@@ -1,46 +1,39 @@
 import { describe, it, expect } from "vitest";
 import {
-  getToolTarget,
+  getToolEffect,
   getFacingDirection,
   getIdleState,
   getThinkingState,
 } from "./animationStateMachine";
 import { POSITIONS } from "../config/constants";
 
-describe("getToolTarget", () => {
-  it("returns target for web_search", () => {
-    const target = getToolTarget("web_search");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-well");
-    expect(target!.positionX).toBe(POSITIONS.well);
+describe("getToolEffect", () => {
+  it("returns casting effect with valid pool", () => {
+    const effect = getToolEffect("web_search", 4);
+    expect(effect).not.toBeNull();
+    expect(effect!.animationState).toBe("casting");
+    expect(effect!.effectIndex).toBeGreaterThanOrEqual(0);
+    expect(effect!.effectIndex).toBeLessThan(4);
   });
 
-  it("returns target for shell_execute", () => {
-    const target = getToolTarget("shell_execute");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-forge");
+  it("returns deterministic index for same tool name", () => {
+    const a = getToolEffect("shell_execute", 10);
+    const b = getToolEffect("shell_execute", 10);
+    expect(a!.effectIndex).toBe(b!.effectIndex);
   });
 
-  it("returns target for browse_webpage", () => {
-    const target = getToolTarget("browse_webpage");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-tower");
+  it("returns different indices for different tools", () => {
+    const a = getToolEffect("web_search", 100);
+    const b = getToolEffect("shell_execute", 100);
+    expect(a!.effectIndex).not.toBe(b!.effectIndex);
   });
 
-  it("returns target for read_file", () => {
-    const target = getToolTarget("read_file");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-signpost");
+  it("returns null when pool is empty", () => {
+    expect(getToolEffect("web_search", 0)).toBeNull();
   });
 
-  it("returns target for view_soul", () => {
-    const target = getToolTarget("view_soul");
-    expect(target).not.toBeNull();
-    expect(target!.animationState).toBe("at-bench");
-  });
-
-  it("returns null for unknown tool", () => {
-    expect(getToolTarget("nonexistent_tool")).toBeNull();
+  it("returns null when pool size is negative", () => {
+    expect(getToolEffect("web_search", -1)).toBeNull();
   });
 });
 

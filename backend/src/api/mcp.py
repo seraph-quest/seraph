@@ -7,20 +7,16 @@ from src.tools.mcp_manager import mcp_manager
 
 router = APIRouter()
 
-VALID_BUILDINGS = {"house-1", "church", "house-2", "forge", "tower", "clock", "mailbox"}
-
 
 class AddServerRequest(BaseModel):
     name: str
     url: str
-    building: str | None = None
     description: str = ""
     enabled: bool = True
 
 
 class UpdateServerRequest(BaseModel):
     enabled: bool | None = None
-    building: str | None = None
     url: str | None = None
     description: str | None = None
 
@@ -36,12 +32,9 @@ async def add_server(req: AddServerRequest):
     """Add a new MCP server."""
     if req.name in mcp_manager._config:
         raise HTTPException(status_code=409, detail=f"Server '{req.name}' already exists")
-    if req.building and req.building not in VALID_BUILDINGS:
-        raise HTTPException(status_code=400, detail=f"Invalid building. Choose from: {sorted(VALID_BUILDINGS)}")
     mcp_manager.add_server(
         name=req.name,
         url=req.url,
-        building=req.building,
         description=req.description,
         enabled=req.enabled,
     )
@@ -50,10 +43,8 @@ async def add_server(req: AddServerRequest):
 
 @router.put("/mcp/servers/{name}")
 async def update_server(name: str, req: UpdateServerRequest):
-    """Update an MCP server (enable/disable, change building, etc.)."""
+    """Update an MCP server (enable/disable, etc.)."""
     updates = req.model_dump(exclude_none=True)
-    if "building" in updates and updates["building"] not in VALID_BUILDINGS:
-        raise HTTPException(status_code=400, detail=f"Invalid building. Choose from: {sorted(VALID_BUILDINGS)}")
     if not mcp_manager.update_server(name, **updates):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "updated", "name": name}

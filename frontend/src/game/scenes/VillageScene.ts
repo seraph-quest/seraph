@@ -1,30 +1,21 @@
 import Phaser from "phaser";
 import { EventBus } from "../EventBus";
 import { AgentSprite } from "../objects/AgentSprite";
+import { MagicEffect } from "../objects/MagicEffect";
 import { SpeechBubble } from "../objects/SpeechBubble";
 import { UserSprite } from "../objects/UserSprite";
 import { Pathfinder } from "../lib/Pathfinder";
 import { SCENE } from "../../config/constants";
+import type { MagicEffectDef } from "../../types";
 
-interface ToolMovePayload {
+interface CastEffectPayload {
   tool: string;
-  targetX: number;
-  targetY: number;
-  anim: string;
+  effectIndex: number;
   text: string;
 }
 
 interface FinalAnswerPayload {
   text: string;
-}
-
-interface ToolStationData {
-  name: string;
-  x: number;
-  y: number;
-  toolKey: string;
-  animation: string;
-  tooltip: string;
 }
 
 /** Tileset file names to load */
@@ -54,8 +45,9 @@ export class VillageScene extends Phaser.Scene {
   private label!: Phaser.GameObjects.Text;
   private pathfinder!: Pathfinder;
 
-  // Tool station data from map objects
-  private toolStations: ToolStationData[] = [];
+  // Magic effect pool
+  private magicEffectPool: MagicEffectDef[] = [];
+  private activeMagicEffect: MagicEffect | null = null;
 
   // Spawn points
   private agentSpawn = { x: 512, y: 350 };
@@ -75,7 +67,7 @@ export class VillageScene extends Phaser.Scene {
 
   // EventBus handler references
   private handleThink!: () => void;
-  private handleToolMove!: (payload: ToolMovePayload) => void;
+  private handleCastEffect!: (payload: CastEffectPayload) => void;
   private handleFinalAnswer!: (payload: FinalAnswerPayload) => void;
   private handleReturnIdle!: () => void;
   private handleNudge!: (payload: { text: string }) => void;
@@ -132,6 +124,9 @@ export class VillageScene extends Phaser.Scene {
 
     // Parse object layer
     this.parseObjectLayer(map);
+
+    // Parse magic effects from map custom properties
+    this.parseMagicEffects(map);
 
     // Camera setup
     this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
@@ -194,9 +189,6 @@ export class VillageScene extends Phaser.Scene {
     this.label.setOrigin(0.5, 0);
     this.label.setDepth(25);
 
-    // ─── Publish tool station positions ───────────────
-    this.publishToolStations();
-
     // ─── EventBus handlers ───────────────────────────
     this.handleThink = () => {
       this.stopWandering();
@@ -212,19 +204,34 @@ export class VillageScene extends Phaser.Scene {
       });
     };
 
-    this.handleToolMove = (payload: ToolMovePayload) => {
+    this.handleCastEffect = (payload: CastEffectPayload) => {
       this.stopWandering();
       this.speechBubble.hide();
-      this.agent.moveAlongPath(this.pathfinder, payload.targetX, payload.targetY, () => {
-        this.agent.playAnim(payload.anim);
-        if (payload.text) {
-          this.speechBubble.show(payload.text);
-        }
-      });
+      this.clearMagicEffect();
+
+      // Stay in place, play think animation
+      this.agent.playAnim("think");
+
+      // Spawn magic effect overlay if pool has entries
+      if (this.magicEffectPool.length > 0) {
+        const idx = payload.effectIndex % this.magicEffectPool.length;
+        const def = this.magicEffectPool[idx];
+        this.activeMagicEffect = new MagicEffect(
+          this,
+          def,
+          this.agent.sprite.x,
+          this.agent.sprite.y
+        );
+      }
+
+      if (payload.text) {
+        this.speechBubble.show(payload.text);
+      }
     };
 
     this.handleFinalAnswer = (payload: FinalAnswerPayload) => {
       this.stopWandering();
+      this.fadeOutMagicEffect();
       const targetX = this.userAvatar.sprite.x - 40;
       const targetY = this.userAvatar.sprite.y;
       this.agent.moveAlongPath(this.pathfinder, targetX, targetY, () => {
@@ -242,6 +249,7 @@ export class VillageScene extends Phaser.Scene {
 
     this.handleReturnIdle = () => {
       this.speechBubble.hide();
+      this.fadeOutMagicEffect();
       this.agent.moveAlongPath(this.pathfinder, this.agentSpawn.x, this.agentSpawn.y, () => {
         this.agent.playAnim("idle");
         this.startWandering();
@@ -266,7 +274,7 @@ export class VillageScene extends Phaser.Scene {
     };
 
     EventBus.on("agent-think", this.handleThink);
-    EventBus.on("agent-move-to-tool", this.handleToolMove);
+    EventBus.on("agent-cast-effect", this.handleCastEffect);
     EventBus.on("agent-final-answer", this.handleFinalAnswer);
     EventBus.on("agent-return-idle", this.handleReturnIdle);
     EventBus.on("agent-nudge", this.handleNudge);
@@ -287,13 +295,17 @@ export class VillageScene extends Phaser.Scene {
       this.userAvatar.sprite.setDepth(5 + this.userAvatar.sprite.y * 0.001);
     }
 
+    if (this.activeMagicEffect) {
+      this.activeMagicEffect.setPosition(this.agent.sprite.x, this.agent.sprite.y);
+    }
+
     this.speechBubble.updatePosition();
     this.userAvatar.updateStatusPosition();
   }
 
   shutdown() {
     EventBus.off("agent-think", this.handleThink);
-    EventBus.off("agent-move-to-tool", this.handleToolMove);
+    EventBus.off("agent-cast-effect", this.handleCastEffect);
     EventBus.off("agent-final-answer", this.handleFinalAnswer);
     EventBus.off("agent-return-idle", this.handleReturnIdle);
     EventBus.off("agent-nudge", this.handleNudge);
@@ -301,6 +313,7 @@ export class VillageScene extends Phaser.Scene {
 
     this.scale.off("resize", this.onResize, this);
     this.stopWandering();
+    this.clearMagicEffect();
     this.userAvatar.cancelMovement();
 
     if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
@@ -360,16 +373,7 @@ export class VillageScene extends Phaser.Scene {
       const props = obj.properties as Array<{ name: string; value: unknown }> | undefined;
       const getProp = (name: string) => props?.find((p) => p.name === name)?.value;
 
-      if (obj.type === "tool_station") {
-        this.toolStations.push({
-          name: obj.name,
-          x: obj.x!,
-          y: obj.y!,
-          toolKey: String(getProp("tool_key") ?? ""),
-          animation: String(getProp("animation") ?? "idle"),
-          tooltip: String(getProp("tooltip") ?? obj.name),
-        });
-      } else if (obj.type === "spawn_point") {
+      if (obj.type === "spawn_point") {
         if (obj.name === "agent_spawn") {
           this.agentSpawn = { x: obj.x!, y: obj.y! };
         } else if (obj.name === "user_spawn") {
@@ -384,16 +388,6 @@ export class VillageScene extends Phaser.Scene {
         };
       }
     }
-  }
-
-  // ─── Publish tool stations to chatStore ────────────
-
-  private publishToolStations() {
-    const positions: Record<string, { x: number; y: number; animation: string }> = {};
-    for (const ts of this.toolStations) {
-      positions[ts.toolKey] = { x: ts.x, y: ts.y, animation: ts.animation };
-    }
-    EventBus.emit("tool-stations-loaded", positions);
   }
 
   // ─── Tooltip ───────────────────────────────────────
@@ -428,6 +422,90 @@ export class VillageScene extends Phaser.Scene {
       // Camera auto-adjusts with bounds — just re-center label
       this.label.setX(this.cameras.main.midPoint.x);
     }, 100);
+  }
+
+  // ─── Magic Effects ──────────────────────────────────
+
+  private parseMagicEffects(map: Phaser.Tilemaps.Tilemap) {
+    // Read magic_effects from map custom properties
+    const props = (map as unknown as { properties?: Array<{ name: string; value: unknown }> }).properties;
+    if (!props) return;
+
+    const magicProp = props.find((p) => p.name === "magic_effects");
+    if (!magicProp || typeof magicProp.value !== "string") return;
+
+    try {
+      const effects = JSON.parse(magicProp.value) as Array<{
+        id: string;
+        name: string;
+        tilesetName: string;
+        tileWidth: number;
+        tileHeight: number;
+        columns: number;
+        frameDuration: number;
+        entries: Array<{ anchorLocalId: number; frames: number[] }>;
+      }>;
+
+      // Collect unique tilesets needed and load them as spritesheets
+      const tilesetKeys = new Set<string>();
+      for (const fx of effects) {
+        if (!tilesetKeys.has(fx.tilesetName)) {
+          tilesetKeys.add(fx.tilesetName);
+          // Load spritesheet if not already loaded
+          if (!this.textures.exists(fx.tilesetName)) {
+            // Determine the asset directory based on naming convention
+            const assetPath = `assets/animations/${fx.tilesetName}.png`;
+            this.load.spritesheet(fx.tilesetName, assetPath, {
+              frameWidth: fx.tileWidth,
+              frameHeight: fx.tileHeight,
+            });
+          }
+        }
+      }
+
+      // Convert to MagicEffectDef array (one per entry, using first entry's frames)
+      for (const fx of effects) {
+        if (fx.entries.length === 0) continue;
+        // Use the first entry's frames as the animation sequence
+        this.magicEffectPool.push({
+          id: fx.id,
+          name: fx.name,
+          tilesetKey: fx.tilesetName,
+          tileWidth: fx.tileWidth,
+          tileHeight: fx.tileHeight,
+          columns: fx.columns,
+          frameDuration: fx.frameDuration,
+          frames: fx.entries[0].frames,
+        });
+      }
+
+      // If we need to load new spritesheets, start the loader
+      if (tilesetKeys.size > 0) {
+        this.load.once("complete", () => {
+          EventBus.emit("magic-effects-loaded", this.magicEffectPool.length);
+        });
+        this.load.start();
+      } else {
+        EventBus.emit("magic-effects-loaded", this.magicEffectPool.length);
+      }
+    } catch {
+      // Ignore malformed magic_effects
+    }
+  }
+
+  private clearMagicEffect() {
+    if (this.activeMagicEffect) {
+      this.activeMagicEffect.destroy();
+      this.activeMagicEffect = null;
+    }
+  }
+
+  private fadeOutMagicEffect() {
+    if (this.activeMagicEffect) {
+      const effect = this.activeMagicEffect;
+      this.activeMagicEffect = null;
+      effect.fadeOut();
+    }
   }
 
   // ─── Wandering System ─────────────────────────────

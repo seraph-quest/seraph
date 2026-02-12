@@ -1,10 +1,21 @@
 import { useCallback, useEffect } from "react";
 import { useChatStore } from "../stores/chatStore";
-import { getToolTarget, getIdleState, getThinkingState } from "../lib/animationStateMachine";
+import { getToolEffect, getIdleState, getThinkingState } from "../lib/animationStateMachine";
 import { EventBus } from "../game/EventBus";
 
 export function useAgentAnimation() {
-  const { agentVisual, setAgentVisual, resetAgentVisual } = useChatStore();
+  const { agentVisual, setAgentVisual, resetAgentVisual, magicEffectPoolSize, setMagicEffectPoolSize } = useChatStore();
+
+  // Listen for magic effects loaded from VillageScene
+  useEffect(() => {
+    const onEffectsLoaded = (poolSize: number) => {
+      setMagicEffectPoolSize(poolSize);
+    };
+    EventBus.on("magic-effects-loaded", onEffectsLoaded);
+    return () => {
+      EventBus.off("magic-effects-loaded", onEffectsLoaded);
+    };
+  }, [setMagicEffectPoolSize]);
 
   const onThinking = useCallback(() => {
     const thinking = getThinkingState();
@@ -18,24 +29,24 @@ export function useAgentAnimation() {
 
   const onToolDetected = useCallback(
     (toolName: string, stepContent?: string) => {
-      const target = getToolTarget(toolName);
-      if (!target) return;
+      const effect = getToolEffect(toolName, magicEffectPoolSize);
+      if (!effect) {
+        // No magic effects available — stay in thinking state
+        return;
+      }
 
       setAgentVisual({
-        animationState: target.animationState,
-        positionX: target.positionX,
+        animationState: effect.animationState,
         speechText: stepContent ?? null,
       });
 
-      EventBus.emit("agent-move-to-tool", {
+      EventBus.emit("agent-cast-effect", {
         tool: toolName,
-        targetX: target.pixelX,
-        targetY: target.pixelY,
-        anim: target.animationState,
+        effectIndex: effect.effectIndex,
         text: stepContent ?? "",
       });
     },
-    [setAgentVisual]
+    [setAgentVisual, magicEffectPoolSize]
   );
 
   const onFinalAnswer = useCallback(

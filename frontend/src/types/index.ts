@@ -37,6 +37,7 @@ export type AgentAnimationState =
   | "thinking"
   | "walking"
   | "wandering"
+  | "casting"
   | "at-well"
   | "at-signpost"
   | "at-bench"
@@ -102,11 +103,18 @@ export interface DomainProgress {
   percentage: number;
 }
 
+export interface MagicEffectDef {
+  id: string;
+  name: string;
+  tilesetKey: string;      // Phaser texture key (e.g. "CuteRPG_Magical")
+  tileWidth: number;
+  tileHeight: number;
+  columns: number;
+  frameDuration: number;
+  frames: number[];        // local tile IDs for the animation
+}
+
 export interface ToolMeta {
   name: string;
   description: string;
-  building: string | null;
-  pixelX: number | null;
-  pixelY: number | null;
-  animation: string | null;
 }

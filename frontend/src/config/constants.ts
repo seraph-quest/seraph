@@ -33,19 +33,6 @@ export const TOOL_NAMES = {
   GET_GOAL_PROGRESS: "get_goal_progress",
 } as const;
 
-// Building name → pixel coords + animation state for dynamic MCP tools
-// These are the FALLBACK positions used when the map hasn't loaded yet.
-// VillageScene will emit "tool-stations-loaded" with positions from the map.
-export const BUILDING_POSITIONS: Record<string, { pixelX: number; pixelY: number; animation: string }> = {
-  "house-1": { pixelX: 192, pixelY: 280, animation: "at-well" },
-  "church":  { pixelX: 512, pixelY: 240, animation: "at-bench" },
-  "house-2": { pixelX: 832, pixelY: 280, animation: "at-signpost" },
-  "forge":   { pixelX: 384, pixelY: 320, animation: "at-forge" },
-  "tower":   { pixelX: 640, pixelY: 200, animation: "at-tower" },
-  "clock":   { pixelX: 576, pixelY: 340, animation: "at-clock" },
-  "mailbox": { pixelX: 128, pixelY: 340, animation: "at-mailbox" },
-};
-
 export const SCENE = {
   TILE_SIZE: 16,
   MAP_COLS: 64,

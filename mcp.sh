@@ -3,12 +3,12 @@
 # mcp.sh — Manage MCP servers for Seraph
 #
 # Usage:
-#   ./mcp.sh list                                        List configured servers
-#   ./mcp.sh add <name> <url> [--building B] [--desc D]  Add a server
-#   ./mcp.sh remove <name>                               Remove a server
-#   ./mcp.sh enable <name>                               Enable a server
-#   ./mcp.sh disable <name>                              Disable a server
-#   ./mcp.sh test <name>                                 Test connection (needs backend)
+#   ./mcp.sh list                              List configured servers
+#   ./mcp.sh add <name> <url> [--desc D]       Add a server
+#   ./mcp.sh remove <name>                     Remove a server
+#   ./mcp.sh enable <name>                     Enable a server
+#   ./mcp.sh disable <name>                    Disable a server
+#   ./mcp.sh test <name>                       Test connection (needs backend)
 #
 set -euo pipefail
 
@@ -23,8 +23,6 @@ fi
 CONFIG_FILE="$CONFIG_DIR/mcp-servers.json"
 
 API_URL="${SERAPH_API_URL:-http://localhost:8004}"
-
-VALID_BUILDINGS=("house-1" "church" "house-2" "forge" "tower" "clock" "mailbox")
 
 # --- Helpers ---
 
@@ -50,17 +48,6 @@ hot_reload() {
     fi
 }
 
-validate_building() {
-    local building="$1"
-    for b in "${VALID_BUILDINGS[@]}"; do
-        if [[ "$b" == "$building" ]]; then
-            return 0
-        fi
-    done
-    echo "Error: Invalid building '$building'. Choose from: ${VALID_BUILDINGS[*]}" >&2
-    exit 1
-}
-
 # --- Commands ---
 
 cmd_list() {
@@ -71,16 +58,16 @@ cmd_list() {
         echo "No MCP servers configured."
         echo ""
         echo "Add one with: ./mcp.sh add <name> <url>"
-        echo "Example:      ./mcp.sh add things3 http://host.docker.internal:9100/mcp --building church"
+        echo "Example:      ./mcp.sh add things3 http://host.docker.internal:9100/mcp"
         return
     fi
 
-    printf "%-15s %-8s %-10s %s\n" "NAME" "ENABLED" "BUILDING" "URL"
-    printf "%-15s %-8s %-10s %s\n" "----" "-------" "--------" "---"
+    printf "%-15s %-8s %s\n" "NAME" "ENABLED" "URL"
+    printf "%-15s %-8s %s\n" "----" "-------" "---"
 
-    jq -r '.mcpServers | to_entries[] | [.key, (if .value.enabled == false then "no" else "yes" end), (.value.building // "-"), .value.url] | @tsv' "$CONFIG_FILE" |
-        while IFS=$'\t' read -r name enabled building url; do
-            printf "%-15s %-8s %-10s %s\n" "$name" "$enabled" "$building" "$url"
+    jq -r '.mcpServers | to_entries[] | [.key, (if .value.enabled == false then "no" else "yes" end), .value.url] | @tsv' "$CONFIG_FILE" |
+        while IFS=$'\t' read -r name enabled url; do
+            printf "%-15s %-8s %s\n" "$name" "$enabled" "$url"
         done
 
     echo ""
@@ -100,21 +87,16 @@ cmd_add() {
     ensure_config
 
     if [[ $# -lt 2 ]]; then
-        echo "Usage: ./mcp.sh add <name> <url> [--building B] [--desc D]" >&2
+        echo "Usage: ./mcp.sh add <name> <url> [--desc D]" >&2
         exit 1
     fi
 
     local name="$1" url="$2"
     shift 2
 
-    local building="" description=""
+    local description=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --building|-b)
-                building="$2"
-                validate_building "$building"
-                shift 2
-                ;;
             --desc|--description|-d)
                 description="$2"
                 shift 2
@@ -136,10 +118,8 @@ cmd_add() {
     local server_json
     server_json=$(jq -n \
         --arg url "$url" \
-        --arg building "$building" \
         --arg description "$description" \
         '{url: $url, enabled: true} +
-         (if $building != "" then {building: $building} else {} end) +
          (if $description != "" then {description: $description} else {} end)')
 
     # Add to config
@@ -148,7 +128,6 @@ cmd_add() {
         mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 
     echo "Added MCP server '$name' → $url"
-    [[ -n "$building" ]] && echo "  Building: $building"
     [[ -n "$description" ]] && echo "  Description: $description"
     hot_reload
 }
@@ -266,21 +245,16 @@ cmd_help() {
 mcp.sh — Manage MCP servers for Seraph
 
 Commands:
-  list                                        List configured servers
-  add <name> <url> [--building B] [--desc D]  Add a new server
-  remove <name>                               Remove a server
-  enable <name>                               Enable a disabled server
-  disable <name>                              Disable a server (keeps config)
-  test <name>                                 Test connection (backend must be running)
-
-Buildings:
-  house-1   (at-well)      house-2  (at-signpost)    church  (at-bench)
-  forge     (at-forge)     tower    (at-tower)        clock   (at-clock)
-  mailbox   (at-mailbox)
+  list                              List configured servers
+  add <name> <url> [--desc D]       Add a new server
+  remove <name>                     Remove a server
+  enable <name>                     Enable a disabled server
+  disable <name>                    Disable a server (keeps config)
+  test <name>                       Test connection (backend must be running)
 
 Examples:
-  ./mcp.sh add things3 http://host.docker.internal:9100/mcp --building church --desc "Things3 task manager"
-  ./mcp.sh add github http://github-mcp:8090/mcp --building tower
+  ./mcp.sh add things3 http://host.docker.internal:9100/mcp --desc "Things3 task manager"
+  ./mcp.sh add github http://github-mcp:8090/mcp
   ./mcp.sh disable github
   ./mcp.sh test things3
   ./mcp.sh list

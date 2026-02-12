@@ -9,12 +9,6 @@ import type {
   ToolMeta,
 } from "../types";
 
-interface ToolStationPosition {
-  x: number;
-  y: number;
-  animation: string;
-}
-
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
@@ -30,7 +24,7 @@ interface ChatStore {
   settingsPanelOpen: boolean;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
-  toolStationPositions: Record<string, ToolStationPosition>;
+  magicEffectPoolSize: number;
 
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -48,7 +42,7 @@ interface ChatStore {
   setSettingsPanelOpen: (open: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
-  setToolStationPositions: (positions: Record<string, ToolStationPosition>) => void;
+  setMagicEffectPoolSize: (size: number) => void;
   fetchToolRegistry: () => Promise<void>;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
@@ -86,7 +80,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   settingsPanelOpen: false,
   onboardingCompleted: null,
   toolRegistry: [],
-  toolStationPositions: {},
+  magicEffectPoolSize: 0,
 
   addMessage: (message) =>
     set((state) => {
@@ -133,7 +127,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setToolRegistry: (tools) => set({ toolRegistry: tools }),
 
-  setToolStationPositions: (positions) => set({ toolStationPositions: positions }),
+  setMagicEffectPoolSize: (size) => set({ magicEffectPoolSize: size }),
 
   fetchToolRegistry: async () => {
     try {
@@ -146,10 +140,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           toolRegistry: tools.map((t: Record<string, unknown>) => ({
             name: t.name as string,
             description: (t.description ?? "") as string,
-            building: (t.building ?? null) as string | null,
-            pixelX: (t.pixel_x ?? null) as number | null,
-            pixelY: (t.pixel_y ?? null) as number | null,
-            animation: (t.animation ?? null) as string | null,
           })),
         });
       }

@@ -1,19 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { useEditorStore } from "../stores/editorStore";
 import { useTilesetStore } from "../stores/tilesetStore";
+import { getTileSourceRect } from "../lib/tileset-loader";
 import { Tooltip } from "./Tooltip";
 import { getCharacters, getSpriteBasePath } from "../lib/sprite-registry";
-import type { MapObject, ToolStation, SpawnPoint } from "../types/editor";
-
-const DEFAULT_TOOL_STATIONS: Omit<ToolStation, "x" | "y">[] = [
-  { name: "well", type: "tool_station", toolKey: "web_search", animation: "at-well", tooltip: "Web Search" },
-  { name: "scroll-desk", type: "tool_station", toolKey: "read_file", animation: "at-signpost", tooltip: "File Reading & Writing" },
-  { name: "shrine", type: "tool_station", toolKey: "view_soul", animation: "at-bench", tooltip: "Soul & Goals" },
-  { name: "anvil", type: "tool_station", toolKey: "shell_execute", animation: "at-forge", tooltip: "Shell Terminal" },
-  { name: "telescope-tower", type: "tool_station", toolKey: "browse_webpage", animation: "at-tower", tooltip: "Web Browser" },
-  { name: "sundial", type: "tool_station", toolKey: "calendar", animation: "at-clock", tooltip: "Calendar" },
-  { name: "pigeon-post", type: "tool_station", toolKey: "email", animation: "at-mailbox", tooltip: "Email" },
-];
+import type { MapObject, SpawnPoint } from "../types/editor";
+import type { TileAnimationGroup, LoadedTileset } from "../types/editor";
 
 type PanelTab = "placed" | "catalog";
 
@@ -21,11 +13,6 @@ export function ObjectPanel() {
   const { objects, addObject, removeObject, updateObject } = useEditorStore();
   const [activeTab, setActiveTab] = useState<PanelTab>("placed");
   const [spritePicker, setSpritePicker] = useState<number | null>(null);
-
-  const addToolStation = (template: Omit<ToolStation, "x" | "y">) => {
-    addObject({ ...template, x: 256, y: 256 } as MapObject);
-    setActiveTab("placed");
-  };
 
   const addSpawnPoint = (name: string) => {
     const obj: SpawnPoint = { name, type: "spawn_point", x: 256, y: 256 };
@@ -52,7 +39,7 @@ export function ObjectPanel() {
   return (
     <div className="flex flex-col h-full">
       <div className="px-2 py-1 text-xs font-bold text-gray-300 border-b border-gray-700 flex items-center justify-between">
-        <Tooltip text="Objects" desc="Game-logic entities: tool stations, spawn points, and NPCs." side="left">
+        <Tooltip text="Objects" desc="Game-logic entities: spawn points, NPCs, and magic effects." side="left">
           <span>Objects</span>
         </Tooltip>
         <span className="text-[10px] text-gray-500">
@@ -97,9 +84,7 @@ export function ObjectPanel() {
               <div className="flex items-center gap-1 px-2 py-1 text-[10px] hover:bg-gray-700/50">
                 <span
                   className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    obj.type === "tool_station"
-                      ? "bg-yellow-500"
-                      : obj.type === "spawn_point"
+                    obj.type === "spawn_point"
                       ? "bg-blue-500"
                       : "bg-purple-500"
                   }`}
@@ -158,21 +143,7 @@ export function ObjectPanel() {
       {/* Catalog — templates to add */}
       {activeTab === "catalog" && (
         <div className="flex-1 overflow-auto p-2 space-y-2">
-          <div>
-            <div className="text-[10px] text-gray-400 mb-1 font-semibold">Tool Stations</div>
-            <div className="space-y-0.5">
-              {DEFAULT_TOOL_STATIONS.map((ts) => (
-                <button
-                  key={ts.name}
-                  onClick={() => addToolStation(ts)}
-                  className="block w-full text-left text-[10px] px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
-                >
-                  <span className="text-yellow-400">{ts.name}</span>
-                  <span className="text-gray-500 ml-1">({ts.tooltip})</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <MagicEffectsCatalog />
           <div>
             <div className="text-[10px] text-gray-400 mb-1 font-semibold">Spawn Points</div>
             <div className="space-y-0.5">
@@ -195,6 +166,100 @@ export function ObjectPanel() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function MagicEffectsCatalog() {
+  const animationGroups = useTilesetStore((s) => s.animationGroups);
+  const tilesets = useTilesetStore((s) => s.tilesets);
+
+  const fxGroups = animationGroups.filter((g) => g.isMagicEffect);
+
+  return (
+    <div>
+      <div className="text-[10px] text-gray-400 mb-1 font-semibold">Magic Effects</div>
+      {fxGroups.length === 0 ? (
+        <div className="text-[9px] text-gray-600 px-1 py-1">
+          Mark animations as "Magic Effect" in the Animation Definer to see them here.
+        </div>
+      ) : (
+        <div className="space-y-1">
+          {fxGroups.map((group) => {
+            const tileset = tilesets[group.tilesetIndex];
+            if (!tileset) return null;
+            return (
+              <MagicEffectRow key={group.id} group={group} tileset={tileset} />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MagicEffectRow({
+  group,
+  tileset,
+}: {
+  group: TileAnimationGroup;
+  tileset: LoadedTileset;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animRef = useRef<number>(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || group.entries.length === 0) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const entry = group.entries[0];
+    const size = 32;
+    canvas.width = size;
+    canvas.height = size;
+
+    const animate = (t: DOMHighResTimeStamp) => {
+      const totalDuration = entry.frames.length * group.frameDuration;
+      const elapsed = t % totalDuration;
+      let accum = 0;
+      let frameLocalId = entry.frames[0];
+      for (const fId of entry.frames) {
+        accum += group.frameDuration;
+        if (elapsed < accum) {
+          frameLocalId = fId;
+          break;
+        }
+      }
+
+      const { sx, sy, sw, sh } = getTileSourceRect(frameLocalId, tileset);
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, size, size);
+      ctx.drawImage(tileset.image, sx, sy, sw, sh, 0, 0, size, size);
+      animRef.current = requestAnimationFrame(animate);
+    };
+    animRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [group, tileset]);
+
+  const frameCount = group.entries[0]?.frames.length ?? 0;
+
+  return (
+    <div className="flex items-center gap-2 px-1 py-0.5 bg-gray-700 rounded">
+      <canvas
+        ref={canvasRef}
+        className="flex-shrink-0"
+        style={{ imageRendering: "pixelated", width: 32, height: 32 }}
+      />
+      <div className="flex-1 min-w-0">
+        <div className="text-[10px] text-gray-200 truncate">
+          {group.name}
+          <span className="ml-1 px-1 py-0 text-[8px] bg-fuchsia-700 text-fuchsia-200 rounded">FX</span>
+        </div>
+        <div className="text-[9px] text-gray-500">
+          {frameCount} frames, {group.frameDuration}ms &middot; {tileset.name}
+        </div>
+      </div>
     </div>
   );
 }

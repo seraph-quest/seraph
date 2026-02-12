@@ -115,18 +115,7 @@ function drawObjects(
     const x = ox + (obj.x / tileSize) * scale;
     const y = oy + (obj.y / tileSize) * scale;
 
-    if (obj.type === "tool_station") {
-      ctx.fillStyle = "rgba(226, 183, 20, 0.6)";
-      ctx.fillRect(x, y, scale, scale);
-      ctx.strokeStyle = "#e2b714";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, scale, scale);
-
-      ctx.fillStyle = "#fff";
-      ctx.font = `${Math.max(8, 10 * zoom)}px sans-serif`;
-      ctx.textAlign = "center";
-      ctx.fillText(obj.name, x + scale / 2, y - 4);
-    } else if (obj.type === "spawn_point") {
+    if (obj.type === "spawn_point") {
       // If a sprite is assigned, render it
       if (obj.spriteSheet) {
         const imgPath = `${getSpriteBasePath("character")}/${obj.spriteSheet}.png`;

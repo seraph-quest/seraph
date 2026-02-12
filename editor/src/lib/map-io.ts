@@ -121,17 +121,6 @@ export function serializeMap(
         visible: true,
       };
 
-      if (obj.type === "tool_station") {
-        return {
-          ...base,
-          properties: [
-            { name: "tool_key", type: "string" as const, value: obj.toolKey },
-            { name: "animation", type: "string" as const, value: obj.animation },
-            { name: "tooltip", type: "string" as const, value: obj.tooltip },
-          ],
-        };
-      }
-
       if (obj.type === "spawn_point" && obj.spriteSheet) {
         return {
           ...base,
@@ -205,6 +194,33 @@ export function serializeMap(
     };
   });
 
+  // Collect magic effect groups for map-level property
+  const magicEffects = (animationGroups ?? []).filter((g) => g.isMagicEffect);
+  const properties: TiledMap["properties"] = magicEffects.length > 0
+    ? [{
+        name: "magic_effects",
+        type: "string",
+        value: JSON.stringify(
+          magicEffects.map((g) => {
+            const ts = tilesets[g.tilesetIndex];
+            return {
+              id: g.id,
+              name: g.name,
+              tilesetName: ts?.name ?? "",
+              tileWidth: ts?.tileWidth ?? 16,
+              tileHeight: ts?.tileHeight ?? 16,
+              columns: ts?.columns ?? 1,
+              frameDuration: g.frameDuration,
+              entries: g.entries.map((e) => ({
+                anchorLocalId: e.anchorLocalId,
+                frames: e.frames,
+              })),
+            };
+          })
+        ),
+      }]
+    : undefined;
+
   return {
     width: mapWidth,
     height: mapHeight,
@@ -217,6 +233,7 @@ export function serializeMap(
     type: "map",
     layers: [...tileLayers, objectLayer],
     tilesets: tilesetRefs,
+    ...(properties ? { properties } : {}),
   };
 }
 
@@ -249,18 +266,7 @@ export function parseMapFromJson(json: string): {
         layers.push([...layer.data]);
       } else if (layer.type === "objectgroup") {
         for (const obj of layer.objects) {
-          if (obj.type === "tool_station") {
-            const props = obj.properties ?? [];
-            objects.push({
-              name: obj.name,
-              type: "tool_station",
-              x: obj.x,
-              y: obj.y,
-              toolKey: String(props.find((p) => p.name === "tool_key")?.value ?? ""),
-              animation: String(props.find((p) => p.name === "animation")?.value ?? ""),
-              tooltip: String(props.find((p) => p.name === "tooltip")?.value ?? ""),
-            });
-          } else if (obj.type === "spawn_point") {
+          if (obj.type === "spawn_point") {
             const props = obj.properties ?? [];
             const spriteSheet = props.find((p) => p.name === "sprite_sheet")?.value;
             const sp: MapObject = {
@@ -319,6 +325,49 @@ export function parseMapFromJson(json: string): {
           frameDuration,
           entries,
         });
+      }
+    }
+
+    // Restore magic effect groups from map-level properties
+    const magicProp = map.properties?.find((p) => p.name === "magic_effects");
+    if (magicProp && typeof magicProp.value === "string") {
+      try {
+        const effects = JSON.parse(magicProp.value) as Array<{
+          id: string;
+          name: string;
+          tilesetName: string;
+          frameDuration: number;
+          entries: TileAnimationEntry[];
+        }>;
+        for (const fx of effects) {
+          // Match tilesetName to tileset index
+          const tsIndex = map.tilesets.findIndex((ts) => ts.name === fx.tilesetName);
+          if (tsIndex < 0) continue;
+          // Check if this group was already reconstructed from tile animations
+          const existing = animationGroups.find(
+            (g) =>
+              g.tilesetIndex === tsIndex &&
+              g.frameDuration === fx.frameDuration &&
+              g.entries.length === fx.entries.length &&
+              g.entries.every((e, i) => e.anchorLocalId === fx.entries[i].anchorLocalId)
+          );
+          if (existing) {
+            existing.isMagicEffect = true;
+            existing.name = fx.name;
+            existing.id = fx.id;
+          } else {
+            animationGroups.push({
+              id: fx.id,
+              name: fx.name,
+              tilesetIndex: tsIndex,
+              frameDuration: fx.frameDuration,
+              entries: fx.entries,
+              isMagicEffect: true,
+            });
+          }
+        }
+      } catch {
+        // Ignore malformed magic_effects
       }
     }
 

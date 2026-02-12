@@ -22,7 +22,6 @@ class MCPManager:
     def __init__(self) -> None:
         self._clients: dict[str, MCPClient] = {}
         self._tools: dict[str, list] = {}
-        self._buildings: dict[str, str] = {}
         self._config_path: str | None = None
         self._config: dict[str, dict] = {}
 
@@ -43,8 +42,6 @@ class MCPManager:
                 logger.info("MCP server '%s' disabled — skipping", name)
                 continue
             self.connect(name, server["url"])
-            if server.get("building"):
-                self._buildings[name] = server["building"]
 
     def _save_config(self) -> None:
         """Write current config back to the JSON file."""
@@ -98,12 +95,6 @@ class MCPManager:
         """Return tools for a specific named server."""
         return self._tools.get(name, [])
 
-    # --- Building / metadata ---
-
-    def get_server_building(self, name: str) -> str | None:
-        """Get the village building assigned to a server."""
-        return self._buildings.get(name)
-
     def get_server_names(self) -> list[str]:
         """Return names of all configured servers (connected or not)."""
         return list(self._config.keys())
@@ -124,14 +115,13 @@ class MCPManager:
                 "enabled": server.get("enabled", True),
                 "connected": connected,
                 "tool_count": tool_count,
-                "building": server.get("building"),
                 "description": server.get("description", ""),
             })
         return result
 
     # --- Runtime config mutations ---
 
-    def add_server(self, name: str, url: str, building: str | None = None,
+    def add_server(self, name: str, url: str,
                    description: str = "", enabled: bool = True) -> None:
         """Add a new server to config and optionally connect it."""
         self._config[name] = {
@@ -139,9 +129,6 @@ class MCPManager:
             "enabled": enabled,
             "description": description,
         }
-        if building:
-            self._config[name]["building"] = building
-            self._buildings[name] = building
         if enabled:
             self.connect(name, url)
         self._save_config()
@@ -160,13 +147,6 @@ class MCPManager:
             elif not kwargs["enabled"] and was_enabled:
                 self.disconnect(name)
 
-        if "building" in kwargs:
-            server["building"] = kwargs["building"]
-            if kwargs["building"]:
-                self._buildings[name] = kwargs["building"]
-            else:
-                self._buildings.pop(name, None)
-
         if "url" in kwargs:
             server["url"] = kwargs["url"]
         if "description" in kwargs:
@@ -181,7 +161,6 @@ class MCPManager:
             return False
         self.disconnect(name)
         del self._config[name]
-        self._buildings.pop(name, None)
         self._save_config()
         return True
 

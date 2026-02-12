@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { API_URL, BUILDING_POSITIONS } from "../config/constants";
+import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { DialogFrame } from "./chat/DialogFrame";
 
@@ -9,11 +9,8 @@ interface McpServer {
   enabled: boolean;
   connected: boolean;
   tool_count: number;
-  building: string | null;
   description: string;
 }
-
-const BUILDING_OPTIONS = ["", ...Object.keys(BUILDING_POSITIONS)];
 
 function McpServerRow({
   server,
@@ -70,7 +67,6 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
   const [show, setShow] = useState(false);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const [building, setBuilding] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState("");
 
@@ -86,7 +82,6 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
         body: JSON.stringify({
           name: name.trim(),
           url: url.trim(),
-          building: building || null,
           description: description.trim(),
           enabled: true,
         }),
@@ -98,7 +93,6 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
       }
       setName("");
       setUrl("");
-      setBuilding("");
       setDescription("");
       setError("");
       setShow(false);
@@ -142,16 +136,6 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
         onChange={(e) => setDescription(e.target.value)}
         className="w-full bg-transparent text-[8px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
       />
-      <select
-        value={building}
-        onChange={(e) => setBuilding(e.target.value)}
-        className="w-full bg-transparent text-[8px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none"
-      >
-        <option value="">Building (auto)</option>
-        {BUILDING_OPTIONS.filter(Boolean).map((b) => (
-          <option key={b} value={b}>{b}</option>
-        ))}
-      </select>
       {error && <div className="text-[7px] text-red-400">{error}</div>}
       <div className="flex gap-1">
         <button

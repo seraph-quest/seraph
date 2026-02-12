@@ -12,6 +12,7 @@ interface DraftGroup {
   name: string;
   frameDuration: number;
   mode: Mode;
+  isMagicEffect: boolean;
   /** Single-tile mode: frames per entry (one entry = one anchor) */
   singleFrames: number[];
   /** Multi-tile mode: each element is a rectangular selection of local IDs */
@@ -19,7 +20,7 @@ interface DraftGroup {
 }
 
 function newDraft(): DraftGroup {
-  return { name: "", frameDuration: 200, mode: "single", singleFrames: [], multiSelections: [] };
+  return { name: "", frameDuration: 200, mode: "single", isMagicEffect: false, singleFrames: [], multiSelections: [] };
 }
 
 export function AnimationDefiner() {
@@ -60,6 +61,7 @@ export function AnimationDefiner() {
           name: group.name,
           frameDuration: group.frameDuration,
           mode: "multi",
+          isMagicEffect: group.isMagicEffect ?? false,
           singleFrames: [],
           multiSelections,
         });
@@ -68,12 +70,13 @@ export function AnimationDefiner() {
           name: group.name,
           frameDuration: group.frameDuration,
           mode: "single",
+          isMagicEffect: group.isMagicEffect ?? false,
           singleFrames: [...group.entries[0].frames],
           multiSelections: [],
         });
       }
     } else {
-      setDraft({ name: group.name, frameDuration: group.frameDuration, mode: "single", singleFrames: [], multiSelections: [] });
+      setDraft({ name: group.name, frameDuration: group.frameDuration, mode: "single", isMagicEffect: group.isMagicEffect ?? false, singleFrames: [], multiSelections: [] });
     }
   };
 
@@ -111,6 +114,7 @@ export function AnimationDefiner() {
       tilesetIndex: activeTilesetIndex,
       frameDuration: draft.frameDuration,
       entries,
+      ...(draft.isMagicEffect ? { isMagicEffect: true } : {}),
     };
 
     const store = useTilesetStore.getState();
@@ -245,7 +249,12 @@ function GroupRow({
     <div className="flex items-center gap-2 px-1 py-0.5 bg-gray-800 rounded">
       <canvas ref={canvasRef} className="flex-shrink-0" style={{ imageRendering: "pixelated", width: 32, height: 32 }} />
       <div className="flex-1 min-w-0">
-        <div className="text-[10px] text-gray-200 truncate">{group.name}</div>
+        <div className="text-[10px] text-gray-200 truncate">
+          {group.name}
+          {group.isMagicEffect && (
+            <span className="ml-1 px-1 py-0 text-[8px] bg-fuchsia-700 text-fuchsia-200 rounded">FX</span>
+          )}
+        </div>
         <div className="text-[9px] text-gray-500">
           {frameCount} frames, {entryCount} tile{entryCount > 1 ? "s" : ""}, {group.frameDuration}ms
         </div>
@@ -532,6 +541,15 @@ function DraftEditor({
             Multi-tile
           </button>
         </div>
+        <label className="flex items-center gap-1 text-[10px] text-gray-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={draft.isMagicEffect}
+            onChange={(e) => setDraft((d) => d ? { ...d, isMagicEffect: e.target.checked } : d)}
+            className="accent-fuchsia-500"
+          />
+          Magic Effect (tool spell pool)
+        </label>
       </div>
 
       {/* Tileset canvas for clicking */}

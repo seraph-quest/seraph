@@ -26,16 +26,6 @@ export interface MapDelta {
   changes: Array<{ x: number; y: number; oldValue: number; newValue: number }>;
 }
 
-export interface ToolStation {
-  name: string;
-  type: "tool_station";
-  x: number;
-  y: number;
-  toolKey: string;
-  animation: string;
-  tooltip: string;
-}
-
 export interface SpawnPoint {
   name: string;
   type: "spawn_point";
@@ -56,7 +46,7 @@ export interface NPC {
   frameRow: number;
 }
 
-export type MapObject = ToolStation | SpawnPoint | NPC;
+export type MapObject = SpawnPoint | NPC;
 
 /** A single tile that participates in an animation — the anchor local ID + its frame sequence */
 export interface TileAnimationEntry {
@@ -71,6 +61,8 @@ export interface TileAnimationGroup {
   tilesetIndex: number;
   frameDuration: number;
   entries: TileAnimationEntry[];
+  /** When true, this group is included in the magic effect pool for tool-use animations */
+  isMagicEffect?: boolean;
 }
 
 /** Pre-computed lookup: GID → animation frames for fast rendering */

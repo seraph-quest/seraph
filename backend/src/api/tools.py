@@ -16,10 +16,6 @@ async def list_tools():
         meta = get_tool_metadata(tool.name)
         result.append({
             "name": tool.name,
-            "description": getattr(tool, "description", ""),
-            "building": meta.get("building") if meta else None,
-            "pixel_x": meta.get("pixel_x") if meta else None,
-            "pixel_y": meta.get("pixel_y") if meta else None,
-            "animation": meta.get("animation") if meta else None,
+            "description": meta.get("description") if meta else getattr(tool, "description", ""),
         })
     return result

@@ -1,3 +1,4 @@
+from config.settings import settings
 from ddgs import DDGS
 from smolagents import tool
 
@@ -14,7 +15,7 @@ def web_search(query: str, max_results: int = 5) -> str:
         Formatted search results with titles, URLs, and snippets.
     """
     try:
-        with DDGS() as ddgs:
+        with DDGS(timeout=settings.web_search_timeout) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
 
         if not results:

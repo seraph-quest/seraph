@@ -45,15 +45,26 @@ async def consolidate_session(session_id: str) -> None:
         # Use LiteLLM directly for the consolidation call (lighter than full agent)
         import litellm
 
-        response = await asyncio.to_thread(
-            litellm.completion,
-            model=settings.default_model,
-            messages=[{"role": "user", "content": prompt}],
-            api_key=settings.openrouter_api_key,
-            api_base="https://openrouter.ai/api/v1",
-            temperature=0.3,
-            max_tokens=1024,
-        )
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    litellm.completion,
+                    model=settings.default_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    api_key=settings.openrouter_api_key,
+                    api_base="https://openrouter.ai/api/v1",
+                    temperature=0.3,
+                    max_tokens=1024,
+                ),
+                timeout=settings.consolidation_llm_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Consolidation LLM timed out after %ds for session %s",
+                settings.consolidation_llm_timeout,
+                session_id[:8],
+            )
+            return
 
         text = response.choices[0].message.content.strip()
 
@@ -75,13 +86,19 @@ async def consolidate_session(session_id: str) -> None:
             singular = category.rstrip("s") if category != "reflections" else "reflection"
             for item in items:
                 if isinstance(item, str) and len(item) > 10:
-                    await asyncio.to_thread(
-                        add_memory,
-                        text=item,
-                        category=singular,
-                        source_session_id=session_id,
-                    )
-                    stored += 1
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                add_memory,
+                                text=item,
+                                category=singular,
+                                source_session_id=session_id,
+                            ),
+                            timeout=10,
+                        )
+                        stored += 1
+                    except asyncio.TimeoutError:
+                        logger.warning("add_memory timed out for session %s", session_id[:8])
 
         # Apply soul updates if any
         soul_updates = data.get("soul_updates", {})

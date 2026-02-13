@@ -3,6 +3,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
+from config.settings import settings
 from src.agent.factory import create_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -37,8 +38,14 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        result = await asyncio.to_thread(agent.run, request.message)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(agent.run, request.message),
+            timeout=settings.agent_chat_timeout,
+        )
         response_text = str(result.output) if hasattr(result, "output") else str(result)
+    except asyncio.TimeoutError:
+        logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
+        raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
     except Exception as e:
         logger.exception("Agent execution failed")
         raise HTTPException(status_code=500, detail=f"Agent error: {e}")

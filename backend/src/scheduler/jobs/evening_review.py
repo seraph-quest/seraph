@@ -100,15 +100,22 @@ async def run_evening_review() -> None:
 
         import litellm
 
-        response = await asyncio.to_thread(
-            litellm.completion,
-            model=settings.default_model,
-            messages=[{"role": "user", "content": prompt}],
-            api_key=settings.openrouter_api_key,
-            api_base="https://openrouter.ai/api/v1",
-            temperature=0.6,
-            max_tokens=512,
-        )
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    litellm.completion,
+                    model=settings.default_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    api_key=settings.openrouter_api_key,
+                    api_base="https://openrouter.ai/api/v1",
+                    temperature=0.6,
+                    max_tokens=512,
+                ),
+                timeout=settings.agent_briefing_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("evening_review: LLM timed out after %ds", settings.agent_briefing_timeout)
+            return
 
         review_text = response.choices[0].message.content.strip()
 

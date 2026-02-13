@@ -152,6 +152,12 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - `manage.sh` - Docker management: `./manage.sh -e dev up -d`, `down`, `logs -f`, `build`
 - `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Requires `jq` (`brew install jq`).
 - `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
+- **Timeout settings** (`config/settings.py`):
+  - `agent_chat_timeout: int = 120` — REST + WS chat agent execution
+  - `agent_strategist_timeout: int = 60` — strategist tick agent
+  - `agent_briefing_timeout: int = 60` — daily briefing + evening review LiteLLM calls
+  - `consolidation_llm_timeout: int = 30` — memory consolidation LiteLLM call
+  - `web_search_timeout: int = 15` — DDGS web search per-call
 
 ## WebSocket Protocol
 - **Client sends**: `{type: "message" | "ping" | "skip_onboarding", message, session_id}`

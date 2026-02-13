@@ -59,6 +59,9 @@ class TestWebSearch:
         from unittest.mock import patch
 
         class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
             def __enter__(self):
                 return self
 
@@ -79,6 +82,9 @@ class TestWebSearch:
         from unittest.mock import patch
 
         class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
             def __enter__(self):
                 return self
 

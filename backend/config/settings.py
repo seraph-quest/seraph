@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Phase 3.5 — Timeouts
     agent_chat_timeout: int = 120    # seconds
     agent_strategist_timeout: int = 60  # seconds
+    agent_briefing_timeout: int = 60  # daily briefing + evening review LiteLLM calls
+    consolidation_llm_timeout: int = 30  # memory consolidation LiteLLM call
+    web_search_timeout: int = 15  # DDGS web search per-call
 
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True

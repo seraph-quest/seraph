@@ -6,7 +6,7 @@ sidebar_position: 2
 
 > **Date**: 2026-02-09 (updated)
 > **OpenClaw version context**: v2026.1.x (145k+ GitHub stars, formerly Clawdbot/Moltbot)
-> **Seraph branch**: `develop` (Phase 1 + 2 complete)
+> **Seraph branch**: `main` (Phases 0–3.5 mostly complete, Phase 4 partial)
 
 ## Overview
 
@@ -22,7 +22,7 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
 - Tool execution with visual feedback (animated RPG avatar casts magic effects in village)
-- **16 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright), calendar (Google), email (Gmail), task management (Things3 via MCP)
+- **12 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
 - **Memory consolidation** — Background extraction of facts/preferences/decisions after each conversation
@@ -30,7 +30,7 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 - **Onboarding flow** — Specialized agent for first-time users, skip/restart controls, welcome message
 - **Plugin system** — Auto-discovery of tools from `src/tools/`, tool registry with village metadata
 - **Sandboxed execution** — snekbox Docker sidecar for shell commands, Playwright for browser
-- Phaser 3 village scene with 7 buildings, day/night cycle, idle wandering, 12 waypoints, speech bubbles
+- Phaser 3 village scene with dynamically loaded buildings from Tiled JSON, day/night cycle, idle wandering, 12 waypoints, speech bubbles
 - Multi-model support via OpenRouter/LiteLLM
 - Docker Compose dev environment (3 services: backend, frontend, sandbox)
 - React 19 + Vite 6 + TypeScript + Tailwind + Zustand + Phaser 3 frontend
@@ -51,38 +51,34 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 
 | # | Feature | OpenClaw | Seraph Status |
 |---|---------|----------|---------------|
-| 4 | **Proactive heartbeat** | Cron-like scheduled tasks (check email, RSS, summaries) | WS protocol scaffolding exists (proactive/ambient types), but no scheduler or reasoning engine yet (Phase 3) |
-| 5 | **Multi-channel messaging** | WhatsApp, Telegram, Discord, Slack, Signal, iMessage, Mattermost, Google Chat | Web UI only |
-| 6 | **Multi-agent routing** | Multiple isolated agents per gateway, deterministic routing | Single agent (+ onboarding agent) |
-| 7 | **Subagents** | Spawnable child agents with concurrency limits, agent-level restrictions | None |
-| 8 | **Note-taking / Knowledge base** | N/A (not an OpenClaw feature) | Planned in roadmap (Phase 2.4) but not implemented — no Obsidian/markdown vault integration |
+| 4 | **Multi-channel messaging** | WhatsApp, Telegram, Discord, Slack, Signal, iMessage, Mattermost, Google Chat | Web UI only |
+| 5 | **Note-taking / Knowledge base** | N/A (not an OpenClaw feature) | Planned in roadmap (Phase 2.4) but not implemented — no Obsidian/markdown vault integration |
 
 ### Tier 3 — Important Gaps (UX & operational)
 
 | # | Feature | OpenClaw | Seraph Status |
 |---|---------|----------|---------------|
-| 9 | **Streaming/chunking** | Block streaming with configurable chunk size, human-like delay | Raw WebSocket step streaming |
-| 10 | **Media support** | Send/receive images, audio, documents bidirectionally | Text only |
-| 11 | **TTS** | ElevenLabs/OpenAI providers, auto/inbound/tagged modes | None |
-| 12 | **Voice transcription** | Inbound voice note transcription hook | None |
-| 13 | **Message queuing** | Steer/followup/collect/interrupt modes, debouncing for rapid messages | No queue, one-at-a-time |
-| 14 | **Security audit CLI** | `openclaw security audit --deep`, permission hardening, log redaction | None |
-| 15 | **User auth/identity** | DM pairing, allowlists, identity links across channels, access groups | Anonymous singleton user, no auth |
-| 16 | **Configuration UI** | Web control dashboard, config editing via chat | No settings UI |
-| 17 | **Remote access** | SSH, Tailscale, mDNS discovery | Localhost only |
-| 18 | **Structured logging** | Redaction, pretty/compact/json styles, per-file output | Basic console logging |
+| 6 | **Streaming/chunking** | Block streaming with configurable chunk size, human-like delay | Raw WebSocket step streaming |
+| 7 | **Media support** | Send/receive images, audio, documents bidirectionally | Text only |
+| 8 | **TTS** | ElevenLabs/OpenAI providers, auto/inbound/tagged modes | None |
+| 9 | **Voice transcription** | Inbound voice note transcription hook | None |
+| 10 | **Message queuing** | Steer/followup/collect/interrupt modes, debouncing for rapid messages | No queue, one-at-a-time |
+| 11 | **Security audit CLI** | `openclaw security audit --deep`, permission hardening, log redaction | None |
+| 12 | **User auth/identity** | DM pairing, allowlists, identity links across channels, access groups | Anonymous singleton user, no auth |
+| 13 | **Remote access** | SSH, Tailscale, mDNS discovery | Localhost only |
+| 14 | **Structured logging** | Redaction, pretty/compact/json styles, per-file output | Basic console logging |
 
 ### Tier 4 — Nice-to-Have
 
 | # | Feature | OpenClaw |
 |---|---------|----------|
-| 19 | Mobile nodes (iOS/Android with Canvas) |
-| 20 | macOS menubar companion app |
-| 21 | Group chat mention gating & policies |
-| 22 | Config includes with deep merge (10 levels) |
-| 23 | Response prefix templates (`{model}`, `{identity.name}`) |
-| 24 | Ack reactions (emoji confirmations) |
-| 25 | Custom chat commands (`/command` in chat) |
+| 15 | Mobile nodes (iOS/Android with Canvas) |
+| 16 | macOS menubar companion app |
+| 17 | Group chat mention gating & policies |
+| 18 | Config includes with deep merge (10 levels) |
+| 19 | Response prefix templates (`{model}`, `{identity.name}`) |
+| 20 | Ack reactions (emoji confirmations) |
+| 21 | Custom chat commands (`/command` in chat) |
 
 ---
 
@@ -97,7 +93,10 @@ These were gaps in the original analysis that have since been implemented:
 | **Sandboxed execution** | No sandboxing | snekbox Docker sidecar (Phase 2) |
 | **Browser automation** | DuckDuckGo text search only | Playwright with headless Chromium (Phase 2) |
 | **Shell command execution** | No shell tool | snekbox-based sandboxed execution (Phase 2) |
-| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (16 native tools) + MCP integrations (Phase 2) |
+| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (12 native tools) + MCP integrations + SKILL.md plugins (Phase 2 + 4) |
+| **Proactive heartbeat** | No scheduler or reasoning engine | APScheduler with 6 jobs: strategist tick, daily briefing, evening review, memory consolidation, goal check, calendar scan (Phase 3) |
+| **Multi-agent / subagents** | Single agent (+ onboarding agent) | Recursive delegation with orchestrator + domain specialists behind feature flag (Phase 4) |
+| **Configuration UI** | No settings UI | Settings panel with interruption mode toggle, SKILL.md management, MCP server management (Phase 3.5) |
 
 ---
 
@@ -137,7 +136,7 @@ These were gaps in the original analysis that have since been implemented:
 
 OpenClaw is headless. Seraph's **visual RPG experience** has no equivalent:
 
-- Phaser 3 village scene with 7 buildings and magic effect animations
+- Phaser 3 village scene with dynamically loaded buildings and magic effect animations
 - Animated pixel-art avatar with casting effects on tool use
 - Day/night cycle based on system time
 - Idle wandering between 12 waypoints

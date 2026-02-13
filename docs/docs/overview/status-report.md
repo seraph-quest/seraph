@@ -11,7 +11,7 @@ sidebar_position: 3
 
 ## Executive Summary
 
-Seraph is in strong shape. Phases 0-3 are implemented and functional, delivering a proactive AI guardian with persistent identity, 16 tools, MCP extensibility, a sophisticated observer system, and a visually polished RPG village interface. The codebase is well-architected, clean, and production-quality for a single-user application.
+Seraph is in strong shape. Phases 0-3 are implemented and functional, delivering a proactive AI guardian with persistent identity, 12 tools, MCP extensibility, a sophisticated observer system, and a visually polished RPG village interface. The codebase is well-architected, clean, and production-quality for a single-user application.
 
 However, significant work remains to reach the stated vision of being "better than OpenClaw." OpenClaw exploded in late January 2026 (145k+ GitHub stars, millions of installs) and has become the defining AI agent of the moment. The competitive landscape has shifted dramatically. This report maps exactly where Seraph stands, what's missing, and what to prioritize.
 
@@ -25,7 +25,7 @@ However, significant work remains to reach the stated vision of being "better th
 |-------|--------|-----------------|
 | **0 - Foundation** | COMPLETE | Chat UI, WebSocket streaming, Phaser village, day/night cycle, wandering avatar |
 | **1 - Persistent Identity** | COMPLETE | Soul file, LanceDB vector memory, memory consolidation, hierarchical goals, onboarding |
-| **2 - Capable Executor** | COMPLETE | 16 auto-discovered tools, shell sandbox, browser automation, MCP support, tool registry |
+| **2 - Capable Executor** | COMPLETE | 12 auto-discovered tools, shell sandbox, browser automation, MCP support, tool registry |
 | **3 - The Observer** | COMPLETE | APScheduler (6 jobs), user state machine (6 states), attention guardian, insight queue, macOS daemon |
 
 ### Backend Assessment: 85-90% Complete
@@ -114,8 +114,8 @@ OpenClaw (formerly Clawdbot/Moltbot, created by Peter Steinberger) became "agent
 | Local-first / privacy | Yes | No (cloud) | Yes |
 | Persistent memory | Yes (weeks) | Limited | Yes (LanceDB + soul) |
 | Multi-channel | Yes (Telegram, Discord, Slack, etc.) | Web only | **No** (browser only) |
-| Plugin/skill ecosystem | 700+ community skills | Closed | **MCP only, no skill files** |
-| Multi-agent | Yes (specialized sub-agents) | Yes | **No** |
+| Plugin/skill ecosystem | 700+ community skills | Closed | **Yes** (SKILL.md plugins + MCP) |
+| Multi-agent | Yes (specialized sub-agents) | Yes | **Yes** (recursive delegation behind feature flag) |
 | Proactive behavior | **No** (reactive only) | **No** | **Yes** (strategist, briefings) |
 | Screen awareness | **No** | **No** | **Yes** (daemon + OCR) |
 | Visual interface | **No** (headless/terminal) | Basic web UI | **Yes** (RPG village) |

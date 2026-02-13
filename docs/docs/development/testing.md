@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Testing Guide
 
-Seraph has 336 automated tests (281 backend, 55 frontend) with CI running on every push and PR.
+Seraph has 520 automated tests (396 backend, 124 frontend) with CI running on every push and PR.
 
 ## Running Tests
 
@@ -122,9 +122,9 @@ beforeEach(() => {
 
 These areas are intentionally excluded from the test suite:
 
-- **Phaser game objects** (StudyScene, AgentSprite, UserSprite, SpeechBubble) — require WebGL context, fragile mocking
+- **Phaser game objects** (VillageScene, AgentSprite, UserSprite, SpeechBubble) — require WebGL context, fragile mocking
 - **EventBus.ts** — single-line Phaser EventEmitter wrapper
-- **Browser/Calendar/Email tools** — thin wrappers around OAuth-dependent libraries
+- **Browser tool** — thin wrapper around Playwright
 - **LanceDB vector_store.py** — requires real embeddings model loaded
 - **Full WS message streaming** — complex sync/async interaction with agent streaming; basic WS tests cover ping, error handling, and skip_onboarding
 

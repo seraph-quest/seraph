@@ -113,3 +113,4 @@ See [Testing Guide](./development/testing) for full details.
 - **Phase 3** (The Observer): Complete — background scheduler, context awareness, user state machine, proactive strategist, daily briefing, evening review, attention guardian, insight queue, ambient/nudge frontend, native macOS screen daemon
 - **Phase 3.5** (Polish): Mostly complete — goal management UI, interruption mode toggle, token-aware context window, agent execution timeouts, frontend accessibility. Tauri desktop app and infra hardening remain planned.
 - **Phase 4** (The Strategist): Partially complete — proactive reasoning engine, interruption intelligence, morning briefing, evening review, SKILL.md plugins, recursive delegation architecture are done. Decision support, mistake prevention, weekly strategy remain planned.
+- **Phase 5** (Security): Planned — credential injection, leak detection, OAuth 2.1 for MCP, capability permissions

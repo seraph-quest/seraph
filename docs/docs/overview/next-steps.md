@@ -9,7 +9,7 @@ sidebar_position: 4
 
 ## Current State
 
-Phases 0-3 are complete and functional. 414 automated tests (359 backend, 55 frontend). Clean codebase with no TODOs/FIXMEs. The project's unique advantages — proactive intelligence, RPG village metaphor, five-pillar life model, screen awareness — are implemented but not fully leveraged in the UI.
+Phases 0-3 are complete and functional. 520 automated tests (396 backend, 124 frontend). Clean codebase with no TODOs/FIXMEs. The project's unique advantages — proactive intelligence, RPG village metaphor, five-pillar life model, screen awareness — are implemented but not fully leveraged in the UI.
 
 ---
 

@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from src.agent.factory import create_agent, get_model, get_tools
+from src.skills.loader import Skill
 
 
 class TestAgentFactory:
@@ -42,3 +43,38 @@ class TestAgentFactory:
         call_kwargs = mock_agent_cls.call_args[1]
         assert "CONVERSATION HISTORY" in call_kwargs["instructions"]
         assert "User: Hello" in call_kwargs["instructions"]
+
+    @patch("src.agent.factory.skill_manager")
+    @patch("src.agent.factory.ToolCallingAgent")
+    @patch("src.agent.factory.get_model")
+    def test_create_agent_with_skills(self, mock_get_model, mock_agent_cls, mock_skill_mgr):
+        mock_get_model.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+        mock_skill_mgr.get_active_skills.return_value = [
+            Skill(
+                name="test-skill",
+                description="A test skill",
+                instructions="Do the thing.",
+                requires_tools=["web_search"],
+                user_invocable=True,
+                enabled=True,
+            )
+        ]
+
+        create_agent()
+        call_kwargs = mock_agent_cls.call_args[1]
+        assert "Available Skills" in call_kwargs["instructions"]
+        assert "### Skill: test-skill [user-invocable]" in call_kwargs["instructions"]
+        assert "Do the thing." in call_kwargs["instructions"]
+
+    @patch("src.agent.factory.skill_manager")
+    @patch("src.agent.factory.ToolCallingAgent")
+    @patch("src.agent.factory.get_model")
+    def test_create_agent_no_skills(self, mock_get_model, mock_agent_cls, mock_skill_mgr):
+        mock_get_model.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+        mock_skill_mgr.get_active_skills.return_value = []
+
+        create_agent()
+        call_kwargs = mock_agent_cls.call_args[1]
+        assert "Available Skills" not in call_kwargs["instructions"]

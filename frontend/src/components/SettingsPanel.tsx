@@ -5,6 +5,50 @@ import { EventBus } from "../game/EventBus";
 import { DialogFrame } from "./chat/DialogFrame";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 
+interface SkillInfo {
+  name: string;
+  description: string;
+  requires_tools: string[];
+  user_invocable: boolean;
+  enabled: boolean;
+}
+
+function SkillRow({
+  skill,
+  onToggle,
+}: {
+  skill: SkillInfo;
+  onToggle: (name: string, enabled: boolean) => void;
+}) {
+  const statusColor = skill.enabled ? "bg-green-400" : "bg-retro-text/30";
+
+  return (
+    <div className="flex items-center gap-1 px-1 py-0.5 border-b border-retro-text/10 last:border-b-0">
+      <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor}`} />
+      <div className="flex-1 min-w-0">
+        <div className="text-[9px] font-bold text-retro-text truncate">
+          {skill.name}
+          {skill.user_invocable && (
+            <span className="text-retro-highlight/60 ml-1 font-normal">invocable</span>
+          )}
+        </div>
+        <div className="text-[8px] text-retro-text/40 truncate">
+          {skill.description}
+          {skill.requires_tools.length > 0 && (
+            <span> · needs: {skill.requires_tools.join(", ")}</span>
+          )}
+        </div>
+      </div>
+      <button
+        onClick={() => onToggle(skill.name, !skill.enabled)}
+        className={`text-[8px] px-0.5 ${skill.enabled ? "text-green-400 hover:text-red-400" : "text-retro-text/40 hover:text-green-400"}`}
+      >
+        {skill.enabled ? "on" : "off"}
+      </button>
+    </div>
+  );
+}
+
 interface McpServer {
   name: string;
   url: string;
@@ -166,8 +210,21 @@ export function SettingsPanel() {
   const debugWalkability = useChatStore((s) => s.debugWalkability);
   const setDebugWalkability = useChatStore((s) => s.setDebugWalkability);
 
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [servers, setServers] = useState<McpServer[]>([]);
   const [testResult, setTestResult] = useState<string | null>(null);
+
+  const fetchSkills = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/skills`);
+      if (res.ok) {
+        const data = await res.json();
+        setSkills(data.skills ?? []);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const fetchServers = useCallback(async () => {
     try {
@@ -183,9 +240,32 @@ export function SettingsPanel() {
 
   useEffect(() => {
     if (settingsPanelOpen) {
+      fetchSkills();
       fetchServers();
     }
-  }, [settingsPanelOpen, fetchServers]);
+  }, [settingsPanelOpen, fetchSkills, fetchServers]);
+
+  const handleSkillToggle = async (name: string, enabled: boolean) => {
+    try {
+      await fetch(`${API_URL}/api/skills/${name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      fetchSkills();
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSkillReload = async () => {
+    try {
+      await fetch(`${API_URL}/api/skills/reload`, { method: "POST" });
+      fetchSkills();
+    } catch {
+      // ignore
+    }
+  };
 
   const handleToggle = async (name: string, enabled: boolean) => {
     try {
@@ -256,6 +336,31 @@ export function SettingsPanel() {
           </div>
 
           <InterruptionModeToggle />
+
+          <div className="px-1">
+            <div className="text-[9px] uppercase tracking-wider text-retro-border font-bold mb-1">
+              Skills
+            </div>
+            {skills.length > 0 ? (
+              <div className="border border-retro-text/10 rounded mb-1">
+                {skills.map((s) => (
+                  <SkillRow
+                    key={s.name}
+                    skill={s}
+                    onToggle={handleSkillToggle}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="text-[8px] text-retro-text/30 mb-1 px-1">No skills loaded</div>
+            )}
+            <button
+              onClick={handleSkillReload}
+              className="text-[8px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
+            >
+              Reload skills
+            </button>
+          </div>
 
           {import.meta.env.DEV && (
             <div className="px-1">

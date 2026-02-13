@@ -2,6 +2,7 @@ from smolagents import LiteLLMModel, ToolCallingAgent
 
 from config.settings import settings
 from src.plugins.loader import discover_tools
+from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
 
 
@@ -35,6 +36,7 @@ def create_agent(
     """
     model = get_model()
     tools = get_tools()
+    tool_names = [t.name for t in tools]
 
     instructions = (
         "You are Seraph, a proactive guardian intelligence dedicated to elevating "
@@ -46,6 +48,16 @@ def create_agent(
         instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
     if memory_context:
         instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
+
+    # Inject active skills into instructions
+    active_skills = skill_manager.get_active_skills(tool_names)
+    if active_skills:
+        skill_lines = []
+        for s in active_skills:
+            invocable = " [user-invocable]" if s.user_invocable else ""
+            skill_lines.append(f"### Skill: {s.name}{invocable}\n{s.instructions}")
+        instructions += "\n\n## Available Skills\n\n" + "\n\n".join(skill_lines)
+
     if additional_context:
         instructions += f"\n\n--- CONVERSATION HISTORY ---\n{additional_context}"
 

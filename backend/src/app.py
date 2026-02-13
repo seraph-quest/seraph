@@ -11,6 +11,7 @@ from config.settings import settings
 from src.db import init_db, close_db
 from src.memory.soul import ensure_soul_exists
 from src.scheduler.engine import init_scheduler, shutdown_scheduler
+from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -39,6 +40,9 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
     mcp_manager.load_config(mcp_config)
+    skills_dir = os.path.join(settings.workspace_dir, "skills")
+    os.makedirs(skills_dir, exist_ok=True)
+    skill_manager.init(skills_dir)
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()

@@ -1,5 +1,9 @@
 # Seraph AI Agent - Project Context
 
+## Contributing Guidelines
+- Always include tests in a PR where they bring value. If you add or modify functionality, add corresponding tests.
+- Always update CLAUDE.md documentation when changes in a PR affect the project architecture, API surface, new modules, or design decisions.
+
 ## Project Overview
 Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar walks between tool stations (well for web search, forge for shell, etc.) while the user chats via an RPG-style dialog box. The agent has persistent identity (soul file), long-term memory (vector embeddings), a hierarchical goal/quest system, and plug-and-play MCP server integration.
 
@@ -26,7 +30,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/config/constants.ts` - Scene dimensions, tool names, village positions, BUILDING_POSITIONS lookup, wandering waypoints
   - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel, GoalTree, DomainStats
-  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, MCP server management UI, version)
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, skills management, MCP server management UI, version)
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
@@ -69,6 +73,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/profile.py` — `GET /api/user/profile`, `POST /api/user/onboarding/skip`, `POST /api/user/onboarding/restart`
   - `src/api/tools.py` — `GET /api/tools` (returns building metadata per tool for dynamic frontend registration)
   - `src/api/mcp.py` — `GET /api/mcp/servers`, `POST /api/mcp/servers`, `PUT /api/mcp/servers/{name}`, `DELETE /api/mcp/servers/{name}`, `POST /api/mcp/servers/{name}/test`
+  - `src/api/skills.py` — `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
   - `/health` — health check (defined in `src/app.py`)
 - **Tools** (`src/tools/`):
   - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
@@ -79,6 +84,15 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `data/mcp-servers.example.json` committed to repo as reference
   - Loaded on app startup from `settings.workspace_dir + "/mcp-servers.json"`
   - No config file = no MCP tools, no errors
+- **Skills** (`src/skills/`): SKILL.md plugin ecosystem — zero-code markdown plugins
+  - `loader.py` — `Skill` dataclass, YAML frontmatter parser, directory scanner (`load_skills()`)
+  - `manager.py` — Singleton `skill_manager`; runtime enable/disable, tool gating, config persistence via `data/skills-config.json`
+  - Skills are `.md` files in `data/skills/` with YAML frontmatter (`name`, `description`, `requires.tools`, `user_invocable`, `enabled`) and a markdown body of instructions
+  - On agent creation, active skill instructions are injected into the system prompt (after soul/memory, before conversation history)
+  - Tool gating: skills with `requires.tools` are only loaded if all required tools are available
+  - Runtime state: `GET /api/skills` lists all, `PUT /api/skills/{name}` toggles, `POST /api/skills/reload` re-scans directory
+  - Disabled skills tracked in `data/skills-config.json`, survives reload
+  - 3 bundled examples: `daily-standup.md`, `code-review.md`, `goal-reflection.md`
 - **Memory** (`src/memory/`):
   - `soul.py` — Persistent identity file (markdown in workspace)
   - `vector_store.py` — LanceDB vector store for long-term memory search
@@ -86,7 +100,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `consolidator.py` — Background task extracting memories after each conversation
 - **Goals** (`src/goals/repository.py`): SQLModel-based hierarchical goal CRUD
 - **Agent** (`src/agent/`):
-  - `factory.py` — Creates full agent with all tools + context (history, soul, memories)
+  - `factory.py` — Creates full agent with all tools + context (history, soul, memories, active skills)
   - `onboarding.py` — Specialized onboarding agent (limited to soul/goal tools, 5-point discovery)
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `session.py` — Async session manager (SQLite-backed)
@@ -253,3 +267,4 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 6. **Onboarding agent** — Separate agent instance with restricted tool set for first-time user discovery.
 7. **Tile stacking via CellStack** — `number[]` per cell per layer allows overlapping tiles (e.g. decoration on terrain). Serialized as Tiled sublayers (`layer__N`) for format compatibility.
 8. **Editor as standalone app** — Separate Vite app (`editor/`) with own stores and components; shares tileset/sprite assets from `frontend/public/assets/` via proxy. Outputs Tiled JSON consumed directly by VillageScene.
+9. **SKILL.md plugins** — Zero-code markdown files with YAML frontmatter. Drop in `data/skills/`, agent gains capabilities via prompt injection. Tool gating ensures skills only activate when required tools exist. Runtime enable/disable via API + Settings UI.

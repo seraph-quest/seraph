@@ -137,16 +137,32 @@ class SessionManager:
                 .where(Message.session_id == session_id)
                 .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                 .order_by(col(Message.created_at).desc())
-                .limit(limit)
+                .limit(200)
             )
             messages = list(reversed(result.scalars().all()))
             if not messages:
                 return ""
-            lines = []
-            for msg in messages:
-                role = msg.role.capitalize()
-                lines.append(f"{role}: {msg.content}")
-            return "\n".join(lines)
+
+            msg_dicts = [
+                {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat()}
+                for m in messages
+            ]
+
+            try:
+                from src.agent.context_window import build_context_window
+                return await asyncio.to_thread(
+                    build_context_window,
+                    msg_dicts,
+                    token_budget=12000,
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.warning("Token-aware context failed, falling back to simple truncation")
+                lines = []
+                for msg in messages[-limit:]:
+                    role = msg.role.capitalize()
+                    lines.append(f"{role}: {msg.content}")
+                return "\n".join(lines)
 
     async def get_messages(
         self, session_id: str, limit: int = 100, offset: int = 0

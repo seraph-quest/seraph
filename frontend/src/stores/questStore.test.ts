@@ -66,6 +66,37 @@ describe("questStore", () => {
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 
+  it("updateGoal sends all editable fields", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }) });
+    await useQuestStore.getState().updateGoal("g1", {
+      title: "Updated",
+      description: "New desc",
+      level: "monthly",
+      domain: "health",
+      due_date: "2025-06-01",
+    });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/goals/g1");
+    expect(opts.method).toBe("PATCH");
+    const body = JSON.parse(opts.body);
+    expect(body.title).toBe("Updated");
+    expect(body.description).toBe("New desc");
+    expect(body.level).toBe("monthly");
+    expect(body.domain).toBe("health");
+    expect(body.due_date).toBe("2025-06-01");
+  });
+
+  it("updateGoal can clear due_date with null", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }) });
+    await useQuestStore.getState().updateGoal("g1", { due_date: null });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.due_date).toBeNull();
+  });
+
   it("deleteGoal calls API and refreshes", async () => {
     mockFetch.mockResolvedValueOnce({ ok: true });
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });

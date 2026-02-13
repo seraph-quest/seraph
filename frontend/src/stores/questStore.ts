@@ -26,7 +26,10 @@ interface QuestStore {
   loadTree: () => Promise<void>;
   loadDashboard: () => Promise<void>;
   createGoal: (goal: Partial<GoalInfo>) => Promise<void>;
-  updateGoal: (id: string, updates: { status?: string; title?: string }) => Promise<void>;
+  updateGoal: (id: string, updates: {
+    status?: string; title?: string; description?: string;
+    level?: string; domain?: string; due_date?: string | null;
+  }) => Promise<void>;
   deleteGoal: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
 }

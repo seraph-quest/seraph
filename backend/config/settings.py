@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     sandbox_timeout: int = 35
     browser_timeout: int = 30
 
+    # Phase 3.5 — Timeouts
+    agent_chat_timeout: int = 120    # seconds
+    agent_strategist_timeout: int = 60  # seconds
+
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True
     proactivity_level: int = 3  # 1-5 scale

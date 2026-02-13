@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+from config.settings import settings
 from src.agent.strategist import create_strategist_agent, parse_strategist_response
 from src.models.schemas import WSResponse
 
@@ -18,9 +19,12 @@ async def run_strategist_tick() -> None:
         context_block = ctx.to_prompt_block()
 
         agent = create_strategist_agent(context_block)
-        raw = await asyncio.to_thread(
-            agent.run,
-            "Analyze the current context and decide whether to intervene.",
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(
+                agent.run,
+                "Analyze the current context and decide whether to intervene.",
+            ),
+            timeout=settings.agent_strategist_timeout,
         )
 
         decision = parse_strategist_response(str(raw))

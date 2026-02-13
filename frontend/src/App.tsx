@@ -5,11 +5,13 @@ import { QuestPanel } from "./components/quest/QuestPanel";
 import { HudButtons } from "./components/HudButtons";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useChatStore } from "./stores/chatStore";
 import { EventBus } from "./game/EventBus";
 
 export default function App() {
   const { sendMessage, skipOnboarding } = useWebSocket();
+  useKeyboardShortcuts();
   const phaserRef = useRef<IRefPhaserGame>(null);
   // Bridge Phaser EventBus → React panel toggles
   useEffect(() => {

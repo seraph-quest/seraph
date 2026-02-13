@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from smolagents import ActionStep, ToolCall, FinalAnswerStep
 
+from config.settings import settings
 from src.agent.factory import create_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -134,43 +135,51 @@ async def websocket_chat(websocket: WebSocket):
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(None, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
 
-                while True:
-                    step = await queue.get()
-                    if step is _DONE:
-                        break
-                    if isinstance(step, Exception):
-                        raise step
+                async def _drain_queue():
+                    nonlocal step_num, final_result
+                    while True:
+                        step = await queue.get()
+                        if step is _DONE:
+                            break
+                        if isinstance(step, Exception):
+                            raise step
 
-                    if isinstance(step, ToolCall):
-                        if step.name == "final_answer":
-                            continue
-                        step_num += 1
-                        content = f"Calling tool: {step.name}({json.dumps(step.arguments)})"
-                        await websocket.send_text(
-                            WSResponse(
-                                type="step",
-                                content=content,
-                                session_id=session.id,
-                                step=step_num,
-                                seq=_next_seq(),
-                            ).model_dump_json()
-                        )
-
-                    elif isinstance(step, ActionStep):
-                        if step.observations and not step.is_final_answer:
+                        if isinstance(step, ToolCall):
+                            if step.name == "final_answer":
+                                continue
                             step_num += 1
+                            content = f"Calling tool: {step.name}({json.dumps(step.arguments)})"
                             await websocket.send_text(
                                 WSResponse(
                                     type="step",
-                                    content=step.observations,
+                                    content=content,
                                     session_id=session.id,
                                     step=step_num,
                                     seq=_next_seq(),
                                 ).model_dump_json()
                             )
 
-                    elif isinstance(step, FinalAnswerStep):
-                        final_result = str(step.output)
+                        elif isinstance(step, ActionStep):
+                            if step.observations and not step.is_final_answer:
+                                step_num += 1
+                                await websocket.send_text(
+                                    WSResponse(
+                                        type="step",
+                                        content=step.observations,
+                                        session_id=session.id,
+                                        step=step_num,
+                                        seq=_next_seq(),
+                                    ).model_dump_json()
+                                )
+
+                        elif isinstance(step, FinalAnswerStep):
+                            final_result = str(step.output)
+
+                await asyncio.wait_for(_drain_queue(), timeout=settings.agent_chat_timeout)
+
+            except asyncio.TimeoutError:
+                logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
+                final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
 
             except Exception as e:
                 logger.exception("Agent streaming failed")

@@ -1,5 +1,9 @@
 # Seraph AI Agent - Project Context
 
+## Contributing Guidelines
+- Always include tests in a PR where they bring value. If you add or modify functionality, add corresponding tests.
+- Always update CLAUDE.md documentation when changes in a PR affect the project architecture, API surface, new modules, or design decisions.
+
 ## Project Overview
 Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar walks between tool stations (well for web search, forge for shell, etc.) while the user chats via an RPG-style dialog box. The agent has persistent identity (soul file), long-term memory (vector embeddings), a hierarchical goal/quest system, and plug-and-play MCP server integration.
 

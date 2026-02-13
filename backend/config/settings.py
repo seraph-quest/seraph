@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     consolidation_llm_timeout: int = 30  # memory consolidation LiteLLM call
     web_search_timeout: int = 15  # DDGS web search per-call
 
+    # Phase 4 — Recursive Delegation
+    use_delegation: bool = False             # feature flag: orchestrator + specialists
+    delegation_max_depth: int = 1            # 1 = orchestrator → specialists
+    orchestrator_max_steps: int = 8          # max delegation steps for orchestrator
+
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True
     proactivity_level: int = 3  # 1-5 scale

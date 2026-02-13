@@ -38,7 +38,7 @@ Phases 0-3 are complete and functional. 414 automated tests (359 backend, 55 fro
 ## What to skip for now
 
 - **Calendar scan** (3.5.4) — Already more complete than REPORT.md claimed. Works when credentials are configured.
-- **Multi-agent architecture** (4.4) — Premature until single-agent is polished.
+- ~~**Multi-agent architecture** (4.4) — Premature until single-agent is polished.~~ → Implemented as recursive delegation behind feature flag (`USE_DELEGATION=true`).
 - **Voice** (4.8) — Not a differentiator yet.
 - **Workflow engine** (4.3) — Wait for SKILL.md; workflows build on skills.
 

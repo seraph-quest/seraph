@@ -35,7 +35,7 @@ def _make_context(**overrides) -> CurrentContext:
 @pytest.mark.asyncio
 class TestRestChatTimeout:
     @patch("src.memory.vector_store.search_formatted", return_value="")
-    @patch("src.api.chat.create_agent")
+    @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_returns_504_on_timeout(
         self, mock_onboarding, mock_create_agent, mock_search, client

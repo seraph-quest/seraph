@@ -6,7 +6,7 @@ import pytest
 @pytest.mark.asyncio
 class TestChatAPI:
     @patch("src.memory.vector_store.search_formatted", return_value="")
-    @patch("src.api.chat.create_agent")
+    @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_success(self, mock_onboarding, mock_create_agent, mock_search, client):
         mock_agent = MagicMock()
@@ -20,7 +20,7 @@ class TestChatAPI:
         assert "session_id" in data
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
-    @patch("src.api.chat.create_agent")
+    @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_with_session(self, mock_onboarding, mock_create_agent, mock_search, client):
         mock_agent = MagicMock()
@@ -41,7 +41,7 @@ class TestChatAPI:
         assert response.status_code == 422
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
-    @patch("src.api.chat.create_agent")
+    @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_agent_error(self, mock_onboarding, mock_create_agent, mock_search, client):
         mock_agent = MagicMock()

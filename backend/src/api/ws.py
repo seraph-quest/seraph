@@ -6,7 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from smolagents import ActionStep, ToolCall, FinalAnswerStep
 
 from config.settings import settings
-from src.agent.factory import create_agent
+from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
@@ -23,6 +23,14 @@ router = APIRouter()
 _DONE = object()  # sentinel for queue completion
 
 
+def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
+    """Format a tool call step for WS display."""
+    if step_name in specialist_names:
+        task = arguments.get("task", "") if isinstance(arguments, dict) else ""
+        return f"Delegating to {step_name}: {task}"
+    return f"Calling tool: {step_name}({json.dumps(arguments)})"
+
+
 def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
     """Run agent with streaming, pushing each step into an asyncio queue."""
     try:
@@ -35,22 +43,30 @@ def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio
 
 
 async def _build_agent(session_id: str, message: str):
-    """Build the appropriate agent (onboarding vs normal) for this request."""
+    """Build the appropriate agent (onboarding vs normal) for this request.
+
+    Returns (agent, is_onboarding, specialist_names).
+    """
     profile = await get_or_create_profile()
 
     if not profile.onboarding_completed:
-        return create_onboarding_agent(), True
+        return create_onboarding_agent(), True, set()
 
     history = await session_manager.get_history_text(session_id)
     soul = read_soul()
     memories = await asyncio.to_thread(search_formatted, message)
 
-    agent = create_agent(
+    agent = build_agent(
         additional_context=history,
         soul_context=soul,
         memory_context=memories,
     )
-    return agent, False
+    specialist_names = (
+        set(agent.managed_agents.keys())
+        if hasattr(agent, "managed_agents") and agent.managed_agents
+        else set()
+    )
+    return agent, False, specialist_names
 
 
 @router.websocket("/chat")
@@ -125,7 +141,7 @@ async def websocket_chat(websocket: WebSocket):
             except Exception:
                 pass
 
-            agent, is_onboarding = await _build_agent(session.id, ws_msg.message)
+            agent, is_onboarding, specialist_names = await _build_agent(session.id, ws_msg.message)
 
             step_num = 0
             final_result = ""
@@ -148,7 +164,7 @@ async def websocket_chat(websocket: WebSocket):
                             if step.name == "final_answer":
                                 continue
                             step_num += 1
-                            content = f"Calling tool: {step.name}({json.dumps(step.arguments)})"
+                            content = _format_tool_step(step.name, step.arguments, specialist_names)
                             await websocket.send_text(
                                 WSResponse(
                                     type="step",

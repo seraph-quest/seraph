@@ -100,7 +100,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `consolidator.py` — Background task extracting memories after each conversation
 - **Goals** (`src/goals/repository.py`): SQLModel-based hierarchical goal CRUD
 - **Agent** (`src/agent/`):
-  - `factory.py` — Creates full agent with all tools + context (history, soul, memories, active skills)
+  - `factory.py` — Creates flat agent with all tools + context; also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
+  - `specialists.py` — Specialist agent factories for delegation mode (memory_keeper, goal_planner, web_researcher, file_worker, MCP specialists); tool domain mapping; `build_all_specialists()`
   - `onboarding.py` — Specialized onboarding agent (limited to soul/goal tools, 5-point discovery)
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `context_window.py` — Token-aware context window builder (keep first N + last M, summarize middle; reads defaults from settings)
@@ -163,6 +164,10 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `context_window_token_budget: int = 12000` — max tokens for conversation history
   - `context_window_keep_first: int = 2` — always keep first N messages
   - `context_window_keep_recent: int = 20` — always keep last N messages
+- **Delegation settings** (`config/settings.py`):
+  - `use_delegation: bool = False` — feature flag for orchestrator + specialists mode
+  - `delegation_max_depth: int = 1` — max nesting depth (1 = orchestrator → specialists)
+  - `orchestrator_max_steps: int = 8` — max delegation steps for orchestrator
 
 ## WebSocket Protocol
 - **Client sends**: `{type: "message" | "ping" | "skip_onboarding", message, session_id}`
@@ -188,6 +193,16 @@ User sends message → THINKING (center 50%)
 - Tool use triggers a casting animation with a magic effect overlay (no building-walking)
 - Magic effects: `MagicEffect` instances spawned from `magicEffectPool` (loaded from map), destroyed/faded on final answer
 - Animation states: `idle`, `thinking`, `walking`, `wandering`, `casting`, `speaking`
+
+## Delegation Architecture (Feature-Flagged)
+When `use_delegation=True`, the agent uses recursive delegation:
+- Orchestrator (no tools) → delegates to specialists (domain tools)
+- 4 built-in specialists: memory_keeper, goal_planner, web_researcher, file_worker
+- 1 MCP specialist per enabled MCP server (auto-generated)
+- Onboarding and strategist agents remain flat
+- Skills inject at orchestrator level; tool gating aggregates all specialists' tools
+- WS steps show "Delegating to X: task" for specialist calls
+- Frontend animation triggers on specialist names via toolParser regex
 
 ## Proactive Message Flow
 ```

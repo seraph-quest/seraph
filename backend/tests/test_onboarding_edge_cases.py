@@ -37,7 +37,7 @@ class TestOnboardingEdgeCases:
                 full_agent.run.return_value = iter([
                     FinalAnswerStep(output="Full agent response"),
                 ])
-                with patch("src.api.ws._build_agent", return_value=(full_agent, False)), \
+                with patch("src.api.ws._build_agent", return_value=(full_agent, False, set())), \
                      patch("src.memory.consolidator.consolidate_session"):
                     ws.send_text(json.dumps({
                         "type": "message",

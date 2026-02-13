@@ -2,6 +2,7 @@ import { TOOL_NAMES } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 
 const TOOL_PATTERNS = [
+  /Delegating to\s+(\w+):/i,
   /ToolCall\(\s*name\s*=\s*['"](\w+)['"]/i,
   /tool_name\s*[:=]\s*['"](\w+)['"]/i,
   /Calling tool:\s*['"]?(\w+)['"]?/i,

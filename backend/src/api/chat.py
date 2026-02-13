@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from config.settings import settings
-from src.agent.factory import create_agent
+from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
@@ -31,7 +31,7 @@ async def chat(request: ChatRequest):
         history = await session_manager.get_history_text(session.id)
         soul = read_soul()
         memories = await asyncio.to_thread(search_formatted, request.message)
-        agent = create_agent(
+        agent = build_agent(
             additional_context=history,
             soul_context=soul,
             memory_context=memories,

@@ -37,7 +37,7 @@ class TestE2EConversation:
             mock_agent = MagicMock()
             mock_agent.run.return_value = iter(_make_agent_steps())
 
-            with patch("src.api.ws._build_agent", return_value=(mock_agent, False)), \
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
                     # Drain welcome message
@@ -92,7 +92,7 @@ class TestE2EConversation:
             mock_agent = MagicMock()
             mock_agent.run.return_value = iter(_make_agent_steps())
 
-            with patch("src.api.ws._build_agent", return_value=(mock_agent, False)), \
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
                     _ = ws.receive_text()  # welcome
@@ -129,7 +129,7 @@ class TestE2EConversation:
             mock_agent = MagicMock()
             mock_agent.run.return_value = iter(_make_agent_steps())
 
-            with patch("src.api.ws._build_agent", return_value=(mock_agent, False)), \
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
                     _ = ws.receive_text()

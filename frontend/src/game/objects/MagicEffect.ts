@@ -29,7 +29,6 @@ export class MagicEffect {
 
     this.sprite = scene.add.sprite(x + OFFSET_X, y + OFFSET_Y, def.tilesetKey, def.frames[0]);
     this.sprite.setDepth(50);
-    this.sprite.setScale(2);
     this.sprite.play(this.animKey);
   }
 

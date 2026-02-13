@@ -1,10 +1,13 @@
 import Phaser from "phaser";
 import { SCENE } from "../../config/constants";
 
-const PADDING = 10;
-const TAIL_SIZE = 6;
-const MAX_WIDTH = 220;
-const FONT_SIZE = 8;
+// Dimensions in world pixels (scaled by camera zoom like sprites/tiles)
+const PADDING = 4;
+const TAIL_SIZE = 3;
+const MAX_WIDTH = 80;
+const FONT_SIZE = 5;
+const MAX_CHARS = 60;
+const MIN_DISPLAY_MS = 2000;
 
 export class SpeechBubble {
   private container: Phaser.GameObjects.Container;
@@ -14,6 +17,9 @@ export class SpeechBubble {
   private targetSprite: Phaser.GameObjects.Sprite | null = null;
   private clampWidth: number;
   private clampOffsetX: number;
+
+  private queue: string[] = [];
+  private displayTimer: Phaser.Time.TimerEvent | null = null;
 
   constructor(scene: Phaser.Scene, clampWidth?: number, clampOffsetX?: number) {
     this.scene = scene;
@@ -25,8 +31,9 @@ export class SpeechBubble {
       fontFamily: '"Press Start 2P"',
       fontSize: `${FONT_SIZE}px`,
       color: `#${SCENE.COLORS.bubbleText.toString(16).padStart(6, "0")}`,
-      wordWrap: { width: MAX_WIDTH - PADDING * 2 },
-      lineSpacing: 4,
+      wordWrap: { width: MAX_WIDTH - PADDING * 2, useAdvancedWrap: true },
+      lineSpacing: 2,
+      resolution: 2,
     });
     this.text.setOrigin(0, 0);
 
@@ -45,32 +52,76 @@ export class SpeechBubble {
     this.clampOffsetX = offsetX;
   }
 
+  /** Queue a message. Displays immediately if nothing is showing. */
   show(message: string) {
     const truncated =
-      message.length > 80 ? message.slice(0, 80) + "..." : message;
+      message.length > MAX_CHARS ? message.slice(0, MAX_CHARS) + "..." : message;
 
-    this.text.setText(truncated);
+    this.queue.push(truncated);
 
-    // Measure text bounds
-    const textW = Math.min(this.text.width, MAX_WIDTH - PADDING * 2);
+    if (!this.displayTimer) {
+      this.displayNext();
+    }
+  }
+
+  /** Clear the queue and fade out. */
+  hide() {
+    this.queue = [];
+    if (this.displayTimer) {
+      this.displayTimer.remove(false);
+      this.displayTimer = null;
+    }
+    this.scene.tweens.killTweensOf(this.container);
+    this.scene.tweens.add({
+      targets: this.container,
+      alpha: 0,
+      duration: 200,
+      ease: "Sine.easeIn",
+      onComplete: () => {
+        this.container.setVisible(false);
+      },
+    });
+  }
+
+  private displayNext() {
+    if (this.queue.length === 0) {
+      this.displayTimer = null;
+      return;
+    }
+
+    const message = this.queue.shift()!;
+    this.renderBubble(message);
+
+    this.displayTimer = this.scene.time.delayedCall(MIN_DISPLAY_MS, () => {
+      this.displayTimer = null;
+      this.displayNext();
+    });
+  }
+
+  private renderBubble(message: string) {
+    this.scene.tweens.killTweensOf(this.container);
+
+    this.text.setText(message);
+
+    const innerW = MAX_WIDTH - PADDING * 2;
+    const textW = Math.min(this.text.width, innerW);
     const textH = this.text.height;
     const bubbleW = textW + PADDING * 2;
     const bubbleH = textH + PADDING * 2;
 
-    // Draw bubble background
     this.bg.clear();
 
     // Shadow
     this.bg.fillStyle(0x000000, 0.3);
-    this.bg.fillRoundedRect(2, 2, bubbleW, bubbleH, 4);
+    this.bg.fillRoundedRect(1, 1, bubbleW, bubbleH, 3);
 
     // Background fill
     this.bg.fillStyle(SCENE.COLORS.bubbleBg);
-    this.bg.fillRoundedRect(0, 0, bubbleW, bubbleH, 4);
+    this.bg.fillRoundedRect(0, 0, bubbleW, bubbleH, 3);
 
     // Border
-    this.bg.lineStyle(2, SCENE.COLORS.bubbleBorder);
-    this.bg.strokeRoundedRect(0, 0, bubbleW, bubbleH, 4);
+    this.bg.lineStyle(1, SCENE.COLORS.bubbleBorder);
+    this.bg.strokeRoundedRect(0, 0, bubbleW, bubbleH, 3);
 
     // Tail triangle
     this.bg.fillStyle(SCENE.COLORS.bubbleBg);
@@ -82,7 +133,7 @@ export class SpeechBubble {
       bubbleW / 2,
       bubbleH + TAIL_SIZE
     );
-    this.bg.lineStyle(2, SCENE.COLORS.bubbleBorder);
+    this.bg.lineStyle(1, SCENE.COLORS.bubbleBorder);
     this.bg.lineBetween(
       bubbleW / 2 - TAIL_SIZE,
       bubbleH,
@@ -98,33 +149,23 @@ export class SpeechBubble {
 
     this.text.setPosition(PADDING, PADDING);
 
-    // Center bubble over target
     this.container.setSize(bubbleW, bubbleH + TAIL_SIZE);
     this.container.setVisible(true);
     this.updatePosition();
 
-    // Animate in
+    // If already visible, just swap content
+    if (this.container.alpha >= 0.9) {
+      this.container.setAlpha(1);
+      return;
+    }
+
+    // Fade in
     this.container.setAlpha(0);
-    this.container.setScale(0.8);
     this.scene.tweens.add({
       targets: this.container,
       alpha: 1,
-      scaleX: 1,
-      scaleY: 1,
-      duration: 300,
-      ease: "Back.easeOut",
-    });
-  }
-
-  hide() {
-    this.scene.tweens.add({
-      targets: this.container,
-      alpha: 0,
-      duration: 200,
-      ease: "Sine.easeIn",
-      onComplete: () => {
-        this.container.setVisible(false);
-      },
+      duration: 150,
+      ease: "Sine.easeOut",
     });
   }
 
@@ -137,7 +178,6 @@ export class SpeechBubble {
     let cx = this.targetSprite.x - bubbleW / 2;
     const cy = this.targetSprite.y - this.targetSprite.displayHeight - bubbleH - 4;
 
-    // Clamp to canvas edges using dynamic bounds
     const minX = this.clampOffsetX + 4;
     const maxX = this.clampOffsetX + this.clampWidth - bubbleW - 4;
     cx = Phaser.Math.Clamp(cx, minX, maxX);
@@ -146,6 +186,11 @@ export class SpeechBubble {
   }
 
   destroy() {
+    if (this.displayTimer) {
+      this.displayTimer.remove(false);
+      this.displayTimer = null;
+    }
+    this.queue = [];
     this.container.destroy();
   }
 }

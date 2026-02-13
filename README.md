@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  An animated pixel-art avatar walks between tool stations in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration.
+  An animated pixel-art avatar casts magic effects when using tools in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration.
 </p>
 
 ---
@@ -62,7 +62,7 @@ frontend/src/
   hooks/             useWebSocket, useAgentAnimation
   stores/            Zustand stores — chat, quest
   lib/               Tool parser, animation state machine
-  config/            Constants, building positions, waypoints
+  config/            Constants, default positions, waypoints
 
 backend/src/
   api/               REST + WebSocket endpoints (chat, sessions, goals, tools, mcp)
@@ -83,18 +83,12 @@ docs/                Docusaurus docs site
 ## Village & Avatar
 
 ```
-User sends message  -->  THINKING at bench
-  Tool detected:
-    web_search       -->  walks to WELL
-    shell_execute    -->  walks to FORGE
-    browse_webpage   -->  walks to TOWER
-    read/write_file  -->  walks to SIGNPOST
-    soul/goals       -->  walks to CHURCH
-    MCP tools        -->  walks to assigned building
-  Response ready     -->  walks back  -->  SPEAKING  -->  IDLE  -->  WANDERING
+User sends message  -->  THINKING
+  Tool detected     -->  CASTING + magic effect overlay
+  Response ready    -->  SPEAKING  -->  IDLE  -->  WANDERING
 ```
 
-MCP tools automatically animate to their assigned village building.
+Tool use triggers a casting animation with a magic effect overlay at the agent's position.
 
 ---
 
@@ -104,7 +98,7 @@ Add external tool servers with zero code changes:
 
 ```bash
 ./mcp.sh add things3 http://host.docker.internal:9100/mcp \
-  --building church --desc "Things3 task manager"
+  --desc "Things3 task manager"
 
 ./mcp.sh list              # View configured servers
 ./mcp.sh test things3      # Test connection
@@ -115,8 +109,6 @@ Add external tool servers with zero code changes:
 Also available via the **Settings UI** in the browser or the **REST API** (`/api/mcp/servers`).
 
 Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
-
-Available buildings: `house-1` `church` `house-2` `forge` `tower` `clock` `mailbox`
 
 ---
 

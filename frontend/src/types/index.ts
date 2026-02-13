@@ -38,13 +38,6 @@ export type AgentAnimationState =
   | "walking"
   | "wandering"
   | "casting"
-  | "at-well"
-  | "at-signpost"
-  | "at-bench"
-  | "at-tower"
-  | "at-forge"
-  | "at-clock"
-  | "at-mailbox"
   | "speaking";
 
 export type FacingDirection = "left" | "right";
@@ -54,12 +47,6 @@ export interface AgentVisualState {
   positionX: number; // percentage 0-100
   facing: FacingDirection;
   speechText: string | null;
-}
-
-export interface ToolTarget {
-  tool: string;
-  positionX: number;
-  animationState: AgentAnimationState;
 }
 
 export type AmbientState = "idle" | "has_insight" | "goal_behind" | "on_track" | "waiting";

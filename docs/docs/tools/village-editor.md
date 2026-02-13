@@ -116,20 +116,6 @@ Open the animation definer from the tileset panel to create animated tiles:
 
 Objects live on a separate layer and define game-logic entities.
 
-### Tool Stations
-
-Where the agent avatar walks when using a tool:
-
-| Station | Tool Key | Animation State |
-|---------|----------|-----------------|
-| Well | web_search | at-well |
-| Scroll-desk | read_file | at-signpost |
-| Shrine | view_soul | at-bench |
-| Anvil | shell_execute | at-forge |
-| Telescope-tower | browse_webpage | at-tower |
-| Sundial | calendar | at-clock |
-| Pigeon-post | email | at-mailbox |
-
 ### Spawn Points
 
 Starting positions for `agent_spawn` and `user_spawn`. Spawn points can be assigned a character sprite via the inline sprite picker (format: `Character_XXX_Y` where XXX = sheet number, Y = character 1-4).

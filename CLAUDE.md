@@ -5,7 +5,7 @@
 - Always update CLAUDE.md documentation when changes in a PR affect the project architecture, API surface, new modules, or design decisions.
 
 ## Project Overview
-Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar walks between tool stations (well for web search, forge for shell, etc.) while the user chats via an RPG-style dialog box. The agent has persistent identity (soul file), long-term memory (vector embeddings), a hierarchical goal/quest system, and plug-and-play MCP server integration.
+Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar casts magic effects when using tools while the user chats via an RPG-style dialog box. The agent has persistent identity (soul file), long-term memory (vector embeddings), a hierarchical goal/quest system, and plug-and-play MCP server integration.
 
 ## Architecture
 
@@ -26,8 +26,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/hooks/useWebSocket.ts` - Native WS connection to `ws://localhost:8004/ws/chat`, reconnect, ping, message dispatch
   - `src/hooks/useAgentAnimation.ts` - Walk-then-act state machine with timers
   - `src/lib/toolParser.ts` - Regex detection of tool names from step content (5 patterns + fallback); uses dynamic tool registry from API with static fallback
-  - `src/lib/animationStateMachine.ts` - Tool → village position mapping (pixel coords + percentage fallback); dynamic lookup from tool registry for MCP tools
-  - `src/config/constants.ts` - Scene dimensions, tool names, village positions, BUILDING_POSITIONS lookup, wandering waypoints
+  - `src/lib/animationStateMachine.ts` - Tool → casting animation mapping; triggers magic effects on tool use
+  - `src/config/constants.ts` - Scene dimensions, tool names, default agent position, wandering waypoints
   - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel, GoalTree, DomainStats
   - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, skills management, MCP server management UI, version)
@@ -78,9 +78,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Tools** (`src/tools/`):
   - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
   - Phase 2: `shell_execute`, `browse_webpage`
-  - MCP: `src/tools/mcp_manager.py` — plug-and-play MCP manager; loads server config from `data/mcp-servers.json`, connects to enabled servers via `smolagents.MCPClient`. Supports runtime add/remove/toggle via API. Each server can have a village building assignment for avatar animation. Config file is auto-persisted on mutations.
+  - MCP: `src/tools/mcp_manager.py` — plug-and-play MCP manager; loads server config from `data/mcp-servers.json`, connects to enabled servers via `smolagents.MCPClient`. Supports runtime add/remove/toggle via API. Config file is auto-persisted on mutations.
 - **MCP Configuration** (`data/mcp-servers.json`):
-  - JSON config with `mcpServers` object: `{name: {url, enabled, building?, description?}}`
+  - JSON config with `mcpServers` object: `{name: {url, enabled, description?}}`
   - `data/mcp-servers.example.json` committed to repo as reference
   - Loaded on app startup from `settings.workspace_dir + "/mcp-servers.json"`
   - No config file = no MCP tools, no errors
@@ -150,7 +150,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `frontend-dev` (3000:5173) — Vite dev server
   - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
 - `manage.sh` - Docker management: `./manage.sh -e dev up -d`, `down`, `logs -f`, `build`
-- `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--building B] [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Valid buildings: `house-1`, `church`, `house-2`, `forge`, `tower`, `clock`, `mailbox`. Requires `jq` (`brew install jq`).
+- `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Requires `jq` (`brew install jq`).
 - `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
 
 ## WebSocket Protocol
@@ -169,24 +169,14 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 
 ## Avatar Animation State Machine
 ```
-User sends message → THINKING at bench (center 50%, pixel 512,350)
-  Tool detected in WS step:
-  ├─ web_search         → WALKING → AT-WELL     (house-1: 192,280)
-  ├─ read/write_file    → WALKING → AT-SIGNPOST  (house-2: 832,280)
-  ├─ fill_template/soul/goals → WALKING → AT-BENCH (church: 512,240)
-  ├─ shell_execute      → WALKING → AT-FORGE    (forge: 384,320)
-  ├─ browse_webpage     → WALKING → AT-TOWER    (tower: 640,200)
-  ├─ MCP tools          → WALKING → building assigned in mcp-servers.json
-  └─ no tool / unknown  → stays THINKING
-  Tool with magic_effect → MagicEffect overlay spawned at agent (cycled from pool)
-  WS "final" received → WALKING back → SPEAKING (3s) → IDLE → WANDERING
+User sends message → THINKING (center 50%)
+  Tool detected in WS step → CASTING + MagicEffect overlay spawned at agent (cycled from pool)
+  No tool / unknown → stays THINKING
+  WS "final" received → SPEAKING (3s) → IDLE → WANDERING
 ```
-- Native tools have static targets in `animationStateMachine.ts`
-- MCP tools resolved dynamically from `toolRegistry` (fetched from `GET /api/tools` on WS connect)
-- Tool station positions now defined via map object spawn points (not hardcoded); percentage-based fallback still exists
-- Building→coords mapping: `BUILDING_DEFAULTS` in backend `registry.py`, `BUILDING_POSITIONS` in frontend `constants.ts`
+- Tool use triggers a casting animation with a magic effect overlay (no building-walking)
 - Magic effects: `MagicEffect` instances spawned from `magicEffectPool` (loaded from map), destroyed/faded on final answer
-Animation states: `idle`, `thinking`, `walking`, `wandering`, `at-well`, `at-signpost`, `at-bench`, `at-tower`, `at-forge`, `at-clock`, `at-mailbox`, `speaking`
+- Animation states: `idle`, `thinking`, `walking`, `wandering`, `casting`, `speaking`
 
 ## Proactive Message Flow
 ```

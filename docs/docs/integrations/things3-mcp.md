@@ -130,8 +130,6 @@ Once connected, ask Seraph anything about your Things3 tasks:
 - "Show me all tasks tagged 'urgent'"
 - "What did I complete this week?"
 
-The village avatar walks to the church/bench area (tasks & goals station) when using Things3 tools.
-
 ## Available Tools
 
 All 22 tools from things-mcp are exposed to the agent:
@@ -160,14 +158,6 @@ All 22 tools from things-mcp are exposed to the agent:
 | `update_project` | Update an existing project |
 | `show_item` | Open a Things item by ID |
 | `search_items` | Search via Things URL scheme |
-
-## Village Animation
-
-All Things3 tools map to the **church/bench** station (the tasks & goals area):
-
-- **Building**: church
-- **Position**: (512, 240)
-- **Animation**: `at-bench`
 
 ## Implementation Details
 
@@ -210,5 +200,5 @@ All Things3 tools map to the **church/bench** station (the tasks & goals area):
 - Things3 must be open on the Mac (URL scheme requires the app to be running)
 - Check things-mcp terminal for errors
 
-**Agent doesn't walk to church when using Things tools**
+**Agent doesn't show magic effects when using Things tools**
 - Clear browser cache and reload — the frontend tool names may be stale

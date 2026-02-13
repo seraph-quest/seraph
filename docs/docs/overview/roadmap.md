@@ -72,13 +72,13 @@ Seraph knows who you are, what you want, and remembers everything.
 - Sandboxed shell command execution (Docker-based)
 - Configurable permissions (read-only, workspace-scoped, full)
 - Output streaming to chat
-- New village location: **Forge** (avatar walks to anvil/forge for code/shell tasks)
+- New village location: **Forge** (visual element in village)
 
 ### 2.2 Browser Automation Tool
 - Playwright-based browser control
 - Navigate, extract, fill forms, screenshot
 - Sandboxed browser instance (no access to user's real browser)
-- New village location: **Observatory/Tower** (avatar climbs tower for web exploration)
+- New village location: **Observatory/Tower** (visual element in village)
 
 ### 2.3 Calendar & Email Integration
 - Google Calendar / Outlook read/write

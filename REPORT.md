@@ -45,7 +45,7 @@ However, significant work remains to reach the stated vision of being "better th
 - Polished RPG aesthetic: CRT scanlines, pixel borders, retro scrollbars, message animations
 - Robust WebSocket hook with auto-reconnect, exponential backoff, session restoration
 - 125 distinct asset files (54 characters, 55 enemies, 22 tilesets, 15 animation sheets)
-- All animation states working: idle, thinking, walking, wandering, at-well/signpost/bench/tower/forge/clock/mailbox, speaking, casting
+- All animation states working: idle, thinking, walking, wandering, casting, speaking
 
 **Issues Found:**
 - No goal creation UI in the frontend (backend supports it, but users can only create goals through chat)
@@ -210,7 +210,7 @@ This is critical - these are Seraph's unique advantages that should be doubled d
 No other AI agent has a user state machine + attention budget + delivery gating. OpenClaw is purely reactive. Manus is purely reactive. Seraph actively reasons about your life every 15 minutes and decides whether/when to speak. This is genuinely novel.
 
 ### 2. The RPG Village Metaphor
-Every other AI agent is a chat window or terminal. Seraph's village creates a psychological framework for life management that is unique in the space. The avatar walking to tool stations, the quest log, the ambient state indicators - this is a completely different paradigm for human-AI interaction.
+Every other AI agent is a chat window or terminal. Seraph's village creates a psychological framework for life management that is unique in the space. The avatar casting magic effects during tool use, the quest log, the ambient state indicators - this is a completely different paradigm for human-AI interaction.
 
 ### 3. Five-Pillar Life Model
 OpenClaw optimizes for task execution. Manus optimizes for workflows. Seraph optimizes for the *human* across productivity, performance, health, influence, and growth. No competitor has this breadth.

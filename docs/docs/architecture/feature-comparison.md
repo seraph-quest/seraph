@@ -12,7 +12,7 @@ sidebar_position: 2
 
 **OpenClaw** is a self-hosted gateway connecting messaging platforms (WhatsApp, Telegram, Discord, etc.) to AI agents. It's headless — text-in/text-out with no visual UI.
 
-**Seraph** is a self-contained web app with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar walks between tool stations while the user chats via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals.
+**Seraph** is a self-contained web app with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar casts magic effects when using tools while the user chats via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals.
 
 Different philosophies, but many of OpenClaw's features are worth adopting.
 
@@ -21,7 +21,7 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 ## What Seraph Has (Phase 0-2 Complete)
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
-- Tool execution with visual feedback (animated RPG avatar walks to tool stations in village)
+- Tool execution with visual feedback (animated RPG avatar casts magic effects in village)
 - **16 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright), calendar (Google), email (Gmail), task management (Things3 via MCP)
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
@@ -137,8 +137,8 @@ These were gaps in the original analysis that have since been implemented:
 
 OpenClaw is headless. Seraph's **visual RPG experience** has no equivalent:
 
-- Phaser 3 village scene with 7 buildings mapped to tool categories
-- Animated pixel-art avatar walking between tool stations
+- Phaser 3 village scene with 7 buildings and magic effect animations
+- Animated pixel-art avatar with casting effects on tool use
 - Day/night cycle based on system time
 - Idle wandering between 12 waypoints
 - Speech bubbles with step content

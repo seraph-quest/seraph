@@ -35,7 +35,6 @@ backend/src/security/
     "github": {
       "url": "https://api.githubcopilot.com/mcp/",
       "enabled": true,
-      "building": "tower",
       "auth": {
         "type": "bearer",
         "credential_id": "github-pat"

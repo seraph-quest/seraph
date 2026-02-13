@@ -8,13 +8,7 @@ export const WS_PING_INTERVAL_MS = 30000;
 
 // Percentage-based positions for animation state machine (fallback)
 export const POSITIONS = {
-  mailbox: 10,
-  well: 15,
-  forge: 35,
   bench: 50,
-  tower: 60,
-  clock: 55,
-  signpost: 85,
 } as const;
 
 // Native tool names (static fallback — dynamic tools loaded from API)

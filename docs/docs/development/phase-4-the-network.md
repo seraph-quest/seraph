@@ -205,7 +205,7 @@ backend/src/agents/
 - Seraph can delegate to sub-agents: "Let me have my researcher look into that..."
 - Channel-based routing: Telegram → Seraph, Discord #code → Coder
 
-**Village element**: NPCs at different buildings represent sub-agents (blacksmith at forge = Coder, scholar at library = Researcher)
+**Village element**: NPCs in the village represent sub-agents visually
 
 ---
 
@@ -407,7 +407,7 @@ backend/src/tools/canvas_tool.py
 - Project timeline (Gantt-style)
 - Email/calendar analytics
 
-**Village element**: Seraph walks to the notice board to post visualizations
+**Village element**: Notice board building in village for visualizations
 
 ---
 

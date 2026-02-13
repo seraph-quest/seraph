@@ -26,22 +26,9 @@ backend/src/plugins/
 - Supports hot-reload via `reload_tools()`
 
 **Tool registry** (`registry.py`):
-- Maps tool names to village metadata:
-  ```python
-  TOOL_METADATA = {
-      "web_search":             {"building": "house-1",  "pixel_x": 192, "pixel_y": 280, "animation": "at-well"},
-      "read_file":              {"building": "house-2",  "pixel_x": 832, "pixel_y": 280, "animation": "at-signpost"},
-      "shell_execute":          {"building": "forge",    "pixel_x": 384, "pixel_y": 320, "animation": "at-forge"},
-      "browse_webpage":         {"building": "tower",    "pixel_x": 640, "pixel_y": 200, "animation": "at-tower"},
-      "get_calendar_events":    {"building": "clock",    "pixel_x": 576, "pixel_y": 340, "animation": "at-clock"},
-      "create_calendar_event":  {"building": "clock",    "pixel_x": 576, "pixel_y": 340, "animation": "at-clock"},
-      "read_emails":            {"building": "mailbox",  "pixel_x": 128, "pixel_y": 340, "animation": "at-mailbox"},
-      "send_email":             {"building": "mailbox",  "pixel_x": 128, "pixel_y": 340, "animation": "at-mailbox"},
-      # ... plus all Phase 1 tools
-  }
-  ```
+- Maps tool names to metadata for the `GET /api/tools` endpoint
 
-**API endpoint**: `GET /api/tools` — returns available tools with village metadata
+**API endpoint**: `GET /api/tools` — returns available tools with metadata
 
 **Modified**: `backend/src/agent/factory.py`
 - `get_tools()` now calls `discover_tools()` from plugin loader + `mcp_manager.get_tools()` for MCP tools
@@ -66,8 +53,6 @@ sandbox-dev:
 - Calls snekbox HTTP API (`http://sandbox:8060/eval`)
 - Returns stdout/stderr, handles timeouts (35s default)
 - Sandboxed — no network access, limited resources
-
-**Village element**: Forge building at position (384, 320)
 
 **Settings**:
 - `sandbox_url`: URL of the snekbox service (default `http://sandbox:8060`)
@@ -103,8 +88,6 @@ RUN uv run playwright install chromium
 - 30s timeout, single-page context per call
 - Real browser user agent for JavaScript-rendered pages
 
-**Village element**: Tower building at position (640, 200)
-
 ---
 
 ## 2.4 Calendar Integration
@@ -117,8 +100,6 @@ RUN uv run playwright install chromium
 - Uses gcsa (Google Calendar Simple API)
 - OAuth credentials at `/app/config/google_credentials.json`
 - Token stored at `/app/data/google_calendar_token.json`
-
-**Village element**: Town clock at position (576, 340)
 
 **Settings**:
 - `google_credentials_path`: Path to OAuth credentials JSON
@@ -136,8 +117,6 @@ RUN uv run playwright install chromium
 - Shares Google OAuth credentials with calendar
 - Separate token: `/app/data/google_gmail_token.json`
 
-**Village element**: Mailbox at position (128, 340)
-
 ---
 
 ## 2.6 Village Expansion
@@ -148,21 +127,11 @@ RUN uv run playwright install chromium
 - Props placement system for smaller objects (clock, mailbox)
 - Extended wandering waypoints to include new building areas
 
-**Modified**: `frontend/src/game/objects/AgentSprite.ts`
-- 4 new animation states:
-  - `at-forge`: Facing down, medium cycle (hammering motion)
-  - `at-tower`: Facing up, slow cycle (looking/observing)
-  - `at-clock`: Facing right, slow cycle (checking time)
-  - `at-mailbox`: Facing left, slow cycle (reading letter)
-
 **Modified**: `frontend/src/config/constants.ts`
 - New `TOOL_NAMES`: `SHELL_EXECUTE`, `BROWSE_WEBPAGE`, `GET_CALENDAR_EVENTS`, `CREATE_CALENDAR_EVENT`, `READ_EMAILS`, `SEND_EMAIL` (plus Phase 1 soul/goal tools)
-- New `POSITIONS`: forge (35%), tower (60%), clock (55%), mailbox (10%)
-- New `SCENE.POSITIONS`: forge, tower, clock, mailbox with pixel coords
-- Extended wandering waypoints
 
 **Modified**: `frontend/src/lib/animationStateMachine.ts`
-- Full `TOOL_TARGETS` mapping for all 16 native tools + Things3 MCP tools to village positions and animations
+- Tool detection triggers casting animation with magic effect overlay
 
 ---
 
@@ -191,21 +160,21 @@ RUN uv run playwright install chromium
 
 ## All 16 Tools (auto-discovered)
 
-| Tool | File | Village Building | Animation |
-|------|------|-----------------|-----------|
-| `web_search` | web_search_tool.py | house-1 | at-well |
-| `read_file` | filesystem_tool.py | house-2 | at-signpost |
-| `write_file` | filesystem_tool.py | house-2 | at-signpost |
-| `fill_template` | template_tool.py | church | at-bench |
-| `view_soul` | soul_tool.py | church | at-bench |
-| `update_soul` | soul_tool.py | church | at-bench |
-| `create_goal` | goal_tools.py | church | at-bench |
-| `update_goal` | goal_tools.py | church | at-bench |
-| `get_goals` | goal_tools.py | church | at-bench |
-| `get_goal_progress` | goal_tools.py | church | at-bench |
-| `shell_execute` | shell_tool.py | forge | at-forge |
-| `browse_webpage` | browser_tool.py | tower | at-tower |
-| `get_calendar_events` | calendar_tool.py | clock | at-clock |
-| `create_calendar_event` | calendar_tool.py | clock | at-clock |
-| `read_emails` | email_tool.py | mailbox | at-mailbox |
-| `send_email` | email_tool.py | mailbox | at-mailbox |
+| Tool | File |
+|------|------|
+| `web_search` | web_search_tool.py |
+| `read_file` | filesystem_tool.py |
+| `write_file` | filesystem_tool.py |
+| `fill_template` | template_tool.py |
+| `view_soul` | soul_tool.py |
+| `update_soul` | soul_tool.py |
+| `create_goal` | goal_tools.py |
+| `update_goal` | goal_tools.py |
+| `get_goals` | goal_tools.py |
+| `get_goal_progress` | goal_tools.py |
+| `shell_execute` | shell_tool.py |
+| `browse_webpage` | browser_tool.py |
+| `get_calendar_events` | calendar_tool.py |
+| `create_calendar_event` | calendar_tool.py |
+| `read_emails` | email_tool.py |
+| `send_email` | email_tool.py |

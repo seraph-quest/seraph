@@ -188,96 +188,6 @@ export class AgentSprite {
       repeat: -1,
     });
 
-    // At-well: facing left, slow idle
-    scene.anims.create({
-      key: "at-well",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "left-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 4,
-      repeat: -1,
-    });
-
-    // At-signpost: facing right, slow idle
-    scene.anims.create({
-      key: "at-signpost",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "right-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 4,
-      repeat: -1,
-    });
-
-    // At-bench: facing up, slow cycle
-    scene.anims.create({
-      key: "at-bench",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "up-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 3,
-      repeat: -1,
-    });
-
-    // At-forge: facing down, medium cycle (hammering)
-    scene.anims.create({
-      key: "at-forge",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "down-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 5,
-      repeat: -1,
-    });
-
-    // At-tower: facing up, slow cycle (looking up/observing)
-    scene.anims.create({
-      key: "at-tower",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "up-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 4,
-      repeat: -1,
-    });
-
-    // At-clock: facing right, slow cycle (checking time)
-    scene.anims.create({
-      key: "at-clock",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "right-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 3,
-      repeat: -1,
-    });
-
-    // At-mailbox: facing left, slow cycle (reading letter)
-    scene.anims.create({
-      key: "at-mailbox",
-      frames: scene.anims.generateFrameNames(SPRITE_KEY, {
-        prefix: "left-walk.",
-        start: 0,
-        end: 5,
-        zeroPad: 3,
-      }),
-      frameRate: 3,
-      repeat: -1,
-    });
   }
 
   private createCharSheetAnimations(config: SpriteConfig) {
@@ -317,13 +227,6 @@ export class AgentSprite {
     });
 
     scene.anims.create({ key: "think", frames: framesByDir["down"], frameRate: 3, repeat: -1 });
-    scene.anims.create({ key: "at-well", frames: framesByDir["left"], frameRate: 4, repeat: -1 });
-    scene.anims.create({ key: "at-mailbox", frames: framesByDir["left"], frameRate: 3, repeat: -1 });
-    scene.anims.create({ key: "at-signpost", frames: framesByDir["right"], frameRate: 4, repeat: -1 });
-    scene.anims.create({ key: "at-clock", frames: framesByDir["right"], frameRate: 3, repeat: -1 });
-    scene.anims.create({ key: "at-bench", frames: framesByDir["up"], frameRate: 3, repeat: -1 });
-    scene.anims.create({ key: "at-tower", frames: framesByDir["up"], frameRate: 4, repeat: -1 });
-    scene.anims.create({ key: "at-forge", frames: framesByDir["down"], frameRate: 5, repeat: -1 });
   }
 
   moveTo(x: number, y: number, onComplete?: () => void) {

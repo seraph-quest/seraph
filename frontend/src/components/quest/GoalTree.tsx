@@ -38,7 +38,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
           <div key={goal.id} className="mb-1">
             <div className="flex items-start gap-1 group">
               <button
-                className={`text-[10px] font-mono shrink-0 ${
+                className={`text-[11px] font-mono shrink-0 ${
                   isCompleted ? "text-green-400/70" : "text-retro-text/50"
                 } hover:text-retro-highlight`}
                 onClick={() => {
@@ -51,21 +51,21 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
               </button>
               <div className="flex-1 min-w-0">
                 <span
-                  className={`text-[10px] ${color} ${
+                  className={`text-[11px] ${color} ${
                     isCompleted ? "line-through opacity-50" : ""
                   }`}
                 >
                   {goal.title}
                 </span>
                 {goal.due_date && (
-                  <span className="text-[8px] text-retro-text/30 ml-1">
+                  <span className="text-[9px] text-retro-text/30 ml-1">
                     {new Date(goal.due_date).toLocaleDateString("en-US", {
                       month: "short",
                       day: "numeric",
                     })}
                   </span>
                 )}
-                <span className="text-[8px] text-retro-text/20 ml-1 hidden group-hover:inline">
+                <span className="text-[9px] text-retro-text/20 ml-1 hidden group-hover:inline">
                   {goal.level}
                 </span>
               </div>
@@ -73,7 +73,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                 {onEdit && (
                   <button
                     onClick={() => onEdit(goal)}
-                    className="text-[8px] text-retro-text/30 hover:text-retro-highlight px-0.5"
+                    className="text-[9px] text-retro-text/30 hover:text-retro-highlight px-0.5"
                     title="Edit quest"
                   >
                     /
@@ -85,7 +85,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                       deleteGoal(goal.id);
                     }
                   }}
-                  className="text-[8px] text-retro-text/30 hover:text-red-400 px-0.5"
+                  className="text-[9px] text-retro-text/30 hover:text-red-400 px-0.5"
                   title="Delete quest"
                 >
                   x

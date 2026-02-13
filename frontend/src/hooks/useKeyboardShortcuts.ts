@@ -11,12 +11,15 @@ export function useKeyboardShortcuts() {
 
       switch (e.key.toLowerCase()) {
         case "c":
+          if (!e.shiftKey) return;
           s.setChatPanelOpen(!s.chatPanelOpen);
           break;
         case "q":
+          if (!e.shiftKey) return;
           s.setQuestPanelOpen(!s.questPanelOpen);
           break;
         case "s":
+          if (!e.shiftKey) return;
           s.setSettingsPanelOpen(!s.settingsPanelOpen);
           break;
         case "escape":

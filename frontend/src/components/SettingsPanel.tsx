@@ -26,13 +26,13 @@ function SkillRow({
     <div className="flex items-center gap-1 px-1 py-0.5 border-b border-retro-text/10 last:border-b-0">
       <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor}`} />
       <div className="flex-1 min-w-0">
-        <div className="text-[9px] font-bold text-retro-text truncate">
+        <div className="text-[10px] font-bold text-retro-text truncate">
           {skill.name}
           {skill.user_invocable && (
             <span className="text-retro-highlight/60 ml-1 font-normal">invocable</span>
           )}
         </div>
-        <div className="text-[8px] text-retro-text/40 truncate">
+        <div className="text-[9px] text-retro-text/40 truncate">
           {skill.description}
           {skill.requires_tools.length > 0 && (
             <span> · needs: {skill.requires_tools.join(", ")}</span>
@@ -41,7 +41,7 @@ function SkillRow({
       </div>
       <button
         onClick={() => onToggle(skill.name, !skill.enabled)}
-        className={`text-[8px] px-0.5 ${skill.enabled ? "text-green-400 hover:text-red-400" : "text-retro-text/40 hover:text-green-400"}`}
+        className={`text-[9px] px-0.5 ${skill.enabled ? "text-green-400 hover:text-red-400" : "text-retro-text/40 hover:text-green-400"}`}
       >
         {skill.enabled ? "on" : "off"}
       </button>
@@ -79,28 +79,28 @@ function McpServerRow({
     <div className="flex items-center gap-1 px-1 py-0.5 border-b border-retro-text/10 last:border-b-0">
       <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor}`} />
       <div className="flex-1 min-w-0">
-        <div className="text-[9px] font-bold text-retro-text truncate">{server.name}</div>
-        <div className="text-[8px] text-retro-text/40 truncate">
+        <div className="text-[10px] font-bold text-retro-text truncate">{server.name}</div>
+        <div className="text-[9px] text-retro-text/40 truncate">
           {server.description || server.url}
           {server.connected && ` · ${server.tool_count} tools`}
         </div>
       </div>
       <button
         onClick={() => onTest(server.name)}
-        className="text-[8px] text-retro-text/40 hover:text-retro-highlight px-0.5"
+        className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-0.5"
         title="Test connection"
       >
         test
       </button>
       <button
         onClick={() => onToggle(server.name, !server.enabled)}
-        className={`text-[8px] px-0.5 ${server.enabled ? "text-green-400 hover:text-red-400" : "text-retro-text/40 hover:text-green-400"}`}
+        className={`text-[9px] px-0.5 ${server.enabled ? "text-green-400 hover:text-red-400" : "text-retro-text/40 hover:text-green-400"}`}
       >
         {server.enabled ? "on" : "off"}
       </button>
       <button
         onClick={() => onRemove(server.name)}
-        className="text-[8px] text-retro-text/30 hover:text-red-400 px-0.5"
+        className="text-[9px] text-retro-text/30 hover:text-red-400 px-0.5"
         title="Remove server"
       >
         x
@@ -152,7 +152,7 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
     return (
       <button
         onClick={() => setShow(true)}
-        className="text-[8px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
+        className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
       >
         + Add server
       </button>
@@ -182,17 +182,17 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
         onChange={(e) => setDescription(e.target.value)}
         className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
       />
-      {error && <div className="text-[8px] text-red-400">{error}</div>}
+      {error && <div className="text-[9px] text-red-400">{error}</div>}
       <div className="flex gap-1">
         <button
           onClick={handleSubmit}
-          className="text-[8px] text-retro-highlight hover:text-retro-text uppercase tracking-wider"
+          className="text-[9px] text-retro-highlight hover:text-retro-text uppercase tracking-wider"
         >
           Add
         </button>
         <button
           onClick={() => { setShow(false); setError(""); }}
-          className="text-[8px] text-retro-text/40 hover:text-retro-text uppercase tracking-wider"
+          className="text-[9px] text-retro-text/40 hover:text-retro-text uppercase tracking-wider"
         >
           Cancel
         </button>
@@ -318,7 +318,7 @@ export function SettingsPanel() {
       >
         <div className="flex-1 min-h-0 overflow-y-auto retro-scrollbar flex flex-col gap-2 pb-1">
           <div className="px-1">
-            <div className="text-[9px] uppercase tracking-wider text-retro-border font-bold mb-2">
+            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
               General
             </div>
             {onboardingCompleted === true && (
@@ -328,7 +328,7 @@ export function SettingsPanel() {
                   loadSessions();
                   setSettingsPanelOpen(false);
                 }}
-                className="text-[9px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
+                className="text-[10px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
               >
                 Restart intro
               </button>
@@ -338,7 +338,7 @@ export function SettingsPanel() {
           <InterruptionModeToggle />
 
           <div className="px-1">
-            <div className="text-[9px] uppercase tracking-wider text-retro-border font-bold mb-1">
+            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
               Skills
             </div>
             {skills.length > 0 ? (
@@ -352,11 +352,11 @@ export function SettingsPanel() {
                 ))}
               </div>
             ) : (
-              <div className="text-[8px] text-retro-text/30 mb-1 px-1">No skills loaded</div>
+              <div className="text-[9px] text-retro-text/30 mb-1 px-1">No skills loaded</div>
             )}
             <button
               onClick={handleSkillReload}
-              className="text-[8px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
+              className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
             >
               Reload skills
             </button>
@@ -364,7 +364,7 @@ export function SettingsPanel() {
 
           {import.meta.env.DEV && (
             <div className="px-1">
-              <div className="text-[9px] uppercase tracking-wider text-retro-border font-bold mb-1">
+              <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
                 Debug
               </div>
               <button
@@ -373,7 +373,7 @@ export function SettingsPanel() {
                   setDebugWalkability(next);
                   EventBus.emit("toggle-debug-walkability", next);
                 }}
-                className="text-[9px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
+                className="text-[10px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
               >
                 {debugWalkability ? "\u2611" : "\u2610"} Show walkability grid
               </button>
@@ -381,7 +381,7 @@ export function SettingsPanel() {
           )}
 
           <div className="px-1">
-            <div className="text-[9px] uppercase tracking-wider text-retro-border font-bold mb-1">
+            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
               MCP Servers
             </div>
             {servers.length > 0 ? (
@@ -397,10 +397,10 @@ export function SettingsPanel() {
                 ))}
               </div>
             ) : (
-              <div className="text-[8px] text-retro-text/30 mb-1 px-1">No servers configured</div>
+              <div className="text-[9px] text-retro-text/30 mb-1 px-1">No servers configured</div>
             )}
             {testResult && (
-              <div className="text-[8px] text-retro-highlight px-1 mb-1">{testResult}</div>
+              <div className="text-[9px] text-retro-highlight px-1 mb-1">{testResult}</div>
             )}
             <AddServerForm onAdd={() => {
               fetchServers();
@@ -409,7 +409,7 @@ export function SettingsPanel() {
           </div>
 
           <div className="flex-1" />
-          <div className="text-[8px] text-retro-text/20 px-1 pb-1">
+          <div className="text-[9px] text-retro-text/20 px-1 pb-1">
             Seraph v0.1
           </div>
         </div>

@@ -24,8 +24,8 @@ export function HudButtons() {
       {!chatPanelOpen && (
         <button
           onClick={() => setChatPanelOpen(true)}
-          className="rpg-frame px-3 py-2 text-[10px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
-          title="Open Chat Log (C)"
+          className="rpg-frame px-3 py-2 text-[11px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
+          title="Open Chat Log (Shift+C)"
         >
           Chat
         </button>
@@ -33,8 +33,8 @@ export function HudButtons() {
       {!questPanelOpen && (
         <button
           onClick={() => setQuestPanelOpen(true)}
-          className="rpg-frame px-3 py-2 text-[10px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
-          title="Open Quest Log (Q)"
+          className="rpg-frame px-3 py-2 text-[11px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
+          title="Open Quest Log (Shift+Q)"
         >
           Quests
         </button>
@@ -42,8 +42,8 @@ export function HudButtons() {
       {!settingsPanelOpen && (
         <button
           onClick={() => setSettingsPanelOpen(true)}
-          className="rpg-frame px-3 py-2 text-[10px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
-          title="Open Settings (S)"
+          className="rpg-frame px-3 py-2 text-[11px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
+          title="Open Settings (Shift+S)"
         >
           Settings
         </button>

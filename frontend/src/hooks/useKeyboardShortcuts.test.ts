@@ -1,8 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { useChatStore } from "../stores/chatStore";
-
-// We test the keyboard handler logic directly by dispatching KeyboardEvents
-// and checking the store state, since the hook just registers a window listener.
 
 function resetStore() {
   useChatStore.setState({
@@ -12,35 +9,43 @@ function resetStore() {
   });
 }
 
-function fireKey(key: string, target?: Partial<HTMLElement>) {
-  const event = new KeyboardEvent("keydown", { key, bubbles: true });
-  if (target) {
-    Object.defineProperty(event, "target", { value: target });
+function fireKey(
+  key: string,
+  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean },
+) {
+  const event = new KeyboardEvent("keydown", {
+    key,
+    shiftKey: options?.shiftKey ?? false,
+    bubbles: true,
+  });
+  if (options?.target) {
+    Object.defineProperty(event, "target", { value: options.target });
   }
   window.dispatchEvent(event);
 }
 
 describe("useKeyboardShortcuts", () => {
+  let cleanup: (() => void) | undefined;
+
   beforeEach(async () => {
     resetStore();
-    // Import and init the hook's listener (the module registers on import via useEffect,
-    // but we can simulate by importing the handler pattern directly)
-    // We'll mount the listener manually the same way the hook does
-    const { useKeyboardShortcuts } = await import("./useKeyboardShortcuts");
 
-    // Simulate the effect by running the handler registration
+    // Register handler matching the hook logic (with shiftKey requirement)
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const s = useChatStore.getState();
       switch (e.key.toLowerCase()) {
         case "c":
+          if (!e.shiftKey) return;
           s.setChatPanelOpen(!s.chatPanelOpen);
           break;
         case "q":
+          if (!e.shiftKey) return;
           s.setQuestPanelOpen(!s.questPanelOpen);
           break;
         case "s":
+          if (!e.shiftKey) return;
           s.setSettingsPanelOpen(!s.settingsPanelOpen);
           break;
         case "escape":
@@ -51,41 +56,53 @@ describe("useKeyboardShortcuts", () => {
       }
     };
     window.addEventListener("keydown", handler);
-    // Store cleanup for afterEach
-    (globalThis as any).__testCleanup = () =>
-      window.removeEventListener("keydown", handler);
+    cleanup = () => window.removeEventListener("keydown", handler);
   });
 
   afterEach(() => {
-    (globalThis as any).__testCleanup?.();
+    cleanup?.();
   });
 
-  it("C toggles chat panel open", () => {
-    fireKey("c");
+  it("Shift+C toggles chat panel open", () => {
+    fireKey("c", { shiftKey: true });
     expect(useChatStore.getState().chatPanelOpen).toBe(true);
   });
 
-  it("C toggles chat panel closed", () => {
+  it("Shift+C toggles chat panel closed", () => {
     useChatStore.setState({ chatPanelOpen: true });
+    fireKey("c", { shiftKey: true });
+    expect(useChatStore.getState().chatPanelOpen).toBe(false);
+  });
+
+  it("Shift+Q toggles quest panel", () => {
+    fireKey("q", { shiftKey: true });
+    expect(useChatStore.getState().questPanelOpen).toBe(true);
+  });
+
+  it("Shift+S toggles settings panel", () => {
+    fireKey("s", { shiftKey: true });
+    expect(useChatStore.getState().settingsPanelOpen).toBe(true);
+  });
+
+  it("bare C without Shift does NOT toggle chat", () => {
     fireKey("c");
     expect(useChatStore.getState().chatPanelOpen).toBe(false);
   });
 
-  it("Q toggles quest panel", () => {
+  it("bare Q without Shift does NOT toggle quests", () => {
     fireKey("q");
-    expect(useChatStore.getState().questPanelOpen).toBe(true);
+    expect(useChatStore.getState().questPanelOpen).toBe(false);
   });
 
-  it("S toggles settings panel", () => {
+  it("bare S without Shift does NOT toggle settings (no WASD conflict)", () => {
     fireKey("s");
-    expect(useChatStore.getState().settingsPanelOpen).toBe(true);
+    expect(useChatStore.getState().settingsPanelOpen).toBe(false);
   });
 
   it("Escape closes chat panel first", () => {
     useChatStore.setState({ chatPanelOpen: true, questPanelOpen: true });
     fireKey("Escape");
     expect(useChatStore.getState().chatPanelOpen).toBe(false);
-    // Quest stays open (priority: chat first)
     expect(useChatStore.getState().questPanelOpen).toBe(true);
   });
 
@@ -109,20 +126,17 @@ describe("useKeyboardShortcuts", () => {
   });
 
   it("ignores keys when target is INPUT", () => {
-    fireKey("c", { tagName: "INPUT" });
+    fireKey("c", { target: { tagName: "INPUT" }, shiftKey: true });
     expect(useChatStore.getState().chatPanelOpen).toBe(false);
   });
 
   it("ignores keys when target is TEXTAREA", () => {
-    fireKey("s", { tagName: "TEXTAREA" });
+    fireKey("s", { target: { tagName: "TEXTAREA" }, shiftKey: true });
     expect(useChatStore.getState().settingsPanelOpen).toBe(false);
   });
 
-  it("handles uppercase key", () => {
-    fireKey("C");
+  it("handles uppercase Shift+C", () => {
+    fireKey("C", { shiftKey: true });
     expect(useChatStore.getState().chatPanelOpen).toBe(true);
   });
 });
-
-// Need to import afterEach
-import { afterEach } from "vitest";

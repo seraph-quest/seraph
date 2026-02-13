@@ -28,12 +28,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   return (
     <div className={`message-enter px-3 py-2 rounded-sm ${style}`}>
       <div className="flex items-center gap-2 mb-1">
-        <span className="text-[9px] uppercase tracking-wider text-retro-border font-bold">
+        <span className="text-[10px] uppercase tracking-wider text-retro-border font-bold">
           {label}
           {isStep && message.stepNumber ? ` ${message.stepNumber}` : ""}
         </span>
         {isStep && message.toolUsed && (
-          <span className="text-[8px] text-retro-highlight/80 uppercase">
+          <span className="text-[9px] text-retro-highlight/80 uppercase">
             [{message.toolUsed}]
           </span>
         )}

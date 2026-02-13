@@ -36,7 +36,7 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
           {onboardingCompleted === false && onSkipOnboarding && (
             <button
               onClick={onSkipOnboarding}
-              className="text-[7px] text-retro-text/40 hover:text-retro-highlight px-2 py-0.5 text-right uppercase tracking-wider"
+              className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-2 py-0.5 text-right uppercase tracking-wider"
             >
               Skip intro &gt;&gt;
             </button>
@@ -48,7 +48,7 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
           <ChatInput onSend={onSend} disabled={!isConnected || isAgentBusy} />
         </div>
         {!isConnected && (
-          <div className="absolute top-2 right-4 text-[7px] text-retro-error uppercase animate-blink">
+          <div className="absolute top-2 right-4 text-[9px] text-retro-error uppercase animate-blink">
             Disconnected
           </div>
         )}

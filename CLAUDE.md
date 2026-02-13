@@ -29,7 +29,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/lib/animationStateMachine.ts` - Tool → casting animation mapping; triggers magic effects on tool use
   - `src/config/constants.ts` - Scene dimensions, tool names, default agent position, wandering waypoints
   - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
-  - `src/components/quest/` - QuestPanel, GoalTree, DomainStats
+  - `src/components/quest/` - QuestPanel (search/filter by title, level, domain), GoalTree, GoalForm, DomainStats
   - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, skills management, MCP server management UI, version)
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
@@ -246,7 +246,10 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 - **Maximize/Minimize**: ▲/▼ button on DialogFrame expands chat overlay to nearly full screen (16px margins all sides) with CSS transition
 - **Close**: ✕ button on DialogFrame hides the panel
 - **Reopen**: Floating HudButtons at bottom-left appear when panels are closed ("Chat", "Quests", "Settings")
+- **Keyboard shortcuts**: Shift+C (chat), Shift+Q (quests), Shift+S (settings), Escape (close). Shift modifier prevents conflict with WASD avatar movement. Ignored when focus is in INPUT/TEXTAREA.
+- **Quest search/filter**: QuestPanel includes text search, level dropdown, and domain dropdown. Client-side recursive filter preserves parent chain when descendants match.
 - **Session persistence**: Last selected `sessionId` stored in `localStorage` (`seraph_last_session_id`); restored on page load via `switchSession()` in WS `onopen`
+- **Font sizing**: Minimum 9px throughout all panels (Press Start 2P pixel font). Headers/labels 10-11px, body text 10-11px, secondary/meta text 9-10px.
 
 ## Design Decisions
 1. **Phaser 3 canvas** — Village scene rendered via Phaser with tile-based map. React overlays for chat/quest panels.

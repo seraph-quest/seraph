@@ -41,7 +41,7 @@ export function InterruptionModeToggle() {
 
   return (
     <div className="px-1">
-      <div className="text-[9px] uppercase tracking-wider text-retro-border font-bold mb-2">
+      <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
         Interruption Mode
       </div>
       <div className="flex gap-1">
@@ -58,8 +58,8 @@ export function InterruptionModeToggle() {
                   : "text-retro-text/40 border-retro-text/20 hover:text-retro-text/60 hover:border-retro-text/40"
               }`}
             >
-              <div className="text-[9px] font-bold uppercase tracking-wider">{m.label}</div>
-              <div className="text-[7px] mt-0.5 opacity-70">{m.desc}</div>
+              <div className="text-[10px] font-bold uppercase tracking-wider">{m.label}</div>
+              <div className="text-[9px] mt-0.5 opacity-70">{m.desc}</div>
             </button>
           );
         })}

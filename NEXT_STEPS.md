@@ -23,9 +23,7 @@ Phases 0-3 are complete and functional. 414 automated tests (359 backend, 55 fro
 
 5. ~~**Agent Execution Timeout**~~ (3.5.6) — Done. `asyncio.wait_for` timeouts on REST chat (504), daily briefing, evening review, memory consolidation LLM + add_memory calls. DDGS web search timeout via constructor. 3 new settings: `agent_briefing_timeout` (60s), `consolidation_llm_timeout` (30s), `web_search_timeout` (15s). 5 new tests.
 
-## Tier 2: Robustness (prevents real user frustration)
-
-6. **Token-Aware Context Window** (3.5.5) — Replace fixed 50-message window with adaptive token counting. Keep first 2 + last 20 messages, summarize the middle. Prevents silent quality degradation in long conversations.
+6. ~~**Token-Aware Context Window**~~ (3.5.5) — Done. Token-aware context window with configurable budget. Keeps first N + last M messages, summarizes middle via LLM. 3 new settings: `context_window_token_budget` (12000), `context_window_keep_first` (2), `context_window_keep_recent` (20). Info logging on both return paths. 3 new settings integration tests.
 
 ## Tier 3: The growth engine (Phase 4)
 
@@ -51,4 +49,4 @@ Seraph's biggest advantages are **proactive intelligence** and **the RPG village
 - Village avatar doesn't reflect agent state → ambient states fix this
 - ~~Users can't control interruptions → interruption mode UI fixes this~~ ✓
 
-**Next priorities**: ~~Agent execution timeout (prevents user frustration)~~ ✓, token-aware context (prevents quality degradation), then Telegram bot (makes proactive intelligence useful in daily life).
+**Next priorities**: ~~Agent execution timeout (prevents user frustration)~~ ✓, ~~token-aware context (prevents quality degradation)~~ ✓, then Telegram bot (makes proactive intelligence useful in daily life).

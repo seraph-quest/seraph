@@ -14,7 +14,9 @@ class Settings(BaseSettings):
     soul_file: str = "soul.md"
     embedding_model: str = "all-MiniLM-L6-v2"
     memory_search_top_k: int = 5
-    session_history_window: int = 50
+    context_window_token_budget: int = 12000  # max tokens for conversation history
+    context_window_keep_first: int = 2        # always keep first N messages
+    context_window_keep_recent: int = 20      # always keep last N messages
 
     # Phase 2 — Capable Executor
     sandbox_url: str = "http://sandbox:8060"

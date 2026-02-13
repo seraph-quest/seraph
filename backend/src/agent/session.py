@@ -153,7 +153,6 @@ class SessionManager:
                 return await asyncio.to_thread(
                     build_context_window,
                     msg_dicts,
-                    token_budget=12000,
                     session_id=session_id,
                 )
             except Exception:

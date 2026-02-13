@@ -1,6 +1,6 @@
 """Tests for the token-aware context window."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, PropertyMock
 
 import pytest
 
@@ -146,3 +146,47 @@ class TestSummaryCache:
                 range_key="0-1",
             )
             assert "truncated" in result or len(result) > 0
+
+
+class TestSettingsIntegration:
+    """Tests that build_context_window reads defaults from settings."""
+
+    def test_uses_settings_token_budget(self):
+        """Large budget from settings keeps all messages."""
+        msgs = [_msg("user", f"msg {i}") for i in range(10)]
+        with patch("src.agent.context_window.settings") as mock_settings:
+            mock_settings.context_window_token_budget = 999999
+            mock_settings.context_window_keep_first = 2
+            mock_settings.context_window_keep_recent = 20
+            result = build_context_window(msgs)
+        for i in range(10):
+            assert f"msg {i}" in result
+
+    def test_uses_settings_keep_recent(self):
+        """Small keep_recent from settings limits recent messages."""
+        msgs = [_msg("user", f"message number {i} " * 50) for i in range(30)]
+        with patch("src.agent.context_window.settings") as mock_settings:
+            mock_settings.context_window_token_budget = 500
+            mock_settings.context_window_keep_first = 1
+            mock_settings.context_window_keep_recent = 3
+            result = build_context_window(msgs, session_id="test")
+        # Most recent 3 messages should be present
+        assert "message number 29" in result
+        assert "message number 28" in result
+        assert "message number 27" in result
+        # First message kept
+        assert "message number 0" in result
+        # Middle should be summarized
+        assert "[Summary of" in result
+
+    def test_explicit_args_override_settings(self):
+        """Explicit kwargs take precedence over settings values."""
+        msgs = [_msg("user", f"msg {i}") for i in range(10)]
+        with patch("src.agent.context_window.settings") as mock_settings:
+            mock_settings.context_window_token_budget = 1  # would force summarization
+            mock_settings.context_window_keep_first = 1
+            mock_settings.context_window_keep_recent = 1
+            # Explicit large budget overrides the tiny settings value
+            result = build_context_window(msgs, token_budget=999999)
+        for i in range(10):
+            assert f"msg {i}" in result

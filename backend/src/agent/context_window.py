@@ -5,6 +5,8 @@ from functools import lru_cache
 
 import tiktoken
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 _summary_cache: dict[str, str] = {}
@@ -37,7 +39,6 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
     text = _format_messages(messages)
     try:
         import litellm
-        from config.settings import settings
 
         response = litellm.completion(
             model=settings.default_model,
@@ -70,9 +71,9 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
 
 def build_context_window(
     messages: list[dict],
-    token_budget: int = 12000,
-    keep_recent: int = 20,
-    keep_first: int = 2,
+    token_budget: int | None = None,
+    keep_recent: int | None = None,
+    keep_first: int | None = None,
     session_id: str = "",
 ) -> str:
     """Build a token-aware context window from message history.
@@ -82,12 +83,22 @@ def build_context_window(
     2. Always keep last `keep_recent` messages (recent conversation)
     3. If total fits in budget, return all
     4. Otherwise, summarize the middle section
+
+    When arguments are None, values are read from settings.
     """
+    token_budget = token_budget if token_budget is not None else settings.context_window_token_budget
+    keep_recent = keep_recent if keep_recent is not None else settings.context_window_keep_recent
+    keep_first = keep_first if keep_first is not None else settings.context_window_keep_first
+
     if not messages:
         return ""
 
     full_text = _format_messages(messages)
     if _count_tokens(full_text) <= token_budget:
+        logger.info(
+            "Context window: %d messages, all kept (within %d token budget)",
+            len(messages), token_budget,
+        )
         return full_text
 
     n = len(messages)
@@ -108,4 +119,10 @@ def build_context_window(
     if recent:
         parts.append(_format_messages(recent))
 
-    return "\n".join(parts)
+    result = "\n".join(parts)
+    logger.info(
+        "Context window: %d messages in, %d kept (%d first + %d recent), %d summarized, %d result tokens",
+        n, len(first) + len(recent), len(first), len(recent), len(middle),
+        _count_tokens(result),
+    )
+    return result

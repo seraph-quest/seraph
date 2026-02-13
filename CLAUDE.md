@@ -103,6 +103,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `factory.py` — Creates full agent with all tools + context (history, soul, memories, active skills)
   - `onboarding.py` — Specialized onboarding agent (limited to soul/goal tools, 5-point discovery)
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
+  - `context_window.py` — Token-aware context window builder (keep first N + last M, summarize middle; reads defaults from settings)
   - `session.py` — Async session manager (SQLite-backed)
 - **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile`, `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`
 - **Scheduler** (`src/scheduler/`):
@@ -158,6 +159,10 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `agent_briefing_timeout: int = 60` — daily briefing + evening review LiteLLM calls
   - `consolidation_llm_timeout: int = 30` — memory consolidation LiteLLM call
   - `web_search_timeout: int = 15` — DDGS web search per-call
+- **Context window settings** (`config/settings.py`):
+  - `context_window_token_budget: int = 12000` — max tokens for conversation history
+  - `context_window_keep_first: int = 2` — always keep first N messages
+  - `context_window_keep_recent: int = 20` — always keep last N messages
 
 ## WebSocket Protocol
 - **Client sends**: `{type: "message" | "ping" | "skip_onboarding", message, session_id}`

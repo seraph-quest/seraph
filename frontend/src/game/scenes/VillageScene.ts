@@ -157,7 +157,12 @@ export class VillageScene extends Phaser.Scene {
             // Map paths are relative to map file: "../assets/tilesets/X.png"
             // Strip leading "../" to get path relative to public/
             const imagePath = ts.image.replace(/^\.\.\//, "");
-            this.load.image(ts.name, imagePath);
+            // Load as spritesheet so frame data is available for both
+            // tilemap rendering and magic effect sprite animations
+            this.load.spritesheet(ts.name, imagePath, {
+              frameWidth: ts.tilewidth,
+              frameHeight: ts.tileheight,
+            });
           }
         }
       }
@@ -262,6 +267,9 @@ export class VillageScene extends Phaser.Scene {
         string,
         Phaser.Input.Keyboard.Key
       >;
+      // Stop Phaser from capturing keyboard events globally so that
+      // spacebar / arrows / etc. still work in DOM inputs (chat, etc.)
+      this.input.keyboard.disableGlobalCapture();
     }
 
     // Defer sprite creation if character sheets need loading
@@ -351,7 +359,6 @@ export class VillageScene extends Phaser.Scene {
 
     this.handleCastEffect = (payload: CastEffectPayload) => {
       this.stopWandering();
-      this.speechBubble.hide();
       this.clearMagicEffect();
 
       // Stay in place, play think animation
@@ -377,6 +384,7 @@ export class VillageScene extends Phaser.Scene {
     this.handleFinalAnswer = (payload: FinalAnswerPayload) => {
       this.stopWandering();
       this.fadeOutMagicEffect();
+      this.speechBubble.hide();
       const targetX = this.userAvatar.sprite.x - 40;
       const targetY = this.userAvatar.sprite.y;
       this.agent.moveAlongPath(this.pathfinder, targetX, targetY, () => {
@@ -725,7 +733,8 @@ export class VillageScene extends Phaser.Scene {
   // ─── Magic Effects ──────────────────────────────────
 
   private parseMagicEffects(map: Phaser.Tilemaps.Tilemap) {
-    // Read magic_effects from map custom properties
+    // Read magic_effects from map custom properties to identify which
+    // tileset animations are magic effects (vs regular tile animations)
     const props = (map as unknown as { properties?: Array<{ name: string; value: unknown }> }).properties;
     if (!props) return;
 
@@ -737,55 +746,53 @@ export class VillageScene extends Phaser.Scene {
         id: string;
         name: string;
         tilesetName: string;
-        tileWidth: number;
-        tileHeight: number;
-        columns: number;
-        frameDuration: number;
-        entries: Array<{ anchorLocalId: number; frames: number[] }>;
+        entries: Array<{ anchorLocalId: number }>;
       }>;
 
-      // Collect unique tilesets needed and load them as spritesheets
-      const tilesetKeys = new Set<string>();
+      // Build lookup: tilesetName → Set of anchor local IDs that are magic effects
+      const fxAnchors = new Map<string, Set<number>>();
+      const fxMeta = new Map<string, { id: string; name: string }>();
       for (const fx of effects) {
-        if (!tilesetKeys.has(fx.tilesetName)) {
-          tilesetKeys.add(fx.tilesetName);
-          // Load spritesheet if not already loaded
-          if (!this.textures.exists(fx.tilesetName)) {
-            // Determine the asset directory based on naming convention
-            const assetPath = `assets/animations/${fx.tilesetName}.png`;
-            this.load.spritesheet(fx.tilesetName, assetPath, {
-              frameWidth: fx.tileWidth,
-              frameHeight: fx.tileHeight,
-            });
-          }
+        if (fx.entries.length === 0) continue;
+        const anchorId = fx.entries[0].anchorLocalId;
+        if (!fxAnchors.has(fx.tilesetName)) {
+          fxAnchors.set(fx.tilesetName, new Set());
+        }
+        fxAnchors.get(fx.tilesetName)!.add(anchorId);
+        fxMeta.set(`${fx.tilesetName}:${anchorId}`, { id: fx.id, name: fx.name });
+      }
+
+      // Read animation frames from tileset.tileData (same source as
+      // initAnimatedTiles uses for sunflowers, water, etc.)
+      for (const tileset of this.tilesetsRef) {
+        const anchors = fxAnchors.get(tileset.name);
+        if (!anchors) continue;
+
+        const tileData = (tileset as unknown as {
+          tileData: Record<string, { animation?: Array<{ tileid: number; duration: number }> }>;
+        }).tileData;
+        if (!tileData) continue;
+
+        for (const [localIdStr, data] of Object.entries(tileData)) {
+          if (!data.animation || data.animation.length === 0) continue;
+          const localId = parseInt(localIdStr, 10);
+          if (!anchors.has(localId)) continue;
+
+          const meta = fxMeta.get(`${tileset.name}:${localId}`);
+          this.magicEffectPool.push({
+            id: meta?.id ?? `${tileset.name}-${localId}`,
+            name: meta?.name ?? tileset.name,
+            tilesetKey: tileset.name,
+            tileWidth: tileset.tileWidth,
+            tileHeight: tileset.tileHeight,
+            columns: tileset.columns,
+            frameDuration: data.animation[0].duration,
+            frames: data.animation.map((f) => f.tileid),
+          });
         }
       }
 
-      // Convert to MagicEffectDef array (one per entry, using first entry's frames)
-      for (const fx of effects) {
-        if (fx.entries.length === 0) continue;
-        // Use the first entry's frames as the animation sequence
-        this.magicEffectPool.push({
-          id: fx.id,
-          name: fx.name,
-          tilesetKey: fx.tilesetName,
-          tileWidth: fx.tileWidth,
-          tileHeight: fx.tileHeight,
-          columns: fx.columns,
-          frameDuration: fx.frameDuration,
-          frames: fx.entries[0].frames,
-        });
-      }
-
-      // If we need to load new spritesheets, start the loader
-      if (tilesetKeys.size > 0) {
-        this.load.once("complete", () => {
-          EventBus.emit("magic-effects-loaded", this.magicEffectPool.length);
-        });
-        this.load.start();
-      } else {
-        EventBus.emit("magic-effects-loaded", this.magicEffectPool.length);
-      }
+      EventBus.emit("magic-effects-loaded", this.magicEffectPool.length);
     } catch {
       // Ignore malformed magic_effects
     }
@@ -1076,6 +1083,9 @@ export class VillageScene extends Phaser.Scene {
 
   private handlePlayerInput() {
     if (this.userMoving || !this.cursors || !this.wasd) return;
+    // Skip movement when a DOM input/textarea is focused (e.g. chat)
+    const tag = document.activeElement?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
 
     let dx = 0;
     let dy = 0;

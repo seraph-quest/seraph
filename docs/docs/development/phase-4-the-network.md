@@ -6,7 +6,7 @@ sidebar_position: 5
 
 **Goal**: Seraph reaches beyond the village — multi-channel presence, composable skills, voice, multi-agent collaboration, and agent-rendered visualizations.
 
-**Status**: Planned
+**Status**: Partially implemented — 4.1 (SKILL.md) and 4.4 (Multi-Agent/Delegation) are done. Remaining items planned.
 
 **Inspiration**: Capabilities identified from OpenClaw analysis that are not covered by Phases 1-3.
 
@@ -444,7 +444,7 @@ backend/src/remote/
 
 ## Implementation Order
 
-1. **SKILL.md ecosystem** (4.1) — low effort, high leverage, multiplies all other features
+1. ~~**SKILL.md ecosystem** (4.1) — low effort, high leverage, multiplies all other features~~ ✅
 2. **Multi-model failover** (4.5) — quick win, improves reliability immediately
 3. **Webhook triggers** (4.7) — event-driven complements Phase 3's scheduler
 4. **Enhanced sandboxing** (4.6) — prerequisite for multi-channel and remote access
@@ -452,25 +452,25 @@ backend/src/remote/
 6. **Workflow engine** (4.3) — composable automations, builds on skills
 7. **Voice interface Phase A** (4.8) — browser Speech API, zero cost
 8. **Agent-rendered canvas** (4.9) — visual leverage of quest system
-9. **Multi-agent architecture** (4.4) — specialized delegation
+9. ~~**Multi-agent architecture** (4.4) — specialized delegation~~ ✅
 10. **Remote access + PWA** (4.10) — Seraph goes mobile
 
 ---
 
 ## Verification Checklist
 
-- [ ] Create a SKILL.md file in `data/skills/`, verify agent can use it
+- [x] Create a SKILL.md file in `data/skills/`, verify agent can use it (4.1)
 - [ ] Model failover triggers when primary model returns error
 - [ ] GitHub webhook triggers agent notification
 - [ ] Tool permissions block shell_execute for restricted agent
-- [ ] MCP servers configurable via `mcp-servers.json`, Settings UI, and `mcp.sh` CLI
+- [x] MCP servers configurable via `mcp-servers.json`, Settings UI, and `mcp.sh` CLI (4.1)
 - [ ] Telegram bot responds to messages with full agent capabilities
 - [ ] Workflow with 3+ steps executes end-to-end with step chaining
 - [ ] Voice transcription sends text to agent, response appears in chat
 - [ ] `render_chart` displays a styled chart in canvas panel
-- [ ] Sub-agent spawned by Seraph completes a research task
+- [x] Sub-agent spawned by Seraph completes a research task (4.4 — delegation architecture behind feature flag)
 - [ ] PWA installable on mobile, connects to remote backend
-- [ ] All new tools register and appear in `GET /api/tools`
+- [x] All new tools register and appear in `GET /api/tools` (4.1)
 - [ ] TypeScript compiles clean
 
 ---

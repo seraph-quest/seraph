@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Phase 2 — Capable Executor
 
-**Goal**: Seraph can do real things — browse, execute code, manage calendar/email.
+**Goal**: Seraph can do real things — browse, execute code, search the web.
 
 **Status**: Implemented
 
@@ -90,45 +90,21 @@ RUN uv run playwright install chromium
 
 ---
 
-## 2.4 Calendar Integration
+## 2.4 Calendar & Email (Removed)
 
-**Packages**: `gcsa>=2.6.0`, `google-auth-oauthlib>=1.2.0`
-
-**File**: `backend/src/tools/calendar_tool.py`
-- `get_calendar_events(days_ahead: int = 7) -> str` — Formatted list of upcoming events
-- `create_calendar_event(title, start_time, end_time, description) -> str` — Create new event
-- Uses gcsa (Google Calendar Simple API)
-- OAuth credentials at `/app/config/google_credentials.json`
-- Token stored at `/app/data/google_calendar_token.json`
-
-**Settings**:
-- `google_credentials_path`: Path to OAuth credentials JSON
-- `google_calendar_token_path`: Path to stored OAuth token
+> Calendar and email tools were originally planned here but were removed in favor of MCP server integrations. Calendar data is now an observer-only source (`backend/src/observer/sources/calendar_source.py`) that feeds the strategist context. Email integration can be added via MCP servers (e.g., Gmail MCP).
 
 ---
 
-## 2.5 Email Integration
+## 2.5 Village Expansion
 
-**Package**: `simplegmail>=4.1.0`
-
-**File**: `backend/src/tools/email_tool.py`
-- `read_emails(query: str = "", max_results: int = 10) -> str` — Search/list inbox
-- `send_email(to, subject, body) -> str` — Send an email
-- Shares Google OAuth credentials with calendar
-- Separate token: `/app/data/google_gmail_token.json`
-
----
-
-## 2.6 Village Expansion
-
-**Modified**: `frontend/src/game/scenes/StudyScene.ts`
-- 4 new buildings added to village: Forge, Tower, Clock, Mailbox
-- Day/night texture variants with procedural fallback textures
-- Props placement system for smaller objects (clock, mailbox)
-- Extended wandering waypoints to include new building areas
+**Modified**: `frontend/src/game/scenes/VillageScene.ts`
+- Buildings dynamically parsed from Tiled map JSON (no hardcoded buildings)
+- Day/night cycle with procedural lighting
+- Extended wandering waypoints across village areas
 
 **Modified**: `frontend/src/config/constants.ts`
-- New `TOOL_NAMES`: `SHELL_EXECUTE`, `BROWSE_WEBPAGE`, `GET_CALENDAR_EVENTS`, `CREATE_CALENDAR_EVENT`, `READ_EMAILS`, `SEND_EMAIL` (plus Phase 1 soul/goal tools)
+- Tool name constants for animation mapping (e.g., `SHELL_EXECUTE`, `BROWSE_WEBPAGE`, plus Phase 1 soul/goal tools)
 
 **Modified**: `frontend/src/lib/animationStateMachine.ts`
 - Tool detection triggers casting animation with magic effect overlay
@@ -140,25 +116,21 @@ RUN uv run playwright install chromium
 1. Plugin system (loader, registry) — all tools benefit from auto-discovery
 2. Shell execution tool + snekbox sidecar — easiest to verify
 3. Browser automation tool (Playwright) — high capability unlock
-4. Calendar integration (gcsa + OAuth) — needed for Phase 3 context
-5. Email integration (simplegmail) — shares OAuth with calendar
-6. Village expansion (new buildings, animations) — visual polish
-7. Settings + build verification — ensure everything compiles
+4. Village expansion (buildings, animations) — visual polish
+5. Settings + build verification — ensure everything compiles
 
 ## Verification Checklist
 
 - [x] `shell_execute("print('hello')")` returns "hello" via snekbox
 - [x] `browse_webpage("https://example.com")` returns page content
-- [x] `get_calendar_events()` returns events (requires OAuth setup)
-- [x] `read_emails()` returns inbox content (requires OAuth setup)
 - [x] Drop a new `.py` tool file in `src/tools/`, verify auto-discovered
-- [x] New tools trigger correct village building animations
-- [x] 16 tools auto-discovered by plugin loader
+- [x] New tools trigger correct village casting animations
+- [x] 12 tools auto-discovered by plugin loader
 - [x] 18 routes registered (including `GET /api/tools`)
 - [x] TypeScript compiles clean
 - [x] Lock file updated
 
-## All 16 Tools (auto-discovered)
+## All 12 Tools (auto-discovered)
 
 | Tool | File |
 |------|------|
@@ -174,7 +146,3 @@ RUN uv run playwright install chromium
 | `get_goal_progress` | goal_tools.py |
 | `shell_execute` | shell_tool.py |
 | `browse_webpage` | browser_tool.py |
-| `get_calendar_events` | calendar_tool.py |
-| `create_calendar_event` | calendar_tool.py |
-| `read_emails` | email_tool.py |
-| `send_email` | email_tool.py |

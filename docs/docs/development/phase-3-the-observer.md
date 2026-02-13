@@ -362,7 +362,7 @@ Queued insights I held back today: 0
   - **on_track**: Seraph meditates calmly, bright aura
   - **waiting**: Seraph waves occasionally
 
-**Modified**: `frontend/src/game/scenes/StudyScene.ts`
+**Modified**: `frontend/src/game/scenes/VillageScene.ts`
 - EventBus handler for `"agent-ambient-state"` events
 - Seraph's idle behavior changes based on proactive state
 - Click Seraph while in `has_insight` state → chat opens with queued insights
@@ -404,7 +404,7 @@ Queued insights I held back today: 0
 6. ~~**Frontend ambient indicator + nudge speech bubble**~~ ✅ Phase 3.4
 7. ~~**Native macOS daemon** (window tracking + IDE deep work detection)~~ ✅ Phase 3.5
 8. **Avatar state reflection** (ambient Phaser animations) — visual polish
-9. **Interruption mode UI** (frontend toggle, suggestions) — user control
+9. ~~**Interruption mode UI** (frontend toggle, suggestions) — user control~~ ✅ Phase 3.5.2
 
 ---
 
@@ -426,8 +426,8 @@ Queued insights I held back today: 0
 - [ ] Click Seraph in `has_insight` state → chat opens with queued insights
 - [x] Native daemon sends active window info to backend (Phase 3.5)
 - [x] IDE/terminal detection triggers deep_work user state (Phase 3.5)
-- [ ] Screen OCR works locally via macOS Vision framework
-- [ ] Mode switcher works (Focus / Balanced / Active)
+- [x] Screen OCR works locally via macOS Vision framework (Phase 3.5)
+- [x] Mode switcher works (Focus / Balanced / Active) (Phase 3.5.2)
 - [ ] Seraph suggests mode changes based on calendar
 
 ---
@@ -436,7 +436,7 @@ Queued insights I held back today: 0
 
 ### Backend
 - `apscheduler>=3.11.0,<4.0.0` (already in pyproject.toml)
-- All Phase 2 tools (calendar, email) for context sources
+- All Phase 2 tools for context sources (calendar is observer-only via `calendar_source.py`, no email dependency)
 
 ### Native Daemon
 - `pyobjc-framework-Cocoa` — macOS window tracking

@@ -253,21 +253,21 @@ frontend/src/components/HudButtons.tsx    # Keyboard shortcut hints
 
 ## Verification Checklist
 
-- [ ] Goal create/edit modal works from QuestPanel
-- [ ] Goal delete with confirmation works
-- [ ] Quest panel search filters goals by text
-- [ ] Interruption mode toggle changes mode via API
-- [ ] Current interruption mode shown in HUD area
+- [x] Goal create/edit modal works from QuestPanel (Phase 3.5.1)
+- [x] Goal delete with confirmation works (Phase 3.5.1)
+- [x] Quest panel search filters goals by text (Phase 3.5.1)
+- [x] Interruption mode toggle changes mode via API (Phase 3.5.2)
+- [x] Current interruption mode shown in HUD area (Phase 3.5.2)
 - [ ] Avatar changes behavior in has_insight / goal_behind / on_track states
 - [ ] Click avatar in has_insight state opens chat
 - [ ] Calendar scan job polls Google Calendar and updates context
-- [ ] Long conversations (100+ messages) maintain quality with adaptive windowing
-- [ ] Agent execution times out gracefully after 120s
+- [x] Long conversations (100+ messages) maintain quality with adaptive windowing (Phase 3.5.5)
+- [x] Agent execution times out gracefully after 120s (Phase 3.5.6)
 - [ ] `docker-compose.prod.yaml` starts all services with health checks
 - [ ] GitHub Actions CI runs on PR (lint + type-check)
 - [ ] No API keys committed in repo
-- [ ] Font sizes readable (11px+) in chat and quest panels
-- [ ] Keyboard shortcuts toggle panels
+- [x] Font sizes readable (9px+ with pixel font) (Phase 3.5.9)
+- [x] Keyboard shortcuts toggle panels (Phase 3.5.9)
 - [ ] Tauri app launches with embedded backend (stretch goal)
 
 ---

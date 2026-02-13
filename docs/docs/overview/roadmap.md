@@ -164,36 +164,41 @@ Seraph sees what you're doing, understands your patterns, and its avatar mirrors
 
 **Theme**: Make what exists production-quality. Complete unfinished UI, fix backend gaps, harden infrastructure, eliminate adoption barriers.
 
-**Status**: Planned
+**Status**: Mostly complete. Goal UI, interruption mode, accessibility, timeouts, token-aware context, and SKILL.md plugins are done. Avatar state reflection and Tauri desktop remain planned.
 
-### 3.5.1 Goal Management UI
-- Create/edit/delete goals via dedicated form (not just chat)
-- Quest panel search, filter by domain/level/status, sort
-- Backend APIs already exist — this is frontend-only
+### 3.5.1 Goal Management UI ✅
+- ~~Create/edit/delete goals via dedicated form (not just chat)~~ — `GoalForm.tsx` with create/edit modal
+- ~~Quest panel search, filter by domain/level/status, sort~~ — Text search + level/domain dropdowns, inline actions (complete/edit/delete) on GoalTree nodes
+- ~~Backend APIs already exist — this is frontend-only~~
 
-### 3.5.2 Interruption Mode UI
-- Focus / Balanced / Active toggle in Settings panel
-- Mode indicator in HUD area
-- Backend API exists at `/api/settings/interruption-mode`
+### 3.5.2 Interruption Mode UI ✅
+- ~~Focus / Balanced / Active toggle in Settings panel~~ — `InterruptionModeToggle.tsx`, 3-state toggle
+- ~~Mode indicator in HUD area~~
+- ~~Backend API exists at `/api/settings/interruption-mode`~~
 
 ### 3.5.3 Avatar State Reflection
 - Avatar behavior changes based on ambient state (has_insight, goal_behind, on_track)
 - Click avatar in has_insight state → opens chat with queued insights
 - Ambient WebSocket messages already flow — Phaser visuals missing
 
-### 3.5.4 Calendar Scan Completion
-- Complete the calendar_scan job with Google Calendar API integration
+*Status: Planned.*
+
+### 3.5.4 Calendar Scan
+- ~~Complete the calendar_scan job with Google Calendar API integration~~ — Works when credentials are configured
 - Enable calendar-aware user state transitions
 
-### 3.5.5 Token-Aware Context Window
-- Replace fixed 50-message window with adaptive token counting
-- Summarize middle messages when budget exceeded
-- Prevent quality degradation in long conversations
+*Status: Functional when credentials are configured.*
 
-### 3.5.6 Agent Execution Timeout
-- Timeout handling for agent runs (120s default)
-- Per-tool timeouts (shell 30s, browser 60s, others 15s)
-- Graceful error messages on timeout
+### 3.5.5 Token-Aware Context Window ✅
+- ~~Replace fixed 50-message window with adaptive token counting~~ — Configurable budget (default 12,000 tokens)
+- ~~Summarize middle messages when budget exceeded~~ — Keeps first N + last M messages, LLM summarization for middle
+- ~~Prevent quality degradation in long conversations~~
+- 3 new settings: `context_window_token_budget`, `context_window_keep_first`, `context_window_keep_recent`
+
+### 3.5.6 Agent Execution Timeout ✅
+- ~~Timeout handling for agent runs (120s default)~~ — `asyncio.wait_for` on all agent paths (REST, WS, strategist, briefing)
+- ~~Per-tool timeouts (shell 30s, browser 60s, others 15s)~~ — 5 configurable timeout settings
+- ~~Graceful error messages on timeout~~ — 504 on REST, error message on WS
 
 ### 3.5.7 Tauri Desktop App
 - Native macOS app (single `.dmg` installer)
@@ -201,14 +206,18 @@ Seraph sees what you're doing, understands your patterns, and its avatar mirrors
 - System tray, native notifications, auto-updater
 - Bundles backend as sidecar, daemon as Rust plugin
 
+*Status: Planned. Analysis complete in `docs/architecture/tauri-analysis.md`.*
+
 ### 3.5.8 Infrastructure Hardening
 - Production Docker Compose with health checks, restart policies, resource limits
 - CI/CD pipeline (GitHub Actions: lint, type-check, test on PR)
 - API key security (rotate exposed key, `.gitignore` protection)
 
-### 3.5.9 Frontend Accessibility
-- Increase minimum font sizes (7-9px → 11-12px)
-- Keyboard shortcuts for panel toggling (C/Q/S/Esc)
+*Status: Planned.*
+
+### 3.5.9 Frontend Accessibility ✅
+- ~~Increase minimum font sizes (7-9px → 11-12px)~~ — 9px minimum across all panels (Press Start 2P pixel font)
+- ~~Keyboard shortcuts for panel toggling (C/Q/S/Esc)~~ — Shift+C (chat), Shift+Q (quests), Shift+S (settings), Escape (close). Shift modifier prevents WASD conflict.
 
 ### Milestone
 Everything that exists is robust, polished, and installable. Ready to expand.
@@ -219,36 +228,31 @@ Everything that exists is robust, polished, and installable. Ready to expand.
 
 **Theme**: Seraph doesn't just observe — it *thinks*. Continuously reasoning about how to elevate its human.
 
-### 4.1 Proactive Reasoning Engine
-- Background process that runs on a schedule (every 15 min) and on triggers
-- Inputs: current context, user model, goal hierarchy, calendar, recent patterns
-- Outputs: ranked list of potential interventions with urgency scores
-- Uses chain-of-thought reasoning: "Given that the user's Q1 goal is X, and they've spent today doing Y, and tomorrow they have Z..."
+**Status**: Core proactive reasoning is complete (4.1–4.4). SKILL.md plugin ecosystem and recursive delegation also shipped. Decision support, mistake prevention, and weekly strategy remain planned.
 
-### 4.2 Interruption Intelligence
-- Cost/benefit calculator for each potential intervention
-- Factors: urgency, user receptivity state, time until window closes, intervention history
-- Urgency levels: Ambient → Nudge → Advisory → Alert → Autonomous
-- Respects user's proactivity dial (set during onboarding, adjustable anytime)
-- Learns from dismissal/engagement patterns
+### 4.1 Proactive Reasoning Engine ✅
+- ~~Background process that runs on a schedule (every 15 min) and on triggers~~ — `strategist_tick` job (APScheduler, every 15 min)
+- ~~Inputs: current context, user model, goal hierarchy, calendar, recent patterns~~ — `CurrentContext.to_prompt_block()` aggregates all sources
+- ~~Outputs: ranked list of potential interventions with urgency scores~~ — `StrategistDecision` dataclass with urgency scoring
+- ~~Uses chain-of-thought reasoning~~ — Restricted smolagents agent (`view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5)
 
-### 4.3 Morning Briefing
-- Proactive daily briefing at user's configured time
-- Contents:
-  - Today's calendar with strategic notes
-  - Goal progress snapshot (on track / behind / ahead)
-  - Priority recommendations for the day
-  - Unresolved items from yesterday
-  - Relevant news/information (from user's interest areas)
-- Delivered as RPG "quest briefing" in the village
+### 4.2 Interruption Intelligence ✅
+- ~~Cost/benefit calculator for each potential intervention~~ — User state machine (6 states) + attention budget + delivery gating
+- ~~Factors: urgency, user receptivity state, time until window closes, intervention history~~ — `should_deliver()` considers all factors
+- ~~Urgency levels: Ambient → Nudge → Advisory → Alert → Autonomous~~ — Implemented as `ambient`, `nudge`, `advisory`, `alert` intervention types
+- ~~Respects user's proactivity dial (set during onboarding, adjustable anytime)~~ — Focus/Balanced/Active modes via API + UI
+- Learns from dismissal/engagement patterns — *Not yet implemented*
 
-### 4.4 Evening Review
-- End-of-day reflection prompt
-- What was accomplished vs. planned
-- Goal progress updates
-- "What did you learn today?" prompt
-- Tomorrow preview and planning
-- RPG "campfire scene" — avatar and user review the day
+### 4.3 Morning Briefing ✅
+- ~~Proactive daily briefing at user's configured time~~ — `daily_briefing` job (cron 8 AM)
+- ~~Contents: calendar, goal progress, priority recommendations~~ — Gathers soul + calendar + goals + memories, calls LiteLLM
+- ~~Delivered as RPG "quest briefing" in the village~~ — Delivered via WebSocket with `is_scheduled=True`
+
+### 4.4 Evening Review ✅
+- ~~End-of-day reflection prompt~~ — `evening_review` job (cron 9 PM)
+- ~~What was accomplished vs. planned~~ — Counts today's messages + completed goals
+- ~~Goal progress updates~~ — Delivered via LiteLLM with `is_scheduled=True`
+- RPG "campfire scene" — *Visual scene not yet implemented*
 
 ### 4.5 Decision Support
 - When the user faces a decision, Seraph can:
@@ -258,6 +262,8 @@ Everything that exists is robust, polished, and installable. Ready to expand.
   - Present a structured pros/cons with weighted scoring
   - Play devil's advocate on request
 
+*Status: Planned.*
+
 ### 4.6 Mistake Prevention
 - Pattern-based alerts:
   - "You're about to commit credentials to a public repo"
@@ -266,12 +272,28 @@ Everything that exists is robust, polished, and installable. Ready to expand.
   - "You've been on social media for 45 minutes — your deadline is in 2 days"
   - "Last time you made this type of decision under stress, the outcome was..."
 
+*Status: Planned.*
+
 ### 4.7 Weekly Strategy Session
 - Weekly proactive conversation (user picks the day/time)
 - Review: goal progress, wins, setbacks, patterns
 - Plan: next week's priorities, time allocation, key decisions
 - Adjust: goal timelines, reprioritize if needed
 - RPG framing: "War room" scene in the village
+
+*Status: Planned.*
+
+### 4.8 SKILL.md Plugin Ecosystem ✅
+- Zero-code markdown plugins in `data/skills/` with YAML frontmatter (`name`, `description`, `requires.tools`, `user_invocable`, `enabled`)
+- Tool gating: skills only loaded when required tools are available
+- Runtime enable/disable via `GET/PUT /api/skills` + Settings UI
+- 3 bundled examples: `daily-standup.md`, `code-review.md`, `goal-reflection.md`
+
+### 4.9 Recursive Delegation Architecture ✅
+- Orchestrator (no tools) delegates to domain specialists behind feature flag (`USE_DELEGATION=true`)
+- 4 built-in specialists: `memory_keeper`, `goal_planner`, `web_researcher`, `file_worker`
+- 1 MCP specialist auto-generated per enabled MCP server
+- Configurable: `delegation_max_depth` (default 1), `orchestrator_max_steps` (default 8)
 
 ### Milestone
 Seraph thinks about your life constantly, intervenes at the right moments, and helps you strategize.
@@ -300,7 +322,8 @@ Seraph thinks about your life constantly, intervenes at the right moments, and h
 - User configures which heartbeats are active
 
 ### 5.3 Multi-Channel Delivery
-- Telegram / Discord bot as notification channel
+- **Telegram bot** as first channel — simplest bot API, mobile push notifications, unlocks proactive system's full value. This is the next major priority.
+- Discord / Slack / WhatsApp as subsequent channels
 - Push notifications (PWA or mobile app)
 - Email digests for non-urgent items
 - The RPG web UI remains the primary deep-interaction interface
@@ -363,7 +386,8 @@ Seraph acts on your behalf within defined boundaries, follows up on your commitm
 - Proactive health-productivity recommendations
 
 ### 6.6 Multi-Agent Architecture
-- Specialized sub-agents for different domains:
+- Partial implementation via recursive delegation (Phase 4.9): orchestrator + 4 domain specialists + auto-generated MCP specialists
+- Full vision with named sub-agents remains planned:
   - **Sentinel** — Security, mistake prevention, risk monitoring
   - **Strategist** — Goal planning, decision support, trajectory analysis
   - **Executor** — Task execution, tool operation, background work

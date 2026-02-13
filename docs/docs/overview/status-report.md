@@ -1,3 +1,7 @@
+---
+sidebar_position: 3
+---
+
 # Seraph Project Status Report
 **Date: 2026-02-12 | Prepared by: Claude**
 

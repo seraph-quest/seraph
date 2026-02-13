@@ -1,3 +1,7 @@
+---
+sidebar_position: 4
+---
+
 # Seraph — Next Steps Analysis
 **Date: 2026-02-13**
 

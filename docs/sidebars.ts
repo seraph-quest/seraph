@@ -7,7 +7,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Overview',
-      items: ['overview/vision', 'overview/roadmap'],
+      items: ['overview/vision', 'overview/roadmap', 'overview/status-report', 'overview/next-steps'],
     },
     {
       type: 'category',

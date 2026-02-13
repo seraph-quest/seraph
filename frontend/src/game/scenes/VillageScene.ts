@@ -348,6 +348,7 @@ export class VillageScene extends Phaser.Scene {
       this.speechBubble.hide();
       this.agent.moveAlongPath(this.pathfinder, this.agentSpawn.x, this.agentSpawn.y, () => {
         this.agent.playAnim("think");
+        this.speechBubble.show("...");
       });
 
       // User walks toward agent

@@ -160,6 +160,61 @@ Seraph sees what you're doing, understands your patterns, and its avatar mirrors
 
 ---
 
+## Phase 3.5 — Polish & Production Readiness
+
+**Theme**: Make what exists production-quality. Complete unfinished UI, fix backend gaps, harden infrastructure, eliminate adoption barriers.
+
+**Status**: Planned
+
+### 3.5.1 Goal Management UI
+- Create/edit/delete goals via dedicated form (not just chat)
+- Quest panel search, filter by domain/level/status, sort
+- Backend APIs already exist — this is frontend-only
+
+### 3.5.2 Interruption Mode UI
+- Focus / Balanced / Active toggle in Settings panel
+- Mode indicator in HUD area
+- Backend API exists at `/api/settings/interruption-mode`
+
+### 3.5.3 Avatar State Reflection
+- Avatar behavior changes based on ambient state (has_insight, goal_behind, on_track)
+- Click avatar in has_insight state → opens chat with queued insights
+- Ambient WebSocket messages already flow — Phaser visuals missing
+
+### 3.5.4 Calendar Scan Completion
+- Complete the calendar_scan job with Google Calendar API integration
+- Enable calendar-aware user state transitions
+
+### 3.5.5 Token-Aware Context Window
+- Replace fixed 50-message window with adaptive token counting
+- Summarize middle messages when budget exceeded
+- Prevent quality degradation in long conversations
+
+### 3.5.6 Agent Execution Timeout
+- Timeout handling for agent runs (120s default)
+- Per-tool timeouts (shell 30s, browser 60s, others 15s)
+- Graceful error messages on timeout
+
+### 3.5.7 Tauri Desktop App
+- Native macOS app (single `.dmg` installer)
+- Eliminates Docker + Python + Node.js requirements
+- System tray, native notifications, auto-updater
+- Bundles backend as sidecar, daemon as Rust plugin
+
+### 3.5.8 Infrastructure Hardening
+- Production Docker Compose with health checks, restart policies, resource limits
+- CI/CD pipeline (GitHub Actions: lint, type-check, test on PR)
+- API key security (rotate exposed key, `.gitignore` protection)
+
+### 3.5.9 Frontend Accessibility
+- Increase minimum font sizes (7-9px → 11-12px)
+- Keyboard shortcuts for panel toggling (C/Q/S/Esc)
+
+### Milestone
+Everything that exists is robust, polished, and installable. Ready to expand.
+
+---
+
 ## Phase 4 — The Strategist
 
 **Theme**: Seraph doesn't just observe — it *thinks*. Continuously reasoning about how to elevate its human.

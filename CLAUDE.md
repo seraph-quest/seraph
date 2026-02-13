@@ -13,24 +13,29 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Stack**: React 19 + Vite 6 + TypeScript 5.6 + Tailwind CSS 3 + Zustand 5 + Phaser 3.90
 - **Entry**: `src/main.tsx` → `src/App.tsx`
 - **Key files**:
+  - `src/game/main.ts` - Phaser game factory (`StartGame(parent)`) called by PhaserGame
   - `src/game/PhaserGame.tsx` - React wrapper for Phaser instance
   - `src/game/scenes/VillageScene.ts` - Village scene (dynamic Tiled JSON map, buildings with interiors, forest, day/night cycle, magic effects)
   - `src/game/objects/AgentSprite.ts` - Phaser sprite for Seraph avatar
   - `src/game/objects/UserSprite.ts` - Phaser sprite for user avatar
+  - `src/game/objects/NpcSprite.ts` - NPC sprite with wandering behavior, supports character + enemy types
   - `src/game/objects/SpeechBubble.ts` - Phaser speech bubble
   - `src/game/objects/MagicEffect.ts` - Animated spell overlay (pool-cycled, spawned during tool use, faded on idle)
   - `src/game/lib/Pathfinder.ts` - A* pathfinding wrapper (easystarjs); diagonal movement, path simplification, grid swap for interiors
+  - `src/game/lib/mapParsers.ts` - `buildMagicEffectPool()` — parses magic effects from Tiled map JSON custom properties
   - `src/game/EventBus.ts` - Bridges Phaser events to React
-  - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connection, agent visual state, onboarding, ambient, ambientTooltip, chatMaximized, toolRegistry, session persistence via localStorage)
-  - `src/stores/questStore.ts` - Zustand store (goal tree, domain progress dashboard)
+  - `src/stores/chatStore.ts` - Zustand store (messages, sessions, connectionStatus, agentVisual, isAgentBusy, sessionId, onboarding, ambient, ambientTooltip, chatMaximized, chatPanelOpen, questPanelOpen, settingsPanelOpen, toolRegistry, magicEffectPoolSize, debugWalkability, session persistence via localStorage)
+  - `src/stores/questStore.ts` - Zustand store (goals, goalTree, dashboard, loading)
   - `src/hooks/useWebSocket.ts` - Native WS connection to `ws://localhost:8004/ws/chat`, reconnect, ping, message dispatch
   - `src/hooks/useAgentAnimation.ts` - Walk-then-act state machine with timers
-  - `src/lib/toolParser.ts` - Regex detection of tool names from step content (5 patterns + fallback); uses dynamic tool registry from API with static fallback
+  - `src/hooks/useKeyboardShortcuts.ts` - Keyboard shortcut handler (Shift+C/Q/S, Escape)
+  - `src/lib/toolParser.ts` - Regex detection of tool names from step content (6 patterns + fallback); uses dynamic tool registry from API with static fallback
   - `src/lib/animationStateMachine.ts` - Tool → casting animation mapping; triggers magic effects on tool use
-  - `src/config/constants.ts` - Scene dimensions, tool names, default agent position, wandering waypoints
-  - `src/components/chat/` - ChatPanel, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
+  - `src/config/constants.ts` - Scene dimensions, tool names, default agent position
+  - `src/components/chat/` - ChatPanel, ChatSidebar, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel (search/filter by title, level, domain), GoalTree, GoalForm, DomainStats
-  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, skills management, MCP server management UI, version)
+  - `src/components/settings/InterruptionModeToggle.tsx` - Focus/Balanced/Active mode toggle for proactive message delivery
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, skills management, MCP server management UI, version)
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
@@ -74,11 +79,17 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/tools.py` — `GET /api/tools` (returns building metadata per tool for dynamic frontend registration)
   - `src/api/mcp.py` — `GET /api/mcp/servers`, `POST /api/mcp/servers`, `PUT /api/mcp/servers/{name}`, `DELETE /api/mcp/servers/{name}`, `POST /api/mcp/servers/{name}/test`
   - `src/api/skills.py` — `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
+  - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data), `POST /api/observer/refresh` (debug)
+  - `src/api/settings.py` — `GET /api/settings/interruption-mode`, `PUT /api/settings/interruption-mode`
   - `/health` — health check (defined in `src/app.py`)
 - **Tools** (`src/tools/`):
   - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
   - Phase 2: `shell_execute`, `browse_webpage`
   - MCP: `src/tools/mcp_manager.py` — plug-and-play MCP manager; loads server config from `data/mcp-servers.json`, connects to enabled servers via `smolagents.MCPClient`. Supports runtime add/remove/toggle via API. Config file is auto-persisted on mutations.
+- **Tool Discovery** (`src/plugins/`):
+  - `loader.py` — `discover_tools()` auto-discovers all `@tool`-decorated functions from `src/tools/`
+  - `registry.py` — `get_tool_metadata()` returns tool descriptions for frontend registration
+  - `factory.py` uses `discover_tools()` + `mcp_manager.get_tools()` to assemble the full tool set
 - **MCP Configuration** (`data/mcp-servers.json`):
   - JSON config with `mcpServers` object: `{name: {url, enabled, description?}}`
   - `data/mcp-servers.example.json` committed to repo as reference
@@ -106,7 +117,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `context_window.py` — Token-aware context window builder (keep first N + last M, summarize middle; reads defaults from settings)
   - `session.py` — Async session manager (SQLite-backed)
-- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile`, `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`
+- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
 - **Scheduler** (`src/scheduler/`):
   - `engine.py` — APScheduler setup, job registration on app lifespan
   - `connection_manager.py` — WebSocket broadcast manager (`ws_manager`)
@@ -119,7 +130,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Observer** (`src/observer/`):
   - `context.py` — `CurrentContext` dataclass (time, calendar, git, goals, user state, screen, attention budget) + `to_prompt_block()`
   - `manager.py` — `ContextManager` singleton; refreshes all sources, derives user state, detects state transitions, delivers queued bundles
-  - `user_state.py` — User state machine (available/deep_work/in_meeting/transitioning/away/winding_down), delivery gate (`should_deliver()`), attention budget management
+  - `user_state.py` — `UserStateMachine` with 6 states (available/deep_work/in_meeting/transitioning/away/winding_down), `InterruptionMode` enum (focus/balanced/active), `DeliveryDecision` enum (deliver/queue/drop), delivery gate (`should_deliver()`), attention budget management
   - `delivery.py` — `deliver_or_queue()` routes proactive messages through the attention guardian; `deliver_queued_bundle()` drains queue on state transitions
   - `insight_queue.py` — DB-backed queue for insights held during blocked states (24h expiry)
   - `user_state.py` also includes `_DEEP_WORK_APPS` — IDE/terminal app names that trigger `deep_work` state when detected in `active_window` (priority between calendar and transition detection)
@@ -168,6 +179,23 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `use_delegation: bool = False` — feature flag for orchestrator + specialists mode
   - `delegation_max_depth: int = 1` — max nesting depth (1 = orchestrator → specialists)
   - `orchestrator_max_steps: int = 8` — max delegation steps for orchestrator
+- **Scheduler settings** (`config/settings.py`):
+  - `scheduler_enabled: bool = True` — enable/disable all background jobs
+  - `memory_consolidation_interval_min: int = 30`
+  - `goal_check_interval_hours: int = 4`
+  - `calendar_scan_interval_min: int = 15`
+  - `strategist_interval_min: int = 15`
+  - `morning_briefing_hour: int = 8`
+  - `evening_review_hour: int = 21`
+- **Observer / proactivity settings** (`config/settings.py`):
+  - `proactivity_level: int = 3` — default proactivity dial
+  - `user_timezone: str = "UTC"`
+  - `working_hours_start: int = 9`, `working_hours_end: int = 17`
+  - `observer_git_repo_path: str = ""` — git repo to monitor
+  - `deep_work_apps: str = ""` — custom app names that trigger deep_work state
+- **Sandbox / browser settings** (`config/settings.py`):
+  - `sandbox_url: str = "http://sandbox:8060"`, `sandbox_timeout: int = 35`
+  - `browser_timeout: int = 30`
 
 ## WebSocket Protocol
 - **Client sends**: `{type: "message" | "ping" | "skip_onboarding", message, session_id}`
@@ -256,9 +284,9 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 ```
 
 ## Village Scene (Phaser)
-- Dynamic map size loaded from Tiled JSON (default 64x40, camera bounds set from `map.widthInPixels`/`heightInPixels`), scaled 2x
+- Dynamic map size loaded from Tiled JSON (default 40x40, camera bounds set from `map.widthInPixels`/`heightInPixels`), scaled 2x
 - Tile stacking via sublayers: layer names with `__N` suffix (e.g. `terrain__2`) share base layer depth; all sublayers checked for collision
-- Buildings: House 1 (west), Church (center), House 2 (east), Forge, Tower, Clock, Mailbox
+- **Buildings**: Dynamically parsed from Tiled map JSON `buildings` custom property via `parseBuildings()`. No buildings are hardcoded — the map editor defines building zones, interior floors, and portals.
 - **Building interiors**: `enterBuilding()` hides exterior zone tiles, `renderInteriorFloor()` creates interior container at depth 2.5, `changeFloor()` switches floors, `exitBuilding()` restores exterior; portal detection (`checkPortalCollision()`) in update loop for entry/stairs
 - **Magic effects**: `magicEffectPool` loaded from map custom property `magic_effects`; `parseMagicEffects()` loads animation spritesheets; `handleCastEffect()` spawns overlay at agent position; destroyed/faded on final answer
 - **WASD/arrow key movement**: User avatar moves tile-by-tile with collision checking (`handlePlayerInput()` in update loop); blocked during tween
@@ -280,7 +308,7 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 ## Design Decisions
 1. **Phaser 3 canvas** — Village scene rendered via Phaser with tile-based map. React overlays for chat/quest panels.
 2. **Pixel art pipeline** — Sprite sheet format defined (16-column sheets, 32x32 frames). PixelLab MCP integration available for character/tile generation.
-3. **Tool detection via regex** — 5 patterns + fallback string match on step content. Dynamic tool set from API, static fallback for native tools.
+3. **Tool detection via regex** — 6 patterns + fallback string match on step content. Dynamic tool set from API, static fallback for native tools.
 4. **No SSR, no router** — Single-view SPA, Vite dev server only.
 5. **SQLite + LanceDB** — Lightweight persistence. SQLModel for structured data, LanceDB for vector similarity search.
 6. **Onboarding agent** — Separate agent instance with restricted tool set for first-time user discovery.

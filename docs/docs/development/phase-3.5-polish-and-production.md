@@ -6,7 +6,7 @@ sidebar_position: 4
 
 **Goal**: Complete unfinished Phase 3 UI work, fix backend gaps, harden infrastructure, and eliminate adoption barriers — making what exists production-quality before expanding in Phase 4.
 
-**Status**: In Progress (Tier 1 & 2 complete)
+**Status**: Mostly complete — 3.5.1 (Goal UI), 3.5.2 (Interruption Mode), 3.5.5 (Token-Aware Context), 3.5.6 (Timeouts), 3.5.9 (Accessibility) are done. 3.5.4 (Calendar) functional when credentials configured. 3.5.3 (Avatar State), 3.5.7 (Tauri), 3.5.8 (Infra Hardening) remain planned.
 
 **Context**: The REPORT.md analysis (2026-02-12) identified several gaps between Phases 3 (complete) and 4 (planned) — items that are neither new features nor security concerns, but quality, robustness, and developer experience improvements needed to ship a solid product.
 

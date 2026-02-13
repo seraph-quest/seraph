@@ -5,6 +5,8 @@ sidebar_position: 3
 # Seraph Project Status Report
 **Date: 2026-02-12 | Prepared by: Claude**
 
+> **Note**: This is a point-in-time snapshot from 2026-02-12. Several gaps identified here (Goal UI, Interruption Mode UI, font sizes, keyboard shortcuts, SKILL.md, token-aware context, agent timeouts) have since been implemented. See the [Roadmap](./roadmap.md) for current completion status.
+
 ---
 
 ## Executive Summary

@@ -70,14 +70,22 @@
       "description": "GitHub integration (requires GITHUB_TOKEN env var)",
       "category": "development",
       "url": "https://api.githubcopilot.com/mcp/",
-      "bundled": false
+      "bundled": false,
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      },
+      "auth_hint": "Create a Personal Access Token at https://github.com/settings/tokens (classic, repo scope)"
     },
     {
       "name": "toggl",
       "description": "Toggl Track time tracking (20–40 tools)",
       "category": "productivity",
       "url": "http://toggl-mcp:9300/mcp",
-      "bundled": true
+      "bundled": true,
+      "headers": {
+        "Authorization": "Bearer ${TOGGL_API_KEY}"
+      },
+      "auth_hint": "Get your API token from https://track.toggl.com/profile (scroll to API Token)"
     }
   ]
 }

@@ -113,6 +113,8 @@ async def install_item(name: str):
                 url=server["url"],
                 description=server.get("description", ""),
                 enabled=False,
+                headers=server.get("headers"),
+                auth_hint=server.get("auth_hint", ""),
             )
             return {"status": "installed", "name": name, "type": "mcp_server"}
 

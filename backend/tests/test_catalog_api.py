@@ -158,6 +158,41 @@ class TestCatalogAPI:
                 url="http://test-mcp:9200/mcp",
                 description="A test MCP server",
                 enabled=False,
+                headers=None,
+                auth_hint="",
+            )
+
+    @pytest.mark.asyncio
+    async def test_install_mcp_passes_headers_and_auth_hint(self, client, workspace_dir):
+        catalog_with_headers = {
+            "skills": [],
+            "mcp_servers": [
+                {
+                    "name": "toggl",
+                    "description": "Toggl Track",
+                    "category": "productivity",
+                    "url": "http://toggl-mcp:9300/mcp",
+                    "bundled": True,
+                    "headers": {"Authorization": "Bearer ${TOGGL_API_KEY}"},
+                    "auth_hint": "Get your token from toggl.com",
+                },
+            ],
+        }
+        with patch("src.api.catalog._load_catalog", return_value=catalog_with_headers), \
+             patch("src.api.catalog.settings") as mock_settings, \
+             patch("src.api.catalog.mcp_manager") as mock_mcp:
+            mock_settings.workspace_dir = workspace_dir
+            mock_mcp._config = {}
+
+            resp = await client.post("/api/catalog/install/toggl")
+            assert resp.status_code == 201
+            mock_mcp.add_server.assert_called_once_with(
+                name="toggl",
+                url="http://toggl-mcp:9300/mcp",
+                description="Toggl Track",
+                enabled=False,
+                headers={"Authorization": "Bearer ${TOGGL_API_KEY}"},
+                auth_hint="Get your token from toggl.com",
             )
 
     @pytest.mark.asyncio

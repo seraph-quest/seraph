@@ -204,7 +204,8 @@ class MCPManager:
 
     def add_server(self, name: str, url: str,
                    description: str = "", enabled: bool = True,
-                   headers: dict[str, str] | None = None) -> None:
+                   headers: dict[str, str] | None = None,
+                   auth_hint: str = "") -> None:
         """Add a new server to config and optionally connect it."""
         self._config[name] = {
             "url": url,
@@ -213,6 +214,8 @@ class MCPManager:
         }
         if headers:
             self._config[name]["headers"] = headers
+        if auth_hint:
+            self._config[name]["auth_hint"] = auth_hint
         if enabled:
             self.connect(name, url, headers=headers)
         self._save_config()

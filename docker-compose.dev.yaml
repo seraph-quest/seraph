@@ -47,6 +47,13 @@ services:
       - seraph-network-dev
     restart: unless-stopped
 
+  toggl-mcp:
+    container_name: toggl-mcp
+    image: ghcr.io/seraph-quest/toggl-mcp:latest
+    networks:
+      - seraph-network-dev
+    restart: unless-stopped
+
   # github-mcp:
   #   container_name: github-mcp
   #   image: ghcr.io/github/github-mcp-server:latest

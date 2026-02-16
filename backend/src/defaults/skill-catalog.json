@@ -71,6 +71,13 @@
       "category": "development",
       "url": "https://api.githubcopilot.com/mcp/",
       "bundled": false
+    },
+    {
+      "name": "toggl",
+      "description": "Toggl Track time tracking (20–40 tools)",
+      "category": "productivity",
+      "url": "http://toggl-mcp:9300/mcp",
+      "bundled": true
     }
   ]
 }

@@ -100,7 +100,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `data/mcp-servers.example.json` committed to repo as reference
   - `src/defaults/mcp-servers.default.json` — seed config template; copied to workspace on first run if no config exists
   - Loaded on app startup from `settings.workspace_dir + "/mcp-servers.json"`
-  - First run seeds from `mcp-servers.default.json` (2 entries: `http-request`, `github` — both `enabled: false`)
+  - First run seeds from `mcp-servers.default.json` (3 entries: `http-request`, `github`, `toggl` — all `enabled: false`)
   - **Auth headers**: Servers can include `"headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"}` — env var patterns `${VAR}` are resolved at connect time via `_resolve_env_vars()`. Raw templates stored in config, resolved values never persisted.
   - **Auth token UI**: `POST /api/mcp/servers/{name}/token` stores a `Bearer` token directly in headers config. Frontend `TokenConfigForm` provides inline token setup with save-and-test flow. Unresolved `${VAR}` patterns detected at connect time → status set to `auth_required`.
   - **Server status**: Each server tracks `status` (`connected`|`disconnected`|`auth_required`|`error`), `status_message`, and `auth_hint` (user guidance from config). Frontend shows 4-state indicator: gray (disabled), green (connected), yellow pulsing (auth needed), red (error).
@@ -178,6 +178,14 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Response cap**: body truncated at 50,000 chars
 - **Docker**: Python 3.12-slim, internal network only (no exposed ports), backend connects at `http://http-mcp:9200/mcp`
 
+### Toggl MCP Server (`ghcr.io/seraph-quest/toggl-mcp`)
+- **Repo**: `seraph-quest/toggl-mcp` — external, published as Docker image to GHCR
+- **Stack**: Python 3.13, mcp[cli], httpx
+- **Entry**: `server.py` — 20–40 Toggl Track tools via FastMCP (port 9300, streamable-http transport)
+- **Auth**: `ClientHolder` proxy + ASGI `AuthMiddleware` — accepts API key from `TOGGL_API_KEY` env var or `Authorization: Bearer <token>` header (Seraph Settings UI flow)
+- **Modes**: `TOGGL_MODE=read` (default, 20 tools) or `readwrite` (40 tools)
+- **Docker**: `ghcr.io/seraph-quest/toggl-mcp:latest`, internal network only (no exposed ports), backend connects at `http://toggl-mcp:9300/mcp`
+
 ### Stdio-to-HTTP MCP Proxy (`mcp-servers/stdio-proxy/`)
 - **Stack**: Python 3.12, FastMCP 2.x, uvicorn
 - **Entry**: `proxy.py` — reads `data/stdio-proxies.json`, spawns each enabled stdio MCP server as a subprocess via `FastMCP.as_proxy()`, serves each on its own HTTP port
@@ -191,10 +199,11 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Usage flow**: Add entry to `data/stdio-proxies.json` → `proxy start` → `./mcp.sh add <name> http://localhost:<port>/mcp` → backend connects as normal HTTP MCP server
 
 ### Infrastructure
-- `docker-compose.dev.yaml` - Four services (github-mcp commented out):
+- `docker-compose.dev.yaml` - Five services (github-mcp commented out):
   - `backend-dev` (8004:8003) — FastAPI + uvicorn, depends on sandbox
   - `sandbox-dev` — snekbox (sandboxed Python execution for `shell_execute`), `linux/amd64`, privileged, internal network only
   - `http-mcp` — FastMCP HTTP request tool server (internal network only, port 9200); built from `mcp-servers/http-request/`
+  - `toggl-mcp` — Toggl Track MCP server (internal network only, port 9300); `ghcr.io/seraph-quest/toggl-mcp`
   - `frontend-dev` (3000:5173) — Vite dev server
   - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
 - `manage.sh` - Docker + daemon + proxy management: `./manage.sh -e dev up -d` (also starts daemon if `DAEMON_ENABLED=true`, proxy if `PROXY_ENABLED=true`), `down` (also stops daemon + proxy), `logs -f`, `build`, `daemon start|stop|status|logs`, `proxy start|stop|status|logs`
@@ -354,7 +363,7 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 9. **SKILL.md plugins** — Zero-code markdown files with YAML frontmatter. Drop in `data/skills/`, agent gains capabilities via prompt injection. Tool gating ensures skills only activate when required tools exist. Runtime enable/disable via API + Settings UI.
 10. **Bundled HTTP MCP server** — Self-hosted FastMCP server (`mcp-servers/http-request/`) exposing `http_request` tool for arbitrary REST API calls. Runs as Docker service on internal network. Security: blocks internal/private IPs, clamps timeout 1-60s.
 11. **Discover catalog** — Curated catalog (`src/defaults/skill-catalog.json`) of skills and MCP servers. Browse in Settings UI, one-click install. Catalog API (`GET /api/catalog`, `POST /api/catalog/install/{name}`) copies bundled skill files or adds MCP config entries. All MCP entries install as `enabled: false`.
-12. **MCP seed config** — On first startup, `src/defaults/mcp-servers.default.json` is copied to workspace if no config exists. Ships with `http-request` and `github` entries (both disabled). Existing configs are never overwritten.
+12. **MCP seed config** — On first startup, `src/defaults/mcp-servers.default.json` is copied to workspace if no config exists. Ships with `http-request`, `github`, and `toggl` entries (all disabled). Existing configs are never overwritten.
 13. **Bundled defaults in `src/defaults/`** — Static/reference files (catalog, MCP default config, skill templates) live under `src/defaults/` to avoid being hidden by the Docker workspace volume mount at `/app/data`. Skills are seeded to workspace on first run.
 14. **Stdio-to-HTTP MCP proxy** — Native macOS process (`mcp-servers/stdio-proxy/`) that wraps stdio-only MCP servers as HTTP endpoints via `FastMCP.as_proxy()`. Single process runs multiple proxies via asyncio, each on its own port. Backend MCPManager connects to proxied servers as normal HTTP MCP servers — no backend changes needed. Runs natively (not Docker) so tools can access macOS system APIs.
 15. **Draggable/resizable panels** — `useDragResize` hook with pointer capture, 8-edge resize handles, Zustand-persisted layout. Panels coexist (opening one doesn't close others), z-stack tracks focus order.

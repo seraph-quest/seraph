@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
+import { useDragResize } from "../hooks/useDragResize";
+import { ResizeHandles } from "./ResizeHandles";
 import { EventBus } from "../game/EventBus";
 import { DialogFrame } from "./chat/DialogFrame";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
@@ -401,6 +403,11 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
 
+  const { dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("settings", {
+    minWidth: 240,
+    minHeight: 200,
+  });
+
   const fetchSkills = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/api/skills`);
@@ -525,11 +532,17 @@ export function SettingsPanel() {
   if (!settingsPanelOpen) return null;
 
   return (
-    <div className="settings-overlay">
+    <div
+      className="settings-overlay"
+      style={style}
+      onPointerDown={bringToFront}
+    >
+      <ResizeHandles resizeHandleProps={resizeHandleProps} />
       <DialogFrame
         title="Settings"
         className="flex-1 min-h-0 flex flex-col"
         onClose={() => setSettingsPanelOpen(false)}
+        dragHandleProps={dragHandleProps}
       >
         <div className="flex-1 min-h-0 overflow-y-auto retro-scrollbar flex flex-col gap-2 pb-1">
           <div className="px-1">

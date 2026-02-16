@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
+import { useDragResize } from "../../hooks/useDragResize";
+import { ResizeHandles } from "../ResizeHandles";
 import { DialogFrame } from "../chat/DialogFrame";
 import { DomainStats } from "./DomainStats";
 import { GoalTree } from "./GoalTree";
@@ -46,6 +48,11 @@ export function QuestPanel() {
   const [filterLevel, setFilterLevel] = useState("");
   const [filterDomain, setFilterDomain] = useState("");
 
+  const { dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("quest", {
+    minWidth: 240,
+    minHeight: 200,
+  });
+
   useEffect(() => {
     if (questPanelOpen) refresh();
   }, [questPanelOpen, refresh]);
@@ -63,11 +70,17 @@ export function QuestPanel() {
   if (!questPanelOpen) return null;
 
   return (
-    <div className="quest-overlay">
+    <div
+      className="quest-overlay"
+      style={style}
+      onPointerDown={bringToFront}
+    >
+      <ResizeHandles resizeHandleProps={resizeHandleProps} />
       <DialogFrame
         title="Quest Log"
         className="flex-1 min-h-0 flex flex-col"
         onClose={() => setQuestPanelOpen(false)}
+        dragHandleProps={dragHandleProps}
       >
         <div className="flex-1 min-h-0 overflow-y-auto retro-scrollbar flex flex-col gap-2 pb-1">
           {dashboard && <DomainStats dashboard={dashboard} />}

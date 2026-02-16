@@ -177,7 +177,7 @@ function McpServerRow({
       </button>
       <button
         onClick={() => onToggle(server.name, !server.enabled)}
-        className={`text-[9px] px-0.5 ${server.enabled ? "text-green-400 hover:text-red-400" : "text-retro-text/40 hover:text-green-400"}`}
+        className={`text-[9px] px-0.5 ${!server.enabled ? "text-retro-text/40 hover:text-green-400" : server.status === "connected" ? "text-green-400 hover:text-red-400" : server.status === "auth_required" ? "text-yellow-400 hover:text-red-400" : server.status === "error" ? "text-red-400 hover:text-red-400" : "text-retro-text/40 hover:text-red-400"}`}
       >
         {server.enabled ? "on" : "off"}
       </button>
@@ -239,7 +239,15 @@ function TokenConfigForm({
   return (
     <div className="px-1 py-1 border border-retro-text/10 rounded space-y-1 mx-1 mb-1 bg-retro-bg/50">
       {server.auth_hint && (
-        <div className="text-[9px] text-retro-highlight/70">{server.auth_hint}</div>
+        <div className="text-[9px] text-retro-highlight/70">
+          {server.auth_hint.split(/(https?:\/\/[^\s)]+)/).map((part, i) =>
+            part.match(/^https?:\/\//) ? (
+              <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="underline hover:text-retro-text">{part}</a>
+            ) : (
+              <span key={i}>{part}</span>
+            )
+          )}
+        </div>
       )}
       <input
         type="password"

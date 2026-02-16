@@ -218,6 +218,19 @@ class TestMCPManager:
 
     # --- Status tracking tests ---
 
+    def test_flatten_exception_text_simple(self):
+        mgr = MCPManager()
+        exc = Exception("something broke")
+        assert "something broke" in mgr._flatten_exception_text(exc)
+
+    def test_flatten_exception_text_group(self):
+        mgr = MCPManager()
+        inner = Exception("401 Unauthorized")
+        group = ExceptionGroup("task group error", [inner])
+        text = mgr._flatten_exception_text(group)
+        assert "401" in text
+        assert "unauthorized" in text
+
     def test_check_unresolved_vars_returns_missing(self):
         mgr = MCPManager()
         missing = mgr._check_unresolved_vars({"Authorization": "Bearer ${MY_TOKEN}"})
@@ -243,6 +256,16 @@ class TestMCPManager:
         assert "gh" not in mgr._clients
         assert mgr._status["gh"]["status"] == "auth_required"
         assert "MISSING_TOKEN_XYZ" in mgr._status["gh"]["error"]
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_401_in_exception_group_sets_auth_required(self, MockMCPClient):
+        inner = Exception("Client error '401 Unauthorized' for url 'https://api.githubcopilot.com/mcp/'")
+        MockMCPClient.side_effect = ExceptionGroup("unhandled errors in a TaskGroup", [inner])
+
+        mgr = MCPManager()
+        mgr.connect("gh", "http://gh/mcp")
+        assert "gh" not in mgr._clients
+        assert mgr._status["gh"]["status"] == "auth_required"
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_connect_401_sets_auth_required(self, MockMCPClient):

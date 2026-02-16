@@ -12,7 +12,7 @@
       "headers": {
         "Authorization": "Bearer ${GITHUB_TOKEN}"
       },
-      "auth_hint": "Create a Personal Access Token at github.com/settings/tokens (classic, repo scope)"
+      "auth_hint": "Create a Personal Access Token at https://github.com/settings/tokens (classic, repo scope)"
     }
   }
 }

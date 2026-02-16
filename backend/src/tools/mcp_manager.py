@@ -70,6 +70,19 @@ class MCPManager:
         )
 
     @staticmethod
+    def _flatten_exception_text(exc: BaseException) -> str:
+        """Collect str() of exc and all chained/grouped sub-exceptions into one lowercase string."""
+        parts = [str(exc)]
+        if isinstance(exc, BaseExceptionGroup):
+            for sub in exc.exceptions:
+                parts.append(MCPManager._flatten_exception_text(sub))
+        if exc.__cause__:
+            parts.append(MCPManager._flatten_exception_text(exc.__cause__))
+        elif exc.__context__:
+            parts.append(MCPManager._flatten_exception_text(exc.__context__))
+        return " ".join(parts).lower()
+
+    @staticmethod
     def _check_unresolved_vars(headers: dict[str, str] | None) -> list[str]:
         """Return list of env var names that are still unresolved after _resolve_env_vars."""
         if not headers:
@@ -103,8 +116,8 @@ class MCPManager:
             self._tools[name] = tools
             self._status[name] = {"status": "connected", "error": None}
             logger.info("Connected to MCP server '%s': %d tools loaded", name, len(tools))
-        except Exception as exc:
-            exc_str = str(exc).lower()
+        except BaseException as exc:
+            exc_str = self._flatten_exception_text(exc)
             if any(kw in exc_str for kw in ("401", "403", "unauthorized", "forbidden")):
                 self._status[name] = {"status": "auth_required", "error": str(exc)}
                 logger.warning("MCP server '%s' auth failed: %s", name, exc)

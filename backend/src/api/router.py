@@ -10,6 +10,7 @@ from src.api.observer import router as observer_router
 from src.api.settings import router as settings_router
 from src.api.skills import router as skills_router
 from src.api.tools import router as tools_router
+from src.api.vault import router as vault_router
 from src.api.ws import router as ws_router
 
 api_router = APIRouter()
@@ -24,4 +25,5 @@ api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
 api_router.include_router(skills_router, prefix="/api", tags=["skills"])
 api_router.include_router(observer_router, prefix="/api", tags=["observer"])
 api_router.include_router(settings_router, prefix="/api", tags=["settings"])
+api_router.include_router(vault_router, prefix="/api", tags=["vault"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])

@@ -25,6 +25,10 @@ export const TOOL_NAMES = {
   UPDATE_GOAL: "update_goal",
   GET_GOALS: "get_goals",
   GET_GOAL_PROGRESS: "get_goal_progress",
+  STORE_SECRET: "store_secret",
+  GET_SECRET: "get_secret",
+  LIST_SECRETS: "list_secrets",
+  DELETE_SECRET: "delete_secret",
 } as const;
 
 export const SCENE = {

@@ -21,6 +21,10 @@ from src.tools.mcp_manager import mcp_manager
 TOOL_DOMAINS: dict[str, str] = {
     "view_soul": "memory",
     "update_soul": "memory",
+    "store_secret": "memory",
+    "get_secret": "memory",
+    "list_secrets": "memory",
+    "delete_secret": "memory",
     "create_goal": "goals",
     "update_goal": "goals",
     "get_goals": "goals",

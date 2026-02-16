@@ -40,7 +40,7 @@ export function ResizeHandles({ resizeHandleProps }: ResizeHandlesProps) {
           <div
             key={edge}
             onPointerDown={props.onPointerDown}
-            style={{ ...edgeStyles[edge], ...props.style, zIndex: 1 }}
+            style={{ ...edgeStyles[edge], ...props.style, zIndex: 11 }}
           />
         );
       })}
@@ -51,7 +51,7 @@ export function ResizeHandles({ resizeHandleProps }: ResizeHandlesProps) {
             key={corner}
             className="group"
             onPointerDown={props.onPointerDown}
-            style={{ ...edgeStyles[corner], ...props.style, zIndex: 2 }}
+            style={{ ...edgeStyles[corner], ...props.style, zIndex: 20 }}
           >
             <div
               className="opacity-0 group-hover:opacity-100 transition-opacity"

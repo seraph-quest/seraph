@@ -34,6 +34,9 @@ class CurrentContext:
     active_window: Optional[str] = None
     screen_context: Optional[str] = None
 
+    # Daemon heartbeat — Unix timestamp of last POST from daemon
+    last_daemon_post: Optional[float] = None
+
     # Phase 3.3 — State machine tracking
     previous_user_state: str = "available"
     attention_budget_last_reset: Optional[datetime] = None

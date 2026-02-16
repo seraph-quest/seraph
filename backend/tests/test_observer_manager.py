@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -71,6 +72,26 @@ class TestContextManagerRefresh:
         assert ctx.screen_context == "Editing Python"
 
     @pytest.mark.asyncio
+    async def test_refresh_preserves_heartbeat(self):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", None)
+        ts = mgr.get_context().last_daemon_post
+
+        with patch("src.observer.sources.time_source.gather_time", return_value={
+            "time_of_day": "afternoon", "day_of_week": "Tuesday", "is_working_hours": True,
+        }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value=None), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": ""
+             }):
+            ctx = await mgr.refresh()
+
+        assert ctx.last_daemon_post == ts
+
+    @pytest.mark.asyncio
     async def test_survives_source_failure(self):
         mgr = ContextManager()
 
@@ -129,6 +150,26 @@ class TestContextManagerUpdates:
         ctx = mgr.get_context()
         assert ctx.active_window == "Safari"
         assert ctx.screen_context == "New OCR text"
+
+    def test_update_screen_context_records_heartbeat(self):
+        """Every update_screen_context call records a heartbeat timestamp."""
+        mgr = ContextManager()
+        assert mgr.get_context().last_daemon_post is None
+        before = time.time()
+        mgr.update_screen_context("Terminal", None)
+        after = time.time()
+        ts = mgr.get_context().last_daemon_post
+        assert ts is not None
+        assert before <= ts <= after
+
+    def test_heartbeat_updates_on_every_post(self):
+        """Heartbeat timestamp updates on each call, even partial."""
+        mgr = ContextManager()
+        mgr.update_screen_context("App1", None)
+        ts1 = mgr.get_context().last_daemon_post
+        mgr.update_screen_context(None, None)
+        ts2 = mgr.get_context().last_daemon_post
+        assert ts2 >= ts1
 
 
 class TestCurrentContextSerialization:

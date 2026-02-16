@@ -78,3 +78,24 @@ class TestAgentFactory:
         create_agent()
         call_kwargs = mock_agent_cls.call_args[1]
         assert "Available Skills" not in call_kwargs["instructions"]
+
+    @patch("src.agent.factory.ToolCallingAgent")
+    @patch("src.agent.factory.get_model")
+    def test_create_agent_with_observer_context(self, mock_get_model, mock_agent_cls):
+        mock_get_model.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+
+        create_agent(observer_context="User is in: VS Code — main.py\nTime: morning (Monday)")
+        call_kwargs = mock_agent_cls.call_args[1]
+        assert "CURRENT CONTEXT" in call_kwargs["instructions"]
+        assert "VS Code" in call_kwargs["instructions"]
+
+    @patch("src.agent.factory.ToolCallingAgent")
+    @patch("src.agent.factory.get_model")
+    def test_create_agent_empty_observer_context_omitted(self, mock_get_model, mock_agent_cls):
+        mock_get_model.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+
+        create_agent(observer_context="")
+        call_kwargs = mock_agent_cls.call_args[1]
+        assert "CURRENT CONTEXT" not in call_kwargs["instructions"]

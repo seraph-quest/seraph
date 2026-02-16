@@ -35,7 +35,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/components/chat/` - ChatPanel, ChatSidebar, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel (search/filter by title, level, domain), GoalTree, GoalForm, DomainStats
   - `src/components/settings/InterruptionModeToggle.tsx` - Focus/Balanced/Active mode toggle for proactive message delivery
-  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version)
+  - `src/components/settings/DaemonStatus.tsx` - Screen observer daemon status indicator (polls `/api/observer/daemon-status` every 10s, shows connected/disconnected + active window)
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, daemon status, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version)
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
@@ -80,7 +81,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/mcp.py` — `GET /api/mcp/servers`, `POST /api/mcp/servers`, `PUT /api/mcp/servers/{name}`, `DELETE /api/mcp/servers/{name}`, `POST /api/mcp/servers/{name}/test`, `POST /api/mcp/servers/{name}/token`
   - `src/api/skills.py` — `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
   - `src/api/catalog.py` — `GET /api/catalog` (browse catalog with install status), `POST /api/catalog/install/{name}` (install skill or MCP server from catalog)
-  - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data), `POST /api/observer/refresh` (debug)
+  - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data), `GET /api/observer/daemon-status` (daemon heartbeat connectivity check), `POST /api/observer/refresh` (debug)
   - `src/api/settings.py` — `GET /api/settings/interruption-mode`, `PUT /api/settings/interruption-mode`
   - `/health` — health check (defined in `src/app.py`)
 - **Tools** (`src/tools/`):
@@ -119,7 +120,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `consolidator.py` — Background task extracting memories after each conversation
 - **Goals** (`src/goals/repository.py`): SQLModel-based hierarchical goal CRUD
 - **Agent** (`src/agent/`):
-  - `factory.py` — Creates flat agent with all tools + context; also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
+  - `factory.py` — Creates flat agent with all tools + context (soul, memory, observer, skills); also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
   - `specialists.py` — Specialist agent factories for delegation mode (memory_keeper, goal_planner, web_researcher, file_worker, MCP specialists); tool domain mapping; `build_all_specialists()`
   - `onboarding.py` — Specialized onboarding agent (limited to soul/goal tools, 5-point discovery)
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
@@ -136,7 +137,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `jobs/daily_briefing.py` — Morning briefing via LiteLLM; gathers soul/calendar/goals/memories, delivers with `is_scheduled=True` (cron 8 AM)
   - `jobs/evening_review.py` — Evening reflection via LiteLLM; counts today's messages/completed goals, delivers with `is_scheduled=True` (cron 9 PM)
 - **Observer** (`src/observer/`):
-  - `context.py` — `CurrentContext` dataclass (time, calendar, git, goals, user state, screen, attention budget) + `to_prompt_block()`
+  - `context.py` — `CurrentContext` dataclass (time, calendar, git, goals, user state, screen, attention budget, `last_daemon_post` heartbeat) + `to_prompt_block()`
   - `manager.py` — `ContextManager` singleton; refreshes all sources, derives user state, detects state transitions, delivers queued bundles
   - `user_state.py` — `UserStateMachine` with 6 states (available/deep_work/in_meeting/transitioning/away/winding_down), `InterruptionMode` enum (focus/balanced/active), `DeliveryDecision` enum (deliver/queue/drop), delivery gate (`should_deliver()`), attention budget management
   - `delivery.py` — `deliver_or_queue()` routes proactive messages through the attention guardian; `deliver_queued_bundle()` drains queue on state transitions
@@ -181,9 +182,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `http-mcp` — FastMCP HTTP request tool server (internal network only, port 9200); built from `mcp-servers/http-request/`
   - `frontend-dev` (3000:5173) — Vite dev server
   - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
-- `manage.sh` - Docker management: `./manage.sh -e dev up -d`, `down`, `logs -f`, `build`
+- `manage.sh` - Docker + daemon management: `./manage.sh -e dev up -d` (also starts daemon if `DAEMON_ENABLED=true`), `down` (also stops daemon), `logs -f`, `build`, `daemon start|stop|status|logs`
 - `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Requires `jq` (`brew install jq`).
-- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
+- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR`, `DAEMON_ENABLED`, `DAEMON_ARGS` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
 - **Timeout settings** (`config/settings.py`):
   - `agent_chat_timeout: int = 120` — REST + WS chat agent execution
   - `agent_strategist_timeout: int = 60` — strategist tick agent
@@ -290,10 +291,11 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 ┌──────────────────────────────────────────────────────┐
 │  Backend (Docker, localhost:8004)                      │
 │                                                      │
-│  update_screen_context() [partial update]             │
+│  update_screen_context() [partial update + heartbeat]  │
 │  → active_window + screen_context both preserved      │
+│  → last_daemon_post timestamp recorded on every POST  │
 │  → to_prompt_block() includes "Screen content:…"     │
-│  → strategist sees what's on screen                   │
+│  → chat agent + strategist both see screen context    │
 │                                                      │
 │  UserStateMachine.derive_state() [enhanced]:          │
 │  if active_window matches IDE → deep_work             │

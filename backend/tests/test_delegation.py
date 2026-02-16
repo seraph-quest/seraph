@@ -13,7 +13,7 @@ class TestFeatureFlag:
         mock_create.return_value = MagicMock()
         with patch.object(settings, "use_delegation", False):
             agent = build_agent(soul_context="test soul")
-        mock_create.assert_called_once_with("", "test soul", "")
+        mock_create.assert_called_once_with("", "test soul", "", "")
         assert agent is mock_create.return_value
 
     @patch("src.agent.factory.create_orchestrator")
@@ -21,7 +21,7 @@ class TestFeatureFlag:
         mock_create_orch.return_value = MagicMock()
         with patch.object(settings, "use_delegation", True):
             agent = build_agent(soul_context="test soul")
-        mock_create_orch.assert_called_once_with("", "test soul", "")
+        mock_create_orch.assert_called_once_with("", "test soul", "", "")
         assert agent is mock_create_orch.return_value
 
 

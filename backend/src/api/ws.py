@@ -56,10 +56,14 @@ async def _build_agent(session_id: str, message: str):
     soul = read_soul()
     memories = await asyncio.to_thread(search_formatted, message)
 
+    from src.observer.manager import context_manager as obs_manager
+    observer_context = obs_manager.get_context().to_prompt_block()
+
     agent = build_agent(
         additional_context=history,
         soul_context=soul,
         memory_context=memories,
+        observer_context=observer_context,
     )
     specialist_names = (
         set(agent.managed_agents.keys())

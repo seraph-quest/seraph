@@ -31,10 +31,15 @@ async def chat(request: ChatRequest):
         history = await session_manager.get_history_text(session.id)
         soul = read_soul()
         memories = await asyncio.to_thread(search_formatted, request.message)
+
+        from src.observer.manager import context_manager as obs_manager
+        observer_context = obs_manager.get_context().to_prompt_block()
+
         agent = build_agent(
             additional_context=history,
             soul_context=soul,
             memory_context=memories,
+            observer_context=observer_context,
         )
 
     try:

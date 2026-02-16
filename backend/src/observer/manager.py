@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from src.observer.context import CurrentContext
@@ -116,6 +117,7 @@ class ContextManager:
                 attention_budget_remaining=budget,
                 active_window=old.active_window,
                 screen_context=old.screen_context,
+                last_daemon_post=old.last_daemon_post,
                 # Phase 3.3 tracking
                 previous_user_state=old.user_state,
                 attention_budget_last_reset=last_reset,
@@ -191,11 +193,13 @@ class ContextManager:
 
         Supports partial updates — only overwrites fields that are non-None,
         so the window loop and OCR loop don't clobber each other's data.
+        Records timestamp for daemon heartbeat tracking.
         """
         if active_window is not None:
             self._context.active_window = active_window
         if screen_context is not None:
             self._context.screen_context = screen_context
+        self._context.last_daemon_post = time.time()
 
     def decrement_attention_budget(self) -> None:
         """Reduce attention budget by 1 (minimum 0)."""

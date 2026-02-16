@@ -26,6 +26,7 @@ def create_agent(
     additional_context: str = "",
     soul_context: str = "",
     memory_context: str = "",
+    observer_context: str = "",
 ) -> ToolCallingAgent:
     """Create a ToolCallingAgent with LiteLLM model and tools.
 
@@ -33,6 +34,7 @@ def create_agent(
         additional_context: Conversation history to include in the system prompt.
         soul_context: Soul file content (user identity, values, goals).
         memory_context: Relevant long-term memories for this conversation.
+        observer_context: Current observer context (time, window, screen, etc.).
     """
     model = get_model()
     tools = get_tools()
@@ -48,6 +50,8 @@ def create_agent(
         instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
     if memory_context:
         instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
+    if observer_context:
+        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
 
     # Inject active skills into instructions
     active_skills = skill_manager.get_active_skills(tool_names)
@@ -74,6 +78,7 @@ def create_orchestrator(
     additional_context: str = "",
     soul_context: str = "",
     memory_context: str = "",
+    observer_context: str = "",
 ) -> ToolCallingAgent:
     """Create an orchestrator agent that delegates to specialist sub-agents.
 
@@ -109,6 +114,8 @@ def create_orchestrator(
         instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
     if memory_context:
         instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
+    if observer_context:
+        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
 
     # Inject active skills into instructions
     active_skills = skill_manager.get_active_skills(all_tool_names)
@@ -136,11 +143,12 @@ def build_agent(
     additional_context: str = "",
     soul_context: str = "",
     memory_context: str = "",
+    observer_context: str = "",
 ) -> ToolCallingAgent:
     """Build the appropriate agent based on delegation feature flag.
 
     Drop-in replacement for create_agent() at call sites.
     """
     if settings.use_delegation:
-        return create_orchestrator(additional_context, soul_context, memory_context)
-    return create_agent(additional_context, soul_context, memory_context)
+        return create_orchestrator(additional_context, soul_context, memory_context, observer_context)
+    return create_agent(additional_context, soul_context, memory_context, observer_context)

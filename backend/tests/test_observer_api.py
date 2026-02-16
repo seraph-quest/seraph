@@ -1,3 +1,4 @@
+import time
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -48,6 +49,48 @@ class TestObserverAPI:
         # None means "don't overwrite" — previous values preserved
         assert mgr.get_context().active_window == "VS Code"
         assert mgr.get_context().screen_context == "Editing"
+
+    @pytest.mark.asyncio
+    async def test_daemon_status_disconnected(self, client):
+        """Daemon status returns disconnected when no POST received."""
+        mgr = ContextManager()
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["connected"] is False
+        assert data["last_post"] is None
+        assert data["active_window"] is None
+        assert data["has_screen_context"] is False
+
+    @pytest.mark.asyncio
+    async def test_daemon_status_connected(self, client):
+        """Daemon status returns connected after a recent POST."""
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code — main.py", None)
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["connected"] is True
+        assert data["last_post"] is not None
+        assert data["active_window"] == "VS Code — main.py"
+
+    @pytest.mark.asyncio
+    async def test_daemon_status_stale(self, client):
+        """Daemon status returns disconnected when last POST is too old."""
+        mgr = ContextManager()
+        mgr.update_screen_context("Terminal", None)
+        # Simulate stale timestamp (60 seconds ago)
+        mgr._context.last_daemon_post = time.time() - 60
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["connected"] is False
 
     @pytest.mark.asyncio
     async def test_post_refresh(self, client):

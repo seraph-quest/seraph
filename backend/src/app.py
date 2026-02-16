@@ -60,6 +60,13 @@ async def lifespan(app: FastAPI):
             import shutil
             os.makedirs(os.path.dirname(mcp_config), exist_ok=True)
             shutil.copy2(default_config, mcp_config)
+    stdio_proxy_config = os.path.join(settings.workspace_dir, "stdio-proxies.json")
+    if not os.path.exists(stdio_proxy_config):
+        default_proxy_config = os.path.join(defaults_dir, "stdio-proxies.default.json")
+        if os.path.isfile(default_proxy_config):
+            import shutil
+            os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
+            shutil.copy2(default_proxy_config, stdio_proxy_config)
     mcp_manager.load_config(mcp_config)
     skills_dir = os.path.join(settings.workspace_dir, "skills")
     os.makedirs(skills_dir, exist_ok=True)

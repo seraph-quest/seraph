@@ -48,7 +48,7 @@ export function QuestPanel() {
   const [filterLevel, setFilterLevel] = useState("");
   const [filterDomain, setFilterDomain] = useState("");
 
-  const { dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("quest", {
+  const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("quest", {
     minWidth: 240,
     minHeight: 200,
   });
@@ -71,6 +71,7 @@ export function QuestPanel() {
 
   return (
     <div
+      ref={panelRef}
       className="quest-overlay"
       style={style}
       onPointerDown={bringToFront}

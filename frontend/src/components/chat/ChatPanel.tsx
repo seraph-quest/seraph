@@ -22,7 +22,7 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const isConnected = connectionStatus === "connected";
 
-  const { dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("chat", {
+  const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("chat", {
     minWidth: 400,
     minHeight: 200,
   });
@@ -31,6 +31,7 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
 
   return (
     <div
+      ref={panelRef}
       className={`chat-overlay${chatMaximized ? " maximized" : ""}`}
       style={chatMaximized ? undefined : style}
       onPointerDown={bringToFront}

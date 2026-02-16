@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useRef, type CSSProperties, type PointerEventHandler } from "react";
+import { useCallback, useEffect, useRef, type CSSProperties, type PointerEventHandler, type RefObject } from "react";
 import { usePanelLayoutStore, PANEL_MIN_SIZES } from "../stores/panelLayoutStore";
 
 export type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
 const VISIBLE_MIN = 80;
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 function clampRect(
   x: number,
@@ -12,7 +19,7 @@ function clampRect(
   height: number,
   minW: number,
   minH: number,
-) {
+): Rect {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const w = Math.max(width, minW);
@@ -21,6 +28,13 @@ function clampRect(
   // Top: keep drag bar on screen (y >= 0); bottom/sides: keep 80px visible
   const cy = Math.max(0, Math.min(y, vh - VISIBLE_MIN));
   return { x: cx, y: cy, width: w, height: h };
+}
+
+function applyRectToEl(el: HTMLElement, r: Rect) {
+  el.style.left = `${r.x}px`;
+  el.style.top = `${r.y}px`;
+  el.style.width = `${r.width}px`;
+  el.style.height = `${r.height}px`;
 }
 
 const CURSOR_MAP: Record<ResizeEdge, string> = {
@@ -43,6 +57,7 @@ export function useDragResize(
   const minW = opts.minWidth ?? PANEL_MIN_SIZES[panelId]?.width ?? 200;
   const minH = opts.minHeight ?? PANEL_MIN_SIZES[panelId]?.height ?? 200;
 
+  const panelRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const resizeState = useRef<{
     edge: ResizeEdge;
@@ -60,10 +75,10 @@ export function useDragResize(
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       bringToFront(panelId);
-      const r = panels[panelId];
+      const r = usePanelLayoutStore.getState().panels[panelId];
       dragState.current = { startX: e.clientX, startY: e.clientY, origX: r.x, origY: r.y };
     },
-    [panelId, bringToFront, panels],
+    [panelId, bringToFront],
   );
 
   const onResizePointerDown = useCallback(
@@ -74,7 +89,7 @@ export function useDragResize(
         e.stopPropagation();
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
         bringToFront(panelId);
-        const r = panels[panelId];
+        const r = usePanelLayoutStore.getState().panels[panelId];
         resizeState.current = {
           edge,
           startX: e.clientX,
@@ -85,23 +100,27 @@ export function useDragResize(
           origH: r.height,
         };
       },
-    [panelId, bringToFront, panels],
+    [panelId, bringToFront],
   );
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
+      const el = panelRef.current;
+      if (!el) return;
+
       if (dragState.current) {
         const dx = e.clientX - dragState.current.startX;
         const dy = e.clientY - dragState.current.startY;
+        const r = usePanelLayoutStore.getState().panels[panelId];
         const clamped = clampRect(
           dragState.current.origX + dx,
           dragState.current.origY + dy,
-          rect.width,
-          rect.height,
+          r.width,
+          r.height,
           minW,
           minH,
         );
-        setRect(panelId, { x: clamped.x, y: clamped.y });
+        applyRectToEl(el, { ...clamped, width: r.width, height: r.height });
         return;
       }
 
@@ -120,7 +139,6 @@ export function useDragResize(
         if (s.edge.includes("s")) newH = s.origH + dy;
         if (s.edge.includes("n")) { newH = s.origH - dy; newY = s.origY + dy; }
 
-        // Enforce min sizes before clamping — adjust position if shrinking past min
         if (newW < minW) {
           if (s.edge.includes("w")) newX = s.origX + s.origW - minW;
           newW = minW;
@@ -131,11 +149,25 @@ export function useDragResize(
         }
 
         const clamped = clampRect(newX, newY, newW, newH, minW, minH);
-        setRect(panelId, clamped);
+        applyRectToEl(el, clamped);
       }
     };
 
     const onUp = () => {
+      const el = panelRef.current;
+      if (el && (dragState.current || resizeState.current)) {
+        // Commit final position to store
+        const finalRect: Partial<Rect> = {};
+        const left = parseFloat(el.style.left);
+        const top = parseFloat(el.style.top);
+        const width = parseFloat(el.style.width);
+        const height = parseFloat(el.style.height);
+        if (!isNaN(left)) finalRect.x = left;
+        if (!isNaN(top)) finalRect.y = top;
+        if (!isNaN(width)) finalRect.width = width;
+        if (!isNaN(height)) finalRect.height = height;
+        setRect(panelId, finalRect);
+      }
       dragState.current = null;
       resizeState.current = null;
     };
@@ -146,7 +178,7 @@ export function useDragResize(
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
     };
-  }, [panelId, setRect, rect, minW, minH]);
+  }, [panelId, setRect, minW, minH]);
 
   // Reclamp on window resize
   useEffect(() => {
@@ -183,5 +215,5 @@ export function useDragResize(
     style: { cursor: CURSOR_MAP[edge] } as CSSProperties,
   });
 
-  return { dragHandleProps, resizeHandleProps, style, bringToFront: () => bringToFront(panelId) };
+  return { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront: () => bringToFront(panelId) };
 }

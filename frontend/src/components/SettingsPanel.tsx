@@ -403,7 +403,7 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
 
-  const { dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("settings", {
+  const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("settings", {
     minWidth: 240,
     minHeight: 200,
   });
@@ -533,6 +533,7 @@ export function SettingsPanel() {
 
   return (
     <div
+      ref={panelRef}
       className="settings-overlay"
       style={style}
       onPointerDown={bringToFront}

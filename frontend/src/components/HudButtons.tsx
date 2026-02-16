@@ -14,8 +14,12 @@ export function HudButtons() {
   const setChatPanelOpen = useChatStore((s) => s.setChatPanelOpen);
   const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
+  const chatMaximized = useChatStore((s) => s.chatMaximized);
   const ambientState = useChatStore((s) => s.ambientState);
   const ambientTooltip = useChatStore((s) => s.ambientTooltip);
+
+  // Hide when chat is maximized to avoid overlapping the input area
+  if (chatMaximized && chatPanelOpen) return null;
 
   const dotClass = AMBIENT_DOT_COLORS[ambientState];
 

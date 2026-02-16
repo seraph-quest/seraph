@@ -139,3 +139,16 @@ class QueuedInsight(SQLModel, table=True):
     urgency: int = Field(default=3)
     reasoning: str = Field(default="")
     created_at: datetime = Field(default_factory=_now)
+
+
+# ─── Secret (Vault) ─────────────────────────────────────
+
+class Secret(SQLModel, table=True):
+    __tablename__ = "secrets"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    key: str = Field(unique=True, index=True)
+    encrypted_value: str
+    description: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

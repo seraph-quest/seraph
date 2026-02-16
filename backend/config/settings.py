@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     observer_git_repo_path: str = ""
     deep_work_apps: str = ""  # comma-separated extra app keywords for deep work detection
 
+    # Vault
+    vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty
+
     model_config = {"env_file": ".env.dev", "env_file_encoding": "utf-8"}
 
 

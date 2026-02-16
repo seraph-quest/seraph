@@ -21,6 +21,7 @@ class TestToolDomainMapping:
     def test_all_builtin_tools_have_domains(self):
         expected_tools = {
             "view_soul", "update_soul",
+            "store_secret", "get_secret", "list_secrets", "delete_secret",
             "create_goal", "update_goal", "get_goals", "get_goal_progress",
             "web_search", "browse_webpage",
             "read_file", "write_file", "fill_template", "shell_execute",
@@ -112,7 +113,7 @@ class TestNamedFactories:
         create_memory_keeper(tools_by_name)
         agent_kwargs = mock_agent_cls.call_args[1]
         tool_names = {t.name for t in agent_kwargs["tools"]}
-        assert tool_names == {"view_soul", "update_soul"}
+        assert tool_names == {"view_soul", "update_soul", "store_secret", "get_secret", "list_secrets", "delete_secret"}
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")

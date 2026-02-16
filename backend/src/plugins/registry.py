@@ -43,6 +43,19 @@ TOOL_METADATA: dict[str, dict] = {
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
     },
+    # Vault tools
+    "store_secret": {
+        "description": "Store an encrypted secret in the vault",
+    },
+    "get_secret": {
+        "description": "Retrieve a secret from the vault",
+    },
+    "list_secrets": {
+        "description": "List secret keys stored in the vault",
+    },
+    "delete_secret": {
+        "description": "Delete a secret from the vault",
+    },
 }
 
 

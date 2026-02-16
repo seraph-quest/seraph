@@ -86,9 +86,10 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/catalog.py` — `GET /api/catalog` (browse catalog with install status), `POST /api/catalog/install/{name}` (install skill or MCP server from catalog)
   - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data), `GET /api/observer/daemon-status` (daemon heartbeat connectivity check), `POST /api/observer/refresh` (debug)
   - `src/api/settings.py` — `GET /api/settings/interruption-mode`, `PUT /api/settings/interruption-mode`
+  - `src/api/vault.py` — `GET /api/vault/keys` (list keys with metadata, no values), `DELETE /api/vault/keys/{key}`
   - `/health` — health check (defined in `src/app.py`)
 - **Tools** (`src/tools/`):
-  - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
+  - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`, `store_secret`, `get_secret`, `list_secrets`, `delete_secret`
   - Phase 2: `shell_execute`, `browse_webpage`
   - MCP: `src/tools/mcp_manager.py` — plug-and-play MCP manager; loads server config from `data/mcp-servers.json`, connects to enabled servers via `smolagents.MCPClient`. Supports runtime add/remove/toggle via API. Config file is auto-persisted on mutations. Tracks granular status per server (`connected`/`disconnected`/`auth_required`/`error`). `set_token()` stores auth tokens directly in config and reconnects.
 - **Tool Discovery** (`src/plugins/`):
@@ -122,6 +123,11 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `embedder.py` — Sentence transformers for memory embeddings
   - `consolidator.py` — Background task extracting memories after each conversation
 - **Goals** (`src/goals/repository.py`): SQLModel-based hierarchical goal CRUD
+- **Vault** (`src/vault/`):
+  - `crypto.py` — Fernet encryption/decryption; key from `settings.vault_encryption_key` or auto-generated file at `{workspace_dir}/.vault-key` (chmod 600)
+  - `repository.py` — Async CRUD for `Secret` table (store/upsert, get with decrypt, list_keys metadata only, delete, exists)
+  - Agent tools (`src/tools/vault_tools.py`): `store_secret`, `get_secret`, `list_secrets`, `delete_secret` — docstrings instruct agent to never display secret values in chat
+  - API: `GET /api/vault/keys` (metadata only), `DELETE /api/vault/keys/{key}` — no create/read endpoints (values only accessible via agent tools)
 - **Agent** (`src/agent/`):
   - `factory.py` — Creates flat agent with all tools + context (soul, memory, observer, skills); accepts optional `observer_context` param injected into system prompt. WS chat endpoint calls `context_manager.get_context().to_prompt_block()` per message to include live observer state. Also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
   - `specialists.py` — Specialist agent factories for delegation mode (memory_keeper, goal_planner, web_researcher, file_worker, MCP specialists); tool domain mapping; `build_all_specialists()`
@@ -129,7 +135,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `context_window.py` — Token-aware context window builder (keep first N + last M, summarize middle; reads defaults from settings)
   - `session.py` — Async session manager (SQLite-backed)
-- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
+- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`, `Secret`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
 - **Scheduler** (`src/scheduler/`):
   - `engine.py` — APScheduler setup, job registration on app lifespan
   - `connection_manager.py` — WebSocket broadcast manager (`ws_manager`)
@@ -358,3 +364,4 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 13. **Bundled defaults in `src/defaults/`** — Static/reference files (catalog, MCP default config, skill templates) live under `src/defaults/` to avoid being hidden by the Docker workspace volume mount at `/app/data`. Skills are seeded to workspace on first run.
 14. **Stdio-to-HTTP MCP proxy** — Native macOS process (`mcp-servers/stdio-proxy/`) that wraps stdio-only MCP servers as HTTP endpoints via `FastMCP.as_proxy()`. Single process runs multiple proxies via asyncio, each on its own port. Backend MCPManager connects to proxied servers as normal HTTP MCP servers — no backend changes needed. Runs natively (not Docker) so tools can access macOS system APIs.
 15. **Draggable/resizable panels** — `useDragResize` hook with pointer capture, 8-edge resize handles, Zustand-persisted layout. Panels coexist (opening one doesn't close others), z-stack tracks focus order.
+16. **Agent Vault** — Fernet-encrypted key-value store (`src/vault/`) for persisting API tokens and credentials across sessions. Agent tools (`store_secret`/`get_secret`/`list_secrets`/`delete_secret`) handle encryption transparently. Values only accessible via agent tools — API exposes key metadata only. Auto-generates encryption key file on first use. Skills (e.g. moltbook) use vault for token persistence.

@@ -20,8 +20,14 @@ Moltbook is a social platform API. Use `http_request` to interact with it.
 6. **Search users**: `GET /users?q=...` with auth header
 7. **View profile**: `GET /users/{username}` with auth header
 
+**Token Management** (requires vault tools):
+- After a successful login, store the token: `store_secret("moltbook_token", token, "Moltbook API auth token")`
+- Before making authenticated requests, check for an existing token: `list_secrets` to see if `moltbook_token` exists, then `get_secret("moltbook_token")` to retrieve it
+- If a stored token returns 401, delete it with `delete_secret("moltbook_token")` and re-authenticate
+- NEVER display the token value in chat — use it only in Authorization headers
+
 **Guidelines**:
-- Always ask the user for credentials or use stored token
+- Check vault for stored token before asking the user for credentials
 - Format feed posts and comments readably
 - Summarize long feeds rather than dumping raw JSON
 - Handle errors gracefully and explain API error messages

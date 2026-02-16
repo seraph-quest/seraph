@@ -133,7 +133,6 @@ body {
   z-index: 50;
   display: flex;
   flex-direction: column;
-  transition: all 0.25s ease-in-out;
 }
 
 .chat-overlay.maximized {
@@ -142,6 +141,8 @@ body {
   width: calc(100vw - 32px) !important;
   height: calc(100vh - 32px) !important;
   z-index: 60 !important;
+  transition: left 0.25s ease-in-out, top 0.25s ease-in-out,
+              width 0.25s ease-in-out, height 0.25s ease-in-out;
 }
 
 /* ── Quest Overlay ───────────────────────────────────── */

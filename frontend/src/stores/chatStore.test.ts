@@ -71,18 +71,18 @@ describe("chatStore sync actions", () => {
     expect(visual.positionX).toBe(50);
   });
 
-  it("setChatPanelOpen closes quest panel", () => {
+  it("setChatPanelOpen does not close quest panel", () => {
     useChatStore.setState({ questPanelOpen: true });
     useChatStore.getState().setChatPanelOpen(true);
     expect(useChatStore.getState().chatPanelOpen).toBe(true);
-    expect(useChatStore.getState().questPanelOpen).toBe(false);
+    expect(useChatStore.getState().questPanelOpen).toBe(true);
   });
 
-  it("setQuestPanelOpen closes chat panel", () => {
+  it("setQuestPanelOpen does not close chat panel", () => {
     useChatStore.setState({ chatPanelOpen: true });
     useChatStore.getState().setQuestPanelOpen(true);
     expect(useChatStore.getState().questPanelOpen).toBe(true);
-    expect(useChatStore.getState().chatPanelOpen).toBe(false);
+    expect(useChatStore.getState().chatPanelOpen).toBe(true);
   });
 
   it("toggleChatMaximized toggles state", () => {

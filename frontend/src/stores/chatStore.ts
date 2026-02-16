@@ -116,13 +116,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setAmbientTooltip: (tooltip) => set({ ambientTooltip: tooltip }),
 
-  setChatPanelOpen: (open) =>
-    set({ chatPanelOpen: open, questPanelOpen: open ? false : get().questPanelOpen }),
+  setChatPanelOpen: (open) => set({ chatPanelOpen: open }),
 
   toggleChatMaximized: () => set((state) => ({ chatMaximized: !state.chatMaximized })),
 
-  setQuestPanelOpen: (open) =>
-    set({ questPanelOpen: open, chatPanelOpen: open ? false : get().chatPanelOpen }),
+  setQuestPanelOpen: (open) => set({ questPanelOpen: open }),
 
   setSettingsPanelOpen: (open) => set({ settingsPanelOpen: open }),
 

@@ -1,4 +1,5 @@
 import { useChatStore } from "../stores/chatStore";
+import { usePanelLayoutStore } from "../stores/panelLayoutStore";
 
 const AMBIENT_DOT_COLORS: Record<string, string> = {
   goal_behind: "bg-red-500 animate-pulse",
@@ -17,6 +18,7 @@ export function HudButtons() {
   const chatMaximized = useChatStore((s) => s.chatMaximized);
   const ambientState = useChatStore((s) => s.ambientState);
   const ambientTooltip = useChatStore((s) => s.ambientTooltip);
+  const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
 
   // Hide when chat is maximized to avoid overlapping the input area
   if (chatMaximized && chatPanelOpen) return null;
@@ -27,7 +29,7 @@ export function HudButtons() {
     <div className="fixed bottom-4 left-4 z-50 flex gap-2 items-center">
       {!chatPanelOpen && (
         <button
-          onClick={() => setChatPanelOpen(true)}
+          onClick={() => { setChatPanelOpen(true); bringToFront("chat"); }}
           className="rpg-frame px-3 py-2 text-[11px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
           title="Open Chat Log (Shift+C)"
         >
@@ -36,7 +38,7 @@ export function HudButtons() {
       )}
       {!questPanelOpen && (
         <button
-          onClick={() => setQuestPanelOpen(true)}
+          onClick={() => { setQuestPanelOpen(true); bringToFront("quest"); }}
           className="rpg-frame px-3 py-2 text-[11px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
           title="Open Quest Log (Shift+Q)"
         >
@@ -45,7 +47,7 @@ export function HudButtons() {
       )}
       {!settingsPanelOpen && (
         <button
-          onClick={() => setSettingsPanelOpen(true)}
+          onClick={() => { setSettingsPanelOpen(true); bringToFront("settings"); }}
           className="rpg-frame px-3 py-2 text-[11px] text-retro-border hover:text-retro-highlight uppercase tracking-wider transition-colors cursor-pointer"
           title="Open Settings (Shift+S)"
         >

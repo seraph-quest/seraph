@@ -29,6 +29,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/hooks/useWebSocket.ts` - Native WS connection to `ws://localhost:8004/ws/chat`, reconnect, ping, message dispatch
   - `src/hooks/useAgentAnimation.ts` - Walk-then-act state machine with timers
   - `src/hooks/useKeyboardShortcuts.ts` - Keyboard shortcut handler (Shift+C/Q/S, Escape)
+  - `src/stores/panelLayoutStore.ts` - Zustand store with persist; per-panel position/size rects, z-order stack, min sizes, `bringToFront()`
+  - `src/hooks/useDragResize.ts` - Pointer-based drag/resize hook (8-edge resize, edge clamping, pointer capture)
+  - `src/components/ResizeHandles.tsx` - 8-edge + 4-corner resize handle UI
   - `src/lib/toolParser.ts` - Regex detection of tool names from step content (6 patterns + fallback); uses dynamic tool registry from API with static fallback
   - `src/lib/animationStateMachine.ts` - Tool → casting animation mapping; triggers magic effects on tool use
   - `src/config/constants.ts` - Scene dimensions, tool names, default agent position
@@ -36,7 +39,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/components/quest/` - QuestPanel (search/filter by title, level, domain), GoalTree, GoalForm, DomainStats
   - `src/components/settings/InterruptionModeToggle.tsx` - Focus/Balanced/Active mode toggle for proactive message delivery
   - `src/components/settings/DaemonStatus.tsx` - Screen observer daemon status indicator (polls `/api/observer/daemon-status` every 10s, shows connected/disconnected + active window)
-  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, daemon status, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version)
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, daemon status, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version), polls MCP servers every 5s while open to catch external changes
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
@@ -120,7 +123,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `consolidator.py` — Background task extracting memories after each conversation
 - **Goals** (`src/goals/repository.py`): SQLModel-based hierarchical goal CRUD
 - **Agent** (`src/agent/`):
-  - `factory.py` — Creates flat agent with all tools + context (soul, memory, observer, skills); also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
+  - `factory.py` — Creates flat agent with all tools + context (soul, memory, observer, skills); accepts optional `observer_context` param injected into system prompt. WS chat endpoint calls `context_manager.get_context().to_prompt_block()` per message to include live observer state. Also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
   - `specialists.py` — Specialist agent factories for delegation mode (memory_keeper, goal_planner, web_researcher, file_worker, MCP specialists); tool domain mapping; `build_all_specialists()`
   - `onboarding.py` — Specialized onboarding agent (limited to soul/goal tools, 5-point discovery)
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
@@ -195,7 +198,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `frontend-dev` (3000:5173) — Vite dev server
   - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
 - `manage.sh` - Docker + daemon + proxy management: `./manage.sh -e dev up -d` (also starts daemon if `DAEMON_ENABLED=true`, proxy if `PROXY_ENABLED=true`), `down` (also stops daemon + proxy), `logs -f`, `build`, `daemon start|stop|status|logs`, `proxy start|stop|status|logs`
-- `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Requires `jq` (`brew install jq`).
+- `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. When backend is running, calls API for live-reload; falls back to direct `jq` file editing when offline. Requires `jq` (`brew install jq`).
 - `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR`, `DAEMON_ENABLED`, `DAEMON_ARGS`, `PROXY_ENABLED`, `PROXY_ARGS` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
 - **Timeout settings** (`config/settings.py`):
   - `agent_chat_timeout: int = 120` — REST + WS chat agent execution
@@ -336,6 +339,7 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 - **Keyboard shortcuts**: Shift+C (chat), Shift+Q (quests), Shift+S (settings), Escape (close). Shift modifier prevents conflict with WASD avatar movement. Ignored when focus is in INPUT/TEXTAREA.
 - **Quest search/filter**: QuestPanel includes text search, level dropdown, and domain dropdown. Client-side recursive filter preserves parent chain when descendants match.
 - **Session persistence**: Last selected `sessionId` stored in `localStorage` (`seraph_last_session_id`); restored on page load via `switchSession()` in WS `onopen`
+- **Drag & Resize**: All panels draggable via title bar, resizable from 8 edges/corners. Position/size persisted in localStorage via `panelLayoutStore`. Z-ordering: clicking brings to front. Min sizes: chat 400×200, quest/settings 240×200.
 - **Font sizing**: Minimum 9px throughout all panels (Press Start 2P pixel font). Headers/labels 10-11px, body text 10-11px, secondary/meta text 9-10px.
 
 ## Design Decisions
@@ -353,3 +357,4 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 12. **MCP seed config** — On first startup, `src/defaults/mcp-servers.default.json` is copied to workspace if no config exists. Ships with `http-request` and `github` entries (both disabled). Existing configs are never overwritten.
 13. **Bundled defaults in `src/defaults/`** — Static/reference files (catalog, MCP default config, skill templates) live under `src/defaults/` to avoid being hidden by the Docker workspace volume mount at `/app/data`. Skills are seeded to workspace on first run.
 14. **Stdio-to-HTTP MCP proxy** — Native macOS process (`mcp-servers/stdio-proxy/`) that wraps stdio-only MCP servers as HTTP endpoints via `FastMCP.as_proxy()`. Single process runs multiple proxies via asyncio, each on its own port. Backend MCPManager connects to proxied servers as normal HTTP MCP servers — no backend changes needed. Runs natively (not Docker) so tools can access macOS system APIs.
+15. **Draggable/resizable panels** — `useDragResize` hook with pointer capture, 8-edge resize handles, Zustand-persisted layout. Panels coexist (opening one doesn't close others), z-stack tracks focus order.

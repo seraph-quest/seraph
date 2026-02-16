@@ -72,6 +72,33 @@ launchctl bootout gui/$(id -u)/com.seraph.things-mcp
 rm ~/Library/LaunchAgents/com.seraph.things-mcp.plist
 ```
 
+#### Alternative: Stdio Proxy
+
+The stdio proxy (`mcp-servers/stdio-proxy/`) is a simpler alternative to the LaunchAgent. It wraps things-mcp as an HTTP endpoint automatically.
+
+1. Add to `data/stdio-proxies.json`:
+   ```json
+   {
+     "proxies": {
+       "things3": {
+         "command": "uvx",
+         "args": ["things-mcp"],
+         "port": 8100,
+         "enabled": true,
+         "description": "Things3 task manager"
+       }
+     }
+   }
+   ```
+
+2. Start the proxy and register:
+   ```bash
+   ./manage.sh -e dev proxy start
+   ./mcp.sh add things3 http://host.docker.internal:8100/mcp --desc "Things3 task manager"
+   ```
+
+**Note:** The `uvx` binary still needs Full Disk Access to read the Things3 database (see step above).
+
 #### Alternative: run manually in a terminal
 
 If you prefer not to use a LaunchAgent, you can run things-mcp directly — but the terminal app (iTerm, Terminal.app, etc.) will need Full Disk Access:

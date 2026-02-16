@@ -8,7 +8,11 @@
     "github": {
       "url": "https://api.githubcopilot.com/mcp/",
       "enabled": false,
-      "description": "GitHub integration (requires GITHUB_TOKEN env var)"
+      "description": "GitHub integration (requires GITHUB_TOKEN env var)",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      },
+      "auth_hint": "Create a Personal Access Token at github.com/settings/tokens (classic, repo scope)"
     }
   }
 }

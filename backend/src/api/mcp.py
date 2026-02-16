@@ -13,12 +13,18 @@ class AddServerRequest(BaseModel):
     url: str
     description: str = ""
     enabled: bool = True
+    headers: dict[str, str] | None = None
 
 
 class UpdateServerRequest(BaseModel):
     enabled: bool | None = None
     url: str | None = None
     description: str | None = None
+    headers: dict[str, str] | None = None
+
+
+class SetTokenRequest(BaseModel):
+    token: str
 
 
 @router.get("/mcp/servers")
@@ -37,6 +43,7 @@ async def add_server(req: AddServerRequest):
         url=req.url,
         description=req.description,
         enabled=req.enabled,
+        headers=req.headers,
     )
     return {"status": "created", "name": req.name}
 
@@ -58,6 +65,16 @@ async def remove_server(name: str):
     return {"status": "removed", "name": name}
 
 
+@router.post("/mcp/servers/{name}/token")
+async def set_server_token(name: str, req: SetTokenRequest):
+    """Set auth token for an MCP server. Reconnects if enabled."""
+    if not mcp_manager.set_token(name, req.token):
+        raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    configs = mcp_manager.get_config()
+    entry = next((c for c in configs if c["name"] == name), None)
+    return {"status": "updated", "server": entry}
+
+
 @router.post("/mcp/servers/{name}/test")
 async def test_server(name: str):
     """Test connection to an MCP server. Connects, lists tools, disconnects."""
@@ -66,12 +83,30 @@ async def test_server(name: str):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     url = config["url"]
 
+    # Check for unresolved env vars before attempting connection
+    raw_headers = config.get("headers")
+    missing_vars = mcp_manager._check_unresolved_vars(raw_headers)
+    if missing_vars:
+        return {
+            "status": "auth_required",
+            "message": f"Missing environment variables: {', '.join(missing_vars)}",
+            "missing_env_vars": missing_vars,
+        }
+
     try:
         from smolagents import MCPClient
-        client = MCPClient({"url": url, "transport": "streamable-http"})
+        params: dict = {"url": url, "transport": "streamable-http"}
+        if raw_headers:
+            params["headers"] = {
+                k: mcp_manager._resolve_env_vars(v) for k, v in raw_headers.items()
+            }
+        client = MCPClient(params, structured_output=False)
         tools = client.get_tools()
         tool_names = [t.name for t in tools]
         client.disconnect()
         return {"status": "ok", "tool_count": len(tools), "tools": tool_names}
     except Exception as e:
+        exc_str = str(e).lower()
+        if any(kw in exc_str for kw in ("401", "403", "unauthorized", "forbidden")):
+            return {"status": "auth_failed", "message": f"Authentication failed: {e}"}
         raise HTTPException(status_code=502, detail=f"Connection failed: {e}")

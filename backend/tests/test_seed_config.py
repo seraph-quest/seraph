@@ -87,6 +87,33 @@ class TestSeedConfig:
                 f"Default MCP server '{name}' should be disabled"
             )
 
+    def test_default_github_has_auth_headers(self):
+        """GitHub entry in default config should have auth headers with env var template."""
+        default_path = os.path.join(
+            os.path.dirname(__file__),
+            "../src/defaults/mcp-servers.default.json",
+        )
+        with open(default_path) as f:
+            data = json.load(f)
+
+        github = data["mcpServers"]["github"]
+        assert "headers" in github
+        assert "Authorization" in github["headers"]
+        assert "${GITHUB_TOKEN}" in github["headers"]["Authorization"]
+
+    def test_default_github_has_auth_hint(self):
+        """GitHub entry in default config should have an auth_hint."""
+        default_path = os.path.join(
+            os.path.dirname(__file__),
+            "../src/defaults/mcp-servers.default.json",
+        )
+        with open(default_path) as f:
+            data = json.load(f)
+
+        github = data["mcpServers"]["github"]
+        assert "auth_hint" in github
+        assert "github.com" in github["auth_hint"].lower()
+
     def test_seed_default_skills(self, tmp_path):
         """Default skills should be seeded to empty workspace skills dir."""
         from src.app import _seed_default_skills

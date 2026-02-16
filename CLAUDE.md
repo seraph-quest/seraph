@@ -175,6 +175,18 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Response cap**: body truncated at 50,000 chars
 - **Docker**: Python 3.12-slim, internal network only (no exposed ports), backend connects at `http://http-mcp:9200/mcp`
 
+### Stdio-to-HTTP MCP Proxy (`mcp-servers/stdio-proxy/`)
+- **Stack**: Python 3.12, FastMCP 2.x, uvicorn
+- **Entry**: `proxy.py` — reads `data/stdio-proxies.json`, spawns each enabled stdio MCP server as a subprocess via `FastMCP.as_proxy()`, serves each on its own HTTP port
+- **Native macOS**: Runs outside Docker so tools like Things3 can access AppleScript/system APIs
+- **Config**: `data/stdio-proxies.json` with `proxies` object: `{name: {command, args, port, enabled, description?, env?}}`
+- **Seed config**: `backend/src/defaults/stdio-proxies.default.json` — empty `{"proxies": {}}`, copied to workspace on first run
+- **Architecture**: Single process, multiple proxies via asyncio — one uvicorn task per proxied server, each on its own port
+- **Retry**: Exponential backoff (5s → 60s max) on subprocess crash
+- **Signal handling**: SIGTERM/SIGINT → stop_event → all tasks cancel → subprocesses terminated
+- **Quick start**: `./manage.sh -e dev proxy start` (or `./mcp-servers/stdio-proxy/run.sh --verbose`)
+- **Usage flow**: Add entry to `data/stdio-proxies.json` → `proxy start` → `./mcp.sh add <name> http://localhost:<port>/mcp` → backend connects as normal HTTP MCP server
+
 ### Infrastructure
 - `docker-compose.dev.yaml` - Four services (github-mcp commented out):
   - `backend-dev` (8004:8003) — FastAPI + uvicorn, depends on sandbox
@@ -182,9 +194,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `http-mcp` — FastMCP HTTP request tool server (internal network only, port 9200); built from `mcp-servers/http-request/`
   - `frontend-dev` (3000:5173) — Vite dev server
   - `github-mcp` (commented out) — `ghcr.io/github/github-mcp-server` only supports stdio; needs mcp-proxy or use GitHub's hosted endpoint `https://api.githubcopilot.com/mcp/`
-- `manage.sh` - Docker + daemon management: `./manage.sh -e dev up -d` (also starts daemon if `DAEMON_ENABLED=true`), `down` (also stops daemon), `logs -f`, `build`, `daemon start|stop|status|logs`
+- `manage.sh` - Docker + daemon + proxy management: `./manage.sh -e dev up -d` (also starts daemon if `DAEMON_ENABLED=true`, proxy if `PROXY_ENABLED=true`), `down` (also stops daemon + proxy), `logs -f`, `build`, `daemon start|stop|status|logs`, `proxy start|stop|status|logs`
 - `mcp.sh` - MCP server CLI management: `./mcp.sh list`, `add <name> <url> [--desc D]`, `remove <name>`, `enable <name>`, `disable <name>`, `test <name>`. Edits `data/mcp-servers.json` directly via `jq`. Requires `jq` (`brew install jq`).
-- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR`, `DAEMON_ENABLED`, `DAEMON_ARGS` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
+- `.env.dev` - `OPENROUTER_API_KEY`, model settings, `VITE_API_URL`, `VITE_WS_URL`, data/log paths, `WORKSPACE_DIR`, `DAEMON_ENABLED`, `DAEMON_ARGS`, `PROXY_ENABLED`, `PROXY_ARGS` (MCP servers configured via `data/mcp-servers.json` instead of env vars)
 - **Timeout settings** (`config/settings.py`):
   - `agent_chat_timeout: int = 120` — REST + WS chat agent execution
   - `agent_strategist_timeout: int = 60` — strategist tick agent
@@ -340,3 +352,4 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 11. **Discover catalog** — Curated catalog (`src/defaults/skill-catalog.json`) of skills and MCP servers. Browse in Settings UI, one-click install. Catalog API (`GET /api/catalog`, `POST /api/catalog/install/{name}`) copies bundled skill files or adds MCP config entries. All MCP entries install as `enabled: false`.
 12. **MCP seed config** — On first startup, `src/defaults/mcp-servers.default.json` is copied to workspace if no config exists. Ships with `http-request` and `github` entries (both disabled). Existing configs are never overwritten.
 13. **Bundled defaults in `src/defaults/`** — Static/reference files (catalog, MCP default config, skill templates) live under `src/defaults/` to avoid being hidden by the Docker workspace volume mount at `/app/data`. Skills are seeded to workspace on first run.
+14. **Stdio-to-HTTP MCP proxy** — Native macOS process (`mcp-servers/stdio-proxy/`) that wraps stdio-only MCP servers as HTTP endpoints via `FastMCP.as_proxy()`. Single process runs multiple proxies via asyncio, each on its own port. Backend MCPManager connects to proxied servers as normal HTTP MCP servers — no backend changes needed. Runs natively (not Docker) so tools can access macOS system APIs.

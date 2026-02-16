@@ -1,4 +1,6 @@
 import { useChatStore } from "../../stores/chatStore";
+import { useDragResize } from "../../hooks/useDragResize";
+import { ResizeHandles } from "../ResizeHandles";
 import { DialogFrame } from "./DialogFrame";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
@@ -20,16 +22,27 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const isConnected = connectionStatus === "connected";
 
+  const { dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("chat", {
+    minWidth: 400,
+    minHeight: 200,
+  });
+
   if (!chatPanelOpen) return null;
 
   return (
-    <div className={`chat-overlay${chatMaximized ? " maximized" : ""}`}>
+    <div
+      className={`chat-overlay${chatMaximized ? " maximized" : ""}`}
+      style={chatMaximized ? undefined : style}
+      onPointerDown={bringToFront}
+    >
+      {!chatMaximized && <ResizeHandles resizeHandleProps={resizeHandleProps} />}
       <DialogFrame
         title="Chat Log"
         className="flex-1 min-h-0 flex flex-row relative"
         onMaximize={toggleChatMaximized}
         maximized={chatMaximized}
         onClose={() => setChatPanelOpen(false)}
+        dragHandleProps={chatMaximized ? undefined : dragHandleProps}
       >
         <ChatSidebar />
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">

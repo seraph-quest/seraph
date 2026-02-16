@@ -35,7 +35,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/components/chat/` - ChatPanel, ChatSidebar, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel (search/filter by title, level, domain), GoalTree, GoalForm, DomainStats
   - `src/components/settings/InterruptionModeToggle.tsx` - Focus/Balanced/Active mode toggle for proactive message delivery
-  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, skills management, Discover catalog, MCP server management UI, version)
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version)
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
@@ -77,7 +77,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/goals.py` — `GET /api/goals`, `GET /api/goals/tree`, `GET /api/goals/dashboard`, `POST /api/goals`, `PATCH/DELETE /api/goals/{id}`
   - `src/api/profile.py` — `GET /api/user/profile`, `POST /api/user/onboarding/skip`, `POST /api/user/onboarding/restart`
   - `src/api/tools.py` — `GET /api/tools` (returns building metadata per tool for dynamic frontend registration)
-  - `src/api/mcp.py` — `GET /api/mcp/servers`, `POST /api/mcp/servers`, `PUT /api/mcp/servers/{name}`, `DELETE /api/mcp/servers/{name}`, `POST /api/mcp/servers/{name}/test`
+  - `src/api/mcp.py` — `GET /api/mcp/servers`, `POST /api/mcp/servers`, `PUT /api/mcp/servers/{name}`, `DELETE /api/mcp/servers/{name}`, `POST /api/mcp/servers/{name}/test`, `POST /api/mcp/servers/{name}/token`
   - `src/api/skills.py` — `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
   - `src/api/catalog.py` — `GET /api/catalog` (browse catalog with install status), `POST /api/catalog/install/{name}` (install skill or MCP server from catalog)
   - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data), `POST /api/observer/refresh` (debug)
@@ -86,17 +86,20 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Tools** (`src/tools/`):
   - Phase 1: `web_search`, `read_file`, `write_file`, `fill_template`, `view_soul`, `update_soul`, `create_goal`, `update_goal`, `get_goals`, `get_goal_progress`
   - Phase 2: `shell_execute`, `browse_webpage`
-  - MCP: `src/tools/mcp_manager.py` — plug-and-play MCP manager; loads server config from `data/mcp-servers.json`, connects to enabled servers via `smolagents.MCPClient`. Supports runtime add/remove/toggle via API. Config file is auto-persisted on mutations.
+  - MCP: `src/tools/mcp_manager.py` — plug-and-play MCP manager; loads server config from `data/mcp-servers.json`, connects to enabled servers via `smolagents.MCPClient`. Supports runtime add/remove/toggle via API. Config file is auto-persisted on mutations. Tracks granular status per server (`connected`/`disconnected`/`auth_required`/`error`). `set_token()` stores auth tokens directly in config and reconnects.
 - **Tool Discovery** (`src/plugins/`):
   - `loader.py` — `discover_tools()` auto-discovers all `@tool`-decorated functions from `src/tools/`
   - `registry.py` — `get_tool_metadata()` returns tool descriptions for frontend registration
   - `factory.py` uses `discover_tools()` + `mcp_manager.get_tools()` to assemble the full tool set
 - **MCP Configuration** (`data/mcp-servers.json`):
-  - JSON config with `mcpServers` object: `{name: {url, enabled, description?}}`
+  - JSON config with `mcpServers` object: `{name: {url, enabled, description?, headers?, auth_hint?}}`
   - `data/mcp-servers.example.json` committed to repo as reference
   - `src/defaults/mcp-servers.default.json` — seed config template; copied to workspace on first run if no config exists
   - Loaded on app startup from `settings.workspace_dir + "/mcp-servers.json"`
   - First run seeds from `mcp-servers.default.json` (2 entries: `http-request`, `github` — both `enabled: false`)
+  - **Auth headers**: Servers can include `"headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"}` — env var patterns `${VAR}` are resolved at connect time via `_resolve_env_vars()`. Raw templates stored in config, resolved values never persisted.
+  - **Auth token UI**: `POST /api/mcp/servers/{name}/token` stores a `Bearer` token directly in headers config. Frontend `TokenConfigForm` provides inline token setup with save-and-test flow. Unresolved `${VAR}` patterns detected at connect time → status set to `auth_required`.
+  - **Server status**: Each server tracks `status` (`connected`|`disconnected`|`auth_required`|`error`), `status_message`, and `auth_hint` (user guidance from config). Frontend shows 4-state indicator: gray (disabled), green (connected), yellow pulsing (auth needed), red (error).
   - No config file and no default = no MCP tools, no errors
 - **Skills** (`src/skills/`): SKILL.md plugin ecosystem — zero-code markdown plugins
   - `loader.py` — `Skill` dataclass, YAML frontmatter parser, directory scanner (`load_skills()`)

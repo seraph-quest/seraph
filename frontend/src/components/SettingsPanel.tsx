@@ -108,6 +108,10 @@ interface McpServer {
   connected: boolean;
   tool_count: number;
   description: string;
+  status: "disconnected" | "connected" | "auth_required" | "error";
+  status_message: string | null;
+  has_headers: boolean;
+  auth_hint: string;
 }
 
 function McpServerRow({
@@ -115,17 +119,35 @@ function McpServerRow({
   onToggle,
   onRemove,
   onTest,
+  onSetup,
 }: {
   server: McpServer;
   onToggle: (name: string, enabled: boolean) => void;
   onRemove: (name: string) => void;
   onTest: (name: string) => void;
+  onSetup: (server: McpServer) => void;
 }) {
   const statusColor = !server.enabled
     ? "bg-retro-text/30"
-    : server.connected
+    : server.status === "connected"
       ? "bg-green-400"
-      : "bg-red-400";
+      : server.status === "auth_required"
+        ? "bg-yellow-400 animate-pulse"
+        : server.status === "error"
+          ? "bg-red-400"
+          : "bg-retro-text/30";
+
+  const statusLabel = !server.enabled
+    ? null
+    : server.status === "connected"
+      ? `${server.tool_count} tools`
+      : server.status === "auth_required"
+        ? "token needed"
+        : server.status === "error"
+          ? server.status_message || "error"
+          : null;
+
+  const showSetup = server.status === "auth_required" || server.has_headers;
 
   return (
     <div className="flex items-center gap-1 px-1 py-0.5 border-b border-retro-text/10 last:border-b-0">
@@ -134,9 +156,18 @@ function McpServerRow({
         <div className="text-[10px] font-bold text-retro-text truncate">{server.name}</div>
         <div className="text-[9px] text-retro-text/40 truncate">
           {server.description || server.url}
-          {server.connected && ` · ${server.tool_count} tools`}
+          {statusLabel && ` · ${statusLabel}`}
         </div>
       </div>
+      {showSetup && (
+        <button
+          onClick={() => onSetup(server)}
+          className="text-[9px] text-yellow-400 hover:text-retro-highlight px-0.5"
+          title="Configure auth token"
+        >
+          {server.status === "auth_required" ? "setup" : "key"}
+        </button>
+      )}
       <button
         onClick={() => onTest(server.name)}
         className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-0.5"
@@ -161,11 +192,92 @@ function McpServerRow({
   );
 }
 
+function TokenConfigForm({
+  server,
+  onClose,
+  onSaved,
+}: {
+  server: McpServer;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [token, setToken] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const handleSaveAndTest = async () => {
+    if (!token.trim()) return;
+    setSaving(true);
+    setStatus("Saving...");
+    try {
+      const saveRes = await fetch(`${API_URL}/api/mcp/servers/${server.name}/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: token.trim() }),
+      });
+      if (!saveRes.ok) {
+        const data = await saveRes.json();
+        setStatus(data.detail || "Failed to save token");
+        setSaving(false);
+        return;
+      }
+      setStatus("Testing...");
+      const testRes = await fetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
+      const testData = await testRes.json();
+      if (testData.status === "ok") {
+        setStatus(`Connected — ${testData.tool_count} tools`);
+        setTimeout(() => { onClose(); onSaved(); }, 1500);
+      } else {
+        setStatus(testData.message || testData.detail || "Connection failed");
+      }
+    } catch {
+      setStatus("Connection failed");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="px-1 py-1 border border-retro-text/10 rounded space-y-1 mx-1 mb-1 bg-retro-bg/50">
+      {server.auth_hint && (
+        <div className="text-[9px] text-retro-highlight/70">{server.auth_hint}</div>
+      )}
+      <input
+        type="password"
+        placeholder="Paste token here"
+        value={token}
+        onChange={(e) => setToken(e.target.value)}
+        className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
+      />
+      {status && (
+        <div className={`text-[9px] ${status.startsWith("Connected") ? "text-green-400" : "text-retro-highlight"}`}>
+          {status}
+        </div>
+      )}
+      <div className="flex gap-1">
+        <button
+          onClick={handleSaveAndTest}
+          disabled={saving || !token.trim()}
+          className="text-[9px] text-retro-highlight hover:text-retro-text uppercase tracking-wider disabled:text-retro-text/20"
+        >
+          Save & Test
+        </button>
+        <button
+          onClick={onClose}
+          className="text-[9px] text-retro-text/40 hover:text-retro-text uppercase tracking-wider"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AddServerForm({ onAdd }: { onAdd: () => void }) {
   const [show, setShow] = useState(false);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
+  const [authToken, setAuthToken] = useState("");
   const [error, setError] = useState("");
 
   const handleSubmit = async () => {
@@ -174,15 +286,19 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
       return;
     }
     try {
+      const body: Record<string, unknown> = {
+        name: name.trim(),
+        url: url.trim(),
+        description: description.trim(),
+        enabled: true,
+      };
+      if (authToken.trim()) {
+        body.headers = { Authorization: `Bearer ${authToken.trim()}` };
+      }
       const res = await fetch(`${API_URL}/api/mcp/servers`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          url: url.trim(),
-          description: description.trim(),
-          enabled: true,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -192,6 +308,7 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
       setName("");
       setUrl("");
       setDescription("");
+      setAuthToken("");
       setError("");
       setShow(false);
       onAdd();
@@ -234,6 +351,13 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
         onChange={(e) => setDescription(e.target.value)}
         className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
       />
+      <input
+        type="password"
+        placeholder="Auth token (optional)"
+        value={authToken}
+        onChange={(e) => setAuthToken(e.target.value)}
+        className="w-full bg-transparent text-[9px] text-retro-text border-b border-retro-text/20 px-0.5 py-0.5 outline-none focus:border-retro-highlight"
+      />
       {error && <div className="text-[9px] text-red-400">{error}</div>}
       <div className="flex gap-1">
         <button
@@ -267,6 +391,7 @@ export function SettingsPanel() {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
   const [installing, setInstalling] = useState<string | null>(null);
+  const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -489,13 +614,25 @@ export function SettingsPanel() {
             {servers.length > 0 ? (
               <div className="border border-retro-text/10 rounded mb-1">
                 {servers.map((s) => (
-                  <McpServerRow
-                    key={s.name}
-                    server={s}
-                    onToggle={handleToggle}
-                    onRemove={handleRemove}
-                    onTest={handleTest}
-                  />
+                  <div key={s.name}>
+                    <McpServerRow
+                      server={s}
+                      onToggle={handleToggle}
+                      onRemove={handleRemove}
+                      onTest={handleTest}
+                      onSetup={setConfiguringServer}
+                    />
+                    {configuringServer?.name === s.name && (
+                      <TokenConfigForm
+                        server={s}
+                        onClose={() => setConfiguringServer(null)}
+                        onSaved={() => {
+                          fetchServers();
+                          useChatStore.getState().fetchToolRegistry();
+                        }}
+                      />
+                    )}
+                  </div>
                 ))}
               </div>
             ) : (

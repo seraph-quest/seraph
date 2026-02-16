@@ -13,15 +13,6 @@
         "Authorization": "Bearer ${GITHUB_TOKEN}"
       },
       "auth_hint": "Create a Personal Access Token at https://github.com/settings/tokens (classic, repo scope)"
-    },
-    "toggl": {
-      "url": "http://toggl-mcp:9300/mcp",
-      "enabled": false,
-      "description": "Toggl Track time tracking (20–40 tools)",
-      "headers": {
-        "Authorization": "Bearer ${TOGGL_API_KEY}"
-      },
-      "auth_hint": "Get your API token from https://track.toggl.com/profile (scroll to API Token)"
     }
   }
 }

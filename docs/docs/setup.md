@@ -290,40 +290,6 @@ On the first calendar scan, the backend will initiate an OAuth consent flow in t
 
 After initial authorization, the token refreshes automatically. If no credentials are configured, the calendar source silently returns empty — no errors are raised.
 
-## Optional: Toggl Track
-
-Toggl Track integration provides 20–40 MCP tools for time tracking (entries, projects, clients, tags, reports, and more).
-
-### Enable via Settings UI
-
-1. Open the **Settings** panel in the UI
-2. Find **toggl** in the MCP Servers section and toggle it **on**
-3. Click the token field and paste your Toggl API token
-4. Click **Save & Test** — the status dot should turn green
-
-Get your API token from [track.toggl.com/profile](https://track.toggl.com/profile) (scroll to "API Token").
-
-### Or via environment variable
-
-Set `TOGGL_API_KEY` in `.env.dev`:
-
-```bash
-TOGGL_API_KEY=your_toggl_api_token
-```
-
-Then rebuild: `./manage.sh -e dev up -d`
-
-### Read/write mode
-
-By default, toggl-mcp starts in **read-only** mode (20 tools). To enable write tools (create/update/delete time entries, projects, etc.), add to `docker-compose.dev.yaml` under the `toggl-mcp` service:
-
-```yaml
-environment:
-  TOGGL_MODE: readwrite
-```
-
-See the [toggl-mcp repo](https://github.com/seraph-quest/toggl-mcp) for the full tool reference.
-
 ## Optional: GitHub MCP
 
 GitHub MCP integration is **currently disabled** (commented out in `docker-compose.dev.yaml`). The official `github-mcp-server` image only supports stdio transport, which doesn't work in a container network.

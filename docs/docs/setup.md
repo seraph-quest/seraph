@@ -181,11 +181,52 @@ OCR requires the **Screen Recording** permission:
 
 **Note:** Starting with macOS Sequoia (15.0), the system shows a monthly confirmation prompt asking if you want to continue allowing screen recording. This cannot be suppressed. If permission is revoked, the daemon continues in window-only mode.
 
+## Optional: Stdio MCP Proxy
+
+The stdio proxy wraps stdio-only MCP servers (like `github-mcp-server` or `things-mcp`) as HTTP endpoints so the Dockerized backend can connect to them. It runs natively on macOS so proxied tools can access system APIs (AppleScript, URL schemes, etc.).
+
+### Configuration
+
+Add entries to `data/stdio-proxies.json`:
+
+```json
+{
+  "proxies": {
+    "things3": {
+      "command": "uvx",
+      "args": ["things-mcp"],
+      "port": 8100,
+      "enabled": true,
+      "description": "Things3 task manager"
+    }
+  }
+}
+```
+
+### Start the proxy
+
+```bash
+./manage.sh -e dev proxy start
+```
+
+Then register the proxied server with the backend:
+
+```bash
+./mcp.sh add things3 http://host.docker.internal:8100/mcp --desc "Things3 task manager"
+```
+
+To start the proxy automatically with `./manage.sh -e dev up -d`, set in `.env.dev`:
+
+```bash
+PROXY_ENABLED=true
+PROXY_ARGS=--verbose
+```
+
 ## Optional: MCP Servers
 
 Seraph supports plug-and-play MCP server integration. Servers are configured in `data/mcp-servers.json` and can be managed three ways:
 
-- **CLI**: `./mcp.sh list`, `add <name> <url>`, `remove`, `enable`, `disable`, `test`
+- **CLI**: `./mcp.sh list`, `add <name> <url>`, `remove`, `enable`, `disable`, `test` — when the backend is running, `mcp.sh` calls the API for live-reload; falls back to direct file editing when offline
 - **Settings UI**: Add/remove/toggle servers in the Settings panel
 - **REST API**: `GET/POST /api/mcp/servers`, `PUT/DELETE /api/mcp/servers/{name}`
 
@@ -253,11 +294,10 @@ After initial authorization, the token refreshes automatically. If no credential
 
 GitHub MCP integration is **currently disabled** (commented out in `docker-compose.dev.yaml`). The official `github-mcp-server` image only supports stdio transport, which doesn't work in a container network.
 
-Workarounds being evaluated:
-- **mcp-proxy**: stdio-to-HTTP bridge
-- **GitHub's hosted MCP endpoint**: `https://api.githubcopilot.com/mcp/`
+Two options are available:
 
-Once a working transport is available, register it via `./mcp.sh add github <url>`.
+- **Stdio proxy**: Use the stdio proxy (`mcp-servers/stdio-proxy/`) to wrap `github-mcp-server` as an HTTP endpoint. Add it to `data/stdio-proxies.json`, start with `./manage.sh -e dev proxy start`, then register with `./mcp.sh add github http://host.docker.internal:<port>/mcp`.
+- **GitHub's hosted MCP endpoint**: `https://api.githubcopilot.com/mcp/` — register directly with `./mcp.sh add github https://api.githubcopilot.com/mcp/` and configure a GitHub token via the Settings UI.
 
 ## Optional: SKILL.md Plugins
 

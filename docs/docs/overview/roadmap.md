@@ -164,7 +164,7 @@ Seraph sees what you're doing, understands your patterns, and its avatar mirrors
 
 **Theme**: Make what exists production-quality. Complete unfinished UI, fix backend gaps, harden infrastructure, eliminate adoption barriers.
 
-**Status**: Mostly complete. Goal UI, interruption mode, accessibility, timeouts, token-aware context, and SKILL.md plugins are done. Avatar state reflection and Tauri desktop remain planned.
+**Status**: Mostly complete. Goal UI, interruption mode, accessibility, timeouts, token-aware context, SKILL.md plugins, draggable panels, MCP auth UX, and stdio proxy are done. Avatar state reflection and Tauri desktop remain planned.
 
 ### 3.5.1 Goal Management UI ✅
 - ~~Create/edit/delete goals via dedicated form (not just chat)~~ — `GoalForm.tsx` with create/edit modal
@@ -218,6 +218,21 @@ Seraph sees what you're doing, understands your patterns, and its avatar mirrors
 ### 3.5.9 Frontend Accessibility ✅
 - ~~Increase minimum font sizes (7-9px → 11-12px)~~ — 9px minimum across all panels (Press Start 2P pixel font)
 - ~~Keyboard shortcuts for panel toggling (C/Q/S/Esc)~~ — Shift+C (chat), Shift+Q (quests), Shift+S (settings), Escape (close). Shift modifier prevents WASD conflict.
+
+### 3.5.10 Draggable & Resizable Panels ✅
+- All panels (chat, quest, settings) draggable via title bar, resizable from 8 edges/corners
+- Layout (position/size) persisted in localStorage via `panelLayoutStore`
+- Z-ordering: clicking a panel brings it to front
+
+### 3.5.11 MCP Auth UX ✅
+- 4-state status indicator per server: gray (disabled), green (connected), yellow pulsing (auth needed), red (error)
+- Inline token config form with save-and-test flow
+- Clickable auth hints guide users through token setup
+
+### 3.5.12 Stdio-to-HTTP MCP Proxy ✅
+- Native macOS proxy (`mcp-servers/stdio-proxy/`) wraps stdio-only MCP servers as HTTP endpoints
+- `manage.sh` integration: `proxy start|stop|status|logs`
+- Backend connects to proxied servers as normal HTTP MCP servers — no backend changes needed
 
 ### Milestone
 Everything that exists is robust, polished, and installable. Ready to expand.

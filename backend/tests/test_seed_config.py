@@ -77,7 +77,7 @@ class TestSeedConfig:
         """All entries in the default config should have enabled: false."""
         default_path = os.path.join(
             os.path.dirname(__file__),
-            "../data/mcp-servers.default.json",
+            "../src/defaults/mcp-servers.default.json",
         )
         with open(default_path) as f:
             data = json.load(f)
@@ -86,3 +86,41 @@ class TestSeedConfig:
             assert server.get("enabled") is False, (
                 f"Default MCP server '{name}' should be disabled"
             )
+
+    def test_seed_default_skills(self, tmp_path):
+        """Default skills should be seeded to empty workspace skills dir."""
+        from src.app import _seed_default_skills
+
+        defaults_dir = os.path.join(
+            os.path.dirname(__file__), "../src/defaults"
+        )
+        skills_dir = str(tmp_path / "skills")
+        os.makedirs(skills_dir)
+
+        _seed_default_skills(defaults_dir, skills_dir)
+
+        seeded = os.listdir(skills_dir)
+        assert len(seeded) >= 8
+        assert "daily-standup.md" in seeded
+        assert "weekly-planner.md" in seeded
+
+    def test_seed_does_not_overwrite_existing(self, tmp_path):
+        """Seeding should not overwrite skills that already exist."""
+        from src.app import _seed_default_skills
+
+        defaults_dir = os.path.join(
+            os.path.dirname(__file__), "../src/defaults"
+        )
+        skills_dir = str(tmp_path / "skills")
+        os.makedirs(skills_dir)
+
+        # Create a custom version of a skill
+        custom_content = "---\nname: daily-standup\ndescription: My custom version\n---\nCustom."
+        with open(os.path.join(skills_dir, "daily-standup.md"), "w") as f:
+            f.write(custom_content)
+
+        _seed_default_skills(defaults_dir, skills_dir)
+
+        # Custom version should be preserved
+        with open(os.path.join(skills_dir, "daily-standup.md")) as f:
+            assert f.read() == custom_content

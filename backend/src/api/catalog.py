@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_CATALOG_PATH = os.path.join(os.path.dirname(__file__), "../../data/skill-catalog.json")
-_BUNDLED_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "../../data/skills")
+_DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
+_CATALOG_PATH = os.path.join(_DEFAULTS_DIR, "skill-catalog.json")
+_BUNDLED_SKILLS_DIR = os.path.join(_DEFAULTS_DIR, "skills")
 
 
 def _load_catalog() -> dict:

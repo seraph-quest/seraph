@@ -94,7 +94,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **MCP Configuration** (`data/mcp-servers.json`):
   - JSON config with `mcpServers` object: `{name: {url, enabled, description?}}`
   - `data/mcp-servers.example.json` committed to repo as reference
-  - `data/mcp-servers.default.json` — seed config template; copied to workspace on first run if no config exists
+  - `src/defaults/mcp-servers.default.json` — seed config template; copied to workspace on first run if no config exists
   - Loaded on app startup from `settings.workspace_dir + "/mcp-servers.json"`
   - First run seeds from `mcp-servers.default.json` (2 entries: `http-request`, `github` — both `enabled: false`)
   - No config file and no default = no MCP tools, no errors
@@ -106,7 +106,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - Tool gating: skills with `requires.tools` are only loaded if all required tools are available
   - Runtime state: `GET /api/skills` lists all, `PUT /api/skills/{name}` toggles, `POST /api/skills/reload` re-scans directory
   - Disabled skills tracked in `data/skills-config.json`, survives reload
-  - 8 bundled skills: `daily-standup.md`, `code-review.md`, `goal-reflection.md`, `weekly-planner.md`, `morning-intention.md`, `evening-journal.md`, `moltbook.md` (requires `http_request`), `web-briefing.md` (requires `http_request` + `web_search`)
+  - 8 bundled skills in `src/defaults/skills/`: `daily-standup.md`, `code-review.md`, `goal-reflection.md`, `weekly-planner.md`, `morning-intention.md`, `evening-journal.md`, `moltbook.md` (requires `http_request`), `web-briefing.md` (requires `http_request` + `web_search`)
+  - Default skills are seeded to workspace `skills/` directory on first run (existing files never overwritten)
   - MCP-dependent skills (`moltbook`, `web-briefing`) auto-deactivate via tool gating when `http_request` tool unavailable
 - **Memory** (`src/memory/`):
   - `soul.py` — Persistent identity file (markdown in workspace)
@@ -331,5 +332,6 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 8. **Editor as standalone app** — Separate Vite app (`editor/`) with own stores and components; shares tileset/sprite assets from `frontend/public/assets/` via proxy. Outputs Tiled JSON consumed directly by VillageScene.
 9. **SKILL.md plugins** — Zero-code markdown files with YAML frontmatter. Drop in `data/skills/`, agent gains capabilities via prompt injection. Tool gating ensures skills only activate when required tools exist. Runtime enable/disable via API + Settings UI.
 10. **Bundled HTTP MCP server** — Self-hosted FastMCP server (`mcp-servers/http-request/`) exposing `http_request` tool for arbitrary REST API calls. Runs as Docker service on internal network. Security: blocks internal/private IPs, clamps timeout 1-60s.
-11. **Discover catalog** — Curated catalog (`data/skill-catalog.json`) of skills and MCP servers. Browse in Settings UI, one-click install. Catalog API (`GET /api/catalog`, `POST /api/catalog/install/{name}`) copies bundled skill files or adds MCP config entries. All MCP entries install as `enabled: false`.
-12. **MCP seed config** — On first startup, `mcp-servers.default.json` is copied to workspace if no config exists. Ships with `http-request` and `github` entries (both disabled). Existing configs are never overwritten.
+11. **Discover catalog** — Curated catalog (`src/defaults/skill-catalog.json`) of skills and MCP servers. Browse in Settings UI, one-click install. Catalog API (`GET /api/catalog`, `POST /api/catalog/install/{name}`) copies bundled skill files or adds MCP config entries. All MCP entries install as `enabled: false`.
+12. **MCP seed config** — On first startup, `src/defaults/mcp-servers.default.json` is copied to workspace if no config exists. Ships with `http-request` and `github` entries (both disabled). Existing configs are never overwritten.
+13. **Bundled defaults in `src/defaults/`** — Static/reference files (catalog, MCP default config, skill templates) live under `src/defaults/` to avoid being hidden by the Docker workspace volume mount at `/app/data`. Skills are seeded to workspace on first run.

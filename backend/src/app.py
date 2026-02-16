@@ -17,6 +17,20 @@ from src.tools.mcp_manager import mcp_manager
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
 
+def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
+    """Copy bundled default skills to workspace if they don't already exist."""
+    import shutil
+    bundled_skills = os.path.join(defaults_dir, "skills")
+    if not os.path.isdir(bundled_skills):
+        return
+    for filename in os.listdir(bundled_skills):
+        if not filename.endswith(".md"):
+            continue
+        dst = os.path.join(skills_dir, filename)
+        if not os.path.exists(dst):
+            shutil.copy2(os.path.join(bundled_skills, filename), dst)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -38,9 +52,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         import logging
         logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
+    defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
     mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
     if not os.path.exists(mcp_config):
-        default_config = os.path.join(os.path.dirname(__file__), "../data/mcp-servers.default.json")
+        default_config = os.path.join(defaults_dir, "mcp-servers.default.json")
         if os.path.isfile(default_config):
             import shutil
             os.makedirs(os.path.dirname(mcp_config), exist_ok=True)
@@ -48,6 +63,7 @@ async def lifespan(app: FastAPI):
     mcp_manager.load_config(mcp_config)
     skills_dir = os.path.join(settings.workspace_dir, "skills")
     os.makedirs(skills_dir, exist_ok=True)
+    _seed_default_skills(defaults_dir, skills_dir)
     skill_manager.init(skills_dir)
     yield
     shutdown_scheduler()

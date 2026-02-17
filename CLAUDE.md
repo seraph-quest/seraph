@@ -128,6 +128,14 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `repository.py` — Async CRUD for `Secret` table (store/upsert, get with decrypt, list_keys metadata only, delete, exists)
   - Agent tools (`src/tools/vault_tools.py`): `store_secret`, `get_secret`, `list_secrets`, `delete_secret` — docstrings instruct agent to never display secret values in chat
   - API: `GET /api/vault/keys` (metadata only), `DELETE /api/vault/keys/{key}` — no create/read endpoints (values only accessible via agent tools)
+- **LLM Logging** (`src/llm_logger.py`):
+  - `SeraphLLMLogger(CustomLogger)` — LiteLLM global callback; writes JSONL to `RotatingFileHandler` (`seraph.llm_calls` logger, `propagate=False`)
+  - Extracts model, tokens, cost, latency from LiteLLM's `standard_logging_object`
+  - Content logging (messages/response) gated by `settings.llm_log_content` (default off)
+  - All logging wrapped in try/except — never breaks an LLM call
+  - `init_llm_logging()` — appends callback to `litellm.callbacks`; called in app lifespan after `ensure_soul_exists()`
+  - Output: `{llm_log_dir}/llm_calls.jsonl` (default `/app/logs/llm_calls.jsonl`, 50 MB rotation, 5 backups)
+  - Settings: `llm_log_enabled` (default `True`), `llm_log_content` (default `False`), `llm_log_dir`, `llm_log_max_bytes`, `llm_log_backup_count`
 - **Agent** (`src/agent/`):
   - `factory.py` — Creates flat agent with all tools + context (soul, memory, observer, skills); accepts optional `observer_context` param injected into system prompt. WS chat endpoint calls `context_manager.get_context().to_prompt_block()` per message to include live observer state. Also creates orchestrator with managed specialists when delegation is enabled via `build_agent()`
   - `specialists.py` — Specialist agent factories for delegation mode (memory_keeper, goal_planner, web_researcher, file_worker, MCP specialists); tool domain mapping; `build_all_specialists()`

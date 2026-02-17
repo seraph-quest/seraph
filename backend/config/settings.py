@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # Vault
     vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty
 
+    # LLM Call Logging
+    llm_log_enabled: bool = True
+    llm_log_content: bool = False          # include messages/response (large)
+    llm_log_dir: str = "/app/logs"
+    llm_log_max_bytes: int = 52_428_800    # 50 MB per file
+    llm_log_backup_count: int = 5          # keep 5 rotated files
+
     model_config = {"env_file": ".env.dev", "env_file_encoding": "utf-8"}
 
 

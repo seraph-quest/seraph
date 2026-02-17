@@ -9,6 +9,7 @@ from slowapi.util import get_remote_address
 
 from config.settings import settings
 from src.db import init_db, close_db
+from src.llm_logger import init_llm_logging
 from src.memory.soul import ensure_soul_exists
 from src.scheduler.engine import init_scheduler, shutdown_scheduler
 from src.skills.manager import skill_manager
@@ -35,6 +36,7 @@ def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
 async def lifespan(app: FastAPI):
     await init_db()
     ensure_soul_exists()
+    init_llm_logging()
     # Load persisted interruption mode before scheduler starts
     try:
         from src.api.profile import get_or_create_profile

@@ -16,10 +16,10 @@ See the **[Setup Guide](./setup)** for complete installation and configuration i
 - **Frontend**: React 19, Vite 6, TypeScript 5.6, Tailwind CSS 3, Zustand 5, Phaser 3.90
 - **Backend**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
 - **Database**: SQLModel + SQLite (aiosqlite), LanceDB (vector memory)
-- **Tools**: 12 built-in tools (auto-discovered) + MCP integrations — web search, file I/O, shell (snekbox sandbox), browser (Playwright), soul/memory, goals
+- **Tools**: 16 built-in tools (auto-discovered) + MCP integrations — web search, file I/O, shell (snekbox sandbox), browser (Playwright), soul/memory, goals, vault
 - **Scheduler**: APScheduler — 6 background jobs (memory consolidation, goal check, calendar scan, strategist tick, daily briefing, evening review)
 - **Observer**: Native macOS daemon → context manager → user state machine → attention guardian → insight queue
-- **Infra**: Docker Compose (3 services: backend, frontend, snekbox sandbox), uv package manager
+- **Infra**: Docker Compose (4 services: backend, frontend, snekbox sandbox, http-mcp), uv package manager
 
 ## Project Structure
 
@@ -46,15 +46,16 @@ backend/
 ├── config/settings.py   # Pydantic Settings (env vars)
 ├── src/
 │   ├── app.py           # FastAPI app factory (lifespan: DB init, soul file)
-│   ├── api/             # REST + WebSocket endpoints (chat, sessions, goals, profile, tools, mcp, skills, observer, settings)
+│   ├── api/             # REST + WebSocket endpoints (chat, sessions, goals, profile, tools, mcp, skills, observer, settings, vault, catalog)
 │   ├── agent/           # Agent factory, onboarding, strategist, specialists, context window, session manager
-│   ├── tools/           # 12 @tool implementations (auto-discovered) + MCP manager
+│   ├── tools/           # 16 @tool implementations (auto-discovered) + MCP manager
 │   ├── plugins/         # Tool auto-discovery loader + registry
 │   ├── skills/          # SKILL.md plugin loader + manager
-│   ├── db/              # SQLModel engine + models (Session, Message, Goal, UserProfile, Memory, QueuedInsight)
+│   ├── db/              # SQLModel engine + models (Session, Message, Goal, UserProfile, Memory, QueuedInsight, Secret)
 │   ├── memory/          # Soul file, LanceDB vector store, embedder, consolidator
 │   ├── goals/           # Hierarchical goal CRUD repository
 │   ├── observer/        # Context manager, user state machine, delivery gate, insight queue, data sources
+│   ├── vault/           # Fernet-encrypted secret store (crypto, repository)
 │   └── scheduler/       # APScheduler engine, connection manager, 6 background jobs
 ├── data/
 │   ├── skills/          # SKILL.md plugin files (YAML frontmatter + instructions)

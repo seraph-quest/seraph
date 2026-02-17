@@ -37,7 +37,9 @@ backend/src/db/
 | `Message` | id, session_id (FK), role, content, metadata_json, step_number, tool_used, created_at | All chat messages |
 | `Memory` | id, content, category, source_session_id, embedding_id, created_at | Long-term memory entries |
 | `Goal` | id, parent_id (FK self), path, level, title, description, status, domain, start_date, due_date, sort_order, created_at, updated_at | Hierarchical goal tree |
-| `UserProfile` | id (singleton), name, soul_text, preferences_json, onboarding_completed, created_at, updated_at | User identity |
+| `UserProfile` | id (singleton), name, soul_text, preferences_json, onboarding_completed, interruption_mode, created_at, updated_at | User identity |
+| `QueuedInsight` | id, content, urgency, intervention_type, reasoning, created_at, expires_at | Queued proactive insights (24h expiry) |
+| `Secret` | id, key (unique), encrypted_value, description, created_at, updated_at | Encrypted key-value vault entries |
 
 **Goal hierarchy** uses materialized path + adjacency list:
 - `parent_id` for direct parent reference
@@ -233,5 +235,5 @@ frontend/src/components/chat/DialogFrame.tsx
 - [x] Create goals via chat, verify quest panel shows them with progress
 - [x] Click User avatar → quest panel opens; click Seraph → chat opens
 - [x] TypeScript compiles clean
-- [x] All 10 tools register
-- [x] All 18 routes verified
+- [x] All 16 tools register
+- [x] All 35 routes verified

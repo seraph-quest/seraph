@@ -28,7 +28,7 @@ OPENROUTER_API_KEY=sk-or-v1-your-key-here
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEFAULT_MODEL` | `openrouter/x-ai/grok-4.1-fast` | LLM model for the agent (any OpenRouter model) |
+| `DEFAULT_MODEL` | `openrouter/anthropic/claude-sonnet-4` | LLM model for the agent (any OpenRouter model) |
 | `MODEL_TEMPERATURE` | `0.7` | Sampling temperature |
 | `MODEL_MAX_TOKENS` | `4096` | Max tokens per response |
 | `AGENT_MAX_STEPS` | `10` | Max reasoning steps per turn |
@@ -101,9 +101,10 @@ All settings with their defaults are defined in `backend/config/settings.py`.
 ./manage.sh -e dev up -d
 ```
 
-This starts three containers:
+This starts four containers:
 - **backend-dev** (`localhost:8004`) — FastAPI + uvicorn
 - **sandbox-dev** — snekbox (sandboxed shell execution)
+- **http-mcp** — FastMCP HTTP request tool server (internal network only)
 - **frontend-dev** (`localhost:3000`) — Vite dev server
 
 Verify everything is running:
@@ -324,7 +325,7 @@ Skills can be managed via:
 - **REST API**: `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
 - **Tool gating**: Skills with `requires.tools` only activate when required tools are available
 
-Three bundled examples: `daily-standup.md`, `code-review.md`, `goal-reflection.md`.
+Eight bundled skills: `daily-standup`, `code-review`, `goal-reflection`, `weekly-planner`, `morning-intention`, `evening-journal`, `moltbook` (requires `http_request`), `web-briefing` (requires `http_request` + `web_search`).
 
 ## Optional: Village Map Editor
 

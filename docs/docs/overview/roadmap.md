@@ -302,7 +302,7 @@ Everything that exists is robust, polished, and installable. Ready to expand.
 - Zero-code markdown plugins in `data/skills/` with YAML frontmatter (`name`, `description`, `requires.tools`, `user_invocable`, `enabled`)
 - Tool gating: skills only loaded when required tools are available
 - Runtime enable/disable via `GET/PUT /api/skills` + Settings UI
-- 3 bundled examples: `daily-standup.md`, `code-review.md`, `goal-reflection.md`
+- 8 bundled skills: `daily-standup`, `code-review`, `goal-reflection`, `weekly-planner`, `morning-intention`, `evening-journal`, `moltbook` (requires `http_request`), `web-briefing` (requires `http_request` + `web_search`)
 
 ### 4.9 Recursive Delegation Architecture ✅
 - Orchestrator (no tools) delegates to domain specialists behind feature flag (`USE_DELEGATION=true`)

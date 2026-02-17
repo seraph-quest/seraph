@@ -9,7 +9,7 @@ sidebar_position: 4
 
 ## Current State
 
-Phases 0-3 are complete and functional. 520 automated tests (396 backend, 124 frontend). Clean codebase with no TODOs/FIXMEs. The project's unique advantages — proactive intelligence, RPG village metaphor, five-pillar life model, screen awareness — are implemented but not fully leveraged in the UI.
+Phases 0-3 are complete and functional. 624 automated tests (500 backend, 124 frontend). Clean codebase with no TODOs/FIXMEs. The project's unique advantages — proactive intelligence, RPG village metaphor, five-pillar life model, screen awareness — are implemented but not fully leveraged in the UI.
 
 ---
 
@@ -23,7 +23,7 @@ Phases 0-3 are complete and functional. 520 automated tests (396 backend, 124 fr
 
 4. ~~**Frontend Accessibility**~~ (3.5.9) — Done. Font sizes bumped to 9px minimum across all panels. Keyboard shortcuts: Shift+C (chat), Shift+Q (quests), Shift+S (settings), Escape (close). Shift modifier prevents WASD avatar movement conflict.
 
-7. ~~**SKILL.md Plugin Ecosystem**~~ (4.1) — Done. Zero-code markdown plugins in `data/skills/`. YAML frontmatter, tool gating, runtime enable/disable via API + Settings UI. 3 bundled examples.
+7. ~~**SKILL.md Plugin Ecosystem**~~ (4.1) — Done. Zero-code markdown plugins in `data/skills/`. YAML frontmatter, tool gating, runtime enable/disable via API + Settings UI. 8 bundled skills.
 
 5. ~~**Agent Execution Timeout**~~ (3.5.6) — Done. `asyncio.wait_for` timeouts on REST chat (504), daily briefing, evening review, memory consolidation LLM + add_memory calls. DDGS web search timeout via constructor. 3 new settings: `agent_briefing_timeout` (60s), `consolidation_llm_timeout` (30s), `web_search_timeout` (15s). 5 new tests.
 

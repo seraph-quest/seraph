@@ -11,7 +11,7 @@ sidebar_position: 3
 
 ## Executive Summary
 
-Seraph is in strong shape. Phases 0-3 are implemented and functional, delivering a proactive AI guardian with persistent identity, 12 tools, MCP extensibility, a sophisticated observer system, and a visually polished RPG village interface. The codebase is well-architected, clean, and production-quality for a single-user application.
+Seraph is in strong shape. Phases 0-3 are implemented and functional, delivering a proactive AI guardian with persistent identity, 16 tools, MCP extensibility, a sophisticated observer system, and a visually polished RPG village interface. The codebase is well-architected, clean, and production-quality for a single-user application.
 
 However, significant work remains to reach the stated vision of being "better than OpenClaw." OpenClaw exploded in late January 2026 (145k+ GitHub stars, millions of installs) and has become the defining AI agent of the moment. The competitive landscape has shifted dramatically. This report maps exactly where Seraph stands, what's missing, and what to prioritize.
 
@@ -25,7 +25,7 @@ However, significant work remains to reach the stated vision of being "better th
 |-------|--------|-----------------|
 | **0 - Foundation** | COMPLETE | Chat UI, WebSocket streaming, Phaser village, day/night cycle, wandering avatar |
 | **1 - Persistent Identity** | COMPLETE | Soul file, LanceDB vector memory, memory consolidation, hierarchical goals, onboarding |
-| **2 - Capable Executor** | COMPLETE | 12 auto-discovered tools, shell sandbox, browser automation, MCP support, tool registry |
+| **2 - Capable Executor** | COMPLETE | 16 auto-discovered tools, shell sandbox, browser automation, MCP support, tool registry, encrypted vault |
 | **3 - The Observer** | COMPLETE | APScheduler (6 jobs), user state machine (6 states), attention guardian, insight queue, macOS daemon |
 
 ### Backend Assessment: 85-90% Complete
@@ -35,7 +35,7 @@ However, significant work remains to reach the stated vision of being "better th
 - Robust async WebSocket streaming with step visibility
 - Full observer pipeline: daemon -> context manager -> user state machine -> delivery gate -> insight queue
 - 6 background jobs: memory consolidation (30min), goal check (4h), calendar scan (15min), strategist tick (15min), daily briefing (8AM), evening review (9PM)
-- Clean API surface: 15+ endpoints covering chat, sessions, goals, tools, MCP, observer, settings
+- Clean API surface: 35+ endpoints covering chat, sessions, goals, tools, MCP, skills, observer, settings, vault, catalog
 
 **Issues Found:**
 - `calendar_scan` job is registered in the scheduler but the implementation file appears incomplete/missing
@@ -53,12 +53,12 @@ However, significant work remains to reach the stated vision of being "better th
 - 125 distinct asset files (54 characters, 55 enemies, 22 tilesets, 15 animation sheets)
 - All animation states working: idle, thinking, walking, wandering, casting, speaking
 
-**Issues Found:**
-- No goal creation UI in the frontend (backend supports it, but users can only create goals through chat)
-- No interruption mode toggle in settings (backend API exists at `/api/settings/interruption-mode`, no frontend UI)
-- Quest panel has no search/filter/sort capabilities
-- Font sizes are tiny (7-9px) which may be hard to read
-- No keyboard shortcuts for panel toggling
+**Issues Found (all resolved):**
+- ~~No goal creation UI in the frontend~~ → Resolved: `GoalForm.tsx` with create/edit modal
+- ~~No interruption mode toggle in settings~~ → Resolved: `InterruptionModeToggle.tsx` in Settings panel
+- ~~Quest panel has no search/filter/sort capabilities~~ → Resolved: text search + level/domain dropdowns
+- ~~Font sizes are tiny (7-9px)~~ → Resolved: 9px minimum across all panels
+- ~~No keyboard shortcuts for panel toggling~~ → Resolved: Shift+C/Q/S, Escape
 
 ### Editor Assessment: Production-Ready
 

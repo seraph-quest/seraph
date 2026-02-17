@@ -125,12 +125,12 @@ RUN uv run playwright install chromium
 - [x] `browse_webpage("https://example.com")` returns page content
 - [x] Drop a new `.py` tool file in `src/tools/`, verify auto-discovered
 - [x] New tools trigger correct village casting animations
-- [x] 12 tools auto-discovered by plugin loader
-- [x] 18 routes registered (including `GET /api/tools`)
+- [x] 16 tools auto-discovered by plugin loader
+- [x] 35 routes registered (including `GET /api/tools`)
 - [x] TypeScript compiles clean
 - [x] Lock file updated
 
-## All 12 Tools (auto-discovered)
+## All 16 Tools (auto-discovered)
 
 | Tool | File |
 |------|------|
@@ -146,3 +146,7 @@ RUN uv run playwright install chromium
 | `get_goal_progress` | goal_tools.py |
 | `shell_execute` | shell_tool.py |
 | `browse_webpage` | browser_tool.py |
+| `store_secret` | vault_tools.py |
+| `get_secret` | vault_tools.py |
+| `list_secrets` | vault_tools.py |
+| `delete_secret` | vault_tools.py |

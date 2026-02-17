@@ -110,13 +110,17 @@ backend/src/scheduler/
 ```
 backend/src/observer/
   __init__.py
-  context.py                       # CurrentContext dataclass + manager
+  context.py                       # CurrentContext dataclass
+  manager.py                       # ContextManager singleton — refresh, state transitions, budget reset
   user_state.py                    # User state machine + interruption mode
+  delivery.py                      # deliver_or_queue() — routes through attention guardian
+  insight_queue.py                 # DB-backed queue (24h expiry)
   sources/
     __init__.py
     calendar_source.py             # Poll Google Calendar
     git_source.py                  # Watch git repo activity
     time_source.py                 # Time-of-day, day-of-week context
+    goal_source.py                 # Active goals summary
     screen_source.py               # Receive context from native daemon
 ```
 
@@ -155,7 +159,7 @@ class CurrentContext:
 
 ## 3.4 Native macOS Screen Daemon
 
-**Status**: Implemented (Phase 3.5) — Level 0: app name + window title
+**Status**: Implemented (Phase 3.5) — Dual-loop: window polling + optional OCR
 
 **Directory**: `daemon/` at repo root
 
@@ -164,17 +168,24 @@ class CurrentContext:
 **Files**:
 ```
 daemon/
-  seraph_daemon.py               # Main entry point — polling daemon
+  seraph_daemon.py               # Main entry point — dual-loop polling daemon
+  ocr/
+    base.py                      # ABC + OCRResult dataclass
+    screenshot.py                # Quartz screenshot capture
+    apple_vision.py              # Local VNRecognizeTextRequest (~200ms)
+    openrouter.py                # Cloud vision model (~$0.09/mo)
   requirements.txt               # pyobjc-framework-Cocoa, pyobjc-framework-Quartz, httpx
   run.sh                         # Quick start script (creates venv, installs deps, runs)
   README.md                      # Setup, permissions, usage, troubleshooting
 ```
 
-**Capabilities (Level 0 — current)**:
-- **Active window tracking**: App name via `NSWorkspace.sharedWorkspace().frontmostApplication` (no permission) + window title via AppleScript (Accessibility permission)
-- **Idle detection**: Seconds since last input via `Quartz.CGEventSourceSecondsSinceLastEventType` (no permission)
-- **Change detection**: Skips POST if `active_window` unchanged since last POST
-- **Idle gating**: Skips POST if user idle for `--idle-timeout` seconds (default 300)
+**Dual-loop architecture**:
+- **Window loop** (every 5s): App name via `NSWorkspace` + window title via AppleScript + idle detection via `Quartz.CGEventSourceSecondsSinceLastEventType`. Skips POST if `active_window` unchanged or user idle.
+- **OCR loop** (every 30s, opt-in via `--ocr`): Captures screen via `CGWindowListCreateImage`, runs through OCR provider, POSTs extracted text. Skips if text unchanged or user idle.
+
+**OCR providers** (`daemon/ocr/`):
+- **Apple Vision** (default): Local `VNRecognizeTextRequest`, free, ~200ms per capture. Requires Screen Recording permission.
+- **OpenRouter**: Cloud vision model (Gemini 2.0 Flash Lite), ~$0.09/mo at 30s interval. Requires API key.
 
 **IDE-based deep work detection** (`backend/src/observer/user_state.py`):
 - `_DEEP_WORK_APPS` tuple matches IDE/terminal app names (VS Code, Xcode, IntelliJ, iTerm, etc.)
@@ -182,21 +193,18 @@ daemon/
 - Calendar events always take priority (meeting overrides IDE)
 
 **Communication**:
-- POST to `http://localhost:8004/api/observer/context` with `{"active_window": "App — Title", "screen_context": null}`
+- Window loop POSTs `{"active_window": "App — Title"}` to `/api/observer/context`
+- OCR loop POSTs `{"screen_context": "extracted text"}` (partial updates, neither clobbers the other)
 - CLI args: `--url`, `--interval` (default 5s), `--idle-timeout` (default 300s), `--verbose`
+- OCR args: `--ocr`, `--ocr-provider` (`apple-vision` | `openrouter`), `--ocr-interval` (default 30s), `--ocr-model`
 - Graceful shutdown on SIGINT/SIGTERM, handles backend-down with warning + retry
 
 **Privacy**:
-- Only captures app name + window title — no screenshots, keystrokes, or screen content
-- Requires only Accessibility permission (one-time grant, no monthly nag)
+- Screenshots exist only as in-memory bytes, never written to disk
+- Requires Accessibility permission (window titles) + Screen Recording (OCR only, Sequoia monthly nag)
 - All data stays local (daemon posts to localhost backend only)
 
-**Future upgrade path** (see [Screen Daemon Research](./screen-daemon-research)):
-- Level 1: + OCR text extraction (requires Screen Recording permission)
-- Level 2: + Local VLM descriptions (FastVLM/Moondream, ~1GB RAM)
-- Level 3: + Cloud VLM on-demand (Gemini Flash-Lite ~$0.09/mo at 1/5min)
-
-**Quick start**: `./daemon/run.sh --verbose`
+**Quick start**: `./daemon/run.sh --verbose` (window only) or `./daemon/run.sh --ocr --verbose` (with OCR)
 
 ---
 
@@ -238,14 +246,10 @@ backend/src/observer/
 - Gathers: soul file, today's message count, completed goals today, git activity
 - Delivers with `is_scheduled=True` — bypasses delivery gate
 
-**Intervention types**:
-```python
-class InterventionType(str, Enum):
-    AMBIENT = "ambient"      # Visual cue only (avatar behavior change)
-    QUEUED = "queued"        # Added to queue, delivered at next transition
-    ADVISORY = "advisory"    # Direct message (only if available + budget allows)
-    URGENT = "urgent"        # Bypasses budget (missed meeting, same-day deadline)
-```
+**Intervention types** (string values used in WS protocol):
+- `nudge` — Speech bubble on avatar for 5s, no chat panel open
+- `advisory` — Direct message in chat (only if available + budget allows)
+- `alert` — Chat panel auto-opens, high-priority styling
 
 **Urgency scoring**:
 - 1: Ambient only — avatar behavior change, no text
@@ -254,7 +258,7 @@ class InterventionType(str, Enum):
 - 4: Deliver at next break regardless of budget
 - 5: Urgent bypass — deliver immediately unless deep_work mode
 
-**Insight queue** (`queue.py`):
+**Insight queue** (`insight_queue.py`):
 - Accumulates insights during focus/meeting states
 - On state transition to `available` or `transitioning`: deliver as batched bundle
 - "While you were focused: [3 items]"

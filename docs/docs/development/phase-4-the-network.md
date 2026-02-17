@@ -20,9 +20,8 @@ Phase 2's `@tool` auto-discovery requires Python code. OpenClaw's SKILL.md appro
 ```
 backend/src/skills/
   __init__.py
-  loader.py              # Scan workspace/skills/ for SKILL.md files
-  registry.py            # Merge SKILL.md skills with @tool plugins
-  validator.py           # Validate frontmatter, check requirements
+  loader.py              # Skill dataclass, YAML frontmatter parser, directory scanner
+  manager.py             # Singleton skill_manager; runtime enable/disable, config persistence
 ```
 
 **SKILL.md format**:
@@ -32,7 +31,7 @@ name: daily-standup
 description: Generate a standup report from git, calendar, and goals
 requires:
   tools: [shell_execute, get_calendar_events, get_goals]
-user-invocable: true
+user_invocable: true
 ---
 
 # Daily Standup Generator
@@ -44,15 +43,13 @@ When the user asks for a standup report:
 4. Format as: Yesterday / Today / Blockers
 ```
 
-**Loading precedence**:
-1. Workspace skills (`data/skills/`) — highest priority, user-created
-2. Managed skills (`~/.seraph/skills/`) — installed from registry
-3. Bundled skills (shipped with Seraph) — defaults
+**Skill loading**:
+- Skills are `.md` files in workspace `data/skills/` directory
+- Bundled defaults in `src/defaults/skills/` are seeded to workspace on first run (existing files never overwritten)
+- No multi-directory override hierarchy — workspace directory is the single source
 
 **Skill gating**:
-- `requires.tools` — only load if listed tools are available
-- `requires.env` — only load if env vars are set
-- `os` — platform restrictions (darwin/linux)
+- `requires.tools` — only load if listed tools are available (e.g., `moltbook` requires `http_request`)
 
 **Skill creation tool**:
 - Agent can create new skills on the fly via `write_file` to `data/skills/`

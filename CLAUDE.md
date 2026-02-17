@@ -73,7 +73,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 
 ### Backend (`backend/`)
 - **Stack**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
-- **Entry**: `main.py` → `src/app.py` (factory pattern with lifespan: init DB, ensure soul file)
+- **Entry**: `main.py` → `src/app.py` (factory pattern with lifespan: init DB, ensure soul file, init LLM logging)
 - **API routes** (`src/api/router.py`):
   - `src/api/chat.py` — `POST /api/chat` (REST chat, secondary to WS)
   - `src/api/ws.py` — `WS /ws/chat` (primary streaming interface)
@@ -242,6 +242,12 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `working_hours_start: int = 9`, `working_hours_end: int = 17`
   - `observer_git_repo_path: str = ""` — git repo to monitor
   - `deep_work_apps: str = ""` — custom app names that trigger deep_work state
+- **LLM call logging settings** (`config/settings.py`):
+  - `llm_log_enabled: bool = True` — enable LLM call logging
+  - `llm_log_content: bool = False` — include messages/response (large, privacy-sensitive)
+  - `llm_log_dir: str = "/app/logs"` — log file directory
+  - `llm_log_max_bytes: int = 52_428_800` — 50 MB per file
+  - `llm_log_backup_count: int = 5` — keep 5 rotated files
 - **Sandbox / browser settings** (`config/settings.py`):
   - `sandbox_url: str = "http://sandbox:8060"`, `sandbox_timeout: int = 35`
   - `browser_timeout: int = 30`

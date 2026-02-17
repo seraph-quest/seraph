@@ -68,6 +68,11 @@ Receive (streamed):
 | `AGENT_MAX_STEPS` | `10` | Max agent reasoning steps |
 | `DEBUG` | `false` | Enable debug mode |
 | `WORKSPACE_DIR` | `/app/data` | Agent file workspace |
+| `LLM_LOG_ENABLED` | `true` | Enable LLM call logging to JSONL file |
+| `LLM_LOG_CONTENT` | `false` | Include full messages/response in log |
+| `LLM_LOG_DIR` | `/app/logs` | Log file directory |
+| `LLM_LOG_MAX_BYTES` | `52428800` | Max bytes per log file before rotation (50 MB) |
+| `LLM_LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 
 ## Testing
 

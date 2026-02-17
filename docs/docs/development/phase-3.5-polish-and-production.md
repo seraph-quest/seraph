@@ -6,7 +6,7 @@ sidebar_position: 4
 
 **Goal**: Complete unfinished Phase 3 UI work, fix backend gaps, harden infrastructure, and eliminate adoption barriers — making what exists production-quality before expanding in Phase 4.
 
-**Status**: Mostly complete — 3.5.1 (Goal UI), 3.5.2 (Interruption Mode), 3.5.5 (Token-Aware Context), 3.5.6 (Timeouts), 3.5.9 (Accessibility) are done. 3.5.4 (Calendar) functional when credentials configured. 3.5.3 (Avatar State), 3.5.7 (Tauri), 3.5.8 (Infra Hardening) remain planned.
+**Status**: Mostly complete — 3.5.1 (Goal UI), 3.5.2 (Interruption Mode), 3.5.5 (Token-Aware Context), 3.5.6 (Timeouts), 3.5.9 (Accessibility), 3.5.10 (LLM Logging) are done. 3.5.4 (Calendar) functional when credentials configured. 3.5.3 (Avatar State), 3.5.7 (Tauri), 3.5.8 (Infra Hardening) remain planned.
 
 **Context**: The REPORT.md analysis (2026-02-12) identified several gaps between Phases 3 (complete) and 4 (planned) — items that are neither new features nor security concerns, but quality, robustness, and developer experience improvements needed to ship a solid product.
 
@@ -237,6 +237,27 @@ frontend/src/components/HudButtons.tsx    # Keyboard shortcut hints
 
 ---
 
+## 3.5.10 LLM Call Logging
+
+Global observability for all LiteLLM calls — both direct (`litellm.completion()`) and via smolagents (`LiteLLMModel`). Uses LiteLLM's `CustomLogger` callback system so no per-call-site changes are needed.
+
+**Files**:
+```
+backend/src/llm_logger.py        # SeraphLLMLogger + init_llm_logging()
+backend/config/settings.py       # 5 new settings (llm_log_*)
+```
+
+**Design**:
+- `SeraphLLMLogger(CustomLogger)` registered via `litellm.callbacks` in app lifespan
+- Writes one JSON line per call to `{llm_log_dir}/llm_calls.jsonl` via `RotatingFileHandler`
+- Fields: timestamp, status, model, call_type, provider, tokens (input/output/total), cost_usd, latency_ms, stream, api_base, error
+- Content logging (messages/response) gated by `llm_log_content` (default off for privacy)
+- All logging wrapped in try/except — never breaks an LLM call
+- Graceful degradation: if log directory is unwritable, logs warning and skips
+- No new dependencies — uses `litellm.integrations.custom_logger.CustomLogger` (already a dependency) and stdlib `logging.handlers.RotatingFileHandler`
+
+---
+
 ## Implementation Order
 
 1. **Interruption Mode UI** (3.5.2) — lowest effort, unlocks attention guardian for users
@@ -268,6 +289,7 @@ frontend/src/components/HudButtons.tsx    # Keyboard shortcut hints
 - [ ] No API keys committed in repo
 - [x] Font sizes readable (9px+ with pixel font) (Phase 3.5.9)
 - [x] Keyboard shortcuts toggle panels (Phase 3.5.9)
+- [x] LLM call logging writes JSONL with tokens, cost, and latency per call (Phase 3.5.10)
 - [ ] Tauri app launches with embedded backend (stretch goal)
 
 ---

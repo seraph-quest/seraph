@@ -93,6 +93,18 @@ Recursive delegation is an experimental feature where the agent delegates to spe
 | `DELEGATION_MAX_DEPTH` | `1` | Max nesting depth (1 = orchestrator → specialists) |
 | `ORCHESTRATOR_MAX_STEPS` | `8` | Max delegation steps for orchestrator |
 
+### Optional LLM call logging settings
+
+These control per-call observability logging for all LiteLLM calls (direct and via smolagents):
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_LOG_ENABLED` | `true` | Enable LLM call logging to JSONL file |
+| `LLM_LOG_CONTENT` | `false` | Include full messages and response text (large, privacy-sensitive) |
+| `LLM_LOG_DIR` | `/app/logs` | Directory for log files |
+| `LLM_LOG_MAX_BYTES` | `52428800` | Max bytes per log file before rotation (default 50 MB) |
+| `LLM_LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
+
 All settings with their defaults are defined in `backend/config/settings.py`.
 
 ## Start the stack

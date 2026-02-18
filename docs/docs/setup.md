@@ -49,6 +49,9 @@ These control when proactive features run (briefings, reviews, working hours):
 | `GOAL_CHECK_INTERVAL_HOURS` | `4` | Hours between goal progress checks |
 | `CALENDAR_SCAN_INTERVAL_MIN` | `15` | Minutes between calendar scans |
 | `STRATEGIST_INTERVAL_MIN` | `15` | Minutes between strategist ticks |
+| `ACTIVITY_DIGEST_HOUR` | `20` | Hour for the daily screen activity digest |
+| `WEEKLY_REVIEW_HOUR` | `18` | Hour for the Sunday weekly activity review |
+| `SCREEN_OBSERVATION_RETENTION_DAYS` | `90` | Days to keep screen observations before cleanup |
 | `SCHEDULER_ENABLED` | `true` | Enable/disable background scheduler |
 
 ### Optional observer settings
@@ -157,32 +160,37 @@ This is a one-time grant. The daemon will then report the frontmost app and wind
 | `--idle-timeout` | `300` | Seconds of inactivity before skipping POSTs |
 | `--verbose` | off | Log every context POST |
 
-## Optional: Screen OCR
+## Optional: Screen Activity Tracking
 
-OCR mode extracts visible text from the screen so the strategist agent can reason about what you're working on.
+Screen analysis captures and analyzes screenshots **on context switch** (when you change apps), producing structured activity data: activity type, project, summary. Observations are persisted to the database and power daily/weekly activity digests.
+
+Sensitive apps (password managers, banking, crypto wallets) are automatically blocked from screenshots.
 
 ```bash
 # Apple Vision (local, free, ~200ms per capture)
 ./daemon/run.sh --ocr --verbose
 
-# OpenRouter cloud OCR (Gemini 2.5 Flash Lite, ~$0.15/month at default 30s interval)
+# OpenRouter cloud analysis (Gemini 2.5 Flash Lite, structured JSON, ~$1.30/mo)
 OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
+
+# With custom app blocklist
+./daemon/run.sh --ocr --ocr-provider openrouter --blocklist-file ~/blocklist.json --verbose
 ```
 
 | Provider | Pros | Cons |
 |---|---|---|
 | `apple-vision` (default) | Free, offline, fast (~200ms) | Text-only, no layout understanding |
-| `openrouter` | Understands layout and context | Requires API key, small cost |
+| `openrouter` | Structured JSON output, understands layout | Requires API key, small cost |
 
-### OCR options
+### Screen analysis options
 
 | Flag | Default | Description |
 |---|---|---|
-| `--ocr` | off | Enable OCR screen text extraction |
-| `--ocr-provider` | `apple-vision` | `apple-vision` (local) or `openrouter` (cloud) |
-| `--ocr-interval` | `30` | OCR capture interval in seconds |
+| `--ocr` | off | Enable screenshot analysis on context switch |
+| `--ocr-provider` | `apple-vision` | `apple-vision` (local) or `openrouter` (cloud, structured) |
 | `--ocr-model` | `google/gemini-2.5-flash-lite` | Model for OpenRouter provider |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
+| `--blocklist-file` | (none) | Path to JSON blocklist config (extends built-in defaults) |
 
 ### Screen Recording permission
 

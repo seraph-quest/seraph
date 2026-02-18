@@ -95,6 +95,8 @@ class TestSchedulerEngine:
             mock_settings.strategist_interval_min = 15
             mock_settings.morning_briefing_hour = 8
             mock_settings.evening_review_hour = 21
+            mock_settings.activity_digest_hour = 20
+            mock_settings.weekly_review_hour = 18
             mock_settings.user_timezone = "UTC"
 
             from src.scheduler.engine import init_scheduler, shutdown_scheduler
@@ -110,6 +112,9 @@ class TestSchedulerEngine:
                     "strategist_tick",
                     "daily_briefing",
                     "evening_review",
+                    "activity_digest",
+                    "weekly_activity_review",
+                    "screen_cleanup",
                 }
             finally:
                 shutdown_scheduler()

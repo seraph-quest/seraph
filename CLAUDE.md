@@ -84,7 +84,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/mcp.py` — `GET /api/mcp/servers`, `POST /api/mcp/servers`, `PUT /api/mcp/servers/{name}`, `DELETE /api/mcp/servers/{name}`, `POST /api/mcp/servers/{name}/test`, `POST /api/mcp/servers/{name}/token`
   - `src/api/skills.py` — `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
   - `src/api/catalog.py` — `GET /api/catalog` (browse catalog with install status), `POST /api/catalog/install/{name}` (install skill or MCP server from catalog)
-  - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data), `GET /api/observer/daemon-status` (daemon heartbeat connectivity check), `POST /api/observer/refresh` (debug)
+  - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data + structured observations), `GET /api/observer/daemon-status` (daemon heartbeat connectivity check), `GET /api/observer/activity/today` (daily activity summary), `POST /api/observer/refresh` (debug)
   - `src/api/settings.py` — `GET /api/settings/interruption-mode`, `PUT /api/settings/interruption-mode`
   - `src/api/vault.py` — `GET /api/vault/keys` (list keys with metadata, no values), `DELETE /api/vault/keys/{key}`
   - `/health` — health check (defined in `src/app.py`)
@@ -143,7 +143,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `context_window.py` — Token-aware context window builder (keep first N + last M, summarize middle; reads defaults from settings)
   - `session.py` — Async session manager (SQLite-backed)
-- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`, `Secret`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
+- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`, `Secret`, `ScreenObservation`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
 - **Scheduler** (`src/scheduler/`):
   - `engine.py` — APScheduler setup, job registration on app lifespan
   - `connection_manager.py` — WebSocket broadcast manager (`ws_manager`)
@@ -153,6 +153,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `jobs/strategist_tick.py` — Periodic strategic reasoning via restricted agent; refreshes context, runs strategist agent, parses decision, routes through `deliver_or_queue` (every 15 min)
   - `jobs/daily_briefing.py` — Morning briefing via LiteLLM; gathers soul/calendar/goals/memories, delivers with `is_scheduled=True` (cron 8 AM)
   - `jobs/evening_review.py` — Evening reflection via LiteLLM; counts today's messages/completed goals, delivers with `is_scheduled=True` (cron 9 PM)
+  - `jobs/activity_digest.py` — Daily screen activity digest via LiteLLM; queries `screen_observation_repo.get_daily_summary()`, generates time/project/focus analysis, delivers with `is_scheduled=True` (cron, default 8 PM)
+  - `jobs/weekly_activity_review.py` — Weekly activity review via LiteLLM; queries 7-day summary, generates trends/suggestions, delivers with `is_scheduled=True` (cron Sunday, default 6 PM)
+  - `jobs/screen_cleanup.py` — Retention cleanup for `screen_observations` table (cron 3 AM daily, default 90 days retention)
 - **Observer** (`src/observer/`):
   - `context.py` — `CurrentContext` dataclass (time, calendar, git, goals, user state, screen, attention budget, `last_daemon_post` heartbeat) + `to_prompt_block()`
   - `manager.py` — `ContextManager` singleton; refreshes all sources, derives user state, detects state transitions, delivers queued bundles
@@ -160,22 +163,25 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `delivery.py` — `deliver_or_queue()` routes proactive messages through the attention guardian; `deliver_queued_bundle()` drains queue on state transitions
   - `insight_queue.py` — DB-backed queue for insights held during blocked states (24h expiry)
   - `user_state.py` also includes `_DEEP_WORK_APPS` — IDE/terminal app names that trigger `deep_work` state when detected in `active_window` (priority between calendar and transition detection)
+  - `screen_repository.py` — `ScreenObservationRepository` — async CRUD + aggregation for screen observations (`create` with duration backfill, `get_daily_summary`, `get_weekly_summary`, `cleanup_old`)
   - `sources/` — `time_source.py`, `calendar_source.py`, `git_source.py`, `goal_source.py`, `screen_source.py` (daemon API contract + implementation status)
 - **CORS**: Allows `localhost:3000` and `localhost:5173`
 
 ### Native Daemon (`daemon/`)
 - **Stack**: Python 3.12, PyObjC, httpx
 - **Entry**: `seraph_daemon.py` — runs natively on macOS (outside Docker)
-- **Dual-loop architecture**: window polling (every 5s) + optional OCR loop (every 30s, `--ocr` flag)
+- **Single-loop architecture**: window polling (every 5s) + screenshot analysis on context switch (`--ocr` flag)
 - Polls frontmost app name (`NSWorkspace`, no permission) + window title (AppleScript, Accessibility permission) + idle seconds (`Quartz.CGEventSourceSecondsSinceLastEventType`, no permission)
-- **Change detection**: skips POST if `active_window` unchanged since last POST; OCR loop also skips if extracted text unchanged
-- **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300); both loops respect idle
-- POSTs to `POST /api/observer/context` — window loop sends `{"active_window": "App — Title"}`, OCR loop sends `{"screen_context": "extracted text"}` (partial updates, neither clobbers the other)
+- **Change detection**: skips POST if `active_window` unchanged since last POST
+- **Screenshot on context switch**: when `--ocr` is enabled and app changes, captures screenshot → analyzes via vision model → sends structured observation (activity type, project, summary, details)
+- **App blocklist** (`daemon/blocklist.py`): default blocklist (password managers, banking, crypto wallets, Signal) + custom JSON config via `--blocklist-file`. Case-insensitive substring matching. Blocked apps get `blocked: true` in observation, no screenshot taken.
+- **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300)
+- POSTs to `POST /api/observer/context` — sends `{"active_window": "App — Title", "observation": {...}, "switch_timestamp": float}`. Observation field includes `app`, `window_title`, `activity`, `project`, `summary`, `details`, `blocked`. Without `--ocr`, sends only `active_window`.
 - **CLI args**: `--url` (default `http://localhost:8004`), `--interval` (default `5`), `--idle-timeout` (default `300`), `--verbose`
-- **OCR CLI args** (opt-in): `--ocr` (enable), `--ocr-provider` (`apple-vision` | `openrouter`), `--ocr-interval` (default `30`), `--ocr-model` (default `google/gemini-2.5-flash-lite`), `--openrouter-api-key` (or `OPENROUTER_API_KEY` env var)
-- **OCR providers** (`daemon/ocr/`): pluggable provider pattern — `base.py` (ABC + `OCRResult` dataclass), `screenshot.py` (Quartz screenshot capture), `apple_vision.py` (local VNRecognizeTextRequest, ~200ms), `openrouter.py` (cloud vision model, ~$0.15/mo)
+- **OCR CLI args** (opt-in): `--ocr` (enable), `--ocr-provider` (`apple-vision` | `openrouter`), `--ocr-model` (default `google/gemini-2.5-flash-lite`), `--openrouter-api-key` (or `OPENROUTER_API_KEY` env var), `--blocklist-file` (custom blocklist JSON), `--ocr-interval` (deprecated, ignored)
+- **OCR providers** (`daemon/ocr/`): pluggable provider pattern — `base.py` (ABC + `OCRResult` + `AnalysisResult` dataclasses), `screenshot.py` (Quartz screenshot capture), `apple_vision.py` (local VNRecognizeTextRequest, ~200ms), `openrouter.py` (cloud vision model, structured JSON analysis via `analyze_screen()`)
 - **Permissions**: Accessibility (window titles, one-time grant) + Screen Recording (only for `--ocr`, Sequoia monthly nag)
-- **Privacy**: screenshots exist only as in-memory bytes, never written to disk
+- **Privacy**: screenshots exist only as in-memory bytes, never written to disk. Blocked apps are never screenshotted.
 - Graceful shutdown on SIGINT/SIGTERM, handles backend-down with warning + retry
 - Research on future upgrades (OCR, VLMs, cloud APIs): `docs/docs/development/screen-daemon-research.md`
 - **Quick start**: `./daemon/run.sh` (creates venv, installs deps, starts daemon)
@@ -236,6 +242,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `strategist_interval_min: int = 15`
   - `morning_briefing_hour: int = 8`
   - `evening_review_hour: int = 21`
+  - `activity_digest_hour: int = 20` — daily screen activity digest
+  - `weekly_review_hour: int = 18` — Sunday weekly activity review
+  - `screen_observation_retention_days: int = 90` — retention for screen observation cleanup
 - **Observer / proactivity settings** (`config/settings.py`):
   - `proactivity_level: int = 3` — default proactivity dial
   - `user_timezone: str = "UTC"`
@@ -314,12 +323,10 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 │  poll_loop (every 5s):                                │
 │    NSWorkspace → app name                            │
 │    osascript → window title                          │
-│    POST {"active_window": "VS Code — main.py"}       │
-│                                                      │
-│  ocr_loop (every 30s, if --ocr):                     │
-│    CGWindowListCreateImage → PNG bytes               │
-│    → OCR provider (apple-vision or openrouter)       │
-│    POST {"screen_context": "extracted text..."}       │
+│    if window changed AND --ocr:                       │
+│      if app blocked → observation = {blocked: true}   │
+│      else → screenshot → analyze_screen() → JSON     │
+│    POST {active_window, observation, switch_timestamp} │
 └────────────────────┬─────────────────────────────────┘
                      │ POST /api/observer/context
                      ▼
@@ -327,15 +334,24 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 │  Backend (Docker, localhost:8004)                      │
 │                                                      │
 │  update_screen_context() [partial update + heartbeat]  │
-│  → active_window + screen_context both preserved      │
+│  → active_window preserved in CurrentContext          │
 │  → last_daemon_post timestamp recorded on every POST  │
 │  → to_prompt_block() includes "Screen content:…"     │
 │  → chat agent + strategist both see screen context    │
+│                                                      │
+│  if observation present:                               │
+│  → screen_observation_repo.create() [persist to DB]   │
+│  → backfills duration_s on previous observation       │
 │                                                      │
 │  UserStateMachine.derive_state() [enhanced]:          │
 │  if active_window matches IDE → deep_work             │
 │  → delivery gate queues proactive messages             │
 │  → ambient state pushed to frontend                    │
+│                                                      │
+│  Scheduler jobs:                                       │
+│  → activity_digest (8 PM) — daily analysis via LLM    │
+│  → weekly_activity_review (Sun 6 PM) — weekly review  │
+│  → screen_cleanup (3 AM) — retention cleanup (90 days) │
 └──────────────────────────────────────────────────────┘
 ```
 

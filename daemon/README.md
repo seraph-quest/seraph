@@ -103,34 +103,46 @@ Example with all options:
 python seraph_daemon.py --url http://localhost:8004 --interval 3 --idle-timeout 600 --verbose
 ```
 
-### OCR Options
+### Screen Analysis Options
 
-OCR is opt-in and requires the Screen Recording permission.
+Screen analysis is opt-in and runs **on context switch** (not a timer). When you switch apps, the daemon captures and analyzes the screen to produce structured activity data (activity type, project, summary). Blocked apps (password managers, banking, etc.) are never screenshotted.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--ocr` | off | Enable OCR screen text extraction |
-| `--ocr-provider` | `apple-vision` | OCR provider: `apple-vision` (local) or `openrouter` (cloud) |
-| `--ocr-interval` | `30` | OCR capture interval in seconds |
+| `--ocr` | off | Enable screenshot analysis on context switch |
+| `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local) or `openrouter` (cloud, structured JSON) |
 | `--ocr-model` | `google/gemini-2.5-flash-lite` | Model for OpenRouter provider |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
+| `--blocklist-file` | (none) | Path to JSON blocklist config (extends built-in defaults) |
+| `--ocr-interval` | (deprecated) | Ignored — OCR now runs on context switch |
 
 Examples:
 
 ```bash
-# Local OCR — Apple Vision framework (free, offline, ~200ms per capture)
+# Local analysis — Apple Vision framework (free, offline, ~200ms per capture)
 ./daemon/run.sh --ocr --verbose
 
-# Local OCR with faster capture interval (every 15s instead of 30s)
-./daemon/run.sh --ocr --ocr-interval 15 --verbose
-
-# Cloud OCR — OpenRouter with Gemini 2.5 Flash Lite (default model, ~$0.15/mo at 1/30s)
+# Cloud analysis — OpenRouter with Gemini (structured JSON, ~$1.30/mo at ~150 switches/day)
 OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
 
-# Cloud OCR with explicit model selection
-OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter \
-  --ocr-model google/gemini-2.5-flash-lite --verbose
+# With custom blocklist
+./daemon/run.sh --ocr --ocr-provider openrouter --blocklist-file ~/blocklist.json --verbose
 ```
+
+### App Blocklist
+
+Sensitive apps are never screenshotted. Built-in blocked apps include: password managers (1Password, Bitwarden, LastPass, etc.), banking apps, crypto wallets, and Signal.
+
+Custom blocklist config (`--blocklist-file`):
+```json
+{
+  "blocked_apps": ["TikTok", "Instagram"],
+  "allowed_apps": ["Signal"]
+}
+```
+
+- `blocked_apps`: added to defaults (case-insensitive substring match)
+- `allowed_apps`: removed from defaults (overrides)
 
 ## Permissions
 
@@ -176,7 +188,22 @@ The daemon posts to `POST /api/observer/context`:
 ```json
 {
   "active_window": "VS Code — main.py",
-  "screen_context": null
+  "observation": {
+    "app": "VS Code",
+    "window_title": "main.py",
+    "activity": "coding",
+    "project": "seraph",
+    "summary": "Editing Python file in VS Code",
+    "details": ["file: main.py", "language: Python"]
+  },
+  "switch_timestamp": 1700000000.0
+}
+```
+
+Without `--ocr`, the payload is simpler (no `observation` field):
+```json
+{
+  "active_window": "VS Code — main.py"
 }
 ```
 

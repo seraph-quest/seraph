@@ -15,7 +15,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Key files**:
   - `src/game/main.ts` - Phaser game factory (`StartGame(parent)`) called by PhaserGame
   - `src/game/PhaserGame.tsx` - React wrapper for Phaser instance
-  - `src/game/scenes/VillageScene.ts` - Village scene (dynamic Tiled JSON map, buildings with interiors, forest, day/night cycle, magic effects)
+  - `src/game/scenes/VillageScene.ts` - Village scene (dynamic Tiled JSON map, buildings with interiors, forest, magic effects)
   - `src/game/objects/AgentSprite.ts` - Phaser sprite for Seraph avatar
   - `src/game/objects/UserSprite.ts` - Phaser sprite for user avatar
   - `src/game/objects/NpcSprite.ts` - NPC sprite with wandering behavior, supports character + enemy types
@@ -172,8 +172,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 - **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300); both loops respect idle
 - POSTs to `POST /api/observer/context` — window loop sends `{"active_window": "App — Title"}`, OCR loop sends `{"screen_context": "extracted text"}` (partial updates, neither clobbers the other)
 - **CLI args**: `--url` (default `http://localhost:8004`), `--interval` (default `5`), `--idle-timeout` (default `300`), `--verbose`
-- **OCR CLI args** (opt-in): `--ocr` (enable), `--ocr-provider` (`apple-vision` | `openrouter`), `--ocr-interval` (default `30`), `--ocr-model` (default `google/gemini-2.0-flash-lite-001`), `--openrouter-api-key` (or `OPENROUTER_API_KEY` env var)
-- **OCR providers** (`daemon/ocr/`): pluggable provider pattern — `base.py` (ABC + `OCRResult` dataclass), `screenshot.py` (Quartz screenshot capture), `apple_vision.py` (local VNRecognizeTextRequest, ~200ms), `openrouter.py` (cloud vision model, ~$0.09/mo)
+- **OCR CLI args** (opt-in): `--ocr` (enable), `--ocr-provider` (`apple-vision` | `openrouter`), `--ocr-interval` (default `30`), `--ocr-model` (default `google/gemini-2.5-flash-lite`), `--openrouter-api-key` (or `OPENROUTER_API_KEY` env var)
+- **OCR providers** (`daemon/ocr/`): pluggable provider pattern — `base.py` (ABC + `OCRResult` dataclass), `screenshot.py` (Quartz screenshot capture), `apple_vision.py` (local VNRecognizeTextRequest, ~200ms), `openrouter.py` (cloud vision model, ~$0.15/mo)
 - **Permissions**: Accessibility (window titles, one-time grant) + Screen Recording (only for `--ocr`, Sequoia monthly nag)
 - **Privacy**: screenshots exist only as in-memory bytes, never written to disk
 - Graceful shutdown on SIGINT/SIGTERM, handles backend-down with warning + retry
@@ -348,7 +348,6 @@ deliver_or_queue()  ← attention guardian (Phase 3.3)
 - **WASD/arrow key movement**: User avatar moves tile-by-tile with collision checking (`handlePlayerInput()` in update loop); blocked during tween
 - **Character sprite assignment**: Spawn point objects with `sprite_sheet` property (format `Character_XXX_Y`) parsed to `SpriteConfig { key, colOffset }`; `createCharSheetAnimations()` builds directional animations from 16-column sheets
 - Procedural forest (density 0.45, max 300 trees)
-- Day/night cycle (hours 6-17 = day, 18+ = night)
 - Agent wanders between walkable tiles when idle (A* pathfinding via `Pathfinder`)
 - User avatar positioned at home spawn point
 

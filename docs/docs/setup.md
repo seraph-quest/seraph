@@ -165,7 +165,7 @@ OCR mode extracts visible text from the screen so the strategist agent can reaso
 # Apple Vision (local, free, ~200ms per capture)
 ./daemon/run.sh --ocr --verbose
 
-# OpenRouter cloud OCR (Gemini 2.0 Flash Lite, ~$0.09/month)
+# OpenRouter cloud OCR (Gemini 2.5 Flash Lite, ~$0.15/month at default 30s interval)
 OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
 ```
 
@@ -181,7 +181,7 @@ OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --v
 | `--ocr` | off | Enable OCR screen text extraction |
 | `--ocr-provider` | `apple-vision` | `apple-vision` (local) or `openrouter` (cloud) |
 | `--ocr-interval` | `30` | OCR capture interval in seconds |
-| `--ocr-model` | `google/gemini-2.0-flash-lite-001` | Model for OpenRouter provider |
+| `--ocr-model` | `google/gemini-2.5-flash-lite` | Model for OpenRouter provider |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
 
 ### Screen Recording permission

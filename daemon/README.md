@@ -112,7 +112,7 @@ OCR is opt-in and requires the Screen Recording permission.
 | `--ocr` | off | Enable OCR screen text extraction |
 | `--ocr-provider` | `apple-vision` | OCR provider: `apple-vision` (local) or `openrouter` (cloud) |
 | `--ocr-interval` | `30` | OCR capture interval in seconds |
-| `--ocr-model` | `google/gemini-2.0-flash-lite-001` | Model for OpenRouter provider |
+| `--ocr-model` | `google/gemini-2.5-flash-lite` | Model for OpenRouter provider |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
 
 Examples:
@@ -124,12 +124,12 @@ Examples:
 # Local OCR with faster capture interval (every 15s instead of 30s)
 ./daemon/run.sh --ocr --ocr-interval 15 --verbose
 
-# Cloud OCR — OpenRouter with Gemini Flash 1.5 8B (default model, ~$0.09/mo at 1/30s)
+# Cloud OCR — OpenRouter with Gemini 2.5 Flash Lite (default model, ~$0.15/mo at 1/30s)
 OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
 
 # Cloud OCR with explicit model selection
 OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter \
-  --ocr-model google/gemini-2.0-flash-lite-001 --verbose
+  --ocr-model google/gemini-2.5-flash-lite --verbose
 ```
 
 ## Permissions

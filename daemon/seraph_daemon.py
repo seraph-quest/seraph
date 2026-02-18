@@ -287,8 +287,8 @@ async def main() -> None:
     )
     parser.add_argument(
         "--ocr-model",
-        default="google/gemini-2.0-flash-lite-001",
-        help="Model for OpenRouter OCR (default: google/gemini-2.0-flash-lite-001)",
+        default="google/gemini-2.5-flash-lite",
+        help="Model for OpenRouter OCR (default: google/gemini-2.5-flash-lite)",
     )
     parser.add_argument(
         "--openrouter-api-key",

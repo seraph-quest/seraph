@@ -10,7 +10,7 @@ from ocr.base import OCRProvider, OCRResult
 
 logger = logging.getLogger("seraph_daemon")
 
-_DEFAULT_MODEL = "google/gemini-2.0-flash-lite-001"
+_DEFAULT_MODEL = "google/gemini-2.5-flash-lite"
 
 _SYSTEM_PROMPT = (
     "You are a screen reader. Describe the visible text on screen concisely. "

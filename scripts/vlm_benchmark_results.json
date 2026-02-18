@@ -1,0 +1,174 @@
+[
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.30.42.png",
+    "model": "Moondream v2 1.8B",
+    "response": "\nThe image shows a computer screen with two open windows side by side. The left window displays a black and white document titled \"code\", while the right window has a white document titled \"text\". Both windows have visible text that reads \"code\" in the left window, and \"text\" in the right window. The user is likely working on multiple tasks or projects simultaneously, as indicated by the presence of two distinct documents with different contents.",
+    "latency_s": 6.15,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.31.00.png",
+    "model": "Moondream v2 1.8B",
+    "response": "\n The image shows a computer monitor with two open windows side by side. On the left window, there's a document titled \"code\" displayed in white text against a black background. The right window has a document titled \"text\" written in red text on a white background. Both windows have multiple tabs and applications open, indicating that the user is likely working on different tasks or projects simultaneously.",
+    "latency_s": 3.1,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.32.48.png",
+    "model": "Moondream v2 1.8B",
+    "response": "\n The image shows a computer monitor displaying two windows side by side. On the left window, there's a white background with black text that reads \"Lorem ipsum dolor sit amet.\" This window contains some visible text as well. On the right window, there are two blue boxes containing code and a green field with text. The code is written in red and appears to be part of a larger program or application. The user might be working on this computer screen, possibly writing or editing code for an application that uses the \"Lorem ipsum\" string as its placeholder.",
+    "latency_s": 3.54,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.35.39.png",
+    "model": "Moondream v2 1.8B",
+    "response": "\nThe image shows a computer screen with two open windows side by side. The left window displays a webpage with a black background and white text, while the right window has a gray background and white text. Both windows have a header that says \"www.sosu.com\". In the left window, there is a list of file names displayed in the top left corner, and in the right window, there are two tabs open with different contents. The first tab contains a code block, while the second tab has a text box.",
+    "latency_s": 3.54,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.30.42.png",
+    "model": "SmolVLM2 2.2B",
+    "response": "The image shows a screenshot of an iOS application named \"Weather\". This application appears to be used for weather forecasting or information retrieval purposes. \n\nVisible Text: \n- The app's name, \"Weather\", is displayed prominently at the top center of the screen.\n- It has various labels and buttons which seem to indicate different functionalities such as 'Today', '5 Day Forecast', etc.\n- There are icons for weather conditions like 'Sunny', 'Rainy', etc.\n- User can view the temperature, humidity, wind speed and other related data. \n\nCode: \nThe application uses a combination of Swift code and UI components to function. The UI includes buttons, text fields, and a list or grid where data is displayed.\n\nUI Elements:\n- There are various labels and information boxes displaying weather conditions like temperature, humidity, wind speed etc.\n- A large screen shows the forecast for 5 days, including today's forecast.\n  \nUser is likely searching for current weather details, predictions for tomorrow and past weather records. The app seems user-friendly with a simple interface to access detailed weather information.",
+    "latency_s": 6.18,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.31.00.png",
+    "model": "SmolVLM2 2.2B",
+    "response": "The image is a screenshot of a webpage that appears to be related to the Microsoft Office or Excel application, as indicated by the presence of file names like \"Office 365_office_report.xlsx\" and \"Report1.xlsx\". The visible text on the page includes lines such as \"Office 365\", \"Microsoft\", and references to an action such as \"Open Office Report - Read & Share\" in a blue button at the top right of the screen.\n\nAs for UI elements, there are several buttons scattered across the webpage, including buttons like \"Share\", \"Save\", and \"Print\". These likely function to share, save, or print documents within the office environment. There is also an area that seems to be a calendar with dates listed on it, though the exact functionality of this feature isn't clear from the image alone.\n\nIn terms of what the user is doing, it appears that they are navigating through various options and features within the Microsoft Office or Excel application, possibly related to creating, editing, and sharing office documents. The buttons suggest that there might be functionalities for downloading reports, viewing shared files, and sharing them with others in a collaborative environment.\n\nOverall, the screenshot depicts a typical interface where users can interact with various functionalities offered by the Microsoft Office or Excel applications to manage their work efficiently.",
+    "latency_s": 5.14,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.32.48.png",
+    "model": "SmolVLM2 2.2B",
+    "response": "The image displays a screenshot of an email inbox interface from a popular email service provider. The application's name, as seen in the top left corner, reads \"Gmail\". In the main section, there are multiple folders represented by folders icons. Below these folders, you can see the visible text and file names. These files seem to be related to communication content such as emails and possibly attachments or drafts.\n\nIn the middle of the screen, there's a list of email threads displayed in a chronological order with timestamps at the top, indicating when they were received or sent. Each thread contains its own message preview with images and text visible, allowing users to quickly understand the contents of each communication without opening them directly. \n\nTo the left side of the screen are various buttons and options commonly found in email clients: 'Next' button (likely to browse through more emails), 'Reply', 'Reply to selected conversations' (a specific reply function for a set of messages), 'Forward', and possibly others depending on the context.\n\nThe bottom part of the screen might show some additional details or options, but they are not clearly visible in this particular screenshot.\n\nAs for what the user is doing: The user has navigated to their email inbox and selected to view or scroll through an existing email thread. The precise actions being taken depend on further context which isn't provided by the image itself. If the user is actively replying, they are using the 'Reply' function. If they're simply browsing through the emails, they might be clicking on a specific message in one of the threads for more information or to read it.\n\nFor anyone who hasn't used Gmail's interface, here\u2019s a brief overview:\n- **Folders**: These are visual representations of categories that help organize your emails. You can create new folders based on topics, dates, or other criteria.\n- **Emails Threads**: Each conversation is represented by an email thread, which shows the sender and receiver information, message preview, and sometimes attachments.\n- **Timestamps**: These are displayed at the top of each email to show when it was received or sent.\n- **Options**: There are usually buttons for various functions like 'Reply', 'Forward', etc., located on the left side of the screen.\n\nThis interface is user-friendly with a simple and clean design that's easy to navigate through multiple emails at once. Gmail\u2019s emphasis on organization through folders and clear timestamps ensures that users can quickly locate and manage their communications.",
+    "latency_s": 10.69,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.35.39.png",
+    "model": "SmolVLM2 2.2B",
+    "response": "The image depicts a computer monitor displaying a webpage with various elements such as text, images, buttons, and interactive controls. Let me describe each component in detail:\n\n1. **Application Name**: There are multiple windows open on the screen. One window is identified as \"Google Chrome\" which is suggested by the presence of the Google logo at the top left corner of the browser's window. The application name is not explicitly visible, but it can be inferred from its appearance and context.\n\n2. **Visible Text**: \n   - Various tabs are open in Google Chrome:\n     - Tab 1 contains \"Google\" along with other webpages that were presumably opened in this tab.\n     - Tab 2 has \"Flickr\" which is a popular photo-sharing site.\n   - The text on the screen is written in English and includes hyperlinks, indicating that the user might be browsing for information or viewing content online.\n\n3. **File Names**: \n   - There are multiple files visible but no specific names can be determined due to the lack of clarity or zoom level. However, it's clear they are related to browsing and downloading from various websites.\n\n4. **Code**: The exact code is not readable in this image as it would require a closer look and more technical knowledge than I possess. However, if we assume that the code might be present within the browser window or web pages (HTML, CSS, JavaScript), then there are typical components like HTML elements, responsive design aspects, and possibly some user interface interactions through JavaScript functions.\n\n5. **UI Elements**: \n   - Various UI elements like buttons, icons, and navigation bars are present in the tabs.\n   - The presence of these elements indicates that the user is actively engaging with different websites or applications within Google Chrome, managing multiple tasks simultaneously.\n\n**What the User Is Doing:**\n- The user is browsing through various web pages using Google Chrome, likely looking for information, viewing photos from Flickr, and possibly interacting with other functionalities available on the open tabs.\n\nPlease note that without actual screenshots or a more detailed view of the browser settings, details about specific websites being visited and actions performed may be speculative based on this description. The user could also be engaged in browsing multiple topics simultaneously, but the exact nature of their activity is not determinable from this image alone.",
+    "latency_s": 11.35,
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.30.42.png",
+    "model": "Gemini 2.5 Flash Lite",
+    "response": "The screen displays a terminal emulator (iTerm2) on the left side and a web browser (Chrome, on a Mac based on the menu bar) on the right.\n\n**iTerm2 (Left Side):**\n\n*   **Application Name:** iTerm2 is visible in the window title bar.\n*   **File Names/Code:** The terminal prompt indicates `Qwen3-VL Model (-zsh)`. There are commands related to fetching a file (`wget` or similar) and then a command line starting with `\u25ba\u25ba accept edits on rm /Users/bigcube/Desktop/repos/seraph/. (running)`. This suggests the user is actively editing or committing changes to a file within a `seraph` project directory. There's also a comment `* Cogitated for 1m 50s`.\n*   **UI Elements:** Standard terminal window elements like the menu bar (iTerm2, Shell, Edit, View, Session, Scripts, Profiles, Window, Help), scroll bar, and a prompt are present. The text is in a dark theme with a monospace font.\n*   **Visible Text:** The terminal contains a downloaded report summary about \"Qwen3-VL\", including benchmark scores, model details, and comparisons. It also lists sources for further information.\n\n**Web Browser (Right Side):**\n\n*   **Application Name:** Not explicitly stated, but the interface resembles Chrome or a similar browser.\n*   **File Names/Code:** The URL appears to be `perplexity.ai/search/latest-sota-for-local-vision-m-meepTnOCRZAW.2B9LZIENA`. The tab title is \"latest sota for local vision models\". Other tabs show varied content, including development-related sites (GitHub, GitHub), productivity tools (Profitability of Mo...), and general web content.\n*   **UI Elements:**\n    *   A sidebar on the far right with icons for \"History\", \"Discover\", \"Spaces\", \"Finance\", and \"More\".\n    *   A search bar/answer area with \"Answer\", \"Links\", and \"Images\" tabs.\n    *   A content area displaying a search result or article about \"latest sota for local vision models\".\n    *   Buttons for \"Share\" and \"Download Comet\".\n    *   A feedback/chat interface at the bottom with",
+    "latency_s": 7.2,
+    "usage": {
+      "prompt_tokens": 2354,
+      "completion_tokens": 500,
+      "total_tokens": 2854,
+      "cost": 0.0004354,
+      "is_byok": false,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+        "video_tokens": 0
+      },
+      "cost_details": {
+        "upstream_inference_cost": 0.0004354,
+        "upstream_inference_prompt_cost": 0.0002354,
+        "upstream_inference_completions_cost": 0.0002
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      }
+    },
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.31.00.png",
+    "model": "Gemini 2.5 Flash Lite",
+    "response": "The screen displays a code editor, specifically VS Code, as indicated by the \"Built with Electron\" branding at the bottom and the typical VS Code UI elements. The application name is not explicitly visible as a title bar, but the context strongly suggests VS Code.\n\n**Visible Text:**\n\n*   **Top Menu Bar:** \"File\", \"Edit\", \"Selection\", \"View\", \"Run\", \"Terminal\", \"Window\", \"Help\".\n*   **File Explorer:** \"OPEN EDITORS\", \"Welcome\", \"BACKUPS\", \"HFT [SSH: nqrok]\", a section with file names like \"current_cycle.md\", \"decisions_log.md\", \"fund_state.md\", \"research_log.md\", \"run_all_backtests.py\", etc.\n*   **Editor Pane (Left):** Primarily code and comments related to trading strategies, with lines starting with \"##\" indicating headers, and lines starting with \"#\" or \"---\" being comments or strategy descriptions. Specific lines mention \"current_cycle.md\", \"strat_fr_atr_vc\", \"strat_vol_vol_breakout\", and strategy parameters like RSI, TP, and stop loss.\n*   **Editor Pane (Right, Tabbed):**\n    *   **Server Tab:** \"Server\", \"tracking, optimized for\", \"desktop via stdio.\", \"jects, clients, tags, tasks,\", \"tion\", \"d-only access \u2014 queries,\", \"insights\", \"D \u2014 create/update/delete\", \"ries, projects, etc.\", \"read mode \u2014 the LLM never\", \"hcr.io/seraph-quest/toggl-1\".\n    *   **KILO CODE Tab:** Contains code snippets.\n    *   **CHAT Tab:** \"CHAT\", \"SESSIONS\", \"This session is being continued from a p...\", \"Completed\", \"4 hrs ago\".\n*   **Build with Agent Section:** \"Build with Agent\", \"AI responses may be inaccurate.\", \"Generate Agent Instructions to onboard AI onto your\", \"codebase.\"\n*   **Suggested Actions Section:** \"SUGGESTED ACTIONS\", \"Build Workspace\", \"Show Config\", \"Add Context...\", \"Describe what to build next\".\n*   **Bottom Bar:** \"Ln 1\", \"Col 1\", \"Spaces: 4\", \"UTF-8\", \"$K\", \"LF",
+    "latency_s": 7.84,
+    "usage": {
+      "prompt_tokens": 2354,
+      "completion_tokens": 500,
+      "total_tokens": 2854,
+      "cost": 0.0004354,
+      "is_byok": false,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+        "video_tokens": 0
+      },
+      "cost_details": {
+        "upstream_inference_cost": 0.0004354,
+        "upstream_inference_prompt_cost": 0.0002354,
+        "upstream_inference_completions_cost": 0.0002
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      }
+    },
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.32.48.png",
+    "model": "Gemini 2.5 Flash Lite",
+    "response": "The screen displays a development environment, likely VS Code, with a Python file open for editing. The user is actively engaged in coding.\n\n**Application Name:** The application appears to be a code editor, with \"VS Code\" visible in the title bar of some browser tabs, suggesting it's running in a web-based environment or a browser tab. The general layout and icons are characteristic of VS Code.\n\n**Visible Text:**\n*   **File Path/Name:** `simulator.py` is prominently displayed as the currently open file.\n*   **Code Comments and Docstrings:** There are numerous comments and docstrings within the code, explaining various aspects of the simulation, such as \"Fill simulator for backtesting\", \"Knobs that control how fills are simulated.\", \"Attributes\", \"Market-order slippage in basis points.\", \"Taker fee as a decimal fraction (e.g. 0.001 = 10 bps).\", \"Maker fee as a decimal fraction (e.g. 0.00075 = 7.5 bps).\", \"Simulate realistic order fills against OHLCV bars.\", and \"This class is used by the backtest engine to convert 'Order' objects into 'Fill' objects with slippage and fees applied, guaranteeing that backtest results are realistic and comparable to paper/live.\".\n*   **UI Text:**\n    *   \"explorer\"\n    *   \"OPEN EDITORS\"\n    *   \"Welcome\"\n    *   \"backlog.md workspace\"\n    *   \"current_cycle.md workspace\"\n    *   \"researcher.md agents/prompts\"\n    *   `src/hft/backtest`\n    *   \"speed_improvements.md workspace\"\n    *   \"development_log.md workspace\"\n    *   \"claude\"\n    *   \"ruff_cache\"\n    *   \".venv\"\n    *   \"agent_comms\"\n    *   \"agents/prompts\"\n    *   \"coder.md\"\n    *   \"hf_manager.md\"\n    *   \"quant.md\"\n    *   \"research",
+    "latency_s": 7.57,
+    "usage": {
+      "prompt_tokens": 2354,
+      "completion_tokens": 463,
+      "total_tokens": 2817,
+      "cost": 0.0004206,
+      "is_byok": false,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+        "video_tokens": 0
+      },
+      "cost_details": {
+        "upstream_inference_cost": 0.0004206,
+        "upstream_inference_prompt_cost": 0.0002354,
+        "upstream_inference_completions_cost": 0.0001852
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      }
+    },
+    "error": null
+  },
+  {
+    "screenshot": "Screenshot 2026-02-17 at 18.35.39.png",
+    "model": "Gemini 2.5 Flash Lite",
+    "response": "This screen capture displays a multi-pane interface, primarily showing a terminal application (iTerm2) on the left and a web browser on the right.\n\n**Left Pane (iTerm2 Terminal):**\n\n*   **Application Name:** The title bar indicates \"iTerm2\" as the application.\n*   **Visible Text:**\n    *   A command prompt is visible, starting with `ls -lh ~/Desktop/screen/2>/dev/null || echo \"Directory not found\"`. This command attempts to list details of a directory and prints a message if it's not found.\n    *   Below the command, text reads \"Run shell command\".\n    *   There's a prompt asking, \"Do you want to proceed?\" with options \"1. Yes\", \"2. Yes, allow reading from screen/ from this project\", and \"3. No\". The user appears to have selected option \"1. Yes\".\n    *   There are also notes about a \"plan mode\" and \"Claude\" exploring an implementation approach, with the user needing to \"understand\" something.\n    *   A brief note \"Cogitated for 1m 50s\" is present.\n    *   A table is displayed comparing different language models (MathVista, MMMU, ScreenSpot, AI2D) with their scores and comparing them to other benchmarks like GPT-5 and Moondream 3.\n    *   Further text discusses the \"2B Model\" and the \"30B-A3B MoE\" as relevant for \"Seraph's use case,\" with detailed comparisons and potential benefits.\n    *   A \"Sources\" section lists several links related to Qwen3-VL.\n    *   Code snippets like `ctrl+b to run in background` are present.\n*   **File Names:** Although no specific file names are explicitly listed in a file explorer view, the command `~/Desktop/screen/` suggests a directory path.\n\n**Right Pane (Web Browser):**\n\n*   **Application Name:** The browser's tab bar shows several tabs, including \"openrouter.ai/google/gemini-2.5-flash-lite\". The visible content is from this OpenRouter page.\n*   **Visible Text:**\n    *   The main heading is \"Google: Gemini 2.5 Flash Lite\".\n    *   ",
+    "latency_s": 6.66,
+    "usage": {
+      "prompt_tokens": 2354,
+      "completion_tokens": 500,
+      "total_tokens": 2854,
+      "cost": 0.0004354,
+      "is_byok": false,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+        "video_tokens": 0
+      },
+      "cost_details": {
+        "upstream_inference_cost": 0.0004354,
+        "upstream_inference_prompt_cost": 0.0002354,
+        "upstream_inference_completions_cost": 0.0002
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0,
+        "image_tokens": 0
+      }
+    },
+    "error": null
+  }
+]

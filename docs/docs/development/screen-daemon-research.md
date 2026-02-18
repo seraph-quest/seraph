@@ -18,33 +18,34 @@ Research notes for upgrading the Seraph native macOS daemon beyond app name + wi
 
 **Current implementation (Level 0):** NSWorkspace (no permission) + AppleScript window title (Accessibility permission). This gives us app name + window title with minimal friction.
 
-## Local Vision Models
+## Local Vision Models (Not Viable)
 
-For future screenshot understanding (Level 2):
+Benchmarked on 2026-02-17 against 4 real macOS screenshots (iTerm2, VS Code, Perplexity, OpenRouter). See `scripts/vlm_benchmark_report.md` for full results.
 
-| Model | Params | RAM (Apple Silicon) | Speed (M1 Pro) | Notes |
-|-------|--------|--------------------:|-----------------|-------|
-| FastVLM 0.5B | 500M | ~1-2 GB | ~0.5s/frame | Apple's own model, MLX-native, optimized for Apple Silicon |
-| Moondream 0.5B | 500M | ~1-2 GB | ~1s/frame | Strong on UI understanding, good at describing screen content |
-| SmolVLM2 500M | 500M | &lt;1 GB | ~0.8s/frame | HuggingFace, smallest footprint |
-| Qwen2-VL 2B | 2B | ~3-4 GB | ~2s/frame | More capable but heavier |
+| Model | Avg Latency | Quality | Notes |
+|-------|-------------|---------|-------|
+| Moondream v2 1.8B | 4.1s | Hallucinated | Described weather apps, "Lorem ipsum", generic "code" — none matching actual content |
+| SmolVLM2 2.2B | 8.3s | Hallucinated | Described Gmail, Excel, Flickr — completely fabricated |
+| Qwen3-VL 2B | N/A | Crashed | Metal GPU `command buffer 0 failed with status 3`; 200-313s per image when it didn't crash |
 
-**Recommendation:** FastVLM 0.5B or Moondream 0.5B. Both fit comfortably in memory alongside other apps and process a frame in under 1 second on Apple Silicon.
+**Conclusion:** Local VLMs in the 0.5B–2B range are not viable for macOS screenshot understanding. They hallucinate entire applications and UI elements rather than reading actual screen content. Cloud VLMs (Gemini 2.5 Flash Lite) correctly identify apps, file names, code, and URLs at $0.15/mo — the cost is negligible compared to the quality gap.
 
 ## Cloud Vision API Costs
 
-Monthly cost estimates for an 8-hour workday (22 working days/month), assuming ~500 tokens per image description:
+Monthly cost estimates for an 8-hour workday (22 working days/month), assuming ~500 output tokens per image description:
 
 | Model | Cost/Image | 1/min ($$/mo) | 1/5min ($$/mo) | 1/30min ($$/mo) |
 |-------|-----------|---------------:|----------------:|----------------:|
-| Gemini 2.0 Flash Lite | $0.000042 | $0.44 | $0.09 | $0.01 |
+| Gemini 2.5 Flash Lite | $0.000432 | $4.56 | $0.91 | $0.15 |
 | GPT-4o (low detail) | $0.000213 | $2.25 | $0.45 | $0.08 |
 | Claude 3.5 Haiku | $0.001488 | $15.63 | $3.13 | $0.52 |
 | Claude 3.5 Sonnet | $0.004800 | $50.69 | $10.14 | $1.69 |
 
-**Calculation basis:** 8 hours x 60 min = 480 calls/day at 1/min. 22 days/month.
+**Calculation basis:** 8 hours x 60 min = 480 calls/day at 1/min. 22 days/month. ~2,354 input tokens (base64 image + prompt) + ~491 output tokens per call (benchmarked against real macOS screenshots).
 
-**Takeaway:** Gemini 2.0 Flash Lite (`google/gemini-2.0-flash-lite-001`) is essentially free even at 1/min. GPT-4o low is ~$2/mo. Cloud VLMs are viable for infrequent polling (1/5min or less).
+**Note:** Gemini 2.0 Flash Lite (`google/gemini-2.0-flash-lite-001`) was deprecated on March 3, 2026. Gemini 2.5 Flash Lite (`google/gemini-2.5-flash-lite`) is the replacement at $0.10/M input + $0.40/M output.
+
+**Takeaway:** Gemini 2.5 Flash Lite costs ~$0.15/mo at default 30s interval and ~$0.91/mo at 1/5min. Still very affordable for cloud VLM polling. Input tokens are higher than text-only estimates due to base64 image encoding.
 
 ## OCR-Only Approach
 
@@ -71,23 +72,11 @@ Apple's Vision framework provides `VNRecognizeTextRequest`:
 - Lower accuracy on macOS UI text compared to Apple Vision
 - Not recommended when running on macOS
 
-## Hybrid Recommendation
+## Recommendation
 
-The best approach combines OCR and VLM at different frequencies:
+Use **Gemini 2.5 Flash Lite via OpenRouter** as the cloud VLM provider. It correctly identifies applications, reads file names, code, URLs, and UI context from macOS screenshots at ~7s latency and $0.15/mo at the default 30s interval.
 
-```
-OCR every 10-30s:
-  → Extract visible text (file paths, function names, error messages)
-  → Cheap, fast, deterministic
-  → Feed as context tokens to strategist
-
-VLM every 1-5min (on change):
-  → Capture what the user is doing at a high level
-  → "User is debugging a test failure in the terminal"
-  → Richer context but more expensive
-```
-
-This gives the strategist both precise text context (from OCR) and high-level activity understanding (from VLM) without excessive cost or battery drain.
+Apple Vision OCR remains useful as a free offline fallback for text-only extraction (~200ms, no hallucination), but Gemini provides strictly richer context (layout understanding, activity inference) at negligible cost.
 
 ## Language Comparison for Daemon
 
@@ -111,13 +100,12 @@ macOS 15+ shows a monthly system notification: _"[App] has been recording your s
 
 **Implication:** For Level 0 (app + title), we only need Accessibility — no monthly nag. Moving to Level 1+ (OCR/screenshots) will trigger the nag. This should be clearly communicated to users.
 
-## Recommended Upgrade Path
+## Upgrade Path
 
-| Level | Capability | Permission | Daemon Changes |
-|-------|-----------|------------|----------------|
-| **0** | App name + window title | Accessibility | `seraph_daemon.py` (default, no `--ocr` flag) |
-| **1 (implemented)** | + OCR text extraction | + Screen Recording | `--ocr` flag, pluggable providers: `apple-vision` (local) or `openrouter` (cloud) |
-| **2** | + Local VLM descriptions | + Screen Recording | Add FastVLM/Moondream inference, structured activity summary |
-| **3** | + Cloud VLM (on-demand) | + Screen Recording | Add cloud API call for complex scenes, hybrid with local VLM |
+| Level | Capability | Permission | Status |
+|-------|-----------|------------|--------|
+| **0** | App name + window title | Accessibility | Implemented (default) |
+| **1** | + OCR text extraction (Apple Vision) | + Screen Recording | Implemented (`--ocr` flag) |
+| **2** | + Cloud VLM screen understanding (Gemini) | + Screen Recording | Implemented (`--ocr --ocr-provider openrouter`) |
 
-Each level is additive. The daemon's `--level` flag (future) would control which capture pipeline runs. The backend API already accepts both `active_window` and `screen_context` fields, so no backend changes are needed for any level.
+The backend API accepts both `active_window` and `screen_context` fields, so no backend changes are needed for any level.

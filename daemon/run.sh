@@ -16,9 +16,9 @@
 # OCR (opt-in, requires Screen Recording permission):
 #   ./daemon/run.sh --ocr --verbose                        # Local Apple Vision (free, offline, ~200ms)
 #   ./daemon/run.sh --ocr --ocr-interval 15 --verbose      # Local OCR every 15s instead of 30s
-#   ./daemon/run.sh --ocr --ocr-provider openrouter        # Cloud via Gemini Flash 1.5 8B (~$0.09/mo)
+#   ./daemon/run.sh --ocr --ocr-provider openrouter        # Cloud via Gemini 2.5 Flash Lite (~$0.15/mo)
 #   ./daemon/run.sh --ocr --ocr-provider openrouter \
-#     --ocr-model google/gemini-2.0-flash-lite-001 --verbose     # Cloud with explicit model
+#     --ocr-model google/gemini-2.5-flash-lite --verbose         # Cloud with explicit model
 #
 #   ./daemon/run.sh --help              # Show all options
 #

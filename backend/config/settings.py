@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     observer_git_repo_path: str = ""
     deep_work_apps: str = ""  # comma-separated extra app keywords for deep work detection
 
+    # Screen Activity Tracking
+    activity_digest_hour: int = 20                    # 8 PM daily digest
+    weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
+    screen_observation_retention_days: int = 90        # keep 90 days of observations
+
     # Vault
     vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty
 

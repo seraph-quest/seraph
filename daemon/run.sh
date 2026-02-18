@@ -13,12 +13,11 @@
 #   ./daemon/run.sh --verbose           # Log every context POST
 #   ./daemon/run.sh --interval 3        # Poll every 3 seconds
 #
-# OCR (opt-in, requires Screen Recording permission):
+# Screen analysis (opt-in, captures on context switch, requires Screen Recording permission):
 #   ./daemon/run.sh --ocr --verbose                        # Local Apple Vision (free, offline, ~200ms)
-#   ./daemon/run.sh --ocr --ocr-interval 15 --verbose      # Local OCR every 15s instead of 30s
-#   ./daemon/run.sh --ocr --ocr-provider openrouter        # Cloud via Gemini 2.5 Flash Lite (~$0.15/mo)
+#   ./daemon/run.sh --ocr --ocr-provider openrouter        # Cloud via Gemini (structured JSON, ~$1.30/mo)
 #   ./daemon/run.sh --ocr --ocr-provider openrouter \
-#     --ocr-model google/gemini-2.5-flash-lite --verbose         # Cloud with explicit model
+#     --blocklist-file ~/blocklist.json --verbose           # Cloud with custom app blocklist
 #
 #   ./daemon/run.sh --help              # Show all options
 #

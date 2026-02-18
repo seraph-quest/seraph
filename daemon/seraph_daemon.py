@@ -4,12 +4,13 @@ Polls the frontmost application name and window title, posting changes to the
 Seraph backend's /api/observer/context endpoint.  Runs natively on macOS
 (outside Docker) and requires only the Accessibility permission for window titles.
 
-Optionally captures screen text via OCR (--ocr flag). OCR requires the Screen
-Recording permission and runs on a separate, slower loop (default 30s).
+With --ocr, captures and analyzes the screen on context switch using a vision model.
+Blocked apps (password managers, banking, etc.) are never screenshotted.
 
 Usage:
     python seraph_daemon.py [--url URL] [--interval SECS] [--idle-timeout SECS] [--verbose]
-    python seraph_daemon.py --ocr [--ocr-provider apple-vision] [--ocr-interval 30] [--verbose]
+    python seraph_daemon.py --ocr [--ocr-provider apple-vision] [--verbose]
+    python seraph_daemon.py --ocr --ocr-provider openrouter [--blocklist-file PATH] [--verbose]
 """
 
 import argparse
@@ -105,12 +106,21 @@ async def poll_loop(
     interval: float,
     idle_timeout: float,
     verbose: bool,
+    ocr_provider: "ocr.base.OCRProvider | None" = None,
+    blocklist: set[str] | None = None,
 ) -> None:
-    """Core polling loop — detect window changes, post to backend."""
+    """Core polling loop — detect window changes, post to backend.
+
+    When ocr_provider is set, captures and analyzes the screen on each context
+    switch (not on a timer). Blocked apps are never screenshotted.
+    """
+    from blocklist import is_blocked
+
     last_posted: str | None = None
     was_idle = False
+    _blocklist = blocklist or set()
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
                 # Check idle state
@@ -139,14 +149,52 @@ async def poll_loop(
                     await asyncio.sleep(interval)
                     continue
 
+                # Build observation payload on context switch
+                observation = None
+                if ocr_provider is not None and app_name:
+                    observation = {
+                        "app": app_name,
+                        "window_title": window_title or "",
+                    }
+
+                    if is_blocked(app_name, _blocklist):
+                        observation["blocked"] = True
+                        if verbose:
+                            logger.info("Blocked app: %s — skipping screenshot", app_name)
+                    else:
+                        try:
+                            from ocr.screenshot import capture_screen_png
+
+                            png_bytes = await asyncio.to_thread(capture_screen_png)
+                            if png_bytes:
+                                result = await ocr_provider.analyze_screen(png_bytes, app_name)
+                                if result.success:
+                                    observation.update(result.data)
+                                    if verbose:
+                                        ts = time.strftime("%H:%M:%S")
+                                        logger.info(
+                                            "[%s] analyzed (%dms): %s",
+                                            ts,
+                                            result.duration_ms,
+                                            result.data.get("summary", "")[:80],
+                                        )
+                                else:
+                                    logger.debug("Screen analysis failed: %s", result.error)
+                        except Exception:
+                            logger.debug("Screenshot/analysis error", exc_info=True)
+
                 # Post to backend
                 try:
+                    payload: dict = {
+                        "active_window": active_window,
+                    }
+                    if observation is not None:
+                        payload["observation"] = observation
+                        payload["switch_timestamp"] = time.time()
+
                     await client.post(
                         f"{url}/api/observer/context",
-                        json={
-                            "active_window": active_window,
-                            "screen_context": None,
-                        },
+                        json=payload,
                     )
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
@@ -159,84 +207,6 @@ async def poll_loop(
 
             except Exception:
                 logger.exception("Unexpected error in poll loop")
-
-            await asyncio.sleep(interval)
-
-
-async def ocr_loop(
-    url: str,
-    interval: float,
-    idle_timeout: float,
-    provider: "ocr.base.OCRProvider",
-    verbose: bool,
-) -> None:
-    """OCR capture loop — runs alongside poll_loop on a slower cadence."""
-    from ocr.screenshot import capture_screen_png
-
-    last_posted: str | None = None
-    max_text_len = 2000
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while True:
-            try:
-                # Skip if user is idle
-                idle_secs = get_idle_seconds()
-                if idle_secs > idle_timeout:
-                    await asyncio.sleep(interval)
-                    continue
-
-                # Capture screenshot (in thread to avoid blocking)
-                png_bytes = await asyncio.to_thread(capture_screen_png)
-                if png_bytes is None:
-                    await asyncio.sleep(interval)
-                    continue
-
-                # Run OCR
-                result = await provider.extract_text(png_bytes)
-
-                if not result.success:
-                    logger.warning("OCR failed: %s", result.error)
-                    await asyncio.sleep(interval)
-                    continue
-
-                text = result.text.strip()
-                if not text:
-                    await asyncio.sleep(interval)
-                    continue
-
-                # Truncate to max length
-                if len(text) > max_text_len:
-                    text = text[:max_text_len]
-
-                # Skip if unchanged
-                if text == last_posted:
-                    await asyncio.sleep(interval)
-                    continue
-
-                # Post screen_context only (partial update)
-                try:
-                    await client.post(
-                        f"{url}/api/observer/context",
-                        json={
-                            "active_window": None,
-                            "screen_context": text,
-                        },
-                    )
-                    if verbose:
-                        ts = time.strftime("%H:%M:%S")
-                        preview = text[:80].replace("\n", " ")
-                        logger.info(
-                            "[%s] OCR (%s, %dms): %s",
-                            ts, provider.name, result.duration_ms, preview,
-                        )
-                    last_posted = text
-                except httpx.ConnectError:
-                    logger.warning("Backend not reachable at %s — will retry", url)
-                except httpx.HTTPError as exc:
-                    logger.warning("HTTP error posting OCR context: %s", exc)
-
-            except Exception:
-                logger.exception("Unexpected error in OCR loop")
 
             await asyncio.sleep(interval)
 
@@ -271,7 +241,7 @@ async def main() -> None:
         "--ocr",
         action="store_true",
         default=False,
-        help="Enable OCR screen text extraction (requires Screen Recording permission)",
+        help="Enable screenshot analysis on context switch (requires Screen Recording permission)",
     )
     parser.add_argument(
         "--ocr-provider",
@@ -282,8 +252,8 @@ async def main() -> None:
     parser.add_argument(
         "--ocr-interval",
         type=float,
-        default=30,
-        help="OCR capture interval in seconds (default: 30)",
+        default=None,
+        help="Deprecated — OCR now runs on context switch, not a timer. This flag is ignored.",
     )
     parser.add_argument(
         "--ocr-model",
@@ -294,6 +264,11 @@ async def main() -> None:
         "--openrouter-api-key",
         default=os.environ.get("OPENROUTER_API_KEY"),
         help="OpenRouter API key (or set OPENROUTER_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--blocklist-file",
+        default=None,
+        help="Path to JSON blocklist config (default: use built-in defaults only)",
     )
 
     args = parser.parse_args()
@@ -309,6 +284,12 @@ async def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    # Warn about deprecated flag
+    if args.ocr_interval is not None:
+        logger.warning(
+            "--ocr-interval is deprecated — OCR now runs on context switch. This flag is ignored."
+        )
+
     # Clean shutdown on signals
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -320,29 +301,12 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _shutdown, sig)
 
-    logger.info(
-        "Seraph daemon started — polling every %gs, idle timeout %gs, backend %s",
-        args.interval,
-        args.idle_timeout,
-        args.url,
-    )
-
-    async def heartbeat_loop(interval: float = 300) -> None:
-        """Log a periodic heartbeat to confirm daemon is alive."""
-        while True:
-            await asyncio.sleep(interval)
-            logger.info("heartbeat — daemon alive (poll every %gs)", args.interval)
-
-    heartbeat_task = asyncio.create_task(heartbeat_loop())
-    poll_task = asyncio.create_task(
-        poll_loop(args.url, args.interval, args.idle_timeout, args.verbose)
-    )
-
-    # OCR setup
-    ocr_task = None
+    # OCR + blocklist setup
     ocr_provider = None
+    blocklist: set[str] = set()
 
     if args.ocr:
+        from blocklist import load_blocklist
         from ocr import create_provider
 
         ocr_provider = create_provider(
@@ -353,32 +317,48 @@ async def main() -> None:
 
         if not ocr_provider.is_available():
             logger.error("OCR provider %r is not available — disabling OCR", args.ocr_provider)
+            ocr_provider = None
         else:
+            blocklist = load_blocklist(args.blocklist_file)
             logger.info(
-                "OCR enabled — provider=%s, interval=%gs",
+                "OCR enabled — provider=%s, mode=on-context-switch, blocked=%d apps",
                 ocr_provider.name,
-                args.ocr_interval,
+                len(blocklist),
             )
-            ocr_task = asyncio.create_task(
-                ocr_loop(args.url, args.ocr_interval, args.idle_timeout, ocr_provider, args.verbose)
-            )
+
+    logger.info(
+        "Seraph daemon started — polling every %gs, idle timeout %gs, backend %s",
+        args.interval,
+        args.idle_timeout,
+        args.url,
+    )
+
+    async def heartbeat_loop(heartbeat_interval: float = 300) -> None:
+        """Log a periodic heartbeat to confirm daemon is alive."""
+        while True:
+            await asyncio.sleep(heartbeat_interval)
+            logger.info("heartbeat — daemon alive (poll every %gs)", args.interval)
+
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
+    poll_task = asyncio.create_task(
+        poll_loop(
+            args.url,
+            args.interval,
+            args.idle_timeout,
+            args.verbose,
+            ocr_provider=ocr_provider,
+            blocklist=blocklist,
+        )
+    )
 
     await stop_event.wait()
 
     heartbeat_task.cancel()
     poll_task.cancel()
-    if ocr_task is not None:
-        ocr_task.cancel()
 
     for t in (heartbeat_task, poll_task):
         try:
             await t
-        except asyncio.CancelledError:
-            pass
-
-    if ocr_task is not None:
-        try:
-            await ocr_task
         except asyncio.CancelledError:
             pass
 

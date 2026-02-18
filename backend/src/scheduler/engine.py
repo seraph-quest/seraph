@@ -60,6 +60,9 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.strategist_tick import run_strategist_tick
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
+    from src.scheduler.jobs.activity_digest import run_activity_digest
+    from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
+    from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
 
     jobs = [
         {
@@ -103,6 +106,31 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "evening_review",
             "name": "Evening review",
+        },
+        {
+            "func": _async_job_wrapper(run_activity_digest, loop),
+            "trigger": CronTrigger(
+                hour=settings.activity_digest_hour,
+                timezone=validated_tz,
+            ),
+            "id": "activity_digest",
+            "name": "Activity digest",
+        },
+        {
+            "func": _async_job_wrapper(run_weekly_activity_review, loop),
+            "trigger": CronTrigger(
+                day_of_week="sun",
+                hour=settings.weekly_review_hour,
+                timezone=validated_tz,
+            ),
+            "id": "weekly_activity_review",
+            "name": "Weekly activity review",
+        },
+        {
+            "func": _async_job_wrapper(run_screen_cleanup, loop),
+            "trigger": CronTrigger(hour=3, timezone=validated_tz),
+            "id": "screen_cleanup",
+            "name": "Screen observation cleanup",
         },
     ]
 

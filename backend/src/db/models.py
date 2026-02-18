@@ -141,6 +141,24 @@ class QueuedInsight(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+# ─── ScreenObservation ─────────────────────────────────
+
+class ScreenObservation(SQLModel, table=True):
+    __tablename__ = "screen_observations"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    timestamp: datetime = Field(default_factory=_now, index=True)
+    app_name: str = Field(index=True)
+    window_title: str = Field(default="")
+    activity_type: str = Field(default="other", index=True)
+    project: Optional[str] = Field(default=None, index=True)
+    summary: Optional[str] = Field(default=None)
+    details_json: Optional[str] = Field(default=None)
+    duration_s: Optional[int] = Field(default=None)
+    blocked: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=_now)
+
+
 # ─── Secret (Vault) ─────────────────────────────────────
 
 class Secret(SQLModel, table=True):

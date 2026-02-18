@@ -7,6 +7,7 @@ import { EventBus } from "../game/EventBus";
 import { DialogFrame } from "./chat/DialogFrame";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
+import { CaptureModeToggle } from "./settings/CaptureModeToggle";
 
 interface SkillInfo {
   name: string;
@@ -575,6 +576,8 @@ export function SettingsPanel() {
           <InterruptionModeToggle />
 
           <DaemonStatus />
+
+          <CaptureModeToggle />
 
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">

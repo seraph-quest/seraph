@@ -38,8 +38,9 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/components/chat/` - ChatPanel, ChatSidebar, SessionList, MessageList, MessageBubble, ChatInput, ThinkingIndicator, DialogFrame (RPG frame with optional maximize/close buttons)
   - `src/components/quest/` - QuestPanel (search/filter by title, level, domain), GoalTree, GoalForm, DomainStats
   - `src/components/settings/InterruptionModeToggle.tsx` - Focus/Balanced/Active mode toggle for proactive message delivery
+  - `src/components/settings/CaptureModeToggle.tsx` - On Switch/Balanced/Detailed toggle for screenshot frequency control
   - `src/components/settings/DaemonStatus.tsx` - Screen observer daemon status indicator (polls `/api/observer/daemon-status` every 10s, shows connected/disconnected + active window)
-  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, daemon status, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version), polls MCP servers every 5s while open to catch external changes
+  - `src/components/SettingsPanel.tsx` - Standalone settings overlay panel (restart onboarding, interruption mode, capture mode, daemon status, skills management, Discover catalog, MCP server management UI with 4-state status + inline token config, version), polls MCP servers every 5s while open to catch external changes
   - `src/components/HudButtons.tsx` - Floating RPG-styled buttons to reopen closed Chat/Quest/Settings panels + ambient state indicator dot (color-coded, pulsing)
   - `src/index.css` - CRT scanlines/vignette, pixel borders, RPG frame, chat-overlay maximized state
 
@@ -85,7 +86,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `src/api/skills.py` — `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
   - `src/api/catalog.py` — `GET /api/catalog` (browse catalog with install status), `POST /api/catalog/install/{name}` (install skill or MCP server from catalog)
   - `src/api/observer.py` — `GET /api/observer/state`, `POST /api/observer/context` (receives daemon screen data + structured observations), `GET /api/observer/daemon-status` (daemon heartbeat connectivity check), `GET /api/observer/activity/today` (daily activity summary), `POST /api/observer/refresh` (debug)
-  - `src/api/settings.py` — `GET /api/settings/interruption-mode`, `PUT /api/settings/interruption-mode`
+  - `src/api/settings.py` — `GET /api/settings/interruption-mode`, `PUT /api/settings/interruption-mode`, `GET /api/settings/capture-mode`, `PUT /api/settings/capture-mode`
   - `src/api/vault.py` — `GET /api/vault/keys` (list keys with metadata, no values), `DELETE /api/vault/keys/{key}`
   - `/health` — health check (defined in `src/app.py`)
 - **Tools** (`src/tools/`):
@@ -143,7 +144,7 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `strategist.py` — Strategist agent factory (restricted to `view_soul`, `get_goals`, `get_goal_progress`, temp=0.4, max_steps=5) + `StrategistDecision` dataclass + `parse_strategist_response()` JSON parser
   - `context_window.py` — Token-aware context window builder (keep first N + last M, summarize middle; reads defaults from settings)
   - `session.py` — Async session manager (SQLite-backed)
-- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`, `Secret`, `ScreenObservation`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
+- **Database** (`src/db/`): SQLModel + aiosqlite. Models: `UserProfile` (includes `interruption_mode`, `capture_mode`), `Session`, `Message`, `Goal`, `Memory`, `QueuedInsight`, `Secret`, `ScreenObservation`. Enums: `GoalLevel`, `GoalDomain`, `GoalStatus`, `MemoryCategory`
 - **Scheduler** (`src/scheduler/`):
   - `engine.py` — APScheduler setup, job registration on app lifespan
   - `connection_manager.py` — WebSocket broadcast manager (`ws_manager`)
@@ -170,10 +171,11 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
 ### Native Daemon (`daemon/`)
 - **Stack**: Python 3.12, PyObjC, httpx
 - **Entry**: `seraph_daemon.py` — runs natively on macOS (outside Docker)
-- **Single-loop architecture**: window polling (every 5s) + screenshot analysis on context switch (`--ocr` flag)
+- **Dual-loop architecture**: window polling (every 5s) + screenshot analysis on context switch (`--ocr` flag) + periodic capture loop (polls `capture_mode` setting from backend)
 - Polls frontmost app name (`NSWorkspace`, no permission) + window title (AppleScript, Accessibility permission) + idle seconds (`Quartz.CGEventSourceSecondsSinceLastEventType`, no permission)
 - **Change detection**: skips POST if `active_window` unchanged since last POST
 - **Screenshot on context switch**: when `--ocr` is enabled and app changes, captures screenshot → analyzes via vision model → sends structured observation (activity type, project, summary, details)
+- **Periodic capture**: when `--ocr` is enabled and `capture_mode` is `balanced` (every 300s) or `detailed` (every 60s), takes periodic screenshots within the same app. Polls `GET /api/settings/capture-mode` every 60s. Skips when idle or app is blocked.
 - **App blocklist** (`daemon/blocklist.py`): default blocklist (password managers, banking, crypto wallets, Signal) + custom JSON config via `--blocklist-file`. Case-insensitive substring matching. Blocked apps get `blocked: true` in observation, no screenshot taken.
 - **Idle detection**: skips POST if no user input for `--idle-timeout` seconds (default 300)
 - POSTs to `POST /api/observer/context` — sends `{"active_window": "App — Title", "observation": {...}, "switch_timestamp": float}`. Observation field includes `app`, `window_title`, `activity`, `project`, `summary`, `details`, `blocked`. Without `--ocr`, sends only `active_window`.
@@ -245,6 +247,8 @@ Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas rend
   - `activity_digest_hour: int = 20` — daily screen activity digest
   - `weekly_review_hour: int = 18` — Sunday weekly activity review
   - `screen_observation_retention_days: int = 90` — retention for screen observation cleanup
+- **Capture mode settings** (`config/settings.py`):
+  - `default_capture_mode: str = "on_switch"` — default capture mode (`on_switch` | `balanced` | `detailed`)
 - **Observer / proactivity settings** (`config/settings.py`):
   - `proactivity_level: int = 3` — default proactivity dial
   - `user_timezone: str = "UTC"`

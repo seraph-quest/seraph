@@ -63,6 +63,7 @@ These control the observer system and proactive behavior:
 | `PROACTIVITY_LEVEL` | `3` | Proactivity scale (1–5, higher = more proactive) |
 | `OBSERVER_GIT_REPO_PATH` | (empty) | Path to a git repo for commit-aware context |
 | `DEEP_WORK_APPS` | (empty) | Comma-separated extra app keywords that trigger deep work state |
+| `DEFAULT_CAPTURE_MODE` | `on_switch` | Screenshot frequency: `on_switch` (app changes only), `balanced` (+ every 5 min), `detailed` (+ every 1 min) |
 
 ### Optional timeout settings
 
@@ -163,6 +164,16 @@ This is a one-time grant. The daemon will then report the frontmost app and wind
 ## Optional: Screen Activity Tracking
 
 Screen analysis captures and analyzes screenshots **on context switch** (when you change apps), producing structured activity data: activity type, project, summary. Observations are persisted to the database and power daily/weekly activity digests.
+
+**Capture Mode** controls screenshot frequency. Configure via the Settings UI:
+
+| Mode | Behavior |
+|---|---|
+| **On Switch** (default) | Screenshot only when the active app changes |
+| **Balanced** | On switch + periodic every 5 minutes within the same app |
+| **Detailed** | On switch + periodic every 1 minute within the same app |
+
+Blocked apps are never screenshotted in any mode. The daemon polls the backend for capture mode changes every 60 seconds — no restart needed.
 
 Sensitive apps (password managers, banking, crypto wallets) are automatically blocked from screenshots.
 

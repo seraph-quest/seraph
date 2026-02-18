@@ -124,6 +124,7 @@ class UserProfile(SQLModel, table=True):
     preferences_json: Optional[str] = Field(default=None)
     onboarding_completed: bool = Field(default=False)
     interruption_mode: str = Field(default="balanced")
+    capture_mode: str = Field(default="on_switch")  # on_switch | balanced | detailed
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 

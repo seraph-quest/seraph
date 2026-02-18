@@ -37,6 +37,9 @@ class CurrentContext:
     # Daemon heartbeat — Unix timestamp of last POST from daemon
     last_daemon_post: Optional[float] = None
 
+    # Capture mode — controls screenshot frequency (on_switch | balanced | detailed)
+    capture_mode: str = "on_switch"
+
     # Phase 3.3 — State machine tracking
     previous_user_state: str = "available"
     attention_budget_last_reset: Optional[datetime] = None

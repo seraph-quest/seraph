@@ -118,6 +118,7 @@ class ContextManager:
                 active_window=old.active_window,
                 screen_context=old.screen_context,
                 last_daemon_post=old.last_daemon_post,
+                capture_mode=old.capture_mode,
                 # Phase 3.3 tracking
                 previous_user_state=old.user_state,
                 attention_budget_last_reset=last_reset,
@@ -206,6 +207,11 @@ class ContextManager:
         self._context.attention_budget_remaining = max(
             0, self._context.attention_budget_remaining - 1
         )
+
+    def update_capture_mode(self, mode: str) -> None:
+        """Change capture mode setting."""
+        self._context.capture_mode = mode
+        logger.info("Capture mode set to %s", mode)
 
     def update_interruption_mode(self, mode: str) -> None:
         """Change interruption mode and reset budget to mode default."""

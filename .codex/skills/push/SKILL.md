@@ -1,0 +1,111 @@
+---
+name: push
+description:
+  Push the current feature branch to origin and create or update the
+  corresponding pull request targeting `develop`.
+---
+
+# Push
+
+## Prerequisites
+
+- `gh` CLI is installed and authenticated for this repository.
+- The current branch is a feature or fix branch, not `main` or `develop`.
+- `origin/develop` exists. If it does not, stop and surface that blocker.
+
+## Goals
+
+- Push the current branch safely.
+- Create or update a PR targeting `develop`.
+- Keep PR title, body, and validation evidence aligned with the actual diff.
+
+## Validation gate
+
+Run the narrowest required validation before each push:
+
+- Backend changes:
+  `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run pytest -v`
+- Frontend changes:
+  `cd frontend && npm test`
+- Docs changes:
+  `cd docs && npm run build`
+- Editor changes:
+  `cd editor && npm run build`
+- Multi-area changes: run every affected command.
+
+Use `./.codex/worktree_init.sh` first if dependencies have not been installed in
+the workspace yet.
+
+## Steps
+
+1. Identify the current branch and confirm the remote state.
+2. Run required validation for the files changed in this branch.
+3. Push to `origin`, using upstream tracking if needed.
+4. If push is rejected because the branch is behind:
+   - run the `pull` skill,
+   - rerun validation,
+   - push again.
+5. If push fails due to auth, permissions, or branch protection, stop and
+   report the exact error instead of changing remotes or protocols.
+6. Ensure the `symphony` label exists on GitHub:
+   - `gh label create symphony --color 1f6feb --description "Managed by Symphony" || true`
+7. Ensure a PR exists for the branch targeting `develop`:
+   - create one if missing,
+   - update it if it already exists,
+   - if the branch is tied to a closed or merged PR, create a fresh branch and
+     PR instead of reusing it.
+8. Write a concise PR body that reflects the full current scope using concrete
+   sections such as:
+   - `## Summary`
+   - `## Validation`
+   - `## Risks`
+9. Ensure the PR has label `symphony`.
+10. Reply with the PR URL.
+
+## Commands
+
+```sh
+branch=$(git branch --show-current)
+test -n "$branch"
+
+git fetch origin
+git push -u origin HEAD
+
+pr_state=$(gh pr view --json state -q .state 2>/dev/null || true)
+if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
+  echo "Current branch is tied to a closed PR; create a fresh branch." >&2
+  exit 1
+fi
+
+gh label create symphony --color 1f6feb --description "Managed by Symphony" || true
+
+pr_title="<clear PR title>"
+tmp_pr_body=$(mktemp)
+cat >"$tmp_pr_body" <<'EOF'
+## Summary
+- <what changed>
+
+## Validation
+- <commands run>
+
+## Risks
+- <risk or "None noted">
+EOF
+
+if [ -z "$pr_state" ]; then
+  gh pr create --base develop --title "$pr_title" --body-file "$tmp_pr_body"
+else
+  gh pr edit --base develop --title "$pr_title" --body-file "$tmp_pr_body"
+fi
+
+gh pr edit --add-label symphony
+gh pr view --json url -q .url
+rm -f "$tmp_pr_body"
+```
+
+## Notes
+
+- Do not use `--force`; use `--force-with-lease` only if history was rewritten.
+- Treat non-fast-forward failures as sync problems for the `pull` skill.
+- Treat auth or workflow restriction failures as blockers, not as a prompt to
+  rewrite remotes.

@@ -136,13 +136,183 @@ open http://localhost:3000
 open http://localhost:8004/docs
 ```
 
+## Optional: Symphony + Linear
+
+Symphony is a separate automation service that watches a Linear project, creates
+an isolated workspace per issue, launches Codex, and drives the issue through
+implementation, PR creation, review, and merge. It does **not** replace the
+normal Seraph app runtime.
+
+Use the normal app stack when you want to run Seraph locally:
+
+```bash
+./manage.sh -e dev up -d
+```
+
+Use Symphony when you want Linear tickets to be worked automatically.
+
+### What is already in this repo
+
+This repository already includes the repo-side Symphony configuration:
+
+- `WORKFLOW.md` at the repo root
+- repo-local skills under `.codex/skills/`
+- workspace bootstrap helper at `.codex/worktree_init.sh`
+
+The current workflow is configured for a Linear project and expects these team
+statuses:
+
+- `Todo`
+- `In Progress`
+- `Human Review`
+- `Merging`
+- `Rework`
+- `Done`
+
+The workflow also assumes feature branches merge into `develop`, so
+`origin/develop` must exist before Symphony can publish PRs successfully.
+
+### Requirements
+
+| Requirement | Why |
+|---|---|
+| [Linear](https://linear.app/) workspace + project | Symphony polls this project for issues |
+| `LINEAR_API_KEY` in the shell environment | Auth for Linear API access |
+| [mise](https://mise.jdx.dev/) | Installs the Elixir/Erlang toolchain Symphony expects |
+| Separate clone of `openai/symphony` | Symphony runs from its own repository |
+
+### 1. Verify the workflow file
+
+The root `WORKFLOW.md` tells Symphony which Linear project and repo workflow to
+use. If your Linear project changes later, update the `project_slug` there.
+
+### 2. Install mise
+
+On macOS, the simplest path is:
+
+```bash
+brew install mise
+hash -r
+mise --version
+```
+
+### 3. Install and build Symphony
+
+```bash
+git clone https://github.com/openai/symphony
+cd symphony/elixir
+mise trust
+mise install
+mise exec -- mix setup
+mise exec -- mix build
+```
+
+### 4. Start Symphony
+
+Symphony currently requires an explicit acknowledgement flag because this
+preview runs without the usual product guardrails:
+
+```bash
+cd symphony/elixir
+mise exec -- ./bin/symphony /absolute/path/to/seraph/WORKFLOW.md \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+For this repository:
+
+```bash
+cd symphony/elixir
+mise exec -- ./bin/symphony /Users/bigcube/Desktop/repos/seraph/WORKFLOW.md \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+### 5. Optional dashboard
+
+If you want the Symphony web dashboard, pass `--port`:
+
+```bash
+cd symphony/elixir
+mise exec -- ./bin/symphony /Users/bigcube/Desktop/repos/seraph/WORKFLOW.md \
+  --port 4001 \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+Use a free port. If `4000` is already taken by another process, either choose a
+different port such as `4001` or omit `--port` entirely to run without the
+dashboard.
+
+### 6. Feed work through Linear
+
+1. Create issues in the configured Linear project.
+2. Move an issue to `Todo`.
+3. Symphony will poll the project, claim the issue, move it to `In Progress`,
+   create a workspace under `~/code/symphony-workspaces/seraph`, and start
+   working the ticket.
+4. When ready, it will open a PR against `develop` and move the issue through
+   `Human Review`, `Merging`, and `Done`.
+
+### Environment note
+
+`LINEAR_API_KEY` must be available in the shell where Symphony starts. Example:
+
+```bash
+export LINEAR_API_KEY=lin_api_...
+cd symphony/elixir
+mise exec -- ./bin/symphony /Users/bigcube/Desktop/repos/seraph/WORKFLOW.md \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
 ## Screen daemon
 
 The native macOS daemon runs **outside Docker** and posts the active window context to the backend. This enables context-aware features like deep work detection.
 
+:::warning
+The daemon is a **standalone native process** — it is not managed by Docker. Stopping Docker services (`./manage.sh -e dev down`) does **not** stop the daemon. If the daemon was started with `--ocr`, it will continue capturing and analyzing screenshots even when the backend is down. Always stop the daemon explicitly when you're done.
+:::
+
+### Starting the daemon
+
 ```bash
 ./daemon/run.sh --verbose
 ```
+
+To start the daemon automatically with `./manage.sh -e dev up -d`, set in `.env.dev`:
+
+```bash
+DAEMON_ENABLED=true
+DAEMON_ARGS=--verbose
+```
+
+### Stopping the daemon
+
+```bash
+./manage.sh -e dev daemon stop
+```
+
+Or manually:
+
+```bash
+# Find the daemon process
+ps aux | grep seraph_daemon | grep -v grep
+
+# Kill it by PID
+kill <pid>
+```
+
+### Daemon status
+
+```bash
+./manage.sh -e dev daemon status
+```
+
+### Daemon management commands
+
+| Command | Description |
+|---|---|
+| `./manage.sh -e dev daemon start` | Start the daemon |
+| `./manage.sh -e dev daemon stop` | Stop the daemon |
+| `./manage.sh -e dev daemon status` | Check if the daemon is running |
+| `./manage.sh -e dev daemon logs` | View daemon logs |
 
 On first run, macOS will prompt for **Accessibility** permission (needed to read window titles):
 
@@ -392,8 +562,12 @@ localStorage.clear()
 |---|---|---|
 | `curl: (7) Failed to connect to localhost:8004` | Backend not running | `./manage.sh -e dev up -d` and check `./manage.sh -e dev logs -f backend-dev` |
 | `OPENROUTER_API_KEY` error in logs | Missing or invalid API key | Set `OPENROUTER_API_KEY` in `.env.dev` and rebuild: `./manage.sh -e dev up -d` |
+| `mise: command not found` | `mise` is not installed | Install it with `brew install mise`, then rerun the Symphony setup |
+| Symphony refuses to start and asks for an acknowledgement flag | Missing required preview-safety CLI flag | Start with `--i-understand-that-this-will-be-running-without-the-usual-guardrails` |
+| Symphony fails with `:eaddrinuse` when using `--port` | The requested dashboard port is already in use | Use a different port such as `--port 4001`, or omit `--port` |
 | Daemon: "No window title" / title is always None | Accessibility permission not granted | Grant in **System Settings > Privacy & Security > Accessibility** |
 | Daemon: "Backend not reachable" | Backend not running or wrong URL | Start backend first; check `--url` flag |
+| Daemon still capturing after stopping services | Daemon runs outside Docker and isn't stopped by `docker compose down` | Run `./manage.sh -e dev daemon stop` or `kill <pid>` |
 | Daemon exits immediately | Missing PyObjC | Run `cd daemon && uv pip install -r requirements.txt` |
 | `Failed to connect to MCP server` | Things3 MCP not running | Check: `curl http://localhost:9100/mcp`; ensure LaunchAgent is loaded |
 | `unable to open database file` (Things3) | Full Disk Access not granted to `uvx` | Grant FDA, then restart the things-mcp service |

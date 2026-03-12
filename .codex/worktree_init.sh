@@ -4,8 +4,12 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 
-if [ ! -f "$repo_root/.env.dev" ] && [ -f "$repo_root/.env.dev.example" ]; then
-  cp "$repo_root/.env.dev.example" "$repo_root/.env.dev"
+if [ ! -f "$repo_root/.env.dev" ]; then
+  if [ -f "$repo_root/.env.dev.example" ]; then
+    cp "$repo_root/.env.dev.example" "$repo_root/.env.dev"
+  elif [ -f "$repo_root/env.dev.example" ]; then
+    cp "$repo_root/env.dev.example" "$repo_root/.env.dev"
+  fi
 fi
 
 if command -v uv >/dev/null 2>&1; then

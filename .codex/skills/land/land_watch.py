@@ -419,10 +419,10 @@ def is_blocking_review(
         return state == "CHANGES_REQUESTED"
     if body.startswith("[codex]") or state in ("APPROVED", "DISMISSED"):
         return False
-    if body or state == "CHANGES_REQUESTED":
-        return True
     if state == "COMMENTED":
         return False
+    if body or state == "CHANGES_REQUESTED":
+        return True
     return bool(state and state not in ("APPROVED", "DISMISSED"))
 
 

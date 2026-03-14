@@ -5,6 +5,7 @@ from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kw
 from src.plugins.loader import discover_tools
 from src.skills.manager import skill_manager
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
+from src.tools.audit import wrap_tools_for_audit
 from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
 from src.tools.mcp_manager import mcp_manager
 from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
@@ -23,7 +24,9 @@ def get_tools() -> list:
     tool_mode = get_current_tool_policy_mode()
     mcp_mode = get_current_mcp_policy_mode()
     native_tools = wrap_tools_for_approval(
-        wrap_tools_for_secret_refs(filter_tools(discover_tools(), tool_mode))
+        wrap_tools_for_audit(
+            wrap_tools_for_secret_refs(filter_tools(discover_tools(), tool_mode))
+        )
     )
     filtered_mcp_tools = filter_tools(
         mcp_manager.get_tools(),
@@ -33,12 +36,18 @@ def get_tools() -> list:
     )
     if mcp_mode == "approval":
         mcp_tools = wrap_tools_with_forced_approval(
-            wrap_tools_for_secret_refs(filtered_mcp_tools),
+            wrap_tools_for_audit(
+                wrap_tools_for_secret_refs(filtered_mcp_tools),
+                treat_all_as_mcp=True,
+            ),
             treat_all_as_mcp=True,
         )
     else:
         mcp_tools = wrap_tools_for_approval(
-            wrap_tools_for_secret_refs(filtered_mcp_tools),
+            wrap_tools_for_audit(
+                wrap_tools_for_secret_refs(filtered_mcp_tools),
+                treat_all_as_mcp=True,
+            ),
             treat_all_as_mcp=True,
         )
     return native_tools + mcp_tools

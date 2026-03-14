@@ -6,6 +6,7 @@ from config.settings import settings
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.tools.soul_tool import view_soul, update_soul
 from src.tools.goal_tools import create_goal, get_goals
+from src.tools.audit import wrap_tools_for_audit
 
 
 ONBOARDING_INSTRUCTIONS = """\
@@ -58,7 +59,7 @@ def create_onboarding_agent() -> ToolCallingAgent:
     ))
 
     return ToolCallingAgent(
-        tools=[view_soul, update_soul, create_goal, get_goals],
+        tools=wrap_tools_for_audit([view_soul, update_soul, create_goal, get_goals]),
         model=model,
         max_steps=settings.agent_max_steps,
         instructions=ONBOARDING_INSTRUCTIONS,

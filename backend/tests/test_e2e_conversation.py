@@ -163,7 +163,7 @@ class TestE2EConversation:
             for p in patches:
                 p.stop()
 
-    def test_tool_calls_are_written_to_audit_log(self):
+    def test_agent_run_success_is_written_to_audit_log(self):
         client, patches, stack = _make_sync_client_with_db()
         try:
             mock_agent = MagicMock()
@@ -189,14 +189,6 @@ class TestE2EConversation:
                             break
 
                 events = client.get("/api/audit/events").json()
-                assert any(
-                    event["event_type"] == "tool_call" and event["tool_name"] == "web_search"
-                    for event in events
-                )
-                assert any(
-                    event["event_type"] == "tool_result" and event["tool_name"] == "web_search"
-                    for event in events
-                )
                 assert any(
                     event["event_type"] == "agent_run_succeeded"
                     and event["tool_name"] == "chat_agent"

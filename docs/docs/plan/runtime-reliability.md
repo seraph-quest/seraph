@@ -18,10 +18,11 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for core guardian and tool reliability contracts
 - [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
+- [x] real tool execution audit events for call, result, and failure across agent transports
 
 ## In Progress
 
-- [ ] broaden observability beyond chat, scheduler, and provider fallback coverage into more tool edge paths
+- [ ] broaden observability beyond current tool execution coverage into more runtime edge paths
 
 ## Left To Do
 

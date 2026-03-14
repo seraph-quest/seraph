@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from config.settings import settings
+from src.audit.repository import audit_repository
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,46 @@ def has_fallback_model() -> bool:
     return bool(settings.fallback_model.strip())
 
 
+def _safe_model_name(kwargs: dict[str, Any]) -> str:
+    return str(kwargs.get("model", "unknown"))
+
+
+async def _log_llm_runtime_event(
+    *,
+    event_type: str,
+    summary: str,
+    details: dict[str, Any],
+) -> None:
+    try:
+        await audit_repository.log_event(
+            event_type=event_type,
+            actor="system",
+            tool_name="llm_runtime",
+            risk_level="low",
+            policy_mode="full",
+            summary=summary,
+            details=details,
+        )
+    except Exception:
+        logger.debug("Failed to record LLM runtime audit event", exc_info=True)
+
+
+def _log_llm_runtime_event_sync(
+    *,
+    event_type: str,
+    summary: str,
+    details: dict[str, Any],
+) -> None:
+    try:
+        asyncio.run(_log_llm_runtime_event(
+            event_type=event_type,
+            summary=summary,
+            details=details,
+        ))
+    except Exception:
+        logger.debug("Failed to run LLM runtime audit logger", exc_info=True)
+
+
 def completion_with_fallback_sync(
     *,
     messages: list[dict[str, str]],
@@ -94,10 +135,26 @@ def completion_with_fallback_sync(
         max_tokens=max_tokens,
         model_id=model_id,
     )
+    primary_model = _safe_model_name(primary_kwargs)
     try:
-        return litellm.completion(**primary_kwargs)
-    except Exception:
+        response = litellm.completion(**primary_kwargs)
+        _log_llm_runtime_event_sync(
+            event_type="llm_primary_success",
+            summary=f"Primary LLM completion succeeded via {primary_model}",
+            details={"primary_model": primary_model, "used_fallback": False},
+        )
+        return response
+    except Exception as primary_error:
         if not has_fallback_model():
+            _log_llm_runtime_event_sync(
+                event_type="llm_primary_failure",
+                summary=f"Primary LLM completion failed via {primary_model}",
+                details={
+                    "primary_model": primary_model,
+                    "used_fallback": False,
+                    "error": str(primary_error),
+                },
+            )
             raise
         fallback_kwargs = build_completion_kwargs(
             messages=messages,
@@ -105,13 +162,39 @@ def completion_with_fallback_sync(
             max_tokens=max_tokens,
             use_fallback=True,
         )
+        fallback_model = _safe_model_name(fallback_kwargs)
         logger.warning(
             "Primary LLM completion failed for model %s, retrying with fallback %s",
-            primary_kwargs["model"],
-            fallback_kwargs["model"],
+            primary_model,
+            fallback_model,
             exc_info=True,
         )
-        return litellm.completion(**fallback_kwargs)
+        try:
+            response = litellm.completion(**fallback_kwargs)
+            _log_llm_runtime_event_sync(
+                event_type="llm_fallback_success",
+                summary=f"Fallback LLM completion succeeded via {fallback_model}",
+                details={
+                    "primary_model": primary_model,
+                    "fallback_model": fallback_model,
+                    "used_fallback": True,
+                    "primary_error": str(primary_error),
+                },
+            )
+            return response
+        except Exception as fallback_error:
+            _log_llm_runtime_event_sync(
+                event_type="llm_fallback_failure",
+                summary=f"Fallback LLM completion failed via {fallback_model}",
+                details={
+                    "primary_model": primary_model,
+                    "fallback_model": fallback_model,
+                    "used_fallback": True,
+                    "primary_error": str(primary_error),
+                    "fallback_error": str(fallback_error),
+                },
+            )
+            raise
 
 
 async def completion_with_fallback(

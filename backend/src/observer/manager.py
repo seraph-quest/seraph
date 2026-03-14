@@ -119,6 +119,7 @@ class ContextManager:
                 screen_context=old.screen_context,
                 last_daemon_post=old.last_daemon_post,
                 capture_mode=old.capture_mode,
+                tool_policy_mode=old.tool_policy_mode,
                 # Phase 3.3 tracking
                 previous_user_state=old.user_state,
                 attention_budget_last_reset=last_reset,
@@ -212,6 +213,11 @@ class ContextManager:
         """Change capture mode setting."""
         self._context.capture_mode = mode
         logger.info("Capture mode set to %s", mode)
+
+    def update_tool_policy_mode(self, mode: str) -> None:
+        """Change the tool policy mode."""
+        self._context.tool_policy_mode = mode
+        logger.info("Tool policy mode set to %s", mode)
 
     def update_interruption_mode(self, mode: str) -> None:
         """Change interruption mode and reset budget to mode default."""

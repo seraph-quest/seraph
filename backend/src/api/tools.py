@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from config.settings import settings
 from src.agent.factory import get_tools
 from src.plugins.registry import get_tool_metadata
+from src.tools.policy import get_current_tool_policy_mode
 
 router = APIRouter()
 
@@ -11,6 +12,7 @@ router = APIRouter()
 async def list_tools():
     """List all available tools with their metadata (including dynamic MCP tools)."""
     tools = get_tools()
+    mode = get_current_tool_policy_mode()
 
     result = []
     for tool in tools:
@@ -18,22 +20,19 @@ async def list_tools():
         result.append({
             "name": tool.name,
             "description": meta.get("description") if meta else getattr(tool, "description", ""),
+            "policy_modes": meta.get("policy_modes") if meta else [mode],
         })
 
     # When delegation is active, also include specialist names so the frontend
     # toolRegistry recognizes them for animation triggers.
     if settings.use_delegation:
-        from src.agent.specialists import SPECIALIST_CONFIGS, _sanitize_agent_name
-        from src.tools.mcp_manager import mcp_manager
+        from src.agent.specialists import build_all_specialists
 
-        for name, cfg in SPECIALIST_CONFIGS.items():
-            result.append({"name": name, "description": cfg["description"]})
-
-        for server_info in mcp_manager.get_config():
-            if mcp_manager.is_connected(server_info["name"]):
-                result.append({
-                    "name": _sanitize_agent_name(f"mcp_{server_info['name']}"),
-                    "description": server_info.get("description", ""),
-                })
+        for specialist in build_all_specialists():
+            result.append({
+                "name": specialist.name,
+                "description": specialist.description,
+                "policy_modes": [mode],
+            })
 
     return result

@@ -172,3 +172,20 @@ class Secret(SQLModel, table=True):
     description: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+# ─── AuditEvent ─────────────────────────────────────────
+
+class AuditEvent(SQLModel, table=True):
+    __tablename__ = "audit_events"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    actor: str = Field(default="agent", index=True)
+    event_type: str = Field(default="tool_call", index=True)
+    tool_name: Optional[str] = Field(default=None, index=True)
+    risk_level: str = Field(default="low", index=True)
+    policy_mode: str = Field(default="full", index=True)
+    summary: str = Field(default="")
+    details_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)

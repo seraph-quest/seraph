@@ -1,5 +1,6 @@
 """Tests for strategist tick runtime audit coverage."""
 
+from smolagents import Tool
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,6 +9,7 @@ from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
+from src.tools.audit import wrap_tools_for_audit
 
 
 def _make_context(**overrides) -> CurrentContext:
@@ -19,6 +21,16 @@ def _make_context(**overrides) -> CurrentContext:
     )
     defaults.update(overrides)
     return CurrentContext(**defaults)
+
+
+class DummyStrategistTool(Tool):
+    name = "get_goals"
+    description = "Dummy strategist tool"
+    inputs = {}
+    output_type = "string"
+
+    def forward(self) -> str:
+        return "2 active goals"
 
 
 @pytest.mark.asyncio
@@ -69,5 +81,34 @@ async def test_strategist_tick_logs_success(async_db):
         event["event_type"] == "scheduler_job_succeeded"
         and event["tool_name"] == "strategist_tick"
         and event["details"]["delivery"] == "deliver"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_strategist_tick_binds_runtime_context_for_tool_audit(async_db):
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=_make_context())
+    audited_tool = wrap_tools_for_audit([DummyStrategistTool()])[0]
+
+    class DummyAgent:
+        def run(self, _prompt):
+            audited_tool()
+            return (
+                '{"should_intervene": false, "content": "", "intervention_type": "nudge", '
+                '"urgency": 0, "reasoning": "No intervention"}'
+            )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=DummyAgent()),
+    ):
+        await run_strategist_tick()
+
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "tool_call"
+        and event["tool_name"] == "get_goals"
+        and event["session_id"] == "scheduler:strategist_tick"
         for event in events
     )

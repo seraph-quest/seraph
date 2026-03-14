@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from smolagents import Tool
@@ -11,6 +12,8 @@ from src.approval.runtime import get_current_session_id
 from src.audit.formatting import format_tool_call_summary, redact_for_audit, summarize_tool_result
 from src.audit.repository import audit_repository
 from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
+
+logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
@@ -100,18 +103,21 @@ class AuditedTool(Tool):
         summary: str,
         details: dict[str, Any],
     ) -> None:
-        _run_async(
-            audit_repository.log_event(
-                session_id=session_id,
-                actor="agent",
-                event_type=event_type,
-                tool_name=self.name,
-                risk_level=get_tool_risk_level(self.name, is_mcp=self.is_mcp),
-                policy_mode=get_current_tool_policy_mode(),
-                summary=summary,
-                details=details,
+        try:
+            _run_async(
+                audit_repository.log_event(
+                    session_id=session_id,
+                    actor="agent",
+                    event_type=event_type,
+                    tool_name=self.name,
+                    risk_level=get_tool_risk_level(self.name, is_mcp=self.is_mcp),
+                    policy_mode=get_current_tool_policy_mode(),
+                    summary=summary,
+                    details=details,
+                )
             )
-        )
+        except Exception:
+            logger.debug("Failed to record tool execution audit event", exc_info=True)
 
 
 def wrap_tools_for_audit(tools: list[Tool], *, treat_all_as_mcp: bool = False) -> list[Tool]:

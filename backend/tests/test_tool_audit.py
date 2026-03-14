@@ -4,10 +4,11 @@ from unittest.mock import patch
 import pytest
 from smolagents import Tool
 
+from src.agent.onboarding import create_onboarding_agent
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
-from src.tools.audit import wrap_tools_for_audit
+from src.tools.audit import AuditedTool, wrap_tools_for_audit
 
 
 class DummyEchoTool(Tool):
@@ -79,3 +80,22 @@ def test_audited_tool_logs_failure(async_db):
     assert len(tool_failures) == 1
     assert tool_failures[0]["tool_name"] == "shell_execute"
     assert tool_failures[0]["details"]["error"] == "failed:print('hi')"
+
+
+def test_audited_tool_logging_fails_open(async_db):
+    tool = wrap_tools_for_audit([DummyEchoTool()])[0]
+    tokens = set_runtime_context("s1", "high_risk")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            with patch("src.tools.audit.audit_repository.log_event", side_effect=RuntimeError("audit down")):
+                assert tool(code="print('hi')") == "ran:print('hi')"
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_onboarding_agent_uses_audited_tools():
+    agent = create_onboarding_agent()
+
+    for tool_name in ("view_soul", "update_soul", "create_goal", "get_goals"):
+        assert isinstance(agent.tools[tool_name], AuditedTool)

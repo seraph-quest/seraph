@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from smolagents import LiteLLMModel, ToolCallingAgent
 
 from config.settings import settings
+from src.llm_runtime import build_model_kwargs
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
 
@@ -62,13 +63,10 @@ class StrategistDecision:
 
 def create_strategist_agent(context_block: str) -> ToolCallingAgent:
     """Create a restricted agent for strategic reasoning."""
-    model = LiteLLMModel(
-        model_id=settings.default_model,
-        api_key=settings.openrouter_api_key,
-        api_base="https://openrouter.ai/api/v1",
+    model = LiteLLMModel(**build_model_kwargs(
         temperature=0.4,
         max_tokens=settings.model_max_tokens,
-    )
+    ))
 
     instructions = STRATEGIST_INSTRUCTIONS.format(
         proactivity_level=settings.proactivity_level,

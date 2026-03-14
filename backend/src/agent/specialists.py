@@ -13,6 +13,7 @@ import re
 from smolagents import LiteLLMModel, ToolCallingAgent
 
 from config.settings import settings
+from src.llm_runtime import build_model_kwargs
 from src.plugins.loader import discover_tools
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
 from src.tools.mcp_manager import mcp_manager
@@ -102,13 +103,10 @@ def _sanitize_agent_name(name: str) -> str:
 
 def _create_model(temperature: float) -> LiteLLMModel:
     """Create a LiteLLMModel with specialist-specific temperature."""
-    return LiteLLMModel(
-        model_id=settings.default_model,
-        api_key=settings.openrouter_api_key,
-        api_base="https://openrouter.ai/api/v1",
+    return LiteLLMModel(**build_model_kwargs(
         temperature=temperature,
         max_tokens=settings.model_max_tokens,
-    )
+    ))
 
 
 def create_specialist(

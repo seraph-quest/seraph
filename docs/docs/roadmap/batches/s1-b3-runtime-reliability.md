@@ -23,11 +23,12 @@ This batch is just starting, but reliability hardening has begun.
 Shipped in this batch so far:
 
 - degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
+- centralized provider-agnostic LLM runtime settings with an optional fallback completion path for direct LiteLLM calls
 
 Still open inside this batch:
 
-- model/provider routing and fallback beyond the single primary path
-- clearer local-model-capable execution paths
+- broader model/provider routing beyond the first shared fallback path
+- deeper local-model-capable execution paths beyond a configurable API base/model swap
 - broader observability coverage beyond trust-boundary events
 - a repeatable evaluation harness for core guardian and tool flows
 

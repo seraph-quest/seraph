@@ -209,17 +209,13 @@ class SessionManager:
         transcript = "\n".join(f"{m.role.capitalize()}: {m.content[:200]}" for m in messages)
 
         try:
-            import litellm
+            from src.llm_runtime import completion_with_fallback
 
-            response = await asyncio.to_thread(
-                litellm.completion,
-                model=settings.default_model,
+            response = await completion_with_fallback(
                 messages=[{
                     "role": "user",
                     "content": f"Generate a very short title (3-6 words, no quotes) for this conversation. Respond with ONLY the title.\n\n{transcript}",
                 }],
-                api_key=settings.openrouter_api_key,
-                api_base="https://openrouter.ai/api/v1",
                 temperature=0.3,
                 max_tokens=20,
             )

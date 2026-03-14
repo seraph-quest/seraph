@@ -1,6 +1,7 @@
 from smolagents import LiteLLMModel, ToolCallingAgent
 
 from config.settings import settings
+from src.llm_runtime import build_model_kwargs
 from src.plugins.loader import discover_tools
 from src.skills.manager import skill_manager
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
@@ -10,14 +11,11 @@ from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 
 
 def get_model() -> LiteLLMModel:
-    """Create a LiteLLMModel configured for OpenRouter."""
-    return LiteLLMModel(
-        model_id=settings.default_model,
-        api_key=settings.openrouter_api_key,
-        api_base="https://openrouter.ai/api/v1",
+    """Create a LiteLLMModel from the shared runtime configuration."""
+    return LiteLLMModel(**build_model_kwargs(
         temperature=settings.model_temperature,
         max_tokens=settings.model_max_tokens,
-    )
+    ))
 
 
 def get_tools() -> list:

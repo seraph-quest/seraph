@@ -3,6 +3,7 @@
 from smolagents import LiteLLMModel, ToolCallingAgent
 
 from config.settings import settings
+from src.llm_runtime import build_model_kwargs
 from src.tools.soul_tool import view_soul, update_soul
 from src.tools.goal_tools import create_goal, get_goals
 
@@ -51,13 +52,10 @@ and ready when you need me."
 
 def create_onboarding_agent() -> ToolCallingAgent:
     """Create a specialized agent for the onboarding conversation."""
-    model = LiteLLMModel(
-        model_id=settings.default_model,
-        api_key=settings.openrouter_api_key,
-        api_base="https://openrouter.ai/api/v1",
+    model = LiteLLMModel(**build_model_kwargs(
         temperature=0.8,
         max_tokens=settings.model_max_tokens,
-    )
+    ))
 
     return ToolCallingAgent(
         tools=[view_soul, update_soul, create_goal, get_goals],

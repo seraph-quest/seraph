@@ -20,13 +20,13 @@ def test_run_runtime_evals_passes_all_scenarios():
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():
-    summary = asyncio.run(run_runtime_evals(["daily_briefing_fallback", "shell_tool_timeout_contract"]))
+    summary = asyncio.run(run_runtime_evals(["daily_briefing_fallback", "strategist_tick_tool_audit"]))
 
     assert summary.total == 2
     assert summary.failed == 0
     assert [result.name for result in summary.results] == [
         "daily_briefing_fallback",
-        "shell_tool_timeout_contract",
+        "strategist_tick_tool_audit",
     ]
 
 
@@ -41,7 +41,7 @@ def test_main_lists_available_scenarios(capsys):
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "chat_model_wrapper" in captured.out
-    assert "shell_tool_timeout_contract" in captured.out
+    assert "session_title_generation_background_audit" in captured.out
 
 
 def test_main_emits_json_summary(capsys):

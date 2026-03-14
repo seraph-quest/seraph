@@ -12,14 +12,20 @@ from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from smolagents import Tool
 
 from config.settings import settings
+from src.agent.session import SessionManager, session_manager
 from src.agent.factory import get_model
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.strategist import create_strategist_agent
+from src.audit.repository import audit_repository
 from src.llm_runtime import FallbackLiteLLMModel
+from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
+from src.scheduler.jobs.strategist_tick import run_strategist_tick
+from src.tools.audit import wrap_tools_for_audit
 from src.tools.shell_tool import shell_execute
 
 
@@ -102,6 +108,62 @@ def _tool_names(agent: Any) -> list[str]:
     for tool in tools:
         names.append(tool if isinstance(tool, str) else tool.name)
     return sorted(names)
+
+
+def _find_audit_call(
+    mock_log_event: AsyncMock,
+    *,
+    event_type: str,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
+    for call in mock_log_event.call_args_list:
+        kwargs = call.kwargs
+        if kwargs.get("event_type") != event_type:
+            continue
+        if tool_name is not None and kwargs.get("tool_name") != tool_name:
+            continue
+        return kwargs
+    raise AssertionError(f"Missing audit event {event_type} for {tool_name or 'any tool'}")
+
+
+class _DummyStrategistTool(Tool):
+    name = "get_goals"
+    description = "Dummy strategist tool"
+    inputs = {}
+    output_type = "string"
+
+    def forward(self) -> str:
+        return "2 active goals"
+
+
+class _FakeScalarResult:
+    def __init__(self, messages: list[Any]):
+        self._messages = messages
+
+    def scalars(self) -> "_FakeScalarResult":
+        return self
+
+    def all(self) -> list[Any]:
+        return self._messages
+
+
+class _FakeDbSession:
+    def __init__(self, messages: list[Any]):
+        self._messages = messages
+
+    async def execute(self, _query: Any) -> _FakeScalarResult:
+        return _FakeScalarResult(self._messages)
+
+
+class _FakeDbSessionContext:
+    def __init__(self, messages: list[Any]):
+        self._messages = messages
+
+    async def __aenter__(self) -> _FakeDbSession:
+        return _FakeDbSession(self._messages)
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
 
 
 def _eval_chat_model_wrapper() -> dict[str, Any]:
@@ -215,6 +277,97 @@ def _eval_shell_tool_timeout_contract() -> dict[str, Any]:
     return {"result": result}
 
 
+async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=_make_context())
+    audited_tool = wrap_tools_for_audit([_DummyStrategistTool()])[0]
+    mock_log_event = AsyncMock()
+
+    class DummyAgent:
+        def run(self, _prompt: str) -> str:
+            audited_tool()
+            return (
+                '{"should_intervene": false, "content": "", "intervention_type": "nudge", '
+                '"urgency": 0, "reasoning": "No intervention"}'
+            )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=DummyAgent()),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_strategist_tick()
+
+    tool_call = _find_audit_call(mock_log_event, event_type="tool_call", tool_name="get_goals")
+    return {
+        "tool_name": tool_call["tool_name"],
+        "session_id": tool_call["session_id"],
+        "policy_mode": tool_call["policy_mode"],
+    }
+
+
+async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
+    mock_log_event = AsyncMock()
+    llm_response = _make_litellm_response(json.dumps({
+        "facts": ["User is prioritizing runtime reliability"],
+        "patterns": [],
+        "goals": [],
+        "reflections": [],
+        "soul_updates": {},
+    }))
+
+    with (
+        patch.object(session_manager, "get_history_text", AsyncMock(return_value="User: I need reliability.\nAssistant: Let's harden it.")),
+        patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
+        patch("src.memory.consolidator.add_memory"),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await consolidate_session("eval-session")
+
+    success = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_succeeded",
+        tool_name="session_consolidation",
+    )
+    return {
+        "task_name": success["tool_name"],
+        "session_id": success["session_id"],
+        "stored_memory_count": success["details"]["stored_memory_count"],
+    }
+
+
+async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
+    sm = SessionManager()
+    mock_log_event = AsyncMock()
+    llm_response = _make_litellm_response("Reliability planning")
+    fake_messages = [
+        MagicMock(role="user", content="Help me harden the runtime."),
+        MagicMock(role="assistant", content="Let's make the runtime observable and resilient."),
+    ]
+
+    with (
+        patch.object(sm, "get", AsyncMock(return_value=MagicMock(id="eval-session", title="New Conversation"))),
+        patch.object(sm, "update_title", AsyncMock(return_value=True)),
+        patch("src.agent.session.get_session", return_value=_FakeDbSessionContext(fake_messages)),
+        patch("src.llm_runtime.completion_with_fallback", AsyncMock(return_value=llm_response)),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        title = await sm.generate_title("eval-session")
+
+    success = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_succeeded",
+        tool_name="session_title_generation",
+    )
+    assert title == "Reliability planning"
+    return {
+        "task_name": success["tool_name"],
+        "session_id": success["session_id"],
+        "title_length": success["details"]["title_length"],
+    }
+
+
 _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="chat_model_wrapper",
@@ -245,6 +398,24 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="tool",
         description="Shell tool returns a clear timeout contract when sandbox execution stalls.",
         runner=_eval_shell_tool_timeout_contract,
+    ),
+    EvalScenario(
+        name="strategist_tick_tool_audit",
+        category="observability",
+        description="Strategist scheduler runs bind runtime context so wrapped strategist tools emit audit events.",
+        runner=_eval_strategist_tick_tool_audit,
+    ),
+    EvalScenario(
+        name="session_consolidation_background_audit",
+        category="observability",
+        description="Per-session memory consolidation records background-task audit success with deterministic mocks.",
+        runner=_eval_session_consolidation_background_audit,
+    ),
+    EvalScenario(
+        name="session_title_generation_background_audit",
+        category="observability",
+        description="Session title generation records background-task audit success without live providers.",
+        runner=_eval_session_title_generation_background_audit,
     ),
 )
 

@@ -1,8 +1,10 @@
 """Tests for shared LLM runtime configuration and fallback behavior."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 from config.settings import settings
+from src.audit.repository import audit_repository
 from src.llm_runtime import (
     build_completion_kwargs,
     build_model_kwargs,
@@ -66,3 +68,63 @@ def test_completion_with_fallback_sync_retries_with_fallback():
     assert mock_completion.call_args_list[0].kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
     assert mock_completion.call_args_list[1].kwargs["model"] == "ollama/llama3.2"
     assert mock_completion.call_args_list[1].kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+def test_completion_with_fallback_sync_logs_primary_success(async_db):
+    success_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch("litellm.completion", return_value=success_response),
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+        )
+
+    assert result is success_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["used_fallback"] is False
+    assert events[0]["details"]["primary_model"] == "openai/gpt-4o-mini"
+
+
+def test_completion_with_fallback_sync_logs_fallback_success(async_db):
+    primary_error = RuntimeError("primary down")
+    fallback_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", "ollama/llama3.2"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+        patch("litellm.completion", side_effect=[primary_error, fallback_response]),
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+        )
+
+    assert result is fallback_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["used_fallback"] is True
+    assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
+    assert "primary down" in events[0]["details"]["primary_error"]

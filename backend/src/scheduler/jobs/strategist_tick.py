@@ -5,6 +5,7 @@ import contextvars
 import logging
 from time import perf_counter
 
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from config.settings import settings
 from src.agent.strategist import create_strategist_agent, parse_strategist_response
 from src.audit.runtime import log_scheduler_job_event
@@ -18,6 +19,7 @@ from src.llm_runtime import (
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
+_STRATEGIST_RUNTIME_SESSION_ID = "scheduler:strategist_tick"
 
 
 async def run_strategist_tick() -> None:
@@ -32,8 +34,10 @@ async def run_strategist_tick() -> None:
         agent = create_strategist_agent(context_block)
         llm_request_id = f"strategist_tick:{started_at}"
         _register_request(llm_request_id)
+        runtime_tokens = set_runtime_context(_STRATEGIST_RUNTIME_SESSION_ID, "high_risk")
         llm_request_token = set_current_llm_request_id(llm_request_id)
         run_ctx = contextvars.copy_context()
+        reset_runtime_context(runtime_tokens)
         reset_current_llm_request_id(llm_request_token)
         raw = await asyncio.wait_for(
             asyncio.to_thread(

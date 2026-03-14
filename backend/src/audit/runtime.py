@@ -61,3 +61,27 @@ async def log_scheduler_job_event(
         )
     except Exception:
         logger.debug("Failed to record scheduler runtime audit event", exc_info=True)
+
+
+async def log_background_task_event(
+    *,
+    task_name: str,
+    outcome: str,
+    session_id: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Record a background/helper runtime event without breaking callers."""
+    summary = f"Background task {task_name} {outcome.replace('_', ' ')}"
+    try:
+        await audit_repository.log_event(
+            session_id=session_id,
+            actor="system",
+            event_type=f"background_task_{outcome}",
+            tool_name=task_name,
+            risk_level="low",
+            policy_mode="full",
+            summary=summary,
+            details=details or {},
+        )
+    except Exception:
+        logger.debug("Failed to record background runtime audit event", exc_info=True)

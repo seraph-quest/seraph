@@ -44,6 +44,17 @@ class TestConsolidateSession:
             await consolidate_session("s1")
             assert mock_add.call_count == 2
 
+        from src.audit.repository import audit_repository
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "session_consolidation"
+            and event["session_id"] == "s1"
+            and event["details"]["stored_memory_count"] == 2
+            for event in events
+        )
+
     async def test_applies_soul_updates(self, async_db, sm):
         await sm.get_or_create("s1")
         await sm.add_message("s1", "user", "I'm passionate about machine learning and want to build an AI startup.")
@@ -95,3 +106,14 @@ class TestConsolidateSession:
         with patch("litellm.completion", side_effect=RuntimeError("LLM down")):
             # Should not raise
             await consolidate_session("s1")
+
+        from src.audit.repository import audit_repository
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_failed"
+            and event["tool_name"] == "session_consolidation"
+            and event["session_id"] == "s1"
+            and event["details"]["error"] == "LLM down"
+            for event in events
+        )

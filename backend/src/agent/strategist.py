@@ -8,6 +8,7 @@ from smolagents import ToolCallingAgent
 
 from config.settings import settings
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
+from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
 
@@ -74,7 +75,7 @@ def create_strategist_agent(context_block: str) -> ToolCallingAgent:
     )
 
     return ToolCallingAgent(
-        tools=[view_soul, get_goals, get_goal_progress],
+        tools=wrap_tools_for_audit([view_soul, get_goals, get_goal_progress]),
         model=model,
         max_steps=5,
         instructions=instructions,

@@ -2,10 +2,12 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from time import perf_counter
 
 from sqlmodel import select, col
 
 from config.settings import settings
+from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
 from src.db.models import Session, Message
 
@@ -189,8 +191,18 @@ class SessionManager:
 
     async def generate_title(self, session_id: str) -> str | None:
         """Generate a short title for a session using LLM."""
+        started_at = perf_counter()
         session = await self.get(session_id)
         if not session or session.title != "New Conversation":
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="skipped",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "session_missing" if not session else "title_already_set",
+                },
+            )
             return session.title if session else None
 
         async with get_session() as db:
@@ -204,6 +216,15 @@ class SessionManager:
             messages = result.scalars().all()
 
         if not messages:
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="skipped",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "no_messages",
+                },
+            )
             return None
 
         transcript = "\n".join(f"{m.role.capitalize()}: {m.content[:200]}" for m in messages)
@@ -223,8 +244,28 @@ class SessionManager:
             title = response.choices[0].message.content.strip().strip('"\'')
             await self.update_title(session_id, title)
             logger.info("Generated title for session %s: %s", session_id[:8], title)
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="succeeded",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_count": len(messages),
+                    "title_length": len(title),
+                },
+            )
             return title
-        except Exception:
+        except Exception as exc:
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="failed",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_count": len(messages),
+                    "error": str(exc),
+                },
+            )
             logger.exception("Failed to generate title for session %s", session_id[:8])
             return None
 

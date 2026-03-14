@@ -7,6 +7,7 @@ from src.agent.strategist import (
     create_strategist_agent,
     parse_strategist_response,
 )
+from src.tools.audit import AuditedTool
 
 
 # ── parse_strategist_response tests ──────────────────────
@@ -101,6 +102,8 @@ def test_create_strategist_agent_returns_agent(mock_model_cls):
 
     assert agent is not None
     assert len(agent.tools) == 4  # view_soul, get_goals, get_goal_progress + final_answer (built-in)
+    for tool_name in ("view_soul", "get_goals", "get_goal_progress"):
+        assert isinstance(agent.tools[tool_name], AuditedTool)
 
 
 @patch("src.agent.strategist.LiteLLMModel")

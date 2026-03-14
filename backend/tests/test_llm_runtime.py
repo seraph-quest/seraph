@@ -99,6 +99,7 @@ def test_completion_with_fallback_sync_logs_primary_success(async_db):
 
     events = asyncio.run(_fetch())
     assert events
+    assert events[0]["details"]["runtime_path"] == "completion"
     assert events[0]["details"]["used_fallback"] is False
     assert events[0]["details"]["primary_model"] == "openai/gpt-4o-mini"
 
@@ -130,12 +131,13 @@ def test_completion_with_fallback_sync_logs_fallback_success(async_db):
 
     events = asyncio.run(_fetch())
     assert events
+    assert events[0]["details"]["runtime_path"] == "completion"
     assert events[0]["details"]["used_fallback"] is True
     assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
     assert "primary down" in events[0]["details"]["primary_error"]
 
 
-def test_fallback_litellm_model_retries_generate_with_fallback():
+def test_fallback_litellm_model_retries_generate_with_fallback(async_db):
     primary_error = RuntimeError("primary down")
     fallback_response = MagicMock()
 
@@ -162,6 +164,16 @@ def test_fallback_litellm_model_retries_generate_with_fallback():
     assert mock_generate.call_count == 2
     assert mock_generate.call_args_list[0].args[0].model_id == "openrouter/anthropic/claude-sonnet-4"
     assert mock_generate.call_args_list[1].args[0].model_id == "ollama/llama3.2"
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
+    assert "primary down" in events[0]["details"]["primary_error"]
 
 
 def test_fallback_litellm_model_skips_duplicate_fallback_target():
@@ -207,4 +219,106 @@ async def test_completion_with_fallback_timeout_does_not_log_late_success(async_
 
     events = await audit_repository.list_events(limit=10)
     success_events = [e for e in events if e["event_type"] == "llm_primary_success"]
+    timeout_events = [e for e in events if e["event_type"] == "llm_timed_out"]
     assert success_events == []
+    assert timeout_events
+    assert timeout_events[0]["details"]["runtime_path"] == "completion"
+    assert timeout_events[0]["details"]["timeout_seconds"] == 0.01
+
+
+def test_fallback_litellm_model_logs_primary_success(async_db):
+    success_response = MagicMock()
+
+    with (
+        patch.object(settings, "fallback_model", "ollama/llama3.2"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            return_value=success_response,
+        ),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        result = model.generate([{"role": "user", "content": "hello"}])
+
+    assert result is success_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["used_fallback"] is False
+
+
+def test_fallback_litellm_model_logs_primary_failure_without_fallback(async_db):
+    primary_error = RuntimeError("primary down")
+
+    with (
+        patch.object(settings, "fallback_model", ""),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=primary_error,
+        ),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        with pytest.raises(RuntimeError, match="primary down"):
+            model.generate([{"role": "user", "content": "hello"}])
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_primary_failure"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["used_fallback"] is False
+    assert events[0]["details"]["error"] == "primary down"
+
+
+def test_fallback_litellm_model_logs_fallback_failure(async_db):
+    with (
+        patch.object(settings, "fallback_model", "ollama/llama3.2"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=[RuntimeError("primary down"), RuntimeError("fallback down")],
+        ),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        with pytest.raises(RuntimeError, match="fallback down"):
+            model.generate([{"role": "user", "content": "hello"}])
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_failure"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
+    assert events[0]["details"]["fallback_error"] == "fallback down"

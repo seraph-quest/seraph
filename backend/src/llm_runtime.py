@@ -214,16 +214,37 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         tools_to_call_from=None,
         **kwargs,
     ):
+        primary_model = self.model_id
         try:
-            return super().generate(
+            response = super().generate(
                 messages,
                 stop_sequences=stop_sequences,
                 response_format=response_format,
                 tools_to_call_from=tools_to_call_from,
                 **kwargs,
             )
-        except Exception:
+            _log_llm_runtime_event_sync(
+                event_type="llm_primary_success",
+                summary=f"Primary agent model generate succeeded via {primary_model}",
+                details={
+                    "runtime_path": "agent_generate",
+                    "primary_model": primary_model,
+                    "used_fallback": False,
+                },
+            )
+            return response
+        except Exception as primary_error:
             if self._fallback_model is None:
+                _log_llm_runtime_event_sync(
+                    event_type="llm_primary_failure",
+                    summary=f"Primary agent model generate failed via {primary_model}",
+                    details={
+                        "runtime_path": "agent_generate",
+                        "primary_model": primary_model,
+                        "used_fallback": False,
+                        "error": str(primary_error),
+                    },
+                )
                 raise
             logger.warning(
                 "Primary agent model %s failed, retrying with fallback %s",
@@ -231,13 +252,44 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 self._fallback_model.model_id,
                 exc_info=True,
             )
-            return self._fallback_model.generate(
-                messages,
-                stop_sequences=stop_sequences,
-                response_format=response_format,
-                tools_to_call_from=tools_to_call_from,
-                **kwargs,
-            )
+            try:
+                response = self._fallback_model.generate(
+                    messages,
+                    stop_sequences=stop_sequences,
+                    response_format=response_format,
+                    tools_to_call_from=tools_to_call_from,
+                    **kwargs,
+                )
+                _log_llm_runtime_event_sync(
+                    event_type="llm_fallback_success",
+                    summary=(
+                        f"Fallback agent model generate succeeded via {self._fallback_model.model_id}"
+                    ),
+                    details={
+                        "runtime_path": "agent_generate",
+                        "primary_model": primary_model,
+                        "fallback_model": self._fallback_model.model_id,
+                        "used_fallback": True,
+                        "primary_error": str(primary_error),
+                    },
+                )
+                return response
+            except Exception as fallback_error:
+                _log_llm_runtime_event_sync(
+                    event_type="llm_fallback_failure",
+                    summary=(
+                        f"Fallback agent model generate failed via {self._fallback_model.model_id}"
+                    ),
+                    details={
+                        "runtime_path": "agent_generate",
+                        "primary_model": primary_model,
+                        "fallback_model": self._fallback_model.model_id,
+                        "used_fallback": True,
+                        "primary_error": str(primary_error),
+                        "fallback_error": str(fallback_error),
+                    },
+                )
+                raise
 
 
 def completion_with_fallback_sync(
@@ -265,7 +317,11 @@ def completion_with_fallback_sync(
                 _log_llm_runtime_event_sync(
                     event_type="llm_primary_success",
                     summary=f"Primary LLM completion succeeded via {primary_model}",
-                    details={"primary_model": primary_model, "used_fallback": False},
+                    details={
+                        "runtime_path": "completion",
+                        "primary_model": primary_model,
+                        "used_fallback": False,
+                    },
                 )
             return response
         except Exception as primary_error:
@@ -275,6 +331,7 @@ def completion_with_fallback_sync(
                         event_type="llm_primary_failure",
                         summary=f"Primary LLM completion failed via {primary_model}",
                         details={
+                            "runtime_path": "completion",
                             "primary_model": primary_model,
                             "used_fallback": False,
                             "error": str(primary_error),
@@ -301,6 +358,7 @@ def completion_with_fallback_sync(
                         event_type="llm_fallback_success",
                         summary=f"Fallback LLM completion succeeded via {fallback_model}",
                         details={
+                            "runtime_path": "completion",
                             "primary_model": primary_model,
                             "fallback_model": fallback_model,
                             "used_fallback": True,
@@ -314,6 +372,7 @@ def completion_with_fallback_sync(
                         event_type="llm_fallback_failure",
                         summary=f"Fallback LLM completion failed via {fallback_model}",
                         details={
+                            "runtime_path": "completion",
                             "primary_model": primary_model,
                             "fallback_model": fallback_model,
                             "used_fallback": True,
@@ -352,6 +411,16 @@ async def completion_with_fallback(
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         _mark_request_timed_out(request_id)
+        await _log_llm_runtime_event(
+            event_type="llm_timed_out",
+            summary=f"LLM completion timed out via {model_id or settings.default_model}",
+            details={
+                "runtime_path": "completion",
+                "primary_model": model_id or settings.default_model,
+                "timeout_seconds": timeout,
+                "fallback_configured": has_fallback_model(),
+            },
+        )
         raise
     finally:
         if timeout is None:

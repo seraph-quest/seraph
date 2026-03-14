@@ -16,6 +16,7 @@ from src.memory.soul import read_soul
 from src.memory.vector_store import search_formatted
 from src.models.schemas import ChatRequest, ChatResponse
 from src.tools.policy import get_current_tool_policy_mode
+from src.vault.redaction import redact_secrets_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ async def chat(request: ChatRequest):
             timeout=settings.agent_chat_timeout,
         )
         response_text = str(result.output) if hasattr(result, "output") else str(result)
+        response_text = await redact_secrets_in_text(response_text)
     except ApprovalRequired as exc:
         await audit_repository.log_event(
             session_id=exc.session_id,
@@ -85,7 +87,8 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
     except Exception as e:
         logger.exception("Agent execution failed")
-        raise HTTPException(status_code=500, detail=f"Agent error: {e}")
+        safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
+        raise HTTPException(status_code=500, detail=safe_detail)
 
     await session_manager.add_message(session.id, "assistant", response_text)
 

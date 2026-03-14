@@ -69,6 +69,16 @@ class VaultRepository:
                 for s in secrets
             ]
 
+    async def list_secret_values(self) -> list[tuple[str, str]]:
+        """Return decrypted secret values for internal redaction safeguards."""
+        async with get_session() as db:
+            result = await db.execute(select(Secret))
+            secrets = result.scalars().all()
+            return [
+                (s.key, decrypt(s.encrypted_value))
+                for s in secrets
+            ]
+
     async def delete(self, key: str) -> bool:
         """Delete a secret by key. Returns True if deleted."""
         async with get_session() as db:

@@ -3,6 +3,7 @@ import logging
 
 from config.settings import settings
 from src.agent.session import session_manager
+from src.llm_runtime import completion_with_fallback
 from src.memory.soul import read_soul, update_soul_section
 from src.memory.vector_store import add_memory
 
@@ -42,20 +43,11 @@ async def consolidate_session(session_id: str) -> None:
         soul = read_soul()
         prompt = _CONSOLIDATION_PROMPT.format(conversation=history, soul=soul)
 
-        # Use LiteLLM directly for the consolidation call (lighter than full agent)
-        import litellm
-
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    litellm.completion,
-                    model=settings.default_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    api_key=settings.openrouter_api_key,
-                    api_base="https://openrouter.ai/api/v1",
-                    temperature=0.3,
-                    max_tokens=1024,
-                ),
+            response = await completion_with_fallback(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=1024,
                 timeout=settings.consolidation_llm_timeout,
             )
         except asyncio.TimeoutError:

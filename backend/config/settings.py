@@ -4,6 +4,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     openrouter_api_key: str = ""
     default_model: str = "openrouter/anthropic/claude-sonnet-4"
+    llm_api_key: str = ""
+    llm_api_base: str = "https://openrouter.ai/api/v1"
+    fallback_model: str = ""
+    fallback_llm_api_key: str = ""
+    fallback_llm_api_base: str = ""
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10

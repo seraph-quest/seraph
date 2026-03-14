@@ -7,6 +7,7 @@ from functools import lru_cache
 import tiktoken
 
 from config.settings import settings
+from src.llm_runtime import completion_with_fallback_sync
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +56,7 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
 
     text = _format_messages(messages)
     try:
-        import litellm
-
-        response = litellm.completion(
-            model=settings.default_model,
+        response = completion_with_fallback_sync(
             messages=[{
                 "role": "user",
                 "content": (
@@ -67,8 +65,6 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
                     f"{text[:8000]}"
                 ),
             }],
-            api_key=settings.openrouter_api_key,
-            api_base="https://openrouter.ai/api/v1",
             temperature=0.3,
             max_tokens=200,
         )

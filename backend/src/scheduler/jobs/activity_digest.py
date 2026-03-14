@@ -5,6 +5,7 @@ import logging
 from datetime import date
 
 from config.settings import settings
+from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
@@ -78,19 +79,11 @@ async def run_activity_digest() -> None:
             streaks=streaks,
         )
 
-        import litellm
-
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    litellm.completion,
-                    model=settings.default_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    api_key=settings.openrouter_api_key,
-                    api_base="https://openrouter.ai/api/v1",
-                    temperature=0.6,
-                    max_tokens=768,
-                ),
+            response = await completion_with_fallback(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_tokens=768,
                 timeout=settings.agent_briefing_timeout,
             )
         except asyncio.TimeoutError:

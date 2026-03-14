@@ -34,6 +34,35 @@ export function useWebSocket() {
   onToolDetectedRef.current = onToolDetected;
   onFinalAnswerRef.current = onFinalAnswer;
 
+  const sendSocketMessage = useCallback(
+    (message: string, sessionId: string | null, echoUser: boolean) => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+
+      setAgentBusy(true);
+      onThinking();
+
+      if (echoUser) {
+        const userMsg: ChatMessage = {
+          id: makeId(),
+          role: "user",
+          content: message,
+          timestamp: Date.now(),
+        };
+        addMessage(userMsg);
+      }
+
+      wsRef.current.send(
+        JSON.stringify({
+          type: "message",
+          message,
+          session_id: sessionId,
+        })
+      );
+      return true;
+    },
+    [addMessage, setAgentBusy, onThinking]
+  );
+
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
@@ -195,39 +224,28 @@ export function useWebSocket() {
 
   const sendMessage = useCallback(
     (message: string) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
-      setAgentBusy(true);
-      onThinking();
-
-      const userMsg: ChatMessage = {
-        id: makeId(),
-        role: "user",
-        content: message,
-        timestamp: Date.now(),
-      };
-      addMessage(userMsg);
-
       const sessionId = useChatStore.getState().sessionId;
-      wsRef.current.send(
-        JSON.stringify({
-          type: "message",
-          message,
-          session_id: sessionId,
-        })
-      );
+      sendSocketMessage(message, sessionId, true);
     },
-    [addMessage, setAgentBusy, onThinking]
+    [sendSocketMessage]
   );
 
   useEffect(() => {
+    const handleApprovalResume = (payload: { sessionId?: string | null; message?: string }) => {
+      if (!payload?.message) return;
+      const fallbackSessionId = useChatStore.getState().sessionId;
+      sendSocketMessage(payload.message, payload.sessionId ?? fallbackSessionId, false);
+    };
+
+    EventBus.on("approval-resume", handleApprovalResume);
     connect();
     return () => {
+      EventBus.off("approval-resume", handleApprovalResume);
       if (pingRef.current) clearInterval(pingRef.current);
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, sendSocketMessage]);
 
   return { sendMessage, skipOnboarding };
 }

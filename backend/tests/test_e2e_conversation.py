@@ -233,6 +233,7 @@ class TestE2EConversation:
                             assert msg["approval_id"] == "approval-1"
                             assert msg["tool_name"] == "shell_execute"
                             assert msg["risk_level"] == "high"
+                            assert "continue automatically" in msg["content"]
                             break
                     else:
                         raise AssertionError("Expected approval_required message")

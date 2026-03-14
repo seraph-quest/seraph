@@ -20,11 +20,13 @@ async def test_approve_pending_request(client):
         risk_level="high",
         summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
         fingerprint="abc",
-        details={"arguments": {"code": "[redacted]"}},
+        details={"arguments": {"code": "[redacted]"}, "resume_message": "run this snippet"},
     )
     resp = await client.post(f"/api/approvals/{request.id}/approve")
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
+    assert resp.json()["session_id"] == "s1"
+    assert resp.json()["resume_message"] == "run this snippet"
 
 
 @pytest.mark.asyncio

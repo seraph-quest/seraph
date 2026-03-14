@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
+import json
 
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
@@ -31,7 +32,15 @@ async def approve_request(approval_id: str):
         policy_mode=get_current_tool_policy_mode(),
         summary=f"Approved high-risk action for {request.tool_name}",
     )
-    return {"status": request.status, "id": request.id}
+
+    details = json.loads(request.details_json) if request.details_json else {}
+    resume_message = details.get("resume_message")
+
+    response = {"status": request.status, "id": request.id}
+    if request.session_id and resume_message:
+        response["session_id"] = request.session_id
+        response["resume_message"] = resume_message
+    return response
 
 
 @router.post("/approvals/{approval_id}/deny")

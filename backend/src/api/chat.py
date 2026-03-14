@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.approval.exceptions import ApprovalRequired
+from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from config.settings import settings
 from src.agent.factory import build_agent
@@ -60,6 +61,10 @@ async def chat(request: ChatRequest):
         response_text = str(result.output) if hasattr(result, "output") else str(result)
         response_text = await redact_secrets_in_text(response_text)
     except ApprovalRequired as exc:
+        await approval_repository.merge_details(
+            exc.approval_id,
+            {"resume_message": request.message},
+        )
         await audit_repository.log_event(
             session_id=exc.session_id,
             actor="agent",

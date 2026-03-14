@@ -57,7 +57,8 @@ class TestChatAPI:
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
-    async def test_chat_approval_required(self, mock_onboarding, mock_create_agent, mock_search, client):
+    @patch("src.api.chat.approval_repository.merge_details")
+    async def test_chat_approval_required(self, mock_merge_details, mock_onboarding, mock_create_agent, mock_search, client):
         mock_agent = MagicMock()
         mock_agent.run.side_effect = ApprovalRequired(
             approval_id="approval-123",
@@ -74,6 +75,7 @@ class TestChatAPI:
         assert detail["type"] == "approval_required"
         assert detail["approval_id"] == "approval-123"
         assert detail["tool_name"] == "shell_execute"
+        mock_merge_details.assert_awaited_once_with("approval-123", {"resume_message": "Run this"})
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")

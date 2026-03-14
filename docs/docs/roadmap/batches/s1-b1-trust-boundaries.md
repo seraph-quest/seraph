@@ -16,6 +16,25 @@ Add the minimum serious trust and control layer Seraph needs before broader auto
 - audit log of meaningful actions and approvals
 - clearer isolation boundaries between planning, execution, and privileged operations
 
+## Current progress
+
+The trust-boundary foundation is now meaningfully underway.
+
+Shipped in this batch so far:
+
+- tool policy modes for `safe`, `balanced`, and `full`
+- structured audit logging for tool calls, tool results, and approval decisions
+- high-risk approval gates in chat and WebSocket flows
+- secret egress redaction for outbound chat, step output, and surfaced errors
+- vault operation audit for secret store/get/list/delete actions
+- approval flow improvements so approved chat actions can resume automatically
+
+Still open inside this batch:
+
+- stronger secret boundaries than raw `get_secret()` returns
+- tighter isolation between planning, privileged execution, and future workflow/runtime layers
+- a clearer policy model for broader MCP and external execution surfaces
+
 ## Non-goals
 
 - full enterprise multi-tenant security

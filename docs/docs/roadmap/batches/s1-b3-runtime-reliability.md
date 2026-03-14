@@ -26,13 +26,14 @@ Shipped in this batch so far:
 - centralized provider-agnostic LLM runtime settings with an optional fallback completion path for direct LiteLLM calls
 - timeout-safe audit events for primary-vs-fallback direct LLM completion behavior so degraded mode is visible after the fact
 - fallback-capable `smolagents` model wrappers for the main agent, onboarding agent, strategist, and specialists so provider failure is less likely to collapse the interactive runtime
+- a repeatable runtime eval harness for core guardian/tool reliability contracts so fallback wiring and degraded behavior can be checked without live providers
 
 Still open inside this batch:
 
 - broader model/provider routing beyond the first shared fallback path
 - deeper local-model-capable execution paths beyond a configurable API base/model swap
 - broader observability coverage beyond the first direct LLM runtime audit events
-- a repeatable evaluation harness for core guardian and tool flows
+- richer evaluation coverage beyond the first core guardian and tool scenarios
 
 ## Non-goals
 

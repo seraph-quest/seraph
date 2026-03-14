@@ -27,6 +27,19 @@ asyncio_mode = "auto"
 addopts = "--cov=src --cov-report=term-missing"
 ```
 
+### Runtime Evals
+
+For `S1-B3` reliability work, there is also a deterministic eval harness for core guardian/runtime contracts:
+
+```bash
+cd backend
+uv run python -m src.evals.harness --list
+uv run python -m src.evals.harness
+uv run python -m src.evals.harness --scenario daily_briefing_fallback
+```
+
+This runner does not call external providers. It exercises core seams with controlled mocks so fallback wiring, proactive delivery, and tool degradation behavior stay easy to verify after reliability changes.
+
 ### Frontend
 
 ```bash

@@ -2,55 +2,53 @@
 sidebar_position: 4
 ---
 
-# Seraph — Next Steps Analysis
-**Date: 2026-02-13**
+# Seraph Next Steps
 
----
+This page is the short-horizon companion to the [long-term roadmap](./roadmap). It should summarize what we are actively optimizing for now, not compete with the master plan.
 
-## Current State
+## Current Focus
 
-Phases 0-3 are complete and functional. 624 automated tests (500 backend, 124 frontend). Clean codebase with no TODOs/FIXMEs. The project's unique advantages — proactive intelligence, RPG village metaphor, five-pillar life model, screen awareness — are implemented but not fully leveraged in the UI.
+Seraph is now in **Season 1: Trust + Capability**.
 
----
+That means the next execution wave is focused on making the guardian thesis more credible by improving:
 
-## Completed (Tier 1)
+- trust boundaries
+- execution breadth
+- runtime reliability
 
-1. ~~**Fix the docs sidebar**~~ — Done. All docs wired into `docs/sidebars.ts`.
+This is the right priority because Seraph's biggest moat already exists at the product level, while its biggest gaps are operational.
 
-2. ~~**Interruption Mode UI**~~ (3.5.2) — Done. 3-state toggle (Focus/Balanced/Active) in SettingsPanel via `InterruptionModeToggle.tsx`.
+## Current Batches
 
-3. ~~**Goal Management UI**~~ (3.5.1) — Done. Create/edit modal (`GoalForm.tsx`), inline actions (complete/edit/delete) on GoalTree nodes, and search/filter (text search + level/domain dropdowns) in QuestPanel.
+### 1. Trust Boundaries
 
-4. ~~**Frontend Accessibility**~~ (3.5.9) — Done. Font sizes bumped to 9px minimum across all panels. Keyboard shortcuts: Shift+C (chat), Shift+Q (quests), Shift+S (settings), Escape (close). Shift modifier prevents WASD avatar movement conflict.
+- [S1-B1 Trust Boundaries](../roadmap/batches/s1-b1-trust-boundaries)
+- approvals, policy profiles, auditability, secret scoping, stronger isolation
 
-7. ~~**SKILL.md Plugin Ecosystem**~~ (4.1) — Done. Zero-code markdown plugins in `data/skills/`. YAML frontmatter, tool gating, runtime enable/disable via API + Settings UI. 8 bundled skills.
+### 2. Execution Plane
 
-5. ~~**Agent Execution Timeout**~~ (3.5.6) — Done. `asyncio.wait_for` timeouts on REST chat (504), daily briefing, evening review, memory consolidation LLM + add_memory calls. DDGS web search timeout via constructor. 3 new settings: `agent_briefing_timeout` (60s), `consolidation_llm_timeout` (30s), `web_search_timeout` (15s). 5 new tests.
+- [S1-B2 Execution Plane](../roadmap/batches/s1-b2-execution-plane)
+- real shell/process execution, stronger browser automation, workflow engine direction
 
-6. ~~**Token-Aware Context Window**~~ (3.5.5) — Done. Token-aware context window with configurable budget. Keeps first N + last M messages, summarizes middle via LLM. 3 new settings: `context_window_token_budget` (12000), `context_window_keep_first` (2), `context_window_keep_recent` (20). Info logging on both return paths. 3 new settings integration tests.
+### 3. Runtime Reliability
 
-## Tier 3: The growth engine (Phase 4)
+- [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
+- model routing, fallback paths, local model option, observability, evaluation harness
 
-8. **Telegram Bot** (4.2, first channel) — Makes proactive system (briefings, reviews, nudges) actually useful. Users won't keep a browser tab open, but they always have their phone.
+## What Comes After
 
-## Tier 4: Bigger bets (quarter-scale)
+If Season 1 lands well, the next major execution arc is:
 
-9. **Tauri Desktop App** (3.5.7) — Eliminates Docker barrier. Single `.dmg` with bundled backend + daemon. System tray. Biggest adoption unlock but biggest effort.
+- [Season 2: Reach + Presence](../roadmap/seasons/season-2-reach-presence)
 
-10. **Avatar Ambient State Reflection** (3.5.3) — Ambient WebSocket messages already flow; Phaser doesn't react visually. Making Seraph meditate/pace/glow based on state brings the RPG metaphor to life.
+That season moves Seraph from a strong local product into something users can actually keep with them throughout the day via native presence, channel reach, and better ambient delivery.
 
-## What to skip for now
+## Guardrails
 
-- **Calendar scan** (3.5.4) — Already more complete than REPORT.md claimed. Works when credentials are configured.
-- ~~**Multi-agent architecture** (4.4) — Premature until single-agent is polished.~~ → Implemented as recursive delegation behind feature flag (`USE_DELEGATION=true`).
-- **Voice** (4.8) — Not a differentiator yet.
-- **Workflow engine** (4.3) — Wait for SKILL.md; workflows build on skills.
+For the next phase of work, avoid prioritizing:
 
-## Strategic take
+- cosmetic UX upgrades ahead of trust boundaries
+- new channels before the execution plane is safer
+- broad ecosystem work before the runtime is more reliable
 
-Seraph's biggest advantages are **proactive intelligence** and **the RPG village**. Neither is fully leveraged:
-- Proactive messages only reach a browser tab → Telegram fixes this
-- Village avatar doesn't reflect agent state → ambient states fix this
-- ~~Users can't control interruptions → interruption mode UI fixes this~~ ✓
-
-**Next priorities**: ~~Agent execution timeout (prevents user frustration)~~ ✓, ~~token-aware context (prevents quality degradation)~~ ✓, then Telegram bot (makes proactive intelligence useful in daily life).
+Those ideas still matter. They just land better after the current season closes its credibility gap.

@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 
 from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
+from src.vault.repository import vault_repository
 from tests.test_websocket import _make_sync_client_with_db
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
@@ -235,6 +236,54 @@ class TestE2EConversation:
                             break
                     else:
                         raise AssertionError("Expected approval_required message")
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_secret_values_are_redacted_in_streamed_messages(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            import asyncio
+
+            asyncio.run(vault_repository.store("service_token", "super-secret-token"))
+
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter([
+                ToolCall(name="get_secret", arguments={"key": "service_token"}, id="tc1"),
+                ActionStep(
+                    step_number=1,
+                    timing=_TIMING,
+                    observations="Retrieved secret: super-secret-token",
+                    is_final_answer=False,
+                ),
+                FinalAnswerStep(output="Using secret super-secret-token now."),
+            ])
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "fetch the token",
+                        "session_id": None,
+                    }))
+
+                    received = []
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        received.append(msg)
+                        if msg["type"] == "final":
+                            break
+
+                    contents = [msg["content"] for msg in received if "content" in msg]
+                    assert any("[redacted secret]" in content for content in contents)
+                    assert all("super-secret-token" not in content for content in contents)
         finally:
             stack.close()
             for p in patches:

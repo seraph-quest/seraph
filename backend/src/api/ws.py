@@ -20,6 +20,7 @@ from src.memory.vector_store import search_formatted
 from src.models.schemas import WSMessage, WSResponse
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
+from src.vault.redaction import redact_secrets_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -204,8 +205,9 @@ async def websocket_chat(websocket: WebSocket):
 
                         elif isinstance(step, ActionStep):
                             if step.observations and not step.is_final_answer:
+                                safe_observations = await redact_secrets_in_text(step.observations)
                                 result_summary, result_details = summarize_tool_result(
-                                    last_tool_name, step.observations
+                                    last_tool_name, safe_observations
                                 )
                                 await audit_repository.log_event(
                                     session_id=session.id,
@@ -228,7 +230,7 @@ async def websocket_chat(websocket: WebSocket):
                                 await websocket.send_text(
                                     WSResponse(
                                         type="step",
-                                        content=step.observations,
+                                        content=safe_observations,
                                         session_id=session.id,
                                         step=step_num,
                                         seq=_next_seq(),
@@ -236,7 +238,7 @@ async def websocket_chat(websocket: WebSocket):
                                 )
 
                         elif isinstance(step, FinalAnswerStep):
-                            final_result = str(step.output)
+                            final_result = await redact_secrets_in_text(str(step.output))
 
                 await asyncio.wait_for(_drain_queue(), timeout=settings.agent_chat_timeout)
 
@@ -272,10 +274,11 @@ async def websocket_chat(websocket: WebSocket):
 
             except Exception as e:
                 logger.exception("Agent streaming failed")
+                safe_error = await redact_secrets_in_text(f"Agent error: {e}")
                 await websocket.send_text(
                     WSResponse(
                         type="error",
-                        content=f"Agent error: {e}",
+                        content=safe_error,
                         session_id=session.id,
                         seq=_next_seq(),
                     ).model_dump_json()

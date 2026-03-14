@@ -55,3 +55,18 @@ async def test_tools_api_marks_mcp_tools_as_approval_required_in_approval_mode(c
     mcp_entry = next(tool for tool in resp.json() if tool["name"] == "mcp_tasks")
     assert mcp_entry["requires_approval"] is True
     assert mcp_entry["policy_modes"] == ["approval"]
+
+
+@pytest.mark.asyncio
+async def test_tools_api_allows_mcp_tools_with_balanced_native_policy_when_mcp_approval_enabled(client):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval")
+    mcp_tool = MagicMock()
+    mcp_tool.name = "mcp_tasks"
+    mcp_tool.description = "Task MCP"
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx), \
+         patch("src.agent.factory.mcp_manager.get_tools", return_value=[mcp_tool]):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    mcp_entry = next(tool for tool in resp.json() if tool["name"] == "mcp_tasks")
+    assert mcp_entry["requires_approval"] is True
+    assert mcp_entry["policy_modes"] == ["approval"]

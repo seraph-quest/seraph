@@ -33,15 +33,12 @@ def is_tool_allowed(
     mcp_mode: str | None = None,
 ) -> bool:
     """Return whether a tool is allowed under the selected policy mode."""
-    normalized = normalize_tool_policy_mode(mode)
-    if normalized == "full":
-        if not is_mcp:
-            return True
-    elif is_mcp:
-        return False
-
     if is_mcp:
         return normalize_mcp_policy_mode(mcp_mode) in {"approval", "full"}
+
+    normalized = normalize_tool_policy_mode(mode)
+    if normalized == "full":
+        return True
 
     metadata = get_tool_metadata(tool_name)
     if metadata is None:

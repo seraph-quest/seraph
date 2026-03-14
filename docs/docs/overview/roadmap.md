@@ -1,148 +1,78 @@
 ---
 sidebar_position: 2
+title: Master Plan
 ---
 
-# Seraph Long-Term Roadmap
+# Seraph Master Plan
 
-Seraph wins if it becomes the agent that combines four traits better than anyone else:
+Seraph now uses one planning structure only:
 
-- **guardian intelligence**: proactive, interruption-aware, and long-horizon
-- **trust boundaries**: safer, more governable, and more credible than typical agent shells
-- **execution breadth**: able to act across real tools, workflows, and surfaces
-- **embodied UX**: a product people want to live with, not just run
+- one **master plan** file
+- one file per **workstream**
 
-That is the path that differentiates Seraph from OpenClaw, IronClaw, Hermes Agent, and the broader field. The planning system below turns that thesis into a single canonical structure for long-term execution.
+The old `sections / seasons / batches` split is no longer the live planning surface. If an old roadmap file still exists in the repo, treat it as legacy reference material, not the current plan.
 
-## Planning Model
+## How To Read This
 
-Seraph now uses a hybrid roadmap model:
+- `[x]` means the capability already has meaningful shipped foundations
+- `[ ]` means the work is not finished yet
 
-- **Sections** explain why the work exists
-- **Seasons** explain when major work lands
-- **Batches** explain what gets built next
+If you want the current truth, use this page plus the workstream files linked below.
 
-Read the external framing first:
+## Workstreams
 
-- [Competitive Research: Seraph vs OpenClaw, IronClaw, and Hermes Agent](../architecture/competitive-agent-research)
+### 01. [Trust Boundaries](../plan/trust-boundaries)
 
-Then use the roadmap layers below.
+- [x] meaningful foundations are shipped
+- [ ] the workstream is not complete
+- focus: make Seraph safer and more governable before expanding autonomy further
 
-## Section Map
+### 02. [Execution Plane](../plan/execution-plane)
 
-1. [Trust + Capability](../roadmap/sections/section-1-trust-capability)
-2. [Presence + Distribution](../roadmap/sections/section-2-presence-distribution)
-3. [Memory + Guardian Intelligence](../roadmap/sections/section-3-memory-guardian-intelligence)
-4. [Embodiment + Life OS](../roadmap/sections/section-4-embodiment-life-os)
-5. [Ecosystem + Leverage](../roadmap/sections/section-5-ecosystem-leverage)
+- [x] execution foundations are shipped
+- [ ] the workstream is not complete
+- focus: make Seraph better at doing real work, not just reasoning about it
 
-These sections are durable. They should survive individual implementation waves and help explain why a batch matters even when the code changes.
+### 03. [Runtime Reliability](../plan/runtime-reliability)
 
-## Season Map
+- [x] baseline hardening is shipped
+- [ ] the workstream is still active
+- focus: routing, fallbacks, observability, evals, and degraded-mode behavior
 
-1. [Season 1: Trust + Capability](../roadmap/seasons/season-1-trust-capability)
-2. [Season 2: Reach + Presence](../roadmap/seasons/season-2-reach-presence)
-3. [Season 3: Memory + Guardian](../roadmap/seasons/season-3-memory-guardian)
-4. [Season 4: Embodied Life OS](../roadmap/seasons/season-4-embodied-life-os)
+### 04. [Presence And Reach](../plan/presence-and-reach)
 
-The seasons are chronological. They intentionally prioritize credibility before ubiquity and trust before delight.
+- [x] browser and local-observer foundations exist
+- [ ] native presence and external reach are still ahead
+- focus: make Seraph reachable outside a browser tab
 
-## Season-to-Section Matrix
+### 05. [Guardian Intelligence](../plan/guardian-intelligence)
 
-| Season | Primary sections | What this season changes |
-|---|---|---|
-| Season 1 | Trust + Capability, Ecosystem + Leverage | Makes Seraph safe enough and capable enough to justify the guardian promise |
-| Season 2 | Presence + Distribution, Embodiment + Life OS | Makes Seraph reachable outside localhost and more present in daily life |
-| Season 3 | Memory + Guardian Intelligence, Trust + Capability | Turns Seraph from stateful assistant into long-horizon guardian |
-| Season 4 | Embodiment + Life OS, Presence + Distribution, Ecosystem + Leverage | Fully cashes in Seraph's unique product and motivation moat |
+- [x] memory and strategist foundations exist
+- [ ] the deeper guardian model is still ahead
+- focus: move from retrieval + heuristics toward richer human understanding and adaptation
 
-## Now / Next / Later
+### 06. [Embodied UX](../plan/embodied-ux)
 
-### Now
+- [x] the village UX and ambient shell are real
+- [ ] the full life-OS layer is still ahead
+- focus: make Seraph feel alive, legible, and motivating without becoming gimmicky
 
-**Season 1: Trust + Capability**
+### 07. [Ecosystem And Leverage](../plan/ecosystem-and-leverage)
 
-This is the highest-priority season because Seraph's biggest weakness is not product positioning. It is the gap between the guardian thesis and the runtime's current operational credibility.
+- [x] skills, MCP, and delegation foundations exist
+- [ ] the workstream is still early
+- focus: compound Seraph through reusable extensions without losing product clarity
 
-Immediate batches:
+## Order Of Execution
 
-- [S1-B1 Trust Boundaries](../roadmap/batches/s1-b1-trust-boundaries)
-- [S1-B2 Execution Plane](../roadmap/batches/s1-b2-execution-plane)
-- [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
+This is the intended order:
 
-Live status:
+1. Trust Boundaries
+2. Execution Plane
+3. Runtime Reliability
+4. Presence And Reach
+5. Guardian Intelligence
+6. Embodied UX
+7. Ecosystem And Leverage
 
-- [x] trust-boundary foundations are in place
-- [x] execution-plane foundations are in place
-- [x] baseline runtime reliability hardening is in place
-- [ ] current work is still inside `S1-B3` to make runtime status easier to see and debug
-- [ ] Season 1 is not done yet; routing, deeper local paths, and broader observability/evals are still open
-
-### Next
-
-**Season 2: Reach + Presence**
-
-Once Seraph is safer and more credible, it needs to become available in real life rather than trapped in a dev stack. The second season focuses on native presence, channels, and ambient delivery.
-
-Upcoming batches:
-
-- [S2-B1 Native Presence](../roadmap/batches/s2-b1-native-presence)
-- [S2-B2 Channel Reach](../roadmap/batches/s2-b2-channel-reach)
-- [S2-B3 Ambient Guardian](../roadmap/batches/s2-b3-ambient-guardian)
-
-### Later
-
-**Season 3 and Season 4**
-
-These seasons deepen the parts of Seraph that make it more than a secure task runner:
-
-- a richer model of the human
-- adaptive guardian behavior
-- a stronger embodied life operating system
-
-Later-season batches are already defined so implementation can continue without rethinking the entire roadmap:
-
-- [Season 3: Memory + Guardian](../roadmap/seasons/season-3-memory-guardian)
-- [Season 4: Embodied Life OS](../roadmap/seasons/season-4-embodied-life-os)
-
-## Detailed Planning Tree
-
-### Sections
-
-- [Section 1: Trust + Capability](../roadmap/sections/section-1-trust-capability)
-- [Section 2: Presence + Distribution](../roadmap/sections/section-2-presence-distribution)
-- [Section 3: Memory + Guardian Intelligence](../roadmap/sections/section-3-memory-guardian-intelligence)
-- [Section 4: Embodiment + Life OS](../roadmap/sections/section-4-embodiment-life-os)
-- [Section 5: Ecosystem + Leverage](../roadmap/sections/section-5-ecosystem-leverage)
-
-### Seasons
-
-- [Season 1: Trust + Capability](../roadmap/seasons/season-1-trust-capability)
-- [Season 2: Reach + Presence](../roadmap/seasons/season-2-reach-presence)
-- [Season 3: Memory + Guardian](../roadmap/seasons/season-3-memory-guardian)
-- [Season 4: Embodied Life OS](../roadmap/seasons/season-4-embodied-life-os)
-
-### Current Decision-Complete Batches
-
-- [S1-B1 Trust Boundaries](../roadmap/batches/s1-b1-trust-boundaries)
-- [S1-B2 Execution Plane](../roadmap/batches/s1-b2-execution-plane)
-- [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
-- [S2-B1 Native Presence](../roadmap/batches/s2-b1-native-presence)
-- [S2-B2 Channel Reach](../roadmap/batches/s2-b2-channel-reach)
-- [S2-B3 Ambient Guardian](../roadmap/batches/s2-b3-ambient-guardian)
-
-### Later-Season Stubs
-
-- [S3-B1 Human World Model](../roadmap/batches/s3-b1-human-world-model)
-- [S3-B2 Observer Deepening](../roadmap/batches/s3-b2-observer-deepening)
-- [S3-B3 Learning Loop](../roadmap/batches/s3-b3-learning-loop)
-- [S4-B1 Avatar Reflection](../roadmap/batches/s4-b1-avatar-reflection)
-- [S4-B2 Life OS Surfaces](../roadmap/batches/s4-b2-life-os-surfaces)
-- [S4-B3 World + Motivation](../roadmap/batches/s4-b3-world-motivation)
-
-## How To Use This Roadmap
-
-- Use this page as the single long-term entry point.
-- Use section docs to explain strategic rationale.
-- Use season docs to coordinate cross-batch sequencing.
-- Use batch docs to drive implementation and issue breakdown.
-- Use [Next Steps](./next-steps) as the short horizon summary derived from this roadmap.
+This is not a claim that only one workstream can move at a time. It is the order that resolves the biggest product and runtime risks first.

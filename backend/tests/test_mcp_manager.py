@@ -316,6 +316,25 @@ class TestMCPManager:
             for event in events
         )
 
+    @pytest.mark.asyncio
+    @patch("src.tools.mcp_manager.MCPClient")
+    async def test_connect_success_logs_runtime_audit_event_inside_async_context(self, MockMCPClient, async_db):
+        mock_client = MagicMock()
+        mock_client.get_tools.return_value = [MagicMock(name="tool1")]
+        MockMCPClient.return_value = mock_client
+
+        mgr = MCPManager()
+        mgr.connect("svc", "http://svc/mcp")
+        await asyncio.sleep(0)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_connected"
+            and event["tool_name"] == "mcp_server:svc"
+            and event["details"]["tool_count"] == 1
+            for event in events
+        )
+
     def test_disconnect_sets_disconnected(self):
         mgr = MCPManager()
         mgr._status["svc"] = {"status": "connected", "error": None}

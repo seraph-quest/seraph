@@ -124,7 +124,21 @@ def log_integration_event_sync(
 ) -> None:
     """Sync wrapper for integration runtime events used by non-async callers."""
     try:
-        asyncio.run(log_integration_event(
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(log_integration_event(
+                integration_type=integration_type,
+                name=name,
+                outcome=outcome,
+                details=details,
+            ))
+        except Exception:
+            logger.debug("Failed to run integration runtime audit logger", exc_info=True)
+        return
+
+    try:
+        loop.create_task(log_integration_event(
             integration_type=integration_type,
             name=name,
             outcome=outcome,

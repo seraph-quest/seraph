@@ -22,11 +22,22 @@ async_session_factory = sessionmaker(
 )
 
 
+async def _ensure_legacy_columns(conn) -> None:
+    """Backfill columns for older local SQLite databases."""
+    result = await conn.exec_driver_sql("PRAGMA table_info(user_profiles)")
+    columns = {row[1] for row in result.fetchall()}
+    if "tool_policy_mode" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE user_profiles ADD COLUMN tool_policy_mode VARCHAR DEFAULT 'full'"
+        )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_legacy_columns(conn)
 
 
 async def close_db() -> None:

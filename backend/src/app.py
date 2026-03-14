@@ -46,6 +46,8 @@ async def lifespan(app: FastAPI):
             context_manager.update_interruption_mode(profile.interruption_mode)
         if profile.capture_mode:
             context_manager.update_capture_mode(profile.capture_mode)
+        if profile.tool_policy_mode:
+            context_manager.update_tool_policy_mode(profile.tool_policy_mode)
     except Exception:
         import logging
         logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)

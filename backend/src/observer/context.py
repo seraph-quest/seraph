@@ -39,6 +39,7 @@ class CurrentContext:
 
     # Capture mode — controls screenshot frequency (on_switch | balanced | detailed)
     capture_mode: str = "on_switch"
+    tool_policy_mode: str = "full"
 
     # Phase 3.3 — State machine tracking
     previous_user_state: str = "available"
@@ -90,6 +91,10 @@ class CurrentContext:
             minutes_ago = int(delta.total_seconds() / 60)
             lines.append(f"Last interaction: {minutes_ago}m ago")
 
-        lines.append(f"User state: {self.user_state} | Mode: {self.interruption_mode} | Budget: {self.attention_budget_remaining}")
+        lines.append(
+            "User state: "
+            f"{self.user_state} | Mode: {self.interruption_mode} | "
+            f"Budget: {self.attention_budget_remaining} | Tools: {self.tool_policy_mode}"
+        )
 
         return "\n".join(lines)

@@ -3,6 +3,7 @@ from smolagents import LiteLLMModel, ToolCallingAgent
 from config.settings import settings
 from src.plugins.loader import discover_tools
 from src.skills.manager import skill_manager
+from src.tools.policy import filter_tools, get_current_tool_policy_mode
 from src.tools.mcp_manager import mcp_manager
 
 
@@ -19,7 +20,10 @@ def get_model() -> LiteLLMModel:
 
 def get_tools() -> list:
     """Return all auto-discovered tools + MCP tools."""
-    return discover_tools() + mcp_manager.get_tools()
+    mode = get_current_tool_policy_mode()
+    native_tools = filter_tools(discover_tools(), mode)
+    mcp_tools = filter_tools(mcp_manager.get_tools(), mode, is_mcp=True)
+    return native_tools + mcp_tools
 
 
 def create_agent(

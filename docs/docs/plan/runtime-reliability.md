@@ -20,10 +20,11 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
 - [x] real tool execution audit events for call, result, and failure across agent transports
 - [x] strategist tool calls and background helper flows now emit runtime audit coverage
+- [x] MCP server connection lifecycle emits runtime audit coverage for connect, disconnect, auth-required, and failure states
 
 ## In Progress
 
-- [ ] close the remaining runtime observability gaps outside the main agent, strategist, scheduler, and helper paths
+- [ ] close the remaining runtime observability gaps outside the main agent, scheduler/helper flows, and current integration lifecycle coverage
 
 ## Left To Do
 

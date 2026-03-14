@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -85,3 +86,63 @@ async def log_background_task_event(
         )
     except Exception:
         logger.debug("Failed to record background runtime audit event", exc_info=True)
+
+
+async def log_integration_event(
+    *,
+    integration_type: str,
+    name: str,
+    outcome: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Record an external integration lifecycle event without breaking callers."""
+    summary = f"{integration_type.replace('_', ' ').capitalize()} {name} {outcome.replace('_', ' ')}"
+    try:
+        await audit_repository.log_event(
+            actor="system",
+            event_type=f"integration_{outcome}",
+            tool_name=f"{integration_type}:{name}",
+            risk_level="low",
+            policy_mode="full",
+            summary=summary,
+            details={
+                "integration_type": integration_type,
+                "name": name,
+                **(details or {}),
+            },
+        )
+    except Exception:
+        logger.debug("Failed to record integration runtime audit event", exc_info=True)
+
+
+def log_integration_event_sync(
+    *,
+    integration_type: str,
+    name: str,
+    outcome: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Sync wrapper for integration runtime events used by non-async callers."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(log_integration_event(
+                integration_type=integration_type,
+                name=name,
+                outcome=outcome,
+                details=details,
+            ))
+        except Exception:
+            logger.debug("Failed to run integration runtime audit logger", exc_info=True)
+        return
+
+    try:
+        loop.create_task(log_integration_event(
+            integration_type=integration_type,
+            name=name,
+            outcome=outcome,
+            details=details,
+        ))
+    except Exception:
+        logger.debug("Failed to run integration runtime audit logger", exc_info=True)

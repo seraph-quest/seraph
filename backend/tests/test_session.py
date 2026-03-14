@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.agent.session import SessionManager
+from src.audit.repository import audit_repository
 
 
 @pytest.fixture
@@ -159,6 +160,14 @@ class TestGenerateTitle:
             title = await sm.generate_title("s1")
 
         assert title == "AI Discussion"
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "session_title_generation"
+            and event["session_id"] == "s1"
+            and event["details"]["title_length"] == len("AI Discussion")
+            for event in events
+        )
 
     async def test_skips_non_default_title(self, async_db, sm):
         s = await sm.get_or_create("s1")
@@ -166,3 +175,11 @@ class TestGenerateTitle:
         # Need to re-fetch since generate_title reads from DB
         title = await sm.generate_title("s1")
         assert title == "Custom Title"
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_skipped"
+            and event["tool_name"] == "session_title_generation"
+            and event["session_id"] == "s1"
+            and event["details"]["reason"] == "title_already_set"
+            for event in events
+        )

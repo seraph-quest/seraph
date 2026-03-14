@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from time import perf_counter
 
 from config.settings import settings
 from src.agent.session import session_manager
+from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
 from src.memory.soul import read_soul, update_soul_section
 from src.memory.vector_store import add_memory
@@ -35,9 +37,20 @@ async def consolidate_session(session_id: str) -> None:
 
     Runs as a background task after each conversation.
     """
+    started_at = perf_counter()
     try:
         history = await session_manager.get_history_text(session_id, limit=30)
         if not history or len(history) < 50:
+            await log_background_task_event(
+                task_name="session_consolidation",
+                outcome="skipped",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "insufficient_history",
+                    "history_length": len(history),
+                },
+            )
             return
 
         soul = read_soul()
@@ -55,6 +68,16 @@ async def consolidate_session(session_id: str) -> None:
                 "Consolidation LLM timed out after %ds for session %s",
                 settings.consolidation_llm_timeout,
                 session_id[:8],
+            )
+            await log_background_task_event(
+                task_name="session_consolidation",
+                outcome="timed_out",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.consolidation_llm_timeout,
+                    "history_length": len(history),
+                },
             )
             return
 
@@ -105,6 +128,26 @@ async def consolidate_session(session_id: str) -> None:
             stored,
             len(soul_updates),
         )
+        await log_background_task_event(
+            task_name="session_consolidation",
+            outcome="succeeded",
+            session_id=session_id,
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "history_length": len(history),
+                "stored_memory_count": stored,
+                "soul_update_count": len(soul_updates),
+            },
+        )
 
-    except Exception:
+    except Exception as exc:
+        await log_background_task_event(
+            task_name="session_consolidation",
+            outcome="failed",
+            session_id=session_id,
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("Memory consolidation failed for session %s", session_id[:8])

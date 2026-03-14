@@ -19,16 +19,17 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] repeatable runtime eval harness for core guardian and tool reliability contracts
 - [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
 - [x] real tool execution audit events for call, result, and failure across agent transports
+- [x] strategist tool calls and background helper flows now emit runtime audit coverage
 
 ## In Progress
 
-- [ ] broaden observability beyond current tool execution coverage into more runtime edge paths
+- [ ] close the remaining runtime observability gaps outside the main agent, strategist, scheduler, and helper paths
 
 ## Left To Do
 
 - [ ] broaden model and provider routing beyond the first shared fallback path
 - [ ] deepen local-model-capable execution paths beyond API-base swapping
-- [ ] add observability coverage across more tool and runtime paths
+- [ ] add observability coverage across any remaining edge helpers and external integration paths
 - [ ] expand eval coverage beyond the first core scenarios
 
 ## Done Means

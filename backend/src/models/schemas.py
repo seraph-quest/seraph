@@ -19,7 +19,7 @@ class ChatResponse(BaseModel):
 
 
 class WSMessage(BaseModel):
-    type: str = Field("message", description="Message type: message | ping | skip_onboarding")
+    type: str = Field("message", description="Message type: message | resume_message | ping | skip_onboarding")
     message: str = Field("", description="User message")
     session_id: str | None = None
 

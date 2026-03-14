@@ -1,6 +1,7 @@
 import type { ChatMessage } from "../../types";
 import { API_URL } from "../../config/constants";
 import { useState } from "react";
+import { EventBus } from "../../game/EventBus";
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -43,6 +44,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         const data = await res.json();
         if (data?.status) {
           setApprovalStatus(data.status);
+          if (decision === "approve" && data.status === "approved" && data.resume_message) {
+            EventBus.emit("approval-resume", {
+              sessionId: data.session_id ?? null,
+              message: data.resume_message,
+            });
+          }
         }
       }
     } catch {
@@ -94,7 +101,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             </>
           ) : (
             <div className="text-[10px] text-retro-text/60 uppercase tracking-wider">
-              {approvalStatus === "approved" && "Approved. Resend your request to continue."}
+              {approvalStatus === "approved" && "Approved. Retrying your request..."}
               {approvalStatus === "consumed" && "Already approved and used."}
               {approvalStatus === "denied" && "Denied."}
             </div>

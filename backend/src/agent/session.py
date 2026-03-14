@@ -242,5 +242,4 @@ class SessionManager:
             )
             return len(result.scalars().all())
 
-
 session_manager = SessionManager()

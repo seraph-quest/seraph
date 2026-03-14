@@ -8,6 +8,7 @@ from smolagents import ActionStep, ToolCall, FinalAnswerStep
 
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
+from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
@@ -142,7 +143,8 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             session = await session_manager.get_or_create(ws_msg.session_id)
-            await session_manager.add_message(session.id, "user", ws_msg.message)
+            if ws_msg.type != "resume_message":
+                await session_manager.add_message(session.id, "user", ws_msg.message)
             try:
                 from src.observer.manager import context_manager
                 context_manager.update_last_interaction()
@@ -247,6 +249,10 @@ async def websocket_chat(websocket: WebSocket):
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
 
             except ApprovalRequired as exc:
+                await approval_repository.merge_details(
+                    exc.approval_id,
+                    {"resume_message": ws_msg.message},
+                )
                 await audit_repository.log_event(
                     session_id=exc.session_id,
                     actor="agent",
@@ -261,7 +267,7 @@ async def websocket_chat(websocket: WebSocket):
                         type="approval_required",
                         content=(
                             f"{exc.summary}\n\n"
-                            "This is a high-risk action. Approve it in chat, then resend your request to continue."
+                            "This is a high-risk action. Approve it in chat to continue automatically."
                         ),
                         session_id=session.id,
                         seq=_next_seq(),

@@ -79,6 +79,24 @@ class ApprovalRepository:
             db.expunge(request)
             return request
 
+    async def merge_details(self, approval_id: str, details: dict[str, Any]) -> ApprovalRequest | None:
+        """Merge additional metadata into an existing approval request."""
+        async with get_session() as db:
+            result = await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+            )
+            request = result.scalars().first()
+            if request is None:
+                return None
+
+            existing = json.loads(request.details_json) if request.details_json else {}
+            existing.update(details)
+            request.details_json = json.dumps(existing)
+            db.add(request)
+            await db.flush()
+            db.expunge(request)
+            return request
+
     async def consume_approved(
         self,
         *,

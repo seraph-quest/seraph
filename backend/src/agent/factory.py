@@ -6,6 +6,7 @@ from src.skills.manager import skill_manager
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
 from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
 from src.tools.mcp_manager import mcp_manager
+from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 
 
 def get_model() -> LiteLLMModel:
@@ -23,7 +24,9 @@ def get_tools() -> list:
     """Return all auto-discovered tools + MCP tools."""
     tool_mode = get_current_tool_policy_mode()
     mcp_mode = get_current_mcp_policy_mode()
-    native_tools = wrap_tools_for_approval(filter_tools(discover_tools(), tool_mode))
+    native_tools = wrap_tools_for_approval(
+        wrap_tools_for_secret_refs(filter_tools(discover_tools(), tool_mode))
+    )
     filtered_mcp_tools = filter_tools(
         mcp_manager.get_tools(),
         tool_mode,
@@ -31,9 +34,15 @@ def get_tools() -> list:
         mcp_mode=mcp_mode,
     )
     if mcp_mode == "approval":
-        mcp_tools = wrap_tools_with_forced_approval(filtered_mcp_tools, treat_all_as_mcp=True)
+        mcp_tools = wrap_tools_with_forced_approval(
+            wrap_tools_for_secret_refs(filtered_mcp_tools),
+            treat_all_as_mcp=True,
+        )
     else:
-        mcp_tools = wrap_tools_for_approval(filtered_mcp_tools, treat_all_as_mcp=True)
+        mcp_tools = wrap_tools_for_approval(
+            wrap_tools_for_secret_refs(filtered_mcp_tools),
+            treat_all_as_mcp=True,
+        )
     return native_tools + mcp_tools
 
 

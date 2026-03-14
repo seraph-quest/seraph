@@ -15,6 +15,8 @@ from pathlib import Path
 
 from smolagents import MCPClient
 
+from src.audit.runtime import log_integration_event_sync
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,6 +105,16 @@ class MCPManager:
                 msg = f"Missing environment variables: {', '.join(missing_vars)}"
                 self._status[name] = {"status": "auth_required", "error": msg}
                 logger.warning("MCP server '%s' requires auth: %s", name, msg)
+                log_integration_event_sync(
+                    integration_type="mcp_server",
+                    name=name,
+                    outcome="auth_required",
+                    details={
+                        "url": url,
+                        "error": msg,
+                        "missing_env_vars": missing_vars,
+                    },
+                )
                 return
 
             params: dict = {"url": url, "transport": "streamable-http"}
@@ -116,14 +128,41 @@ class MCPManager:
             self._tools[name] = tools
             self._status[name] = {"status": "connected", "error": None}
             logger.info("Connected to MCP server '%s': %d tools loaded", name, len(tools))
+            log_integration_event_sync(
+                integration_type="mcp_server",
+                name=name,
+                outcome="connected",
+                details={
+                    "url": url,
+                    "tool_count": len(tools),
+                },
+            )
         except BaseException as exc:
             exc_str = self._flatten_exception_text(exc)
             if any(kw in exc_str for kw in ("401", "403", "unauthorized", "forbidden")):
                 self._status[name] = {"status": "auth_required", "error": str(exc)}
                 logger.warning("MCP server '%s' auth failed: %s", name, exc)
+                log_integration_event_sync(
+                    integration_type="mcp_server",
+                    name=name,
+                    outcome="auth_required",
+                    details={
+                        "url": url,
+                        "error": str(exc),
+                    },
+                )
             else:
                 self._status[name] = {"status": "error", "error": str(exc)}
                 logger.warning("Failed to connect to MCP server '%s' at %s", name, url, exc_info=True)
+                log_integration_event_sync(
+                    integration_type="mcp_server",
+                    name=name,
+                    outcome="failed",
+                    details={
+                        "url": url,
+                        "error": str(exc),
+                    },
+                )
 
     def disconnect(self, name: str) -> None:
         """Disconnect a specific named MCP server."""
@@ -135,6 +174,12 @@ class MCPManager:
                 client.disconnect()
             except Exception:
                 logger.warning("Error disconnecting MCP client '%s'", name, exc_info=True)
+        log_integration_event_sync(
+            integration_type="mcp_server",
+            name=name,
+            outcome="disconnected",
+            details={"had_client": client is not None},
+        )
 
     def disconnect_all(self) -> None:
         """Disconnect all MCP servers."""

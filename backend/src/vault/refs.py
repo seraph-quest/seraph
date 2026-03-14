@@ -61,7 +61,9 @@ def _resolve_secret_refs_in_string(value: str, session_id: str) -> str:
     if _REF_PREFIX not in value:
         return value
 
+    now = time.time()
     with _lock:
+        _prune_expired(now)
         session_refs = _issued_refs.get(session_id, {}).copy()
 
     def _replace(match: re.Match[str]) -> str:

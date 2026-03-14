@@ -1,5 +1,6 @@
 """Tests for secret reference issuance and runtime resolution."""
 
+import time
 from unittest.mock import AsyncMock, patch
 
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -58,6 +59,21 @@ def test_secret_ref_wrapper_does_not_resolve_other_session_refs():
     tokens = set_runtime_context("s2", "high_risk")
     try:
         result = wrapped(headers={"Authorization": f"Bearer {secret_ref}"})
+    finally:
+        reset_runtime_context(tokens)
+
+    assert result["kwargs"]["headers"]["Authorization"] == f"Bearer {secret_ref}"
+
+
+def test_secret_ref_wrapper_does_not_resolve_expired_refs():
+    wrapped = SecretRefResolvingTool(DummyHeaderTool())
+    with patch("src.vault.refs.time.time", return_value=1_000.0):
+        secret_ref = _issue_ref_for_session("s1")
+
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with patch("src.vault.refs.time.time", return_value=1_000.0 + 3_601):
+            result = wrapped(headers={"Authorization": f"Bearer {secret_ref}"})
     finally:
         reset_runtime_context(tokens)
 

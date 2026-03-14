@@ -289,3 +289,49 @@ class TestE2EConversation:
             stack.close()
             for p in patches:
                 p.stop()
+
+    def test_resume_message_does_not_duplicate_user_turn(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter([
+                FinalAnswerStep(output="Resumed successfully."),
+            ])
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "run this snippet",
+                        "session_id": "s-resume",
+                    }))
+
+                    for _ in range(10):
+                        msg = json.loads(ws.receive_text())
+                        if msg["type"] == "final":
+                            break
+
+                    ws.send_text(json.dumps({
+                        "type": "resume_message",
+                        "message": "run this snippet",
+                        "session_id": "s-resume",
+                    }))
+
+                    for _ in range(10):
+                        msg = json.loads(ws.receive_text())
+                        if msg["type"] == "final":
+                            break
+
+                messages = client.get("/api/sessions/s-resume/messages").json()
+                user_messages = [m for m in messages if m["role"] == "user"]
+                assert len(user_messages) == 1
+                assert user_messages[0]["content"] == "run this snippet"
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()

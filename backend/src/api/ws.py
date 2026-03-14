@@ -143,7 +143,8 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             session = await session_manager.get_or_create(ws_msg.session_id)
-            await session_manager.add_message(session.id, "user", ws_msg.message)
+            if ws_msg.type != "resume_message":
+                await session_manager.add_message(session.id, "user", ws_msg.message)
             try:
                 from src.observer.manager import context_manager
                 context_manager.update_last_interaction()

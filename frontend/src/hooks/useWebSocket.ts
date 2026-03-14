@@ -17,6 +17,7 @@ export function useWebSocket() {
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(WS_RECONNECT_DELAY_MS);
+  const pendingResumeRef = useRef<{ sessionId: string | null; message: string } | null>(null);
 
   const {
     addMessage,
@@ -35,7 +36,12 @@ export function useWebSocket() {
   onFinalAnswerRef.current = onFinalAnswer;
 
   const sendSocketMessage = useCallback(
-    (message: string, sessionId: string | null, echoUser: boolean) => {
+    (
+      message: string,
+      sessionId: string | null,
+      echoUser: boolean,
+      messageType: "message" | "resume_message" = "message"
+    ) => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
 
       setAgentBusy(true);
@@ -53,7 +59,7 @@ export function useWebSocket() {
 
       wsRef.current.send(
         JSON.stringify({
-          type: "message",
+          type: messageType,
           message,
           session_id: sessionId,
         })
@@ -83,6 +89,12 @@ export function useWebSocket() {
           useChatStore.getState().switchSession(stored);
         }
       });
+
+      if (pendingResumeRef.current) {
+        const pending = pendingResumeRef.current;
+        pendingResumeRef.current = null;
+        sendSocketMessage(pending.message, pending.sessionId, false, "resume_message");
+      }
 
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -234,7 +246,18 @@ export function useWebSocket() {
     const handleApprovalResume = (payload: { sessionId?: string | null; message?: string }) => {
       if (!payload?.message) return;
       const fallbackSessionId = useChatStore.getState().sessionId;
-      sendSocketMessage(payload.message, payload.sessionId ?? fallbackSessionId, false);
+      const ok = sendSocketMessage(
+        payload.message,
+        payload.sessionId ?? fallbackSessionId,
+        false,
+        "resume_message"
+      );
+      if (!ok) {
+        pendingResumeRef.current = {
+          sessionId: payload.sessionId ?? fallbackSessionId,
+          message: payload.message,
+        };
+      }
     };
 
     EventBus.on("approval-resume", handleApprovalResume);

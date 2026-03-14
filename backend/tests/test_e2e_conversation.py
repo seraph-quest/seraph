@@ -10,6 +10,7 @@ from smolagents import ToolCall, ActionStep, FinalAnswerStep
 from smolagents.monitoring import Timing
 from starlette.testclient import TestClient
 
+from src.audit.repository import audit_repository
 from tests.test_websocket import _make_sync_client_with_db
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
@@ -154,6 +155,45 @@ class TestE2EConversation:
                     # First step should mention web_search tool
                     assert any("web_search" in s["content"] for s in steps), \
                         f"No step mentions web_search: {[s['content'] for s in steps]}"
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_tool_calls_are_written_to_audit_log(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter(_make_agent_steps())
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "search for weather",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        if msg["type"] == "final":
+                            break
+
+                events = client.get("/api/audit/events").json()
+                assert any(
+                    event["event_type"] == "tool_call" and event["tool_name"] == "web_search"
+                    for event in events
+                )
+                assert any(
+                    event["event_type"] == "tool_result" and event["tool_name"] == "web_search"
+                    for event in events
+                )
         finally:
             stack.close()
             for p in patches:

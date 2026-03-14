@@ -39,6 +39,23 @@ def filter_tools(tools: Iterable, mode: str, *, is_mcp: bool = False) -> list:
     ]
 
 
+def get_tool_risk_level(tool_name: str, *, is_mcp: bool = False) -> str:
+    """Infer a coarse risk level from the policy metadata."""
+    if is_mcp:
+        return "high"
+
+    metadata = get_tool_metadata(tool_name)
+    if metadata is None:
+        return "high"
+
+    modes = metadata.get("policy_modes", [])
+    if modes == ["full"]:
+        return "high"
+    if modes == ["balanced", "full"]:
+        return "medium"
+    return "low"
+
+
 def get_current_tool_policy_mode() -> str:
     """Read the current tool policy mode from the shared observer context."""
     try:

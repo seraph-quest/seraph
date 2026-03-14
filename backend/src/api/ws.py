@@ -9,11 +9,13 @@ from config.settings import settings
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
+from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
 from src.memory.soul import read_soul
 from src.memory.vector_store import search_formatted
 from src.models.schemas import WSMessage, WSResponse
 from src.scheduler.connection_manager import ws_manager
+from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,8 @@ async def websocket_chat(websocket: WebSocket):
 
             step_num = 0
             final_result = ""
+            last_tool_name: str | None = None
+            last_tool_args: dict | None = None
 
             try:
                 queue: asyncio.Queue = asyncio.Queue()
@@ -167,6 +171,18 @@ async def websocket_chat(websocket: WebSocket):
                         if isinstance(step, ToolCall):
                             if step.name == "final_answer":
                                 continue
+                            last_tool_name = step.name
+                            last_tool_args = step.arguments if isinstance(step.arguments, dict) else None
+                            await audit_repository.log_event(
+                                session_id=session.id,
+                                actor="agent",
+                                event_type="tool_call",
+                                tool_name=step.name,
+                                risk_level=get_tool_risk_level(step.name, is_mcp=step.name.startswith("mcp_")),
+                                policy_mode=get_current_tool_policy_mode(),
+                                summary=_format_tool_step(step.name, step.arguments, specialist_names),
+                                details={"arguments": step.arguments, "tool_call_id": getattr(step, "id", None)},
+                            )
                             step_num += 1
                             content = _format_tool_step(step.name, step.arguments, specialist_names)
                             await websocket.send_text(
@@ -181,6 +197,22 @@ async def websocket_chat(websocket: WebSocket):
 
                         elif isinstance(step, ActionStep):
                             if step.observations and not step.is_final_answer:
+                                await audit_repository.log_event(
+                                    session_id=session.id,
+                                    actor="agent",
+                                    event_type="tool_result",
+                                    tool_name=last_tool_name,
+                                    risk_level=get_tool_risk_level(
+                                        last_tool_name or "",
+                                        is_mcp=bool(last_tool_name and last_tool_name.startswith("mcp_")),
+                                    ),
+                                    policy_mode=get_current_tool_policy_mode(),
+                                    summary=step.observations[:500],
+                                    details={
+                                        "step_number": step.step_number,
+                                        "tool_arguments": last_tool_args,
+                                    },
+                                )
                                 step_num += 1
                                 await websocket.send_text(
                                     WSResponse(

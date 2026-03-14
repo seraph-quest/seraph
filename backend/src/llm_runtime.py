@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from threading import Lock
 from typing import Any
@@ -16,6 +17,10 @@ from src.audit.repository import audit_repository
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
+_runtime_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_runtime_request_id",
+    default=None,
+)
 
 
 def _primary_api_key() -> str:
@@ -119,8 +124,22 @@ def _can_log_request(request_id: str | None) -> bool:
     with _runtime_request_lock:
         timed_out = _runtime_requests.get(request_id)
     if timed_out is None:
-        return True
+        return False
     return not timed_out
+
+
+def set_current_llm_request_id(request_id: str) -> contextvars.Token[str | None]:
+    """Bind an LLM runtime request id to the current context."""
+    return _runtime_request_id_var.set(request_id)
+
+
+def reset_current_llm_request_id(token: contextvars.Token[str | None]) -> None:
+    """Restore the previous LLM runtime request id for the current context."""
+    _runtime_request_id_var.reset(token)
+
+
+def _current_llm_request_id() -> str | None:
+    return _runtime_request_id_var.get()
 
 
 async def _log_llm_runtime_event(
@@ -215,6 +234,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         **kwargs,
     ):
         primary_model = self.model_id
+        request_id = _current_llm_request_id()
         try:
             response = super().generate(
                 messages,
@@ -223,28 +243,30 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 tools_to_call_from=tools_to_call_from,
                 **kwargs,
             )
-            _log_llm_runtime_event_sync(
-                event_type="llm_primary_success",
-                summary=f"Primary agent model generate succeeded via {primary_model}",
-                details={
-                    "runtime_path": "agent_generate",
-                    "primary_model": primary_model,
-                    "used_fallback": False,
-                },
-            )
-            return response
-        except Exception as primary_error:
-            if self._fallback_model is None:
+            if _can_log_request(request_id):
                 _log_llm_runtime_event_sync(
-                    event_type="llm_primary_failure",
-                    summary=f"Primary agent model generate failed via {primary_model}",
+                    event_type="llm_primary_success",
+                    summary=f"Primary agent model generate succeeded via {primary_model}",
                     details={
                         "runtime_path": "agent_generate",
                         "primary_model": primary_model,
                         "used_fallback": False,
-                        "error": str(primary_error),
                     },
                 )
+            return response
+        except Exception as primary_error:
+            if self._fallback_model is None:
+                if _can_log_request(request_id):
+                    _log_llm_runtime_event_sync(
+                        event_type="llm_primary_failure",
+                        summary=f"Primary agent model generate failed via {primary_model}",
+                        details={
+                            "runtime_path": "agent_generate",
+                            "primary_model": primary_model,
+                            "used_fallback": False,
+                            "error": str(primary_error),
+                        },
+                    )
                 raise
             logger.warning(
                 "Primary agent model %s failed, retrying with fallback %s",
@@ -260,35 +282,37 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     tools_to_call_from=tools_to_call_from,
                     **kwargs,
                 )
-                _log_llm_runtime_event_sync(
-                    event_type="llm_fallback_success",
-                    summary=(
-                        f"Fallback agent model generate succeeded via {self._fallback_model.model_id}"
-                    ),
-                    details={
-                        "runtime_path": "agent_generate",
-                        "primary_model": primary_model,
-                        "fallback_model": self._fallback_model.model_id,
-                        "used_fallback": True,
-                        "primary_error": str(primary_error),
-                    },
-                )
+                if _can_log_request(request_id):
+                    _log_llm_runtime_event_sync(
+                        event_type="llm_fallback_success",
+                        summary=(
+                            f"Fallback agent model generate succeeded via {self._fallback_model.model_id}"
+                        ),
+                        details={
+                            "runtime_path": "agent_generate",
+                            "primary_model": primary_model,
+                            "fallback_model": self._fallback_model.model_id,
+                            "used_fallback": True,
+                            "primary_error": str(primary_error),
+                        },
+                    )
                 return response
             except Exception as fallback_error:
-                _log_llm_runtime_event_sync(
-                    event_type="llm_fallback_failure",
-                    summary=(
-                        f"Fallback agent model generate failed via {self._fallback_model.model_id}"
-                    ),
-                    details={
-                        "runtime_path": "agent_generate",
-                        "primary_model": primary_model,
-                        "fallback_model": self._fallback_model.model_id,
-                        "used_fallback": True,
-                        "primary_error": str(primary_error),
-                        "fallback_error": str(fallback_error),
-                    },
-                )
+                if _can_log_request(request_id):
+                    _log_llm_runtime_event_sync(
+                        event_type="llm_fallback_failure",
+                        summary=(
+                            f"Fallback agent model generate failed via {self._fallback_model.model_id}"
+                        ),
+                        details={
+                            "runtime_path": "agent_generate",
+                            "primary_model": primary_model,
+                            "fallback_model": self._fallback_model.model_id,
+                            "used_fallback": True,
+                            "primary_error": str(primary_error),
+                            "fallback_error": str(fallback_error),
+                        },
+                    )
                 raise
 
 

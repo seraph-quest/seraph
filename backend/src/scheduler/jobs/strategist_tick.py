@@ -1,12 +1,20 @@
 """Strategist tick — periodic strategic reasoning via restricted agent."""
 
 import asyncio
+import contextvars
 import logging
 from time import perf_counter
 
 from config.settings import settings
 from src.agent.strategist import create_strategist_agent, parse_strategist_response
 from src.audit.runtime import log_scheduler_job_event
+from src.llm_runtime import (
+    _finish_request,
+    _mark_request_timed_out,
+    _register_request,
+    reset_current_llm_request_id,
+    set_current_llm_request_id,
+)
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
@@ -22,8 +30,14 @@ async def run_strategist_tick() -> None:
         context_block = ctx.to_prompt_block()
 
         agent = create_strategist_agent(context_block)
+        llm_request_id = f"strategist_tick:{started_at}"
+        _register_request(llm_request_id)
+        llm_request_token = set_current_llm_request_id(llm_request_id)
+        run_ctx = contextvars.copy_context()
+        reset_current_llm_request_id(llm_request_token)
         raw = await asyncio.wait_for(
             asyncio.to_thread(
+                run_ctx.run,
                 agent.run,
                 "Analyze the current context and decide whether to intervene.",
             ),
@@ -72,6 +86,8 @@ async def run_strategist_tick() -> None:
         )
 
     except asyncio.TimeoutError:
+        if "llm_request_id" in locals():
+            _mark_request_timed_out(llm_request_id)
         await log_scheduler_job_event(
             job_name="strategist_tick",
             outcome="timed_out",
@@ -91,3 +107,6 @@ async def run_strategist_tick() -> None:
             },
         )
         logger.exception("strategist_tick failed")
+    finally:
+        if "llm_request_id" in locals():
+            _finish_request(llm_request_id)

@@ -24,6 +24,13 @@ from src.models.schemas import WSMessage, WSResponse
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
 from src.vault.redaction import redact_secrets_in_text
+from src.llm_runtime import (
+    _finish_request,
+    _mark_request_timed_out,
+    _register_request,
+    reset_current_llm_request_id,
+    set_current_llm_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +173,13 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 queue: asyncio.Queue = asyncio.Queue()
                 loop = asyncio.get_running_loop()
+                llm_request_id = f"agent-ws:{session.id}:{started_at}"
+                _register_request(llm_request_id)
                 tokens = set_runtime_context(session.id, context_manager.get_context().approval_mode)
+                llm_request_token = set_current_llm_request_id(llm_request_id)
                 run_ctx = contextvars.copy_context()
                 reset_runtime_context(tokens)
+                reset_current_llm_request_id(llm_request_token)
                 loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
 
                 async def _drain_queue():
@@ -253,6 +264,7 @@ async def websocket_chat(websocket: WebSocket):
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"
+                _mark_request_timed_out(llm_request_id)
                 await log_agent_run_event(
                     session_id=session.id,
                     transport="websocket",
@@ -325,6 +337,9 @@ async def websocket_chat(websocket: WebSocket):
                     ).model_dump_json()
                 )
                 continue
+            finally:
+                if "llm_request_id" in locals():
+                    _finish_request(llm_request_id)
 
             await session_manager.add_message(session.id, "assistant", final_result)
             if run_outcome == "succeeded":

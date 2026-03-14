@@ -14,6 +14,11 @@ from src.llm_runtime import (
     build_model_kwargs,
     completion_with_fallback,
     completion_with_fallback_sync,
+    _mark_request_timed_out,
+    _register_request,
+    _finish_request,
+    reset_current_llm_request_id,
+    set_current_llm_request_id,
 )
 
 
@@ -322,3 +327,43 @@ def test_fallback_litellm_model_logs_fallback_failure(async_db):
     assert events[0]["details"]["runtime_path"] == "agent_generate"
     assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
     assert events[0]["details"]["fallback_error"] == "fallback down"
+
+
+def test_fallback_litellm_model_skips_late_success_after_timeout(async_db):
+    success_response = MagicMock()
+    request_id = "agent-timeout-1"
+    _register_request(request_id)
+    token = set_current_llm_request_id(request_id)
+
+    try:
+        _mark_request_timed_out(request_id)
+        with (
+            patch.object(settings, "fallback_model", "ollama/llama3.2"),
+            patch.object(settings, "fallback_llm_api_key", ""),
+            patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+            patch(
+                "src.llm_runtime.BaseLiteLLMModel.generate",
+                autospec=True,
+                return_value=success_response,
+            ),
+        ):
+            model = FallbackLiteLLMModel(
+                model_id="openrouter/anthropic/claude-sonnet-4",
+                api_key="primary-key",
+                api_base="https://openrouter.ai/api/v1",
+                temperature=0.3,
+                max_tokens=256,
+            )
+            result = model.generate([{"role": "user", "content": "hello"}])
+    finally:
+        reset_current_llm_request_id(token)
+        _finish_request(request_id)
+
+    assert result is success_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events == []

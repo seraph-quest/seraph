@@ -34,7 +34,7 @@ This is the right priority because Seraph's biggest moat already exists at the p
 ### 3. Runtime Reliability
 
 - [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
-- started with degraded-mode hardening for offline token counting in the context window path, shared provider-agnostic LLM runtime settings, and audit visibility into primary-vs-fallback completion behavior
+- started with degraded-mode hardening for offline token counting in the context window path, shared provider-agnostic LLM runtime settings, timeout-safe audit visibility into primary-vs-fallback completion behavior, and fallback-capable agent models for the main smolagents runtime
 - still open: broader model routing, stronger fallback coverage, deeper local-model paths, observability, and evaluation harness
 
 ## What Comes After

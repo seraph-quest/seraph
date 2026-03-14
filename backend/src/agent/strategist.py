@@ -4,10 +4,10 @@ import json
 import logging
 from dataclasses import dataclass
 
-from smolagents import LiteLLMModel, ToolCallingAgent
+from smolagents import ToolCallingAgent
 
 from config.settings import settings
-from src.llm_runtime import build_model_kwargs
+from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
 

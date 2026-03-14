@@ -24,13 +24,14 @@ Shipped in this batch so far:
 
 - degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
 - centralized provider-agnostic LLM runtime settings with an optional fallback completion path for direct LiteLLM calls
-- audit events for primary-vs-fallback LLM completion behavior so degraded mode is visible after the fact
+- timeout-safe audit events for primary-vs-fallback direct LLM completion behavior so degraded mode is visible after the fact
+- fallback-capable `smolagents` model wrappers for the main agent, onboarding agent, strategist, and specialists so provider failure is less likely to collapse the interactive runtime
 
 Still open inside this batch:
 
 - broader model/provider routing beyond the first shared fallback path
 - deeper local-model-capable execution paths beyond a configurable API base/model swap
-- broader observability coverage beyond the first LLM runtime audit events
+- broader observability coverage beyond the first direct LLM runtime audit events
 - a repeatable evaluation harness for core guardian and tool flows
 
 ## Non-goals

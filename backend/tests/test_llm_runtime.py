@@ -1,13 +1,18 @@
 """Tests for shared LLM runtime configuration and fallback behavior."""
 
 import asyncio
+import time
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from config.settings import settings
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
+    FallbackLiteLLMModel,
     build_completion_kwargs,
     build_model_kwargs,
+    completion_with_fallback,
     completion_with_fallback_sync,
 )
 
@@ -128,3 +133,78 @@ def test_completion_with_fallback_sync_logs_fallback_success(async_db):
     assert events[0]["details"]["used_fallback"] is True
     assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
     assert "primary down" in events[0]["details"]["primary_error"]
+
+
+def test_fallback_litellm_model_retries_generate_with_fallback():
+    primary_error = RuntimeError("primary down")
+    fallback_response = MagicMock()
+
+    with (
+        patch.object(settings, "fallback_model", "ollama/llama3.2"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+    ):
+        with patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=[primary_error, fallback_response],
+        ) as mock_generate:
+            model = FallbackLiteLLMModel(
+                model_id="openrouter/anthropic/claude-sonnet-4",
+                api_key="primary-key",
+                api_base="https://openrouter.ai/api/v1",
+                temperature=0.3,
+                max_tokens=256,
+            )
+            result = model.generate([{"role": "user", "content": "hello"}])
+
+    assert result is fallback_response
+    assert mock_generate.call_count == 2
+    assert mock_generate.call_args_list[0].args[0].model_id == "openrouter/anthropic/claude-sonnet-4"
+    assert mock_generate.call_args_list[1].args[0].model_id == "ollama/llama3.2"
+
+
+def test_fallback_litellm_model_skips_duplicate_fallback_target():
+    with (
+        patch.object(settings, "fallback_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openai/gpt-4o-mini",
+            api_key="primary-key",
+            api_base="http://localhost:11434/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+
+    assert model._fallback_model is None
+
+
+@pytest.mark.asyncio
+async def test_completion_with_fallback_timeout_does_not_log_late_success(async_db):
+    success_response = MagicMock()
+
+    def _slow_success(**_kwargs):
+        time.sleep(0.1)
+        return success_response
+
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch("litellm.completion", side_effect=_slow_success),
+    ):
+        with pytest.raises(asyncio.TimeoutError):
+            await completion_with_fallback(
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0.3,
+                max_tokens=256,
+                timeout=0.01,
+            )
+        await asyncio.sleep(0.15)
+
+    events = await audit_repository.list_events(limit=10)
+    success_events = [e for e in events if e["event_type"] == "llm_primary_success"]
+    assert success_events == []

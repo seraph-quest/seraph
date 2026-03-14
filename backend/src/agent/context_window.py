@@ -14,9 +14,13 @@ _summary_cache: dict[str, str] = {}
 
 
 @lru_cache(maxsize=1)
+def _load_encoding():
+    return tiktoken.get_encoding("cl100k_base")
+
+
 def _get_encoding():
     try:
-        return tiktoken.get_encoding("cl100k_base")
+        return _load_encoding()
     except Exception:
         logger.warning("Failed to load tiktoken encoding, using approximate token counts", exc_info=True)
         return None

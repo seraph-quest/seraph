@@ -17,11 +17,11 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] timeout-safe audit visibility into primary-vs-fallback LLM completion behavior
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for core guardian and tool reliability contracts
-- [x] lifecycle audit events for REST chat, WebSocket chat, and scheduled proactive jobs
+- [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
 
 ## In Progress
 
-- [ ] broaden observability beyond the first direct LLM events and first chat/proactive-job lifecycle coverage
+- [ ] broaden observability beyond chat and scheduler coverage into more tool and provider edge paths
 
 ## Left To Do
 

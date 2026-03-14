@@ -3,8 +3,10 @@
 import asyncio
 import logging
 from datetime import date, timedelta
+from time import perf_counter
 
 from config.settings import settings
+from src.audit.runtime import log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
@@ -43,6 +45,7 @@ Be concise. No preamble. Just the review text."""
 
 async def run_weekly_activity_review() -> None:
     """Generate and send the weekly activity review to connected clients."""
+    started_at = perf_counter()
     try:
         from src.observer.screen_repository import screen_observation_repo
         from src.memory.soul import read_soul
@@ -55,6 +58,14 @@ async def run_weekly_activity_review() -> None:
 
         if summary.get("total_observations", 0) == 0:
             logger.info("weekly_activity_review: no observations this week — skipping")
+            await log_scheduler_job_event(
+                job_name="weekly_activity_review",
+                outcome="skipped",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "no_observations",
+                },
+            )
             return
 
         soul = read_soul()
@@ -94,6 +105,14 @@ async def run_weekly_activity_review() -> None:
                 timeout=settings.agent_briefing_timeout,
             )
         except asyncio.TimeoutError:
+            await log_scheduler_job_event(
+                job_name="weekly_activity_review",
+                outcome="timed_out",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.agent_briefing_timeout,
+                },
+            )
             logger.warning("weekly_activity_review: LLM timed out after %ds", settings.agent_briefing_timeout)
             return
 
@@ -108,8 +127,26 @@ async def run_weekly_activity_review() -> None:
             urgency=2,
             reasoning="Scheduled weekly activity review",
         )
-        await deliver_or_queue(message, is_scheduled=True)
+        result = await deliver_or_queue(message, is_scheduled=True)
+        await log_scheduler_job_event(
+            job_name="weekly_activity_review",
+            outcome="succeeded",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "delivery": result.value,
+                "total_observations": summary.get("total_observations", 0),
+                "total_tracked_minutes": summary.get("total_tracked_minutes", 0),
+            },
+        )
         logger.info("weekly_activity_review: delivered weekly review")
 
-    except Exception:
+    except Exception as exc:
+        await log_scheduler_job_event(
+            job_name="weekly_activity_review",
+            outcome="failed",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("weekly_activity_review failed")

@@ -196,6 +196,12 @@ class TestE2EConversation:
                     event["event_type"] == "tool_result" and event["tool_name"] == "web_search"
                     for event in events
                 )
+                assert any(
+                    event["event_type"] == "agent_run_succeeded"
+                    and event["tool_name"] == "chat_agent"
+                    and event["details"]["transport"] == "websocket"
+                    for event in events
+                )
         finally:
             stack.close()
             for p in patches:

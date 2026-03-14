@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 
@@ -53,6 +54,29 @@ async def test_daily_briefing_happy_path():
         assert "Good morning" in msg.content
         # is_scheduled=True
         assert call_args[1]["is_scheduled"] is True
+
+
+@pytest.mark.asyncio
+async def test_daily_briefing_logs_success(async_db):
+    ctx = _make_context()
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.vector_store.search_formatted", return_value="- [fact] User likes mornings"),
+        patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+    ):
+        await run_daily_briefing()
+
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "scheduler_job_succeeded"
+        and event["tool_name"] == "daily_briefing"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

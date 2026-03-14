@@ -69,6 +69,14 @@ Immediate batches:
 - [S1-B2 Execution Plane](../roadmap/batches/s1-b2-execution-plane)
 - [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
 
+Live status:
+
+- [x] trust-boundary foundations are in place
+- [x] execution-plane foundations are in place
+- [x] baseline runtime reliability hardening is in place
+- [ ] current work is still inside `S1-B3` to make runtime status easier to see and debug
+- [ ] Season 1 is not done yet; routing, deeper local paths, and broader observability/evals are still open
+
 ### Next
 
 **Season 2: Reach + Presence**

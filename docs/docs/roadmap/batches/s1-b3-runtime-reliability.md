@@ -18,22 +18,27 @@ Make Seraph more resilient, observable, and predictable under real usage.
 
 ## Current progress
 
-This batch is just starting, but reliability hardening has begun.
+This batch is active. Use the checklist below as the live status view.
 
-Shipped in this batch so far:
+### Done
 
-- degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
-- centralized provider-agnostic LLM runtime settings with an optional fallback completion path for direct LiteLLM calls
-- timeout-safe audit events for primary-vs-fallback direct LLM completion behavior so degraded mode is visible after the fact
-- fallback-capable `smolagents` model wrappers for the main agent, onboarding agent, strategist, and specialists so provider failure is less likely to collapse the interactive runtime
-- a repeatable runtime eval harness for core guardian/tool reliability contracts so fallback wiring and degraded behavior can be checked without live providers
+- [x] degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
+- [x] centralized provider-agnostic LLM runtime settings with an optional fallback completion path for direct LiteLLM calls
+- [x] timeout-safe audit events for primary-vs-fallback direct LLM completion behavior so degraded mode is visible after the fact
+- [x] fallback-capable `smolagents` model wrappers for the main agent, onboarding agent, strategist, and specialists so provider failure is less likely to collapse the interactive runtime
+- [x] repeatable runtime eval harness for core guardian/tool reliability contracts so fallback wiring and degraded behavior can be checked without live providers
+- [x] lifecycle audit events for REST/WebSocket chat runs and scheduled proactive jobs so runtime failures and skips are more visible after the fact
 
-Still open inside this batch:
+### Working Now
 
-- broader model/provider routing beyond the first shared fallback path
-- deeper local-model-capable execution paths beyond a configurable API base/model swap
-- broader observability coverage beyond the first direct LLM runtime audit events
-- richer evaluation coverage beyond the first core guardian and tool scenarios
+- [ ] broaden observability beyond the first direct LLM events and first chat/proactive-job lifecycle coverage
+
+### Still Open
+
+- [ ] broader model/provider routing beyond the first shared fallback path
+- [ ] deeper local-model-capable execution paths beyond a configurable API base/model swap
+- [ ] broader observability coverage across more tool/runtime paths
+- [ ] richer evaluation coverage beyond the first core guardian and tool scenarios
 
 ## Non-goals
 

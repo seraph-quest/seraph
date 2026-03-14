@@ -5,7 +5,11 @@ sidebar_position: 3
 # Seraph Project Status Report
 **Date: 2026-02-12 | Prepared by: Claude**
 
-> **Note**: This is a point-in-time snapshot from 2026-02-12. Several gaps identified here (Goal UI, Interruption Mode UI, font sizes, keyboard shortcuts, SKILL.md, token-aware context, agent timeouts) have since been implemented. See the [Roadmap](./roadmap.md) for current completion status.
+> **Note**: This is a point-in-time snapshot from 2026-02-12. Several gaps identified here (Goal UI, Interruption Mode UI, font sizes, keyboard shortcuts, SKILL.md, token-aware context, agent timeouts) have since been implemented.
+>
+> For the live current-state view, use:
+> - [Next Steps](./next-steps) for what is done now, what is being worked on now, and what is still open
+> - [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability) for the active batch checklist
 
 ---
 

@@ -3,8 +3,10 @@
 import asyncio
 import logging
 from datetime import date
+from time import perf_counter
 
 from config.settings import settings
+from src.audit.runtime import log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
@@ -73,6 +75,7 @@ async def _get_completed_goals_today() -> list[str]:
 
 async def run_evening_review() -> None:
     """Generate and send the evening review to connected clients."""
+    started_at = perf_counter()
     try:
         from src.observer.manager import context_manager
 
@@ -108,6 +111,14 @@ async def run_evening_review() -> None:
             )
         except asyncio.TimeoutError:
             logger.warning("evening_review: LLM timed out after %ds", settings.agent_briefing_timeout)
+            await log_scheduler_job_event(
+                job_name="evening_review",
+                outcome="timed_out",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.agent_briefing_timeout,
+                },
+            )
             return
 
         review_text = response.choices[0].message.content.strip()
@@ -122,7 +133,25 @@ async def run_evening_review() -> None:
             reasoning="Scheduled evening review",
         )
         await deliver_or_queue(message, is_scheduled=True)
+        await log_scheduler_job_event(
+            job_name="evening_review",
+            outcome="succeeded",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "response_length": len(review_text),
+                "completed_goal_count": len(completed_titles),
+                "message_count": message_count,
+            },
+        )
         logger.info("evening_review: delivered evening review")
 
-    except Exception:
+    except Exception as exc:
+        await log_scheduler_job_event(
+            job_name="evening_review",
+            outcome="failed",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("evening_review failed")

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.approval.exceptions import ApprovalRequired
+from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
 
 
@@ -21,6 +22,14 @@ class TestChatAPI:
         data = response.json()
         assert data["response"] == "Hello! I'm Seraph."
         assert "session_id" in data
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["transport"] == "rest"
+            for event in events
+        )
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")
@@ -53,6 +62,14 @@ class TestChatAPI:
 
         response = await client.post("/api/chat", json={"message": "Hello"})
         assert response.status_code == 500
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_failed"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["transport"] == "rest"
+            for event in events
+        )
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")

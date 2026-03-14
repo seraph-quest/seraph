@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import logging
+from time import perf_counter
 
 from fastapi import APIRouter, HTTPException
 
@@ -11,6 +12,7 @@ from config.settings import settings
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
+from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
 from src.memory.soul import read_soul
@@ -51,6 +53,7 @@ async def chat(request: ChatRequest):
 
     try:
         from src.observer.manager import context_manager as obs_manager
+        started_at = perf_counter()
         tokens = set_runtime_context(session.id, obs_manager.get_context().approval_mode)
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
@@ -89,13 +92,49 @@ async def chat(request: ChatRequest):
         )
     except asyncio.TimeoutError:
         logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
+        await log_agent_run_event(
+            session_id=session.id,
+            transport="rest",
+            is_onboarding=not profile.onboarding_completed,
+            outcome="timed_out",
+            policy_mode=get_current_tool_policy_mode(),
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "message_length": len(request.message),
+                "timeout_seconds": settings.agent_chat_timeout,
+            },
+        )
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
     except Exception as e:
         logger.exception("Agent execution failed")
         safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
+        await log_agent_run_event(
+            session_id=session.id,
+            transport="rest",
+            is_onboarding=not profile.onboarding_completed,
+            outcome="failed",
+            policy_mode=get_current_tool_policy_mode(),
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "message_length": len(request.message),
+                "error": safe_detail,
+            },
+        )
         raise HTTPException(status_code=500, detail=safe_detail)
 
     await session_manager.add_message(session.id, "assistant", response_text)
+    await log_agent_run_event(
+        session_id=session.id,
+        transport="rest",
+        is_onboarding=not profile.onboarding_completed,
+        outcome="succeeded",
+        policy_mode=get_current_tool_policy_mode(),
+        details={
+            "duration_ms": int((perf_counter() - started_at) * 1000),
+            "message_length": len(request.message),
+            "response_length": len(response_text),
+        },
+    )
 
     # Check if onboarding should be marked complete
     if not profile.onboarding_completed:

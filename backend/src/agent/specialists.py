@@ -14,6 +14,7 @@ from smolagents import LiteLLMModel, ToolCallingAgent
 
 from config.settings import settings
 from src.plugins.loader import discover_tools
+from src.tools.approval import wrap_tools_for_approval
 from src.tools.policy import filter_tools, get_current_tool_policy_mode
 from src.tools.mcp_manager import mcp_manager
 
@@ -181,7 +182,7 @@ def build_all_specialists() -> list[ToolCallingAgent]:
     """Assemble the full list of specialist agents (built-in + MCP)."""
     # Build tools_by_name from discovered tools
     mode = get_current_tool_policy_mode()
-    all_tools = filter_tools(discover_tools(), mode)
+    all_tools = wrap_tools_for_approval(filter_tools(discover_tools(), mode))
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []
@@ -198,7 +199,10 @@ def build_all_specialists() -> list[ToolCallingAgent]:
         name = server_info["name"]
         if not mcp_manager.is_connected(name):
             continue
-        server_tools = filter_tools(mcp_manager.get_server_tools(name), mode, is_mcp=True)
+        server_tools = wrap_tools_for_approval(
+            filter_tools(mcp_manager.get_server_tools(name), mode, is_mcp=True),
+            treat_all_as_mcp=True,
+        )
         if not server_tools:
             continue
         desc = server_info.get("description", "")

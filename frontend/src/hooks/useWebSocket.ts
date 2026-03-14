@@ -122,6 +122,20 @@ export function useWebSocket() {
             timestamp: Date.now(),
           };
           addMessage(errorMsg);
+        } else if (data.type === "approval_required") {
+          setAgentBusy(false);
+
+          const approvalMsg: ChatMessage = {
+            id: makeId(),
+            role: "approval",
+            content: data.content,
+            timestamp: Date.now(),
+            approvalId: data.approval_id,
+            toolUsed: data.tool_name,
+            riskLevel: data.risk_level,
+            approvalStatus: "pending",
+          };
+          addMessage(approvalMsg);
         } else if (data.type === "proactive") {
           // Phase 3: Proactive messages from Seraph
           const proactiveMsg: ChatMessage = {

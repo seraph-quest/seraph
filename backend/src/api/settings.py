@@ -29,8 +29,13 @@ class ToolPolicyModeRequest(BaseModel):
     mode: str
 
 
+class ApprovalModeRequest(BaseModel):
+    mode: str
+
+
 _VALID_CAPTURE_MODES = {"on_switch", "balanced", "detailed"}
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
+_VALID_APPROVAL_MODES = {"off", "high_risk"}
 
 
 @router.get("/settings/interruption-mode")
@@ -138,6 +143,40 @@ async def set_tool_policy_mode(body: ToolPolicyModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.tool_policy_mode = body.mode
+            profile.updated_at = datetime.now(timezone.utc)
+            db.add(profile)
+
+    return {"mode": body.mode}
+
+
+@router.get("/settings/approval-mode")
+async def get_approval_mode():
+    """Get current approval mode for high-risk actions."""
+    ctx = context_manager.get_context()
+    return {"mode": ctx.approval_mode}
+
+
+@router.put("/settings/approval-mode")
+async def set_approval_mode(body: ApprovalModeRequest):
+    """Update approval mode (off | high_risk)."""
+    if body.mode not in _VALID_APPROVAL_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid mode '{body.mode}'. Must be one of: "
+                f"{', '.join(sorted(_VALID_APPROVAL_MODES))}"
+            ),
+        )
+
+    context_manager.update_approval_mode(body.mode)
+
+    async with get_db() as db:
+        result = await db.execute(
+            select(UserProfile).where(UserProfile.id == "singleton")
+        )
+        profile = result.scalars().first()
+        if profile:
+            profile.approval_mode = body.mode
             profile.updated_at = datetime.now(timezone.utc)
             db.add(profile)
 

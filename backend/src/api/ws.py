@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 
@@ -6,6 +7,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from smolagents import ActionStep, ToolCall, FinalAnswerStep
 
 from config.settings import settings
+from src.approval.exceptions import ApprovalRequired
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -155,7 +158,10 @@ async def websocket_chat(websocket: WebSocket):
             try:
                 queue: asyncio.Queue = asyncio.Queue()
                 loop = asyncio.get_running_loop()
-                loop.run_in_executor(None, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                tokens = set_runtime_context(session.id, context_manager.get_context().approval_mode)
+                run_ctx = contextvars.copy_context()
+                reset_runtime_context(tokens)
+                loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
 
                 async def _drain_queue():
                     nonlocal step_num, final_result
@@ -237,6 +243,32 @@ async def websocket_chat(websocket: WebSocket):
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
+
+            except ApprovalRequired as exc:
+                await audit_repository.log_event(
+                    session_id=exc.session_id,
+                    actor="agent",
+                    event_type="approval_requested",
+                    tool_name=exc.tool_name,
+                    risk_level=exc.risk_level,
+                    policy_mode=get_current_tool_policy_mode(),
+                    summary=exc.summary,
+                )
+                await websocket.send_text(
+                    WSResponse(
+                        type="approval_required",
+                        content=(
+                            f"{exc.summary}\n\n"
+                            "This is a high-risk action. Approve it in chat, then resend your request to continue."
+                        ),
+                        session_id=session.id,
+                        seq=_next_seq(),
+                        approval_id=exc.approval_id,
+                        tool_name=exc.tool_name,
+                        risk_level=exc.risk_level,
+                    ).model_dump_json()
+                )
+                continue
 
             except Exception as e:
                 logger.exception("Agent streaming failed")

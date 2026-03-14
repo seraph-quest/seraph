@@ -9,6 +9,7 @@ import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
 import { CaptureModeToggle } from "./settings/CaptureModeToggle";
 import { ToolPolicyModeToggle } from "./settings/ToolPolicyModeToggle";
+import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
 import { AuditLogPanel } from "./settings/AuditLogPanel";
 
 interface SkillInfo {
@@ -582,6 +583,8 @@ export function SettingsPanel() {
           <CaptureModeToggle />
 
           <ToolPolicyModeToggle />
+
+          <ApprovalModeToggle />
 
           <AuditLogPanel />
 

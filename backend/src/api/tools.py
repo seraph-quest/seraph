@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from config.settings import settings
 from src.agent.factory import get_tools
 from src.plugins.registry import get_tool_metadata
-from src.tools.policy import get_current_tool_policy_mode
+from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
 
 router = APIRouter()
 
@@ -21,6 +21,7 @@ async def list_tools():
             "name": tool.name,
             "description": meta.get("description") if meta else getattr(tool, "description", ""),
             "policy_modes": meta.get("policy_modes") if meta else [mode],
+            "requires_approval": get_tool_risk_level(tool.name, is_mcp=tool.name.startswith("mcp_")) == "high",
         })
 
     # When delegation is active, also include specialist names so the frontend
@@ -33,6 +34,7 @@ async def list_tools():
                 "name": specialist.name,
                 "description": specialist.description,
                 "policy_modes": [mode],
+                "requires_approval": False,
             })
 
     return result

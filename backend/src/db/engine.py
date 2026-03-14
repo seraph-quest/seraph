@@ -30,6 +30,10 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE user_profiles ADD COLUMN tool_policy_mode VARCHAR DEFAULT 'full'"
         )
+    if "approval_mode" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE user_profiles ADD COLUMN approval_mode VARCHAR DEFAULT 'high_risk'"
+        )
 
 
 async def init_db() -> None:

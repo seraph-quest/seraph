@@ -1,4 +1,4 @@
-export type MessageRole = "user" | "agent" | "step" | "error" | "proactive";
+export type MessageRole = "user" | "agent" | "step" | "error" | "proactive" | "approval";
 
 export interface ChatMessage {
   id: string;
@@ -9,6 +9,9 @@ export interface ChatMessage {
   toolUsed?: string;
   urgency?: number;
   interventionType?: string;
+  approvalId?: string;
+  riskLevel?: string;
+  approvalStatus?: "pending" | "approved" | "denied";
 }
 
 export interface WSMessage {
@@ -18,11 +21,14 @@ export interface WSMessage {
 }
 
 export interface WSResponse {
-  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient";
+  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient" | "approval_required";
   content: string;
   session_id: string;
   step: number | null;
   seq: number | null;
+  approval_id?: string;
+  tool_name?: string;
+  risk_level?: string;
   urgency?: number;
   intervention_type?: string;
   reasoning?: string;

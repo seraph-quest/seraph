@@ -1,9 +1,9 @@
 """Onboarding agent — guides first-time users through identity & goal setup."""
 
-from smolagents import LiteLLMModel, ToolCallingAgent
+from smolagents import ToolCallingAgent
 
 from config.settings import settings
-from src.llm_runtime import build_model_kwargs
+from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.tools.soul_tool import view_soul, update_soul
 from src.tools.goal_tools import create_goal, get_goals
 

@@ -10,10 +10,10 @@ Tier 2 (dynamic): one specialist per connected MCP server
 
 import re
 
-from smolagents import LiteLLMModel, ToolCallingAgent
+from smolagents import ToolCallingAgent
 
 from config.settings import settings
-from src.llm_runtime import build_model_kwargs
+from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.plugins.loader import discover_tools
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
 from src.tools.mcp_manager import mcp_manager

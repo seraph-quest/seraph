@@ -78,6 +78,22 @@ class TestListKeys:
             assert "value" not in entry
 
 
+class TestListSecretValues:
+    async def test_skips_undecryptable_rows(self, async_db, repo):
+        await repo.store("good", "value-a")
+        await repo.store("bad", "value-b")
+
+        def _decrypt_or_fail(ciphertext: str) -> str:
+            if ciphertext == "ENC:value-a":
+                return "value-a"
+            raise ValueError("bad row")
+
+        with patch("src.vault.repository.decrypt", side_effect=_decrypt_or_fail):
+            values = await repo.list_secret_values()
+
+        assert values == [("good", "value-a")]
+
+
 class TestDelete:
     async def test_success(self, async_db, repo):
         await repo.store("to_delete", "val")

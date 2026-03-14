@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from cryptography.fernet import InvalidToken
 from sqlmodel import select
 
 from src.db.engine import get_session
@@ -74,10 +75,13 @@ class VaultRepository:
         async with get_session() as db:
             result = await db.execute(select(Secret))
             secrets = result.scalars().all()
-            return [
-                (s.key, decrypt(s.encrypted_value))
-                for s in secrets
-            ]
+            decrypted: list[tuple[str, str]] = []
+            for secret in secrets:
+                try:
+                    decrypted.append((secret.key, decrypt(secret.encrypted_value)))
+                except (InvalidToken, ValueError, TypeError):
+                    logger.warning("Vault: skipping undecryptable secret '%s' during redaction lookup", secret.key)
+            return decrypted
 
     async def delete(self, key: str) -> bool:
         """Delete a secret by key. Returns True if deleted."""

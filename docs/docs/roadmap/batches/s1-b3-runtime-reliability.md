@@ -16,6 +16,21 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - evaluation harness for core agent workflows
 - clearer degraded-mode behavior when dependencies fail
 
+## Current progress
+
+This batch is just starting, but reliability hardening has begun.
+
+Shipped in this batch so far:
+
+- degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
+
+Still open inside this batch:
+
+- model/provider routing and fallback beyond the single primary path
+- clearer local-model-capable execution paths
+- broader observability coverage beyond trust-boundary events
+- a repeatable evaluation harness for core guardian and tool flows
+
 ## Non-goals
 
 - exhaustive benchmark program across every model

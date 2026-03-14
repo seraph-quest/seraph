@@ -1,6 +1,6 @@
 """Tests for the token-aware context window."""
 
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -43,6 +43,38 @@ class TestCountTokens:
         short = _count_tokens("hi")
         long = _count_tokens("this is a much longer sentence with more words")
         assert long > short
+
+    @patch("src.agent.context_window.tiktoken.get_encoding", side_effect=RuntimeError("offline"))
+    def test_falls_back_when_tiktoken_unavailable(self, _mock_get_encoding):
+        from src.agent import context_window
+
+        context_window._load_encoding.cache_clear()
+        try:
+            count = _count_tokens("hello world")
+            assert isinstance(count, int)
+            assert count > 0
+        finally:
+            context_window._load_encoding.cache_clear()
+
+    def test_retries_real_encoding_after_transient_failure(self):
+        from src.agent import context_window
+
+        class FakeEncoding:
+            @staticmethod
+            def encode(text: str):
+                return list(range(len(text)))
+
+        side_effects = [RuntimeError("offline"), FakeEncoding()]
+        with patch("src.agent.context_window.tiktoken.get_encoding", side_effect=side_effects):
+            context_window._load_encoding.cache_clear()
+            try:
+                fallback_count = _count_tokens("hello world")
+                recovered_count = _count_tokens("hello world")
+            finally:
+                context_window._load_encoding.cache_clear()
+
+        assert fallback_count > 0
+        assert recovered_count == len("hello world")
 
 
 class TestBuildContextWindow:
@@ -190,3 +222,24 @@ class TestSettingsIntegration:
             result = build_context_window(msgs, token_budget=999999)
         for i in range(10):
             assert f"msg {i}" in result
+
+
+class TestOfflineReliability:
+    @patch("src.agent.context_window.tiktoken.get_encoding", side_effect=RuntimeError("offline"))
+    def test_build_context_window_still_works_without_tiktoken(self, _mock_get_encoding):
+        from src.agent import context_window
+
+        context_window._load_encoding.cache_clear()
+        try:
+            msgs = [_msg("user", f"message number {i} " * 40) for i in range(20)]
+            result = build_context_window(
+                msgs,
+                token_budget=200,
+                keep_first=1,
+                keep_recent=2,
+                session_id="offline-test",
+            )
+            assert "message number 0" in result
+            assert "message number 19" in result
+        finally:
+            context_window._load_encoding.cache_clear()

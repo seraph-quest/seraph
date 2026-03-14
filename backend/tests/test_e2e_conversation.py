@@ -3,8 +3,9 @@
 Uses a mocked agent to verify the full WS pipeline without hitting a real LLM.
 """
 
+import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from smolagents import ToolCall, ActionStep, FinalAnswerStep
 from smolagents.monitoring import Timing
@@ -243,6 +244,58 @@ class TestE2EConversation:
                             break
                     else:
                         raise AssertionError("Expected approval_required message")
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_timeout_logs_only_timed_out_runtime_event(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter(_make_agent_steps())
+
+            with (
+                patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())),
+                patch(
+                    "src.api.ws.asyncio.wait_for",
+                    new=AsyncMock(side_effect=asyncio.TimeoutError),
+                ),
+                patch("src.memory.consolidator.consolidate_session"),
+            ):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "search for weather",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        if msg["type"] == "final":
+                            assert "taking too long" in msg["content"]
+                            break
+                    else:
+                        raise AssertionError("Expected timeout final message")
+
+                events = client.get("/api/audit/events").json()
+                assert any(
+                    event["event_type"] == "agent_run_timed_out"
+                    and event["tool_name"] == "chat_agent"
+                    and event["details"]["transport"] == "websocket"
+                    for event in events
+                )
+                assert not any(
+                    event["event_type"] == "agent_run_succeeded"
+                    and event["tool_name"] == "chat_agent"
+                    and event["details"]["transport"] == "websocket"
+                    for event in events
+                )
         finally:
             stack.close()
             for p in patches:

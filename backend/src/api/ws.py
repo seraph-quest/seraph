@@ -161,6 +161,7 @@ async def websocket_chat(websocket: WebSocket):
             last_tool_args: dict | None = None
             tool_call_count = 0
             started_at = perf_counter()
+            run_outcome = "succeeded"
 
             try:
                 queue: asyncio.Queue = asyncio.Queue()
@@ -251,6 +252,7 @@ async def websocket_chat(websocket: WebSocket):
 
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
+                run_outcome = "timed_out"
                 await log_agent_run_event(
                     session_id=session.id,
                     transport="websocket",
@@ -325,20 +327,21 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             await session_manager.add_message(session.id, "assistant", final_result)
-            await log_agent_run_event(
-                session_id=session.id,
-                transport="websocket",
-                is_onboarding=is_onboarding,
-                outcome="succeeded",
-                policy_mode=get_current_tool_policy_mode(),
-                details={
-                    "duration_ms": int((perf_counter() - started_at) * 1000),
-                    "message_length": len(ws_msg.message),
-                    "response_length": len(final_result),
-                    "step_count": step_num,
-                    "tool_call_count": tool_call_count,
-                },
-            )
+            if run_outcome == "succeeded":
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="succeeded",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "response_length": len(final_result),
+                        "step_count": step_num,
+                        "tool_call_count": tool_call_count,
+                    },
+                )
             await websocket.send_text(
                 WSResponse(
                     type="final",

@@ -11,7 +11,7 @@ from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
 from src.observer.manager import context_manager
 from src.observer.user_state import InterruptionMode
-from src.tools.policy import TOOL_POLICY_MODES
+from src.tools.policy import MCP_POLICY_MODES, TOOL_POLICY_MODES
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,8 +33,13 @@ class ApprovalModeRequest(BaseModel):
     mode: str
 
 
+class McpPolicyModeRequest(BaseModel):
+    mode: str
+
+
 _VALID_CAPTURE_MODES = {"on_switch", "balanced", "detailed"}
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
+_VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 
 
@@ -154,6 +159,40 @@ async def get_approval_mode():
     """Get current approval mode for high-risk actions."""
     ctx = context_manager.get_context()
     return {"mode": ctx.approval_mode}
+
+
+@router.get("/settings/mcp-policy-mode")
+async def get_mcp_policy_mode():
+    """Get current MCP access policy mode."""
+    ctx = context_manager.get_context()
+    return {"mode": ctx.mcp_policy_mode}
+
+
+@router.put("/settings/mcp-policy-mode")
+async def set_mcp_policy_mode(body: McpPolicyModeRequest):
+    """Update MCP policy mode (disabled | approval | full)."""
+    if body.mode not in _VALID_MCP_POLICY_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid mode '{body.mode}'. Must be one of: "
+                f"{', '.join(sorted(_VALID_MCP_POLICY_MODES))}"
+            ),
+        )
+
+    context_manager.update_mcp_policy_mode(body.mode)
+
+    async with get_db() as db:
+        result = await db.execute(
+            select(UserProfile).where(UserProfile.id == "singleton")
+        )
+        profile = result.scalars().first()
+        if profile:
+            profile.mcp_policy_mode = body.mode
+            profile.updated_at = datetime.now(timezone.utc)
+            db.add(profile)
+
+    return {"mode": body.mode}
 
 
 @router.put("/settings/approval-mode")

@@ -1,12 +1,14 @@
 from unittest.mock import MagicMock, patch
 
 from src.agent.factory import create_agent, get_model, get_tools
+from src.observer.context import CurrentContext
 from src.skills.loader import Skill
 
 
 class TestAgentFactory:
     @patch("src.agent.factory.mcp_manager")
-    def test_get_tools_returns_list(self, mock_mcp):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_returns_list(self, _mock_context, mock_mcp):
         mock_mcp.get_tools.return_value = []
         tools = get_tools()
         assert isinstance(tools, list)

@@ -40,6 +40,7 @@ class CurrentContext:
     # Capture mode — controls screenshot frequency (on_switch | balanced | detailed)
     capture_mode: str = "on_switch"
     tool_policy_mode: str = "full"
+    mcp_policy_mode: str = "full"
     approval_mode: str = "high_risk"
 
     # Phase 3.3 — State machine tracking
@@ -96,7 +97,7 @@ class CurrentContext:
             "User state: "
             f"{self.user_state} | Mode: {self.interruption_mode} | "
             f"Budget: {self.attention_budget_remaining} | Tools: {self.tool_policy_mode} | "
-            f"Approvals: {self.approval_mode}"
+            f"MCP: {self.mcp_policy_mode} | Approvals: {self.approval_mode}"
         )
 
         return "\n".join(lines)

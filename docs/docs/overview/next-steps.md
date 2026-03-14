@@ -23,8 +23,8 @@ This is the right priority because Seraph's biggest moat already exists at the p
 ### 1. Trust Boundaries
 
 - [S1-B1 Trust Boundaries](../roadmap/batches/s1-b1-trust-boundaries)
-- shipped foundations now include tool policy modes, approval gates, structured audit, secret egress redaction, and vault operation audit
-- current open work is stronger secret scoping and isolation, plus safer continuation paths as approvals become less disruptive
+- shipped foundations now include native tool policy modes, MCP access policy modes, approval gates, structured audit, secret egress redaction, and vault operation audit
+- current open work is stronger secret scoping and isolation, plus clearer separation between planning and privileged execution
 
 ### 2. Execution Plane
 

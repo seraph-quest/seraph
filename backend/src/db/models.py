@@ -126,6 +126,7 @@ class UserProfile(SQLModel, table=True):
     interruption_mode: str = Field(default="balanced")
     capture_mode: str = Field(default="on_switch")  # on_switch | balanced | detailed
     tool_policy_mode: str = Field(default="full")  # safe | balanced | full
+    mcp_policy_mode: str = Field(default="full")  # disabled | approval | full
     approval_mode: str = Field(default="high_risk")  # off | high_risk
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

@@ -23,6 +23,7 @@ The trust-boundary foundation is now meaningfully underway.
 Shipped in this batch so far:
 
 - tool policy modes for `safe`, `balanced`, and `full`
+- explicit MCP access modes for `disabled`, `approval`, and `full`
 - structured audit logging for tool calls, tool results, and approval decisions
 - high-risk approval gates in chat and WebSocket flows
 - secret egress redaction for outbound chat, step output, and surfaced errors
@@ -33,7 +34,7 @@ Still open inside this batch:
 
 - stronger secret boundaries than raw `get_secret()` returns
 - tighter isolation between planning, privileged execution, and future workflow/runtime layers
-- a clearer policy model for broader MCP and external execution surfaces
+- deeper policy distinctions inside the MCP/external execution layer beyond one global gate
 
 ## Non-goals
 

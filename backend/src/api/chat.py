@@ -20,6 +20,13 @@ from src.memory.vector_store import search_formatted
 from src.models.schemas import ChatRequest, ChatResponse
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
+from src.llm_runtime import (
+    _finish_request,
+    _mark_request_timed_out,
+    _register_request,
+    reset_current_llm_request_id,
+    set_current_llm_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +61,13 @@ async def chat(request: ChatRequest):
     try:
         from src.observer.manager import context_manager as obs_manager
         started_at = perf_counter()
+        llm_request_id = f"agent-rest:{session.id}:{started_at}"
+        _register_request(llm_request_id)
         tokens = set_runtime_context(session.id, obs_manager.get_context().approval_mode)
+        llm_request_token = set_current_llm_request_id(llm_request_id)
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
+        reset_current_llm_request_id(llm_request_token)
         result = await asyncio.wait_for(
             asyncio.to_thread(run_ctx.run, agent.run, request.message),
             timeout=settings.agent_chat_timeout,
@@ -91,6 +102,7 @@ async def chat(request: ChatRequest):
             },
         )
     except asyncio.TimeoutError:
+        _mark_request_timed_out(llm_request_id)
         logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
         await log_agent_run_event(
             session_id=session.id,
@@ -121,6 +133,9 @@ async def chat(request: ChatRequest):
             },
         )
         raise HTTPException(status_code=500, detail=safe_detail)
+    finally:
+        if "llm_request_id" in locals():
+            _finish_request(llm_request_id)
 
     await session_manager.add_message(session.id, "assistant", response_text)
     await log_agent_run_event(

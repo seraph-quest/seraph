@@ -14,14 +14,14 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
 - [x] centralized provider-agnostic LLM runtime settings
 - [x] direct LiteLLM fallback path
-- [x] timeout-safe audit visibility into primary-vs-fallback LLM completion behavior
+- [x] timeout-safe audit visibility into primary-vs-fallback LLM completion and agent-model behavior
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for core guardian and tool reliability contracts
 - [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
 
 ## In Progress
 
-- [ ] broaden observability beyond chat and scheduler coverage into more tool and provider edge paths
+- [ ] broaden observability beyond chat, scheduler, and provider fallback coverage into more tool edge paths
 
 ## Left To Do
 

@@ -44,6 +44,18 @@ class TestCountTokens:
         long = _count_tokens("this is a much longer sentence with more words")
         assert long > short
 
+    @patch("src.agent.context_window.tiktoken.get_encoding", side_effect=RuntimeError("offline"))
+    def test_falls_back_when_tiktoken_unavailable(self, _mock_get_encoding):
+        from src.agent import context_window
+
+        context_window._get_encoding.cache_clear()
+        try:
+            count = _count_tokens("hello world")
+            assert isinstance(count, int)
+            assert count > 0
+        finally:
+            context_window._get_encoding.cache_clear()
+
 
 class TestBuildContextWindow:
     def test_empty_messages_returns_empty(self):
@@ -190,3 +202,24 @@ class TestSettingsIntegration:
             result = build_context_window(msgs, token_budget=999999)
         for i in range(10):
             assert f"msg {i}" in result
+
+
+class TestOfflineReliability:
+    @patch("src.agent.context_window.tiktoken.get_encoding", side_effect=RuntimeError("offline"))
+    def test_build_context_window_still_works_without_tiktoken(self, _mock_get_encoding):
+        from src.agent import context_window
+
+        context_window._get_encoding.cache_clear()
+        try:
+            msgs = [_msg("user", f"message number {i} " * 40) for i in range(20)]
+            result = build_context_window(
+                msgs,
+                token_budget=200,
+                keep_first=1,
+                keep_recent=2,
+                session_id="offline-test",
+            )
+            assert "message number 0" in result
+            assert "message number 19" in result
+        finally:
+            context_window._get_encoding.cache_clear()

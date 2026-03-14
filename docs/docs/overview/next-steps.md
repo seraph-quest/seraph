@@ -34,7 +34,8 @@ This is the right priority because Seraph's biggest moat already exists at the p
 ### 3. Runtime Reliability
 
 - [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
-- model routing, fallback paths, local model option, observability, evaluation harness
+- started with degraded-mode hardening for offline token counting in the context window path
+- still open: model routing, provider fallback, local model option, broader observability, and evaluation harness
 
 ## What Comes After
 

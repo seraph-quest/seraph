@@ -1,6 +1,7 @@
 """Token-aware context window for conversation history."""
 
 import logging
+import math
 from functools import lru_cache
 
 import tiktoken
@@ -14,11 +15,23 @@ _summary_cache: dict[str, str] = {}
 
 @lru_cache(maxsize=1)
 def _get_encoding():
-    return tiktoken.get_encoding("cl100k_base")
+    try:
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        logger.warning("Failed to load tiktoken encoding, using approximate token counts", exc_info=True)
+        return None
 
 
 def _count_tokens(text: str) -> int:
-    return len(_get_encoding().encode(text))
+    if not text:
+        return 0
+
+    encoding = _get_encoding()
+    if encoding is None:
+        # Rough fallback: GPT-style tokenization is often around 3-4 chars/token.
+        return max(1, math.ceil(len(text) / 4))
+
+    return len(encoding.encode(text))
 
 
 def _format_messages(messages: list[dict]) -> str:

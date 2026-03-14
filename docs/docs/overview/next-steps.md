@@ -1,56 +1,15 @@
 ---
 sidebar_position: 4
+title: Next Steps (Legacy)
 ---
 
-# Seraph Next Steps
+# Next Steps (Legacy)
 
-This page is the short-horizon companion to the [long-term roadmap](./roadmap). It should summarize what we are actively optimizing for now, not compete with the master plan.
+This page is no longer the live planning surface.
 
-## Current Focus
+Use these instead:
 
-Seraph is now in **Season 1: Trust + Capability**.
+- [Master Plan](./roadmap)
+- the `Workstream` files under the `Plan` sidebar category
 
-That means the next execution wave is focused on making the guardian thesis more credible by improving:
-
-- trust boundaries
-- execution breadth
-- runtime reliability
-
-This is the right priority because Seraph's biggest moat already exists at the product level, while its biggest gaps are operational.
-
-## Current Batches
-
-### 1. Trust Boundaries
-
-- [S1-B1 Trust Boundaries](../roadmap/batches/s1-b1-trust-boundaries)
-- shipped foundations now include native tool policy modes, MCP access policy modes, approval gates, structured audit, secret egress redaction, vault operation audit, and session-scoped secret refs for downstream tool use
-- current open work is narrowing the remaining raw-secret escape hatches, plus clearer separation between planning and privileged execution
-
-### 2. Execution Plane
-
-- [S1-B2 Execution Plane](../roadmap/batches/s1-b2-execution-plane)
-- real shell/process execution, stronger browser automation, workflow engine direction
-
-### 3. Runtime Reliability
-
-- [S1-B3 Runtime Reliability](../roadmap/batches/s1-b3-runtime-reliability)
-- started with degraded-mode hardening for offline token counting in the context window path, shared provider-agnostic LLM runtime settings, timeout-safe audit visibility into primary-vs-fallback completion behavior, fallback-capable agent models for the main smolagents runtime, and a repeatable runtime eval harness for core guardian/tool reliability contracts
-- still open: broader model routing, deeper local-model paths, broader observability coverage, and richer eval coverage beyond the first core scenarios
-
-## What Comes After
-
-If Season 1 lands well, the next major execution arc is:
-
-- [Season 2: Reach + Presence](../roadmap/seasons/season-2-reach-presence)
-
-That season moves Seraph from a strong local product into something users can actually keep with them throughout the day via native presence, channel reach, and better ambient delivery.
-
-## Guardrails
-
-For the next phase of work, avoid prioritizing:
-
-- cosmetic UX upgrades ahead of trust boundaries
-- new channels before the execution plane is safer
-- broad ecosystem work before the runtime is more reliable
-
-Those ideas still matter. They just land better after the current season closes its credibility gap.
+The old short-horizon page remains only so existing links do not break.

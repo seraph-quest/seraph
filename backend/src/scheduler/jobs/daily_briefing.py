@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+from time import perf_counter
 
 from config.settings import settings
+from src.audit.runtime import log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
@@ -40,6 +42,7 @@ Be concise. No preamble. Just the briefing text."""
 
 async def run_daily_briefing() -> None:
     """Generate and send the morning briefing to connected clients."""
+    started_at = perf_counter()
     try:
         from src.observer.manager import context_manager
 
@@ -85,6 +88,14 @@ async def run_daily_briefing() -> None:
             )
         except asyncio.TimeoutError:
             logger.warning("daily_briefing: LLM timed out after %ds", settings.agent_briefing_timeout)
+            await log_scheduler_job_event(
+                job_name="daily_briefing",
+                outcome="timed_out",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.agent_briefing_timeout,
+                },
+            )
             return
 
         briefing_text = response.choices[0].message.content.strip()
@@ -99,7 +110,24 @@ async def run_daily_briefing() -> None:
             reasoning="Scheduled morning briefing",
         )
         await deliver_or_queue(message, is_scheduled=True)
+        await log_scheduler_job_event(
+            job_name="daily_briefing",
+            outcome="succeeded",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "response_length": len(briefing_text),
+                "upcoming_event_count": len(ctx.upcoming_events),
+            },
+        )
         logger.info("daily_briefing: delivered morning briefing")
 
-    except Exception:
+    except Exception as exc:
+        await log_scheduler_job_event(
+            job_name="daily_briefing",
+            outcome="failed",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("daily_briefing failed")

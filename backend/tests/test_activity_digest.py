@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
+
 
 class TestActivityDigest:
     @pytest.mark.asyncio
@@ -26,6 +28,29 @@ class TestActivityDigest:
 
         # LLM should NOT be called
         mock_repo.get_daily_summary.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skip_logs_audit_event(self, async_db):
+        mock_repo = MagicMock()
+        mock_repo.get_daily_summary = AsyncMock(return_value={
+            "date": date.today().isoformat(),
+            "total_observations": 0,
+        })
+
+        with patch(
+            "src.observer.screen_repository.screen_observation_repo",
+            mock_repo,
+        ):
+            from src.scheduler.jobs.activity_digest import run_activity_digest
+            await run_activity_digest()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "scheduler_job_skipped"
+            and event["tool_name"] == "activity_digest"
+            and event["details"]["reason"] == "no_observations"
+            for event in events
+        )
 
     @pytest.mark.asyncio
     async def test_happy_path(self):

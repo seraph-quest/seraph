@@ -19,6 +19,7 @@ from src.app import create_app
 _PATCH_TARGETS = [
     "src.db.engine.get_session",
     "src.agent.session.get_session",
+    "src.approval.repository.get_session",
     "src.goals.repository.get_session",
     "src.audit.repository.get_session",
     "src.api.profile.get_db",  # aliased: `import get_session as get_db`

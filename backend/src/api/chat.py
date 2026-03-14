@@ -1,16 +1,21 @@
 import asyncio
+import contextvars
 import logging
 
 from fastapi import APIRouter, HTTPException
 
+from src.approval.exceptions import ApprovalRequired
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from config.settings import settings
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
+from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
 from src.memory.soul import read_soul
 from src.memory.vector_store import search_formatted
 from src.models.schemas import ChatRequest, ChatResponse
+from src.tools.policy import get_current_tool_policy_mode
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +48,38 @@ async def chat(request: ChatRequest):
         )
 
     try:
+        from src.observer.manager import context_manager as obs_manager
+        tokens = set_runtime_context(session.id, obs_manager.get_context().approval_mode)
+        run_ctx = contextvars.copy_context()
+        reset_runtime_context(tokens)
         result = await asyncio.wait_for(
-            asyncio.to_thread(agent.run, request.message),
+            asyncio.to_thread(run_ctx.run, agent.run, request.message),
             timeout=settings.agent_chat_timeout,
         )
         response_text = str(result.output) if hasattr(result, "output") else str(result)
+    except ApprovalRequired as exc:
+        await audit_repository.log_event(
+            session_id=exc.session_id,
+            actor="agent",
+            event_type="approval_requested",
+            tool_name=exc.tool_name,
+            risk_level=exc.risk_level,
+            policy_mode=get_current_tool_policy_mode(),
+            summary=exc.summary,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "type": "approval_required",
+                "approval_id": exc.approval_id,
+                "tool_name": exc.tool_name,
+                "risk_level": exc.risk_level,
+                "message": (
+                    f"{exc.summary}\n\n"
+                    "This is a high-risk action. Approve it first, then resend your request."
+                ),
+            },
+        )
     except asyncio.TimeoutError:
         logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")

@@ -120,6 +120,7 @@ class ContextManager:
                 last_daemon_post=old.last_daemon_post,
                 capture_mode=old.capture_mode,
                 tool_policy_mode=old.tool_policy_mode,
+                approval_mode=old.approval_mode,
                 # Phase 3.3 tracking
                 previous_user_state=old.user_state,
                 attention_budget_last_reset=last_reset,
@@ -218,6 +219,11 @@ class ContextManager:
         """Change the tool policy mode."""
         self._context.tool_policy_mode = mode
         logger.info("Tool policy mode set to %s", mode)
+
+    def update_approval_mode(self, mode: str) -> None:
+        """Change the high-risk approval mode."""
+        self._context.approval_mode = mode
+        logger.info("Approval mode set to %s", mode)
 
     def update_interruption_mode(self, mode: str) -> None:
         """Change interruption mode and reset budget to mode default."""

@@ -126,6 +126,7 @@ class UserProfile(SQLModel, table=True):
     interruption_mode: str = Field(default="balanced")
     capture_mode: str = Field(default="on_switch")  # on_switch | balanced | detailed
     tool_policy_mode: str = Field(default="full")  # safe | balanced | full
+    approval_mode: str = Field(default="high_risk")  # off | high_risk
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -189,3 +190,20 @@ class AuditEvent(SQLModel, table=True):
     summary: str = Field(default="")
     details_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
+
+
+# ─── ApprovalRequest ────────────────────────────────────
+
+class ApprovalRequest(SQLModel, table=True):
+    __tablename__ = "approval_requests"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    tool_name: str = Field(index=True)
+    risk_level: str = Field(default="high", index=True)
+    status: str = Field(default="pending", index=True)  # pending | approved | denied | consumed
+    fingerprint: str = Field(index=True)
+    summary: str = Field(default="")
+    details_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    resolved_at: Optional[datetime] = Field(default=None)

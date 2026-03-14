@@ -2,6 +2,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.approval.exceptions import ApprovalRequired
+
 
 @pytest.mark.asyncio
 class TestChatAPI:
@@ -50,6 +52,27 @@ class TestChatAPI:
 
         response = await client.post("/api/chat", json={"message": "Hello"})
         assert response.status_code == 500
+
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.build_agent")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_approval_required(self, mock_onboarding, mock_create_agent, mock_search, client):
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = ApprovalRequired(
+            approval_id="approval-123",
+            session_id="s1",
+            tool_name="shell_execute",
+            risk_level="high",
+            summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
+        )
+        mock_onboarding.return_value = mock_agent
+
+        response = await client.post("/api/chat", json={"message": "Run this"})
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["type"] == "approval_required"
+        assert detail["approval_id"] == "approval-123"
+        assert detail["tool_name"] == "shell_execute"
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from src.agent.specialists import (
     create_specialist,
     create_web_researcher,
 )
+from src.observer.context import CurrentContext
 
 
 class TestToolDomainMapping:
@@ -214,7 +215,8 @@ class TestBuildAllSpecialists:
     @patch("src.agent.specialists.LiteLLMModel")
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
-    def test_without_mcp_returns_builtin(self, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_without_mcp_returns_builtin(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
         mock_mcp.get_config.return_value = []
 
@@ -246,7 +248,8 @@ class TestBuildAllSpecialists:
     @patch("src.agent.specialists.LiteLLMModel")
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
-    def test_with_mcp_returns_builtin_plus_mcp(self, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_with_mcp_returns_builtin_plus_mcp(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
 
         created = []
@@ -285,7 +288,8 @@ class TestBuildAllSpecialists:
     @patch("src.agent.specialists.LiteLLMModel")
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
-    def test_skips_disconnected_mcp(self, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_skips_disconnected_mcp(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
 
         created = []

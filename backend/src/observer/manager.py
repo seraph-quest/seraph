@@ -120,6 +120,7 @@ class ContextManager:
                 last_daemon_post=old.last_daemon_post,
                 capture_mode=old.capture_mode,
                 tool_policy_mode=old.tool_policy_mode,
+                mcp_policy_mode=old.mcp_policy_mode,
                 approval_mode=old.approval_mode,
                 # Phase 3.3 tracking
                 previous_user_state=old.user_state,
@@ -219,6 +220,11 @@ class ContextManager:
         """Change the tool policy mode."""
         self._context.tool_policy_mode = mode
         logger.info("Tool policy mode set to %s", mode)
+
+    def update_mcp_policy_mode(self, mode: str) -> None:
+        """Change the MCP tool policy mode."""
+        self._context.mcp_policy_mode = mode
+        logger.info("MCP policy mode set to %s", mode)
 
     def update_approval_mode(self, mode: str) -> None:
         """Change the high-risk approval mode."""

@@ -48,6 +48,8 @@ async def lifespan(app: FastAPI):
             context_manager.update_capture_mode(profile.capture_mode)
         if profile.tool_policy_mode:
             context_manager.update_tool_policy_mode(profile.tool_policy_mode)
+        if profile.mcp_policy_mode:
+            context_manager.update_mcp_policy_mode(profile.mcp_policy_mode)
         if profile.approval_mode:
             context_manager.update_approval_mode(profile.approval_mode)
     except Exception:

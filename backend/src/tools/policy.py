@@ -7,6 +7,8 @@ from src.plugins.registry import get_tool_metadata
 
 TOOL_POLICY_MODES = ("safe", "balanced", "full")
 DEFAULT_TOOL_POLICY_MODE = "full"
+MCP_POLICY_MODES = ("disabled", "approval", "full")
+DEFAULT_MCP_POLICY_MODE = "full"
 
 
 def normalize_tool_policy_mode(mode: str | None) -> str:
@@ -16,13 +18,30 @@ def normalize_tool_policy_mode(mode: str | None) -> str:
     return DEFAULT_TOOL_POLICY_MODE
 
 
-def is_tool_allowed(tool_name: str, mode: str, *, is_mcp: bool = False) -> bool:
+def normalize_mcp_policy_mode(mode: str | None) -> str:
+    """Coerce missing or invalid MCP modes to the default."""
+    if mode in MCP_POLICY_MODES:
+        return mode
+    return DEFAULT_MCP_POLICY_MODE
+
+
+def is_tool_allowed(
+    tool_name: str,
+    mode: str,
+    *,
+    is_mcp: bool = False,
+    mcp_mode: str | None = None,
+) -> bool:
     """Return whether a tool is allowed under the selected policy mode."""
     normalized = normalize_tool_policy_mode(mode)
     if normalized == "full":
-        return True
-    if is_mcp:
+        if not is_mcp:
+            return True
+    elif is_mcp:
         return False
+
+    if is_mcp:
+        return normalize_mcp_policy_mode(mcp_mode) in {"approval", "full"}
 
     metadata = get_tool_metadata(tool_name)
     if metadata is None:
@@ -31,11 +50,17 @@ def is_tool_allowed(tool_name: str, mode: str, *, is_mcp: bool = False) -> bool:
     return normalized in metadata.get("policy_modes", [])
 
 
-def filter_tools(tools: Iterable, mode: str, *, is_mcp: bool = False) -> list:
+def filter_tools(
+    tools: Iterable,
+    mode: str,
+    *,
+    is_mcp: bool = False,
+    mcp_mode: str | None = None,
+) -> list:
     """Filter a tool collection to only those allowed by policy."""
     return [
         tool for tool in tools
-        if is_tool_allowed(getattr(tool, "name", ""), mode, is_mcp=is_mcp)
+        if is_tool_allowed(getattr(tool, "name", ""), mode, is_mcp=is_mcp, mcp_mode=mcp_mode)
     ]
 
 
@@ -62,3 +87,11 @@ def get_current_tool_policy_mode() -> str:
         return normalize_tool_policy_mode(context_manager.get_context().tool_policy_mode)
     except Exception:
         return DEFAULT_TOOL_POLICY_MODE
+
+
+def get_current_mcp_policy_mode() -> str:
+    """Read the current MCP policy mode from the shared observer context."""
+    try:
+        return normalize_mcp_policy_mode(context_manager.get_context().mcp_policy_mode)
+    except Exception:
+        return DEFAULT_MCP_POLICY_MODE

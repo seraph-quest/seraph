@@ -11,7 +11,7 @@ export interface ChatMessage {
   interventionType?: string;
   approvalId?: string;
   riskLevel?: string;
-  approvalStatus?: "pending" | "approved" | "denied";
+  approvalStatus?: "pending" | "approved" | "denied" | "consumed";
 }
 
 export interface WSMessage {

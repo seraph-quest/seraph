@@ -40,7 +40,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         method: "POST",
       });
       if (res.ok) {
-        setApprovalStatus(decision === "approve" ? "approved" : "denied");
+        const data = await res.json();
+        if (data?.status) {
+          setApprovalStatus(data.status);
+        }
       }
     } catch {
       // ignore
@@ -91,9 +94,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             </>
           ) : (
             <div className="text-[10px] text-retro-text/60 uppercase tracking-wider">
-              {approvalStatus === "approved"
-                ? "Approved. Resend your request to continue."
-                : "Denied."}
+              {approvalStatus === "approved" && "Approved. Resend your request to continue."}
+              {approvalStatus === "consumed" && "Already approved and used."}
+              {approvalStatus === "denied" && "Denied."}
             </div>
           )}
         </div>

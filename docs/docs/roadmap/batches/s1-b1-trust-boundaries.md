@@ -28,11 +28,12 @@ Shipped in this batch so far:
 - high-risk approval gates in chat and WebSocket flows
 - secret egress redaction for outbound chat, step output, and surfaced errors
 - vault operation audit for secret store/get/list/delete actions
+- session-scoped secret references for safer downstream tool usage without re-exposing raw values to the model context
 - approval flow improvements so approved chat actions can resume automatically
 
 Still open inside this batch:
 
-- stronger secret boundaries than raw `get_secret()` returns
+- reducing reliance on raw `get_secret()` retrieval in favor of narrower secret-injection paths
 - tighter isolation between planning, privileged execution, and future workflow/runtime layers
 - deeper policy distinctions inside the MCP/external execution layer beyond one global gate
 

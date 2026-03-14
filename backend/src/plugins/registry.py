@@ -64,6 +64,10 @@ TOOL_METADATA: dict[str, dict] = {
         "description": "Retrieve a secret from the vault",
         "policy_modes": ["full"],
     },
+    "get_secret_ref": {
+        "description": "Create an opaque session-scoped reference for a secret",
+        "policy_modes": ["full"],
+    },
     "list_secrets": {
         "description": "List secret keys stored in the vault",
         "policy_modes": ["safe", "balanced", "full"],

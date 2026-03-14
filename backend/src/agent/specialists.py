@@ -15,8 +15,9 @@ from smolagents import LiteLLMModel, ToolCallingAgent
 from config.settings import settings
 from src.plugins.loader import discover_tools
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
-from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
 from src.tools.mcp_manager import mcp_manager
+from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
+from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 
 # --- Tool → domain mapping ---
 
@@ -25,6 +26,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "update_soul": "memory",
     "store_secret": "memory",
     "get_secret": "memory",
+    "get_secret_ref": "memory",
     "list_secrets": "memory",
     "delete_secret": "memory",
     "create_goal": "goals",
@@ -183,7 +185,9 @@ def build_all_specialists() -> list[ToolCallingAgent]:
     # Build tools_by_name from discovered tools
     mode = get_current_tool_policy_mode()
     mcp_mode = get_current_mcp_policy_mode()
-    all_tools = wrap_tools_for_approval(filter_tools(discover_tools(), mode))
+    all_tools = wrap_tools_for_approval(
+        wrap_tools_for_secret_refs(filter_tools(discover_tools(), mode))
+    )
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []
@@ -208,12 +212,12 @@ def build_all_specialists() -> list[ToolCallingAgent]:
         )
         if mcp_mode == "approval":
             server_tools = wrap_tools_with_forced_approval(
-                filtered_server_tools,
+                wrap_tools_for_secret_refs(filtered_server_tools),
                 treat_all_as_mcp=True,
             )
         else:
             server_tools = wrap_tools_for_approval(
-                filtered_server_tools,
+                wrap_tools_for_secret_refs(filtered_server_tools),
                 treat_all_as_mcp=True,
             )
         if not server_tools:

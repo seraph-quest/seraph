@@ -4,6 +4,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.screen_repository import ScreenObservationRepository
@@ -34,6 +35,27 @@ class TestObserverAPI:
         assert resp.status_code == 200
         assert mgr.get_context().active_window == "Terminal"
         assert mgr.get_context().screen_context == "Running tests"
+
+    @pytest.mark.asyncio
+    async def test_post_screen_context_logs_runtime_audit(self, async_db, client):
+        mgr = ContextManager()
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.post("/api/observer/context", json={
+                "active_window": "Terminal",
+                "screen_context": "Running tests",
+            })
+
+        assert resp.status_code == 200
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_received"
+            and event["tool_name"] == "observer_daemon:screen_context"
+            and event["details"]["has_active_window"] is True
+            and event["details"]["has_screen_context"] is True
+            and event["details"]["has_observation"] is False
+            for event in events
+        )
 
     @pytest.mark.asyncio
     async def test_post_screen_context_null_preserves(self, client):
@@ -138,6 +160,16 @@ class TestObserverAPI:
         assert obs.activity_type == "coding"
         assert obs.project == "seraph"
 
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_persisted"
+            and event["tool_name"] == "observer_daemon:screen_context"
+            and event["details"]["app"] == "VS Code"
+            and event["details"]["activity_type"] == "coding"
+            and event["details"]["blocked"] is False
+            for event in events
+        )
+
     @pytest.mark.asyncio
     async def test_post_blocked_observation(self, async_db, client):
         """Blocked observations should be persisted with blocked=True."""
@@ -162,6 +194,35 @@ class TestObserverAPI:
         assert obs.app_name == "1Password"
         assert obs.blocked is True
         assert obs.activity_type == "other"
+
+    @pytest.mark.asyncio
+    async def test_post_structured_observation_logs_persist_failure_runtime_audit(self, async_db, client):
+        mgr = ContextManager()
+        mock_repo = MagicMock()
+        mock_repo.create = AsyncMock(side_effect=RuntimeError("db down"))
+        with (
+            patch("src.api.observer.context_manager", mgr),
+            patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+        ):
+            resp = await client.post("/api/observer/context", json={
+                "active_window": "VS Code — main.py",
+                "observation": {
+                    "app": "VS Code",
+                    "activity": "coding",
+                    "blocked": False,
+                },
+            })
+
+        assert resp.status_code == 200
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_persist_failed"
+            and event["tool_name"] == "observer_daemon:screen_context"
+            and event["details"]["app"] == "VS Code"
+            and event["details"]["error"] == "db down"
+            for event in events
+        )
 
     @pytest.mark.asyncio
     async def test_legacy_compat_no_observation(self, client):

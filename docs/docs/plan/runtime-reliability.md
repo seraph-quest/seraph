@@ -23,6 +23,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] MCP server connection lifecycle emits runtime audit coverage for connect, disconnect, auth-required, and failure states
 - [x] observer context refresh and queued-bundle delivery emit background runtime audit coverage
 - [x] proactive delivery-gate decisions emit runtime audit coverage for delivered, queued, and failed paths
+- [x] observer daemon screen-context ingest emits runtime audit coverage for receive, persist success, and persist failure
 
 ## In Progress
 
@@ -32,7 +33,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 
 - [ ] broaden model and provider routing beyond the first shared fallback path
 - [ ] deepen local-model-capable execution paths beyond API-base swapping
-- [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, proactive delivery gating, and current MCP lifecycle coverage
+- [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, daemon ingest, proactive delivery gating, and current MCP lifecycle coverage
 - [ ] expand eval coverage beyond the current runtime seam checks
 
 ## Done Means

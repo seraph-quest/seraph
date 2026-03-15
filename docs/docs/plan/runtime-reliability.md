@@ -16,7 +16,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] direct LiteLLM fallback path
 - [x] timeout-safe audit visibility into primary-vs-fallback LLM completion and agent-model behavior
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
-- [x] repeatable runtime eval harness for core guardian, tool, and audit-runtime reliability contracts
+- [x] repeatable runtime eval harness for core guardian, tool, and observer/audit-runtime reliability contracts
 - [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
 - [x] real tool execution audit events for call, result, and failure across agent transports
 - [x] strategist tool calls and background helper flows now emit runtime audit coverage
@@ -34,7 +34,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [ ] broaden model and provider routing beyond the first shared fallback path
 - [ ] deepen local-model-capable execution paths beyond API-base swapping
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, daemon ingest, proactive delivery gating, and current MCP lifecycle coverage
-- [ ] expand eval coverage beyond the current runtime seam checks
+- [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing and remaining edge-path contracts
 
 ## Done Means
 

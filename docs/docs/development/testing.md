@@ -36,10 +36,11 @@ cd backend
 uv run python -m src.evals.harness --list
 uv run python -m src.evals.harness
 uv run python -m src.evals.harness --scenario daily_briefing_fallback
-uv run python -m src.evals.harness --scenario strategist_tick_tool_audit
+uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
+uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so fallback wiring, proactive delivery, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so fallback wiring, proactive delivery, daemon ingest, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 

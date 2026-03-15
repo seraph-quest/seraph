@@ -20,13 +20,13 @@ def test_run_runtime_evals_passes_all_scenarios():
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():
-    summary = asyncio.run(run_runtime_evals(["daily_briefing_fallback", "strategist_tick_tool_audit"]))
+    summary = asyncio.run(run_runtime_evals(["daily_briefing_fallback", "observer_delivery_gate_audit"]))
 
     assert summary.total == 2
     assert summary.failed == 0
     assert [result.name for result in summary.results] == [
         "daily_briefing_fallback",
-        "strategist_tick_tool_audit",
+        "observer_delivery_gate_audit",
     ]
 
 
@@ -41,7 +41,7 @@ def test_main_lists_available_scenarios(capsys):
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "chat_model_wrapper" in captured.out
-    assert "session_title_generation_background_audit" in captured.out
+    assert "observer_daemon_ingest_audit" in captured.out
 
 
 def test_main_emits_json_summary(capsys):
@@ -53,3 +53,15 @@ def test_main_emits_json_summary(capsys):
     assert exit_code == 0
     assert payload["failed"] == 0
     assert payload["results"][0]["name"] == "shell_tool_timeout_contract"
+
+
+def test_observer_eval_scenarios_expose_expected_details():
+    summary = asyncio.run(run_runtime_evals(["observer_delivery_gate_audit", "observer_daemon_ingest_audit"]))
+
+    assert summary.failed == 0
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
+    assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
+    assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"
+    assert details_by_name["observer_daemon_ingest_audit"]["persist_failed_error"] == "db down"

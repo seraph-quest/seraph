@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from src.audit.runtime import log_integration_event
 from src.observer.manager import context_manager
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,17 @@ async def get_observer_state():
 async def post_screen_context(body: ScreenContextRequest):
     """Receive screen context from native daemon."""
     context_manager.update_screen_context(body.active_window, body.screen_context)
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="screen_context",
+        outcome="received",
+        details={
+            "has_active_window": body.active_window is not None,
+            "has_screen_context": body.screen_context is not None,
+            "has_observation": body.observation is not None,
+            "blocked": body.observation.blocked if body.observation is not None else None,
+        },
+    )
 
     # Persist structured observation if present
     if body.observation is not None:
@@ -64,7 +76,29 @@ async def post_screen_context(body: ScreenContextRequest):
                 blocked=obs_data.blocked,
                 timestamp=timestamp,
             )
-        except Exception:
+            await log_integration_event(
+                integration_type="observer_daemon",
+                name="screen_context",
+                outcome="persisted",
+                details={
+                    "app": obs_data.app or "",
+                    "activity_type": obs_data.activity or "other",
+                    "blocked": obs_data.blocked,
+                    "has_switch_timestamp": body.switch_timestamp is not None,
+                },
+            )
+        except Exception as exc:
+            await log_integration_event(
+                integration_type="observer_daemon",
+                name="screen_context",
+                outcome="persist_failed",
+                details={
+                    "app": body.observation.app or "",
+                    "activity_type": body.observation.activity or "other",
+                    "blocked": body.observation.blocked,
+                    "error": str(exc),
+                },
+            )
             logger.exception("Failed to persist screen observation")
 
     return {"status": "ok"}

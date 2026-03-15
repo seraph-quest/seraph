@@ -2,6 +2,7 @@
 
 import logging
 
+from src.audit.runtime import log_observer_delivery_event
 from src.models.schemas import WSResponse
 from src.observer.user_state import DeliveryDecision, user_state_machine
 
@@ -22,40 +23,90 @@ async def deliver_or_queue(
     from src.scheduler.connection_manager import ws_manager
 
     ctx = context_manager.get_context()
+    intervention_type = message.intervention_type or message.type
+    urgency = message.urgency or 0
+    decision: DeliveryDecision | None = None
 
-    decision = user_state_machine.should_deliver(
-        user_state=ctx.user_state,
-        interruption_mode=ctx.interruption_mode,
-        attention_budget_remaining=ctx.attention_budget_remaining,
-        urgency=message.urgency or 0,
-        intervention_type=message.intervention_type or message.type,
-        is_scheduled=is_scheduled,
-    )
-
-    if decision == DeliveryDecision.deliver:
-        await ws_manager.broadcast(message)
-        # Decrement budget if this delivery costs budget
-        if user_state_machine.should_cost_budget(
-            intervention_type=message.intervention_type or message.type,
+    try:
+        decision = user_state_machine.should_deliver(
+            user_state=ctx.user_state,
+            interruption_mode=ctx.interruption_mode,
+            attention_budget_remaining=ctx.attention_budget_remaining,
+            urgency=urgency,
+            intervention_type=intervention_type,
             is_scheduled=is_scheduled,
-            urgency=message.urgency or 0,
-        ):
-            context_manager.decrement_attention_budget()
-        logger.info("Delivered proactive message (type=%s)", message.type)
-
-    elif decision == DeliveryDecision.queue:
-        await insight_queue.enqueue(
-            content=message.content,
-            intervention_type=message.intervention_type or message.type,
-            urgency=message.urgency or 0,
-            reasoning=message.reasoning or "",
         )
-        logger.info("Queued proactive message (state=%s, mode=%s)", ctx.user_state, ctx.interruption_mode)
 
-    else:
-        logger.info("Dropped proactive message (type=%s)", message.type)
+        event_details = {
+            "user_state": ctx.user_state,
+            "interruption_mode": ctx.interruption_mode,
+            "attention_budget_remaining": ctx.attention_budget_remaining,
+        }
 
-    return decision
+        if decision == DeliveryDecision.deliver:
+            await ws_manager.broadcast(message)
+            # Decrement budget if this delivery costs budget
+            if user_state_machine.should_cost_budget(
+                intervention_type=intervention_type,
+                is_scheduled=is_scheduled,
+                urgency=urgency,
+            ):
+                context_manager.decrement_attention_budget()
+            logger.info("Delivered proactive message (type=%s)", message.type)
+            await log_observer_delivery_event(
+                decision="delivered",
+                message_type=message.type,
+                intervention_type=intervention_type,
+                urgency=urgency,
+                is_scheduled=is_scheduled,
+                details=event_details,
+            )
+
+        elif decision == DeliveryDecision.queue:
+            await insight_queue.enqueue(
+                content=message.content,
+                intervention_type=intervention_type,
+                urgency=urgency,
+                reasoning=message.reasoning or "",
+            )
+            logger.info("Queued proactive message (state=%s, mode=%s)", ctx.user_state, ctx.interruption_mode)
+            await log_observer_delivery_event(
+                decision="queued",
+                message_type=message.type,
+                intervention_type=intervention_type,
+                urgency=urgency,
+                is_scheduled=is_scheduled,
+                details=event_details,
+            )
+
+        else:
+            logger.info("Dropped proactive message (type=%s)", message.type)
+            await log_observer_delivery_event(
+                decision="dropped",
+                message_type=message.type,
+                intervention_type=intervention_type,
+                urgency=urgency,
+                is_scheduled=is_scheduled,
+                details=event_details,
+            )
+
+        return decision
+    except Exception as exc:
+        await log_observer_delivery_event(
+            decision="failed",
+            message_type=message.type,
+            intervention_type=intervention_type,
+            urgency=urgency,
+            is_scheduled=is_scheduled,
+            details={
+                "user_state": ctx.user_state,
+                "interruption_mode": ctx.interruption_mode,
+                "attention_budget_remaining": ctx.attention_budget_remaining,
+                "delivery_decision": decision.value if decision is not None else None,
+                "error": str(exc),
+            },
+        )
+        raise
 
 
 async def deliver_queued_bundle() -> int:

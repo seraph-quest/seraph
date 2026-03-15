@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
@@ -51,6 +52,29 @@ async def test_deliver_broadcasts():
         assert decision == DeliveryDecision.deliver
         mock_ws.broadcast.assert_called_once_with(msg)
         mock_iq.enqueue.assert_not_called()
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_logs_runtime_audit(async_db):
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
+        await deliver_or_queue(msg)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["intervention_type"] == "advisory"
+            and event["details"]["user_state"] == "available"
+            for event in events
+        )
     finally:
         for p in patches:
             p.stop()
@@ -112,6 +136,29 @@ async def test_queue_when_blocked():
 
 
 @pytest.mark.asyncio
+async def test_queue_logs_runtime_audit(async_db):
+    ctx = _make_context(user_state="deep_work")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Queued msg", intervention_type="advisory", urgency=3)
+        await deliver_or_queue(msg)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["user_state"] == "deep_work"
+            and event["details"]["interruption_mode"] == "balanced"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_queue_when_no_budget():
     ctx = _make_context(attention_budget_remaining=0)
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
@@ -140,6 +187,49 @@ async def test_urgent_delivers_through_blocked():
 
         assert decision == DeliveryDecision.deliver
         mock_ws.broadcast.assert_called_once()
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_logs_runtime_audit(async_db):
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_ws.broadcast.side_effect = RuntimeError("socket down")
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
+        with pytest.raises(RuntimeError, match="socket down"):
+            await deliver_or_queue(msg)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_failed"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["delivery_decision"] == "deliver"
+            and event["details"]["error"] == "socket down"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_delivery_audit_fails_open():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
+        with patch("src.audit.runtime.audit_repository.log_event", new_callable=AsyncMock, side_effect=RuntimeError("audit down")):
+            decision = await deliver_or_queue(msg)
+
+        assert decision == DeliveryDecision.deliver
+        mock_ws.broadcast.assert_called_once_with(msg)
     finally:
         for p in patches:
             p.stop()

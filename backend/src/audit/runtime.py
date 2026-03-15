@@ -115,6 +115,38 @@ async def log_integration_event(
         logger.debug("Failed to record integration runtime audit event", exc_info=True)
 
 
+async def log_observer_delivery_event(
+    *,
+    decision: str,
+    message_type: str,
+    intervention_type: str | None,
+    urgency: int | None,
+    is_scheduled: bool,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Record proactive delivery-gate decisions without breaking callers."""
+    target = intervention_type or message_type
+    summary = f"Observer delivery {decision} for {target}"
+    try:
+        await audit_repository.log_event(
+            actor="system",
+            event_type=f"observer_delivery_{decision}",
+            tool_name="observer_delivery_gate",
+            risk_level="low",
+            policy_mode="full",
+            summary=summary,
+            details={
+                "message_type": message_type,
+                "intervention_type": intervention_type,
+                "urgency": urgency,
+                "is_scheduled": is_scheduled,
+                **(details or {}),
+            },
+        )
+    except Exception:
+        logger.debug("Failed to record observer delivery audit event", exc_info=True)
+
+
 def log_integration_event_sync(
     *,
     integration_type: str,

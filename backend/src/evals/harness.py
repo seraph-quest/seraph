@@ -19,14 +19,17 @@ from src.agent.session import SessionManager, session_manager
 from src.agent.factory import get_model
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.strategist import create_strategist_agent
+from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import FallbackLiteLLMModel
 from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
+from src.observer.delivery import deliver_or_queue
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.shell_tool import shell_execute
+from src.models.schemas import WSResponse
 
 
 Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
@@ -368,6 +371,106 @@ async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
+    delivered_ctx = _make_context(user_state="available", interruption_mode="balanced", attention_budget_remaining=3)
+    queued_ctx = _make_context(user_state="deep_work", interruption_mode="balanced", attention_budget_remaining=3)
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.side_effect = [delivered_ctx, queued_ctx]
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock()
+    mock_insight_queue = MagicMock()
+    mock_insight_queue.enqueue = AsyncMock()
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await deliver_or_queue(
+            WSResponse(type="proactive", content="Ship it", intervention_type="advisory", urgency=3)
+        )
+        await deliver_or_queue(
+            WSResponse(type="proactive", content="Queue it", intervention_type="advisory", urgency=3)
+        )
+
+    delivered = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_delivered",
+        tool_name="observer_delivery_gate",
+    )
+    queued = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_queued",
+        tool_name="observer_delivery_gate",
+    )
+    return {
+        "delivered_user_state": delivered["details"]["user_state"],
+        "queued_user_state": queued["details"]["user_state"],
+        "broadcast_calls": mock_ws_manager.broadcast.await_count,
+        "enqueue_calls": mock_insight_queue.enqueue.await_count,
+    }
+
+
+async def _eval_observer_daemon_ingest_audit() -> dict[str, Any]:
+    mock_context_manager = MagicMock()
+    mock_context_manager.update_screen_context = MagicMock()
+    mock_log_event = AsyncMock()
+    mock_repo = MagicMock()
+    mock_repo.create = AsyncMock(side_effect=[None, RuntimeError("db down")])
+
+    with (
+        patch("src.api.observer.context_manager", mock_context_manager),
+        patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await post_screen_context(
+            ScreenContextRequest(
+                active_window="VS Code",
+                screen_context="Editing eval harness",
+                observation=ScreenObservationData(
+                    app="VS Code",
+                    activity="coding",
+                    blocked=False,
+                ),
+            )
+        )
+        await post_screen_context(
+            ScreenContextRequest(
+                active_window="Cursor",
+                observation=ScreenObservationData(
+                    app="Cursor",
+                    activity="coding",
+                    blocked=False,
+                ),
+            )
+        )
+
+    received = _find_audit_call(
+        mock_log_event,
+        event_type="integration_received",
+        tool_name="observer_daemon:screen_context",
+    )
+    persisted = _find_audit_call(
+        mock_log_event,
+        event_type="integration_persisted",
+        tool_name="observer_daemon:screen_context",
+    )
+    persist_failed = _find_audit_call(
+        mock_log_event,
+        event_type="integration_persist_failed",
+        tool_name="observer_daemon:screen_context",
+    )
+    return {
+        "received_has_observation": received["details"]["has_observation"],
+        "persisted_app": persisted["details"]["app"],
+        "persist_failed_error": persist_failed["details"]["error"],
+        "update_calls": mock_context_manager.update_screen_context.call_count,
+    }
+
+
 _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="chat_model_wrapper",
@@ -416,6 +519,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Session title generation records background-task audit success without live providers.",
         runner=_eval_session_title_generation_background_audit,
+    ),
+    EvalScenario(
+        name="observer_delivery_gate_audit",
+        category="observability",
+        description="Proactive delivery gate records delivered and queued audit outcomes with observer context details.",
+        runner=_eval_observer_delivery_gate_audit,
+    ),
+    EvalScenario(
+        name="observer_daemon_ingest_audit",
+        category="observability",
+        description="Observer daemon screen-context ingest records receive, persist success, and persist failure audit events.",
+        runner=_eval_observer_daemon_ingest_audit,
     ),
 )
 

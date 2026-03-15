@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_api_base: str = "https://openrouter.ai/api/v1"
     fallback_model: str = ""
+    fallback_models: str = ""  # comma-separated ordered fallback chain
     fallback_llm_api_key: str = ""
     fallback_llm_api_base: str = ""
     model_temperature: float = 0.7

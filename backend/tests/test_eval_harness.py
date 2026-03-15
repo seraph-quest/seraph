@@ -20,12 +20,12 @@ def test_run_runtime_evals_passes_all_scenarios():
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():
-    summary = asyncio.run(run_runtime_evals(["daily_briefing_fallback", "observer_delivery_gate_audit"]))
+    summary = asyncio.run(run_runtime_evals(["provider_fallback_chain", "observer_delivery_gate_audit"]))
 
     assert summary.total == 2
     assert summary.failed == 0
     assert [result.name for result in summary.results] == [
-        "daily_briefing_fallback",
+        "provider_fallback_chain",
         "observer_delivery_gate_audit",
     ]
 
@@ -41,6 +41,7 @@ def test_main_lists_available_scenarios(capsys):
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "chat_model_wrapper" in captured.out
+    assert "provider_fallback_chain" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -55,12 +56,26 @@ def test_main_emits_json_summary(capsys):
     assert payload["results"][0]["name"] == "shell_tool_timeout_contract"
 
 
-def test_observer_eval_scenarios_expose_expected_details():
-    summary = asyncio.run(run_runtime_evals(["observer_delivery_gate_audit", "observer_daemon_ingest_audit"]))
+def test_runtime_eval_scenarios_expose_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "provider_fallback_chain",
+                "observer_delivery_gate_audit",
+                "observer_daemon_ingest_audit",
+            ]
+        )
+    )
 
     assert summary.failed == 0
     details_by_name = {result.name: result.details for result in summary.results}
 
+    assert details_by_name["provider_fallback_chain"]["attempted_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+    assert details_by_name["provider_fallback_chain"]["final_model"] == "openai/gpt-4.1-mini"
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"

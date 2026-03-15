@@ -57,6 +57,27 @@ def test_build_completion_kwargs_uses_fallback_settings():
     assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+def test_build_completion_kwargs_uses_first_model_from_fallback_chain():
+    with (
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=128,
+            use_fallback=True,
+        )
+
+    assert kwargs["model"] == "openai/gpt-4o-mini"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+
 def test_completion_with_fallback_sync_retries_with_fallback():
     primary_error = RuntimeError("primary down")
     fallback_response = MagicMock()
@@ -78,6 +99,55 @@ def test_completion_with_fallback_sync_retries_with_fallback():
     assert mock_completion.call_args_list[0].kwargs["model"] == "openrouter/anthropic/claude-sonnet-4"
     assert mock_completion.call_args_list[1].kwargs["model"] == "ollama/llama3.2"
     assert mock_completion.call_args_list[1].kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+def test_completion_with_fallback_sync_walks_fallback_chain(async_db):
+    completion_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(
+            settings,
+            "fallback_models",
+            "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        ),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch(
+            "litellm.completion",
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("first fallback down"),
+                completion_response,
+            ],
+        ) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["fallback_model"] == "openai/gpt-4.1-mini"
+    assert events[0]["details"]["attempted_fallback_models"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+    assert events[0]["details"]["fallback_attempts"] == 2
 
 
 def test_completion_with_fallback_sync_logs_primary_success(async_db):
@@ -107,6 +177,32 @@ def test_completion_with_fallback_sync_logs_primary_success(async_db):
     assert events[0]["details"]["runtime_path"] == "completion"
     assert events[0]["details"]["used_fallback"] is False
     assert events[0]["details"]["primary_model"] == "openai/gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_completion_with_fallback_sync_logs_inside_running_loop(async_db):
+    success_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion", return_value=success_response),
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+        )
+        await asyncio.sleep(0)
+
+    assert result is success_response
+    events = await audit_repository.list_events(limit=5)
+    success_events = [e for e in events if e["event_type"] == "llm_primary_success"]
+    assert success_events
+    assert success_events[0]["details"]["primary_model"] == "openai/gpt-4o-mini"
 
 
 def test_completion_with_fallback_sync_logs_fallback_success(async_db):
@@ -140,6 +236,50 @@ def test_completion_with_fallback_sync_logs_fallback_success(async_db):
     assert events[0]["details"]["used_fallback"] is True
     assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
     assert "primary down" in events[0]["details"]["primary_error"]
+
+
+def test_completion_with_fallback_sync_logs_final_chain_failure(async_db):
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(
+            settings,
+            "fallback_models",
+            "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        ),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch(
+            "litellm.completion",
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("first fallback down"),
+                RuntimeError("final fallback down"),
+            ],
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="final fallback down"):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0.3,
+                max_tokens=256,
+            )
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_failure"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["fallback_model"] == "openai/gpt-4.1-mini"
+    assert events[0]["details"]["attempted_fallback_models"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+    assert events[0]["details"]["fallback_errors"] == [
+        {"model": "openai/gpt-4o-mini", "error": "first fallback down"},
+        {"model": "openai/gpt-4.1-mini", "error": "final fallback down"},
+    ]
 
 
 def test_fallback_litellm_model_retries_generate_with_fallback(async_db):
@@ -181,6 +321,55 @@ def test_fallback_litellm_model_retries_generate_with_fallback(async_db):
     assert "primary down" in events[0]["details"]["primary_error"]
 
 
+def test_fallback_litellm_model_walks_fallback_chain(async_db):
+    fallback_response = MagicMock()
+
+    with (
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("first fallback down"),
+                fallback_response,
+            ],
+        ) as mock_generate,
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        result = model.generate([{"role": "user", "content": "hello"}])
+
+    assert result is fallback_response
+    assert len(model._fallback_models) == 2
+    assert [call.args[0].model_id for call in mock_generate.call_args_list] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["fallback_model"] == "openai/gpt-4.1-mini"
+    assert events[0]["details"]["attempted_fallback_models"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+    assert events[0]["details"]["fallback_attempts"] == 2
+
+
 def test_fallback_litellm_model_skips_duplicate_fallback_target():
     with (
         patch.object(settings, "fallback_model", "openai/gpt-4o-mini"),
@@ -196,6 +385,31 @@ def test_fallback_litellm_model_skips_duplicate_fallback_target():
         )
 
     assert model._fallback_model is None
+
+
+def test_fallback_litellm_model_deduplicates_chain_targets():
+    with (
+        patch.object(settings, "fallback_model", "openai/gpt-4o-mini"),
+        patch.object(
+            settings,
+            "fallback_models",
+            "openai/gpt-4o-mini,openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        ),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+
+    assert [candidate.model_id for candidate in model._fallback_models] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
 
 
 @pytest.mark.asyncio
@@ -327,6 +541,49 @@ def test_fallback_litellm_model_logs_fallback_failure(async_db):
     assert events[0]["details"]["runtime_path"] == "agent_generate"
     assert events[0]["details"]["fallback_model"] == "ollama/llama3.2"
     assert events[0]["details"]["fallback_error"] == "fallback down"
+
+
+def test_fallback_litellm_model_logs_final_chain_failure(async_db):
+    with (
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("first fallback down"),
+                RuntimeError("final fallback down"),
+            ],
+        ),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        with pytest.raises(RuntimeError, match="final fallback down"):
+            model.generate([{"role": "user", "content": "hello"}])
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_failure"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["fallback_model"] == "openai/gpt-4.1-mini"
+    assert events[0]["details"]["attempted_fallback_models"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+    assert events[0]["details"]["fallback_errors"] == [
+        {"model": "openai/gpt-4o-mini", "error": "first fallback down"},
+        {"model": "openai/gpt-4.1-mini", "error": "final fallback down"},
+    ]
 
 
 def test_fallback_litellm_model_skips_late_success_after_timeout(async_db):

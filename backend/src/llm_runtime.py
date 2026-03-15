@@ -27,6 +27,17 @@ def _primary_api_key() -> str:
     return settings.llm_api_key or settings.openrouter_api_key
 
 
+def fallback_model_ids() -> list[str]:
+    """Return the ordered list of configured fallback model ids."""
+    fallback_ids: list[str] = []
+    for raw_value in (settings.fallback_model, settings.fallback_models):
+        for model_id in raw_value.split(","):
+            normalized = model_id.strip()
+            if normalized and normalized not in fallback_ids:
+                fallback_ids.append(normalized)
+    return fallback_ids
+
+
 def build_model_kwargs(
     *,
     temperature: float,
@@ -54,10 +65,13 @@ def build_completion_kwargs(
     max_tokens: int,
     model_id: str | None = None,
     use_fallback: bool = False,
+    fallback_model_id: str | None = None,
+    fallback_api_key: str | None = None,
+    fallback_api_base: str | None = None,
 ) -> dict[str, Any]:
     """Build litellm.completion kwargs for either the primary or fallback path."""
     if use_fallback:
-        fallback_model = settings.fallback_model
+        fallback_model = fallback_model_id or next(iter(fallback_model_ids()), "")
         if not fallback_model:
             raise ValueError("Fallback model is not configured")
         kwargs: dict[str, Any] = {
@@ -66,8 +80,8 @@ def build_completion_kwargs(
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        api_key = settings.fallback_llm_api_key or _primary_api_key()
-        api_base = settings.fallback_llm_api_base or settings.llm_api_base
+        api_key = fallback_api_key or settings.fallback_llm_api_key or _primary_api_key()
+        api_base = fallback_api_base or settings.fallback_llm_api_base or settings.llm_api_base
     else:
         kwargs = {
             "model": model_id or settings.default_model,
@@ -87,7 +101,7 @@ def build_completion_kwargs(
 
 def has_fallback_model() -> bool:
     """Return whether a fallback completion target is configured."""
-    return bool(settings.fallback_model.strip())
+    return bool(fallback_model_ids())
 
 
 def _fallback_api_key(primary_api_key: str | None) -> str:
@@ -100,6 +114,45 @@ def _fallback_api_base(primary_api_base: str | None) -> str:
 
 def _safe_model_name(kwargs: dict[str, Any]) -> str:
     return str(kwargs.get("model", "unknown"))
+
+
+def _target_key(*, model_id: str, api_base: str | None, api_key: str | None) -> tuple[str, str | None, str | None]:
+    return (model_id, api_base or None, api_key or None)
+
+
+def _fallback_targets(
+    *,
+    primary_model_id: str,
+    primary_api_base: str | None,
+    primary_api_key: str | None,
+) -> list[dict[str, str | None]]:
+    fallback_api_key = _fallback_api_key(primary_api_key)
+    fallback_api_base = _fallback_api_base(primary_api_base)
+    seen_targets = {
+        _target_key(
+            model_id=primary_model_id,
+            api_base=primary_api_base,
+            api_key=primary_api_key,
+        ),
+    }
+    targets: list[dict[str, str | None]] = []
+    for fallback_model_id in fallback_model_ids():
+        target_key = _target_key(
+            model_id=fallback_model_id,
+            api_base=fallback_api_base,
+            api_key=fallback_api_key,
+        )
+        if target_key in seen_targets:
+            continue
+        seen_targets.add(target_key)
+        targets.append(
+            {
+                "model_id": fallback_model_id,
+                "api_base": fallback_api_base,
+                "api_key": fallback_api_key,
+            }
+        )
+    return targets
 
 
 def _register_request(request_id: str) -> None:
@@ -169,7 +222,17 @@ def _log_llm_runtime_event_sync(
     details: dict[str, Any],
 ) -> None:
     try:
-        asyncio.run(_log_llm_runtime_event(
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(_log_llm_runtime_event(
+                event_type=event_type,
+                summary=summary,
+                details=details,
+            ))
+            return
+
+        loop.create_task(_log_llm_runtime_event(
             event_type=event_type,
             summary=summary,
             details=details,
@@ -198,32 +261,30 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             flatten_messages_as_text=flatten_messages_as_text,
             **kwargs,
         )
+        self._fallback_models: tuple[BaseLiteLLMModel, ...] = ()
         self._fallback_model: BaseLiteLLMModel | None = None
-
-        fallback_model_id = settings.fallback_model.strip()
-        if not fallback_model_id:
-            return
-
-        fallback_api_key = _fallback_api_key(api_key)
-        fallback_api_base = _fallback_api_base(api_base)
-        fallback_target_differs = (
-            fallback_model_id != self.model_id
-            or (fallback_api_base or None) != self.api_base
-            or (fallback_api_key or None) != self.api_key
-        )
-        if not fallback_target_differs:
-            return
-
         fallback_kwargs = dict(kwargs)
         if flatten_messages_as_text is not None:
             fallback_kwargs["flatten_messages_as_text"] = flatten_messages_as_text
-        self._fallback_model = BaseLiteLLMModel(
-            model_id=fallback_model_id,
-            api_base=fallback_api_base or None,
-            api_key=fallback_api_key or None,
-            custom_role_conversions=custom_role_conversions,
-            **fallback_kwargs,
-        )
+
+        fallback_models: list[BaseLiteLLMModel] = []
+        for target in _fallback_targets(
+            primary_model_id=self.model_id,
+            primary_api_base=self.api_base,
+            primary_api_key=self.api_key,
+        ):
+            fallback_models.append(
+                BaseLiteLLMModel(
+                    model_id=str(target["model_id"]),
+                    api_base=target["api_base"] or None,
+                    api_key=target["api_key"] or None,
+                    custom_role_conversions=custom_role_conversions,
+                    **fallback_kwargs,
+                )
+            )
+
+        self._fallback_models = tuple(fallback_models)
+        self._fallback_model = self._fallback_models[0] if self._fallback_models else None
 
     def generate(
         self,
@@ -255,7 +316,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 )
             return response
         except Exception as primary_error:
-            if self._fallback_model is None:
+            if not self._fallback_models:
                 if _can_log_request(request_id):
                     _log_llm_runtime_event_sync(
                         event_type="llm_primary_failure",
@@ -268,52 +329,78 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         },
                     )
                 raise
-            logger.warning(
-                "Primary agent model %s failed, retrying with fallback %s",
-                self.model_id,
-                self._fallback_model.model_id,
-                exc_info=True,
-            )
-            try:
-                response = self._fallback_model.generate(
-                    messages,
-                    stop_sequences=stop_sequences,
-                    response_format=response_format,
-                    tools_to_call_from=tools_to_call_from,
-                    **kwargs,
+            attempted_fallback_models: list[str] = []
+            fallback_errors: list[dict[str, str]] = []
+            last_error: Exception = primary_error
+
+            for index, fallback_model in enumerate(self._fallback_models):
+                attempted_fallback_models.append(fallback_model.model_id)
+                if index == 0:
+                    logger.warning(
+                        "LLM generate failed for %s, retrying with fallback %s",
+                        primary_model,
+                        fallback_model.model_id,
+                        exc_info=True,
+                    )
+                try:
+                    response = fallback_model.generate(
+                        messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
+                    if _can_log_request(request_id):
+                        _log_llm_runtime_event_sync(
+                            event_type="llm_fallback_success",
+                            summary=(
+                                f"Fallback agent model generate succeeded via {fallback_model.model_id}"
+                            ),
+                            details={
+                                "runtime_path": "agent_generate",
+                                "primary_model": primary_model,
+                                "fallback_model": fallback_model.model_id,
+                                "attempted_fallback_models": attempted_fallback_models,
+                                "fallback_attempts": len(attempted_fallback_models),
+                                "used_fallback": True,
+                                "primary_error": str(primary_error),
+                            },
+                        )
+                    return response
+                except Exception as fallback_error:
+                    last_error = fallback_error
+                    fallback_errors.append(
+                        {
+                            "model": fallback_model.model_id,
+                            "error": str(fallback_error),
+                        }
+                    )
+                    if index + 1 < len(self._fallback_models):
+                        logger.warning(
+                            "Fallback model %s failed, retrying with next fallback %s",
+                            fallback_model.model_id,
+                            self._fallback_models[index + 1].model_id,
+                            exc_info=True,
+                        )
+
+            if _can_log_request(request_id):
+                final_fallback_model = attempted_fallback_models[-1]
+                _log_llm_runtime_event_sync(
+                    event_type="llm_fallback_failure",
+                    summary=f"Fallback agent model generate failed via {final_fallback_model}",
+                    details={
+                        "runtime_path": "agent_generate",
+                        "primary_model": primary_model,
+                        "fallback_model": final_fallback_model,
+                        "attempted_fallback_models": attempted_fallback_models,
+                        "fallback_attempts": len(attempted_fallback_models),
+                        "used_fallback": True,
+                        "primary_error": str(primary_error),
+                        "fallback_error": str(last_error),
+                        "fallback_errors": fallback_errors,
+                    },
                 )
-                if _can_log_request(request_id):
-                    _log_llm_runtime_event_sync(
-                        event_type="llm_fallback_success",
-                        summary=(
-                            f"Fallback agent model generate succeeded via {self._fallback_model.model_id}"
-                        ),
-                        details={
-                            "runtime_path": "agent_generate",
-                            "primary_model": primary_model,
-                            "fallback_model": self._fallback_model.model_id,
-                            "used_fallback": True,
-                            "primary_error": str(primary_error),
-                        },
-                    )
-                return response
-            except Exception as fallback_error:
-                if _can_log_request(request_id):
-                    _log_llm_runtime_event_sync(
-                        event_type="llm_fallback_failure",
-                        summary=(
-                            f"Fallback agent model generate failed via {self._fallback_model.model_id}"
-                        ),
-                        details={
-                            "runtime_path": "agent_generate",
-                            "primary_model": primary_model,
-                            "fallback_model": self._fallback_model.model_id,
-                            "used_fallback": True,
-                            "primary_error": str(primary_error),
-                            "fallback_error": str(fallback_error),
-                        },
-                    )
-                raise
+            raise last_error
 
 
 def completion_with_fallback_sync(
@@ -349,7 +436,12 @@ def completion_with_fallback_sync(
                 )
             return response
         except Exception as primary_error:
-            if not has_fallback_model():
+            fallback_targets = _fallback_targets(
+                primary_model_id=primary_model,
+                primary_api_base=primary_kwargs.get("api_base"),
+                primary_api_key=primary_kwargs.get("api_key"),
+            )
+            if not fallback_targets:
                 if _can_log_request(request_id):
                     _log_llm_runtime_event_sync(
                         event_type="llm_primary_failure",
@@ -362,49 +454,80 @@ def completion_with_fallback_sync(
                         },
                     )
                 raise
-            fallback_kwargs = build_completion_kwargs(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                use_fallback=True,
-            )
-            fallback_model = _safe_model_name(fallback_kwargs)
-            logger.warning(
-                "Primary LLM completion failed for model %s, retrying with fallback %s",
-                primary_model,
-                fallback_model,
-                exc_info=True,
-            )
-            try:
-                response = litellm.completion(**fallback_kwargs)
-                if _can_log_request(request_id):
-                    _log_llm_runtime_event_sync(
-                        event_type="llm_fallback_success",
-                        summary=f"Fallback LLM completion succeeded via {fallback_model}",
-                        details={
-                            "runtime_path": "completion",
-                            "primary_model": primary_model,
-                            "fallback_model": fallback_model,
-                            "used_fallback": True,
-                            "primary_error": str(primary_error),
-                        },
+            attempted_fallback_models: list[str] = []
+            fallback_errors: list[dict[str, str]] = []
+            last_error: Exception = primary_error
+
+            for index, target in enumerate(fallback_targets):
+                fallback_kwargs = build_completion_kwargs(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    use_fallback=True,
+                    fallback_model_id=str(target["model_id"]),
+                    fallback_api_key=target["api_key"],
+                    fallback_api_base=target["api_base"],
+                )
+                fallback_model = _safe_model_name(fallback_kwargs)
+                attempted_fallback_models.append(fallback_model)
+                if index == 0:
+                    logger.warning(
+                        "LLM completion failed for model %s, retrying with fallback %s",
+                        primary_model,
+                        fallback_model,
+                        exc_info=True,
                     )
-                return response
-            except Exception as fallback_error:
-                if _can_log_request(request_id):
-                    _log_llm_runtime_event_sync(
-                        event_type="llm_fallback_failure",
-                        summary=f"Fallback LLM completion failed via {fallback_model}",
-                        details={
-                            "runtime_path": "completion",
-                            "primary_model": primary_model,
-                            "fallback_model": fallback_model,
-                            "used_fallback": True,
-                            "primary_error": str(primary_error),
-                            "fallback_error": str(fallback_error),
-                        },
+                try:
+                    response = litellm.completion(**fallback_kwargs)
+                    if _can_log_request(request_id):
+                        _log_llm_runtime_event_sync(
+                            event_type="llm_fallback_success",
+                            summary=f"Fallback LLM completion succeeded via {fallback_model}",
+                            details={
+                                "runtime_path": "completion",
+                                "primary_model": primary_model,
+                                "fallback_model": fallback_model,
+                                "attempted_fallback_models": attempted_fallback_models,
+                                "fallback_attempts": len(attempted_fallback_models),
+                                "used_fallback": True,
+                                "primary_error": str(primary_error),
+                            },
+                        )
+                    return response
+                except Exception as fallback_error:
+                    last_error = fallback_error
+                    fallback_errors.append(
+                        {
+                            "model": fallback_model,
+                            "error": str(fallback_error),
+                        }
                     )
-                raise
+                    if index + 1 < len(fallback_targets):
+                        logger.warning(
+                            "Fallback model %s failed, retrying with next fallback %s",
+                            fallback_model,
+                            fallback_targets[index + 1]["model_id"],
+                            exc_info=True,
+                        )
+
+            final_fallback_model = attempted_fallback_models[-1]
+            if _can_log_request(request_id):
+                _log_llm_runtime_event_sync(
+                    event_type="llm_fallback_failure",
+                    summary=f"Fallback LLM completion failed via {final_fallback_model}",
+                    details={
+                        "runtime_path": "completion",
+                        "primary_model": primary_model,
+                        "fallback_model": final_fallback_model,
+                        "attempted_fallback_models": attempted_fallback_models,
+                        "fallback_attempts": len(attempted_fallback_models),
+                        "used_fallback": True,
+                        "primary_error": str(primary_error),
+                        "fallback_error": str(last_error),
+                        "fallback_errors": fallback_errors,
+                    },
+                )
+            raise last_error
     finally:
         if request_id is not None:
             _finish_request(request_id)

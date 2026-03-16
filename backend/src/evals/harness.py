@@ -929,6 +929,59 @@ def _eval_runtime_profile_preferences() -> dict[str, Any]:
         _reset_target_health()
 
 
+def _eval_runtime_path_patterns() -> dict[str, Any]:
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", "mcp_*=local|default"),
+        patch.object(
+            settings,
+            "runtime_model_overrides",
+            "mcp_*=openai/gpt-4.1-mini,mcp_github_actions=local:ollama/coder",
+        ),
+        patch.object(
+            settings,
+            "runtime_fallback_overrides",
+            (
+                "mcp_*=openai/gpt-4.1-mini|openai/gpt-4.1-nano;"
+                "mcp_github_actions=openai/gpt-4o-mini|openai/gpt-4.1-mini"
+            ),
+        ),
+    ):
+        wildcard_model = get_model(runtime_path="mcp_linear")
+        exact_model = get_model(runtime_path="mcp_github_actions")
+
+    assert wildcard_model.model_id == "openai/gpt-4.1-mini"
+    assert wildcard_model._runtime_profile == "local"
+    assert [fallback.model_id for fallback in wildcard_model._fallback_models] == [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano",
+    ]
+
+    assert exact_model.model_id == "ollama/coder"
+    assert exact_model._runtime_profile == "local"
+    assert [fallback.model_id for fallback in exact_model._fallback_models] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+
+    return {
+        "wildcard_runtime_path": "mcp_linear",
+        "wildcard_runtime_profile": wildcard_model._runtime_profile,
+        "wildcard_model": wildcard_model.model_id,
+        "wildcard_fallback_models": [fallback.model_id for fallback in wildcard_model._fallback_models],
+        "exact_runtime_path": "mcp_github_actions",
+        "exact_runtime_profile": exact_model._runtime_profile,
+        "exact_model": exact_model.model_id,
+        "exact_fallback_models": [fallback.model_id for fallback in exact_model._fallback_models],
+    }
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -1571,6 +1624,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime paths can prefer an ordered local-vs-default profile chain before explicit fallback models.",
         runner=_eval_runtime_profile_preferences,
+    ),
+    EvalScenario(
+        name="runtime_path_patterns",
+        category="runtime",
+        description="Runtime-path routing rules can use wildcard patterns, while exact path rules still override the wildcard baseline.",
+        runner=_eval_runtime_path_patterns,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

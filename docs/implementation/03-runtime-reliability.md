@@ -13,6 +13,7 @@
 - [x] runtime-path-specific profile preference chains across shared completion and agent-model paths
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
+- [x] wildcard runtime-path routing rules, with exact-path overrides taking precedence
 - [x] first-class local runtime profile for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
@@ -26,7 +27,7 @@
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider routing beyond explicit profile preferences, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
+- [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduler, core agent, delegation, and connected MCP-specialist paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths
 - [ ] expand eval coverage beyond deterministic seam checks into broader behavioral contracts
@@ -40,6 +41,7 @@
 
 - [x] provider failure with configured fallbacks does not collapse the entire chat path
 - [x] runtime paths can force distinct primary and fallback routing without changing the global baseline
+- [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
 - [x] a local or non-OpenRouter path is demonstrably possible across helper, scheduler, core agent, delegation, and connected MCP-specialist flows
 - [ ] key flows are observable and easy to debug
 - [ ] the project has broad repeatable eval coverage for core behavior

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
 from typing import Any
@@ -45,28 +46,64 @@ def local_runtime_paths() -> set[str]:
     }
 
 
-def _runtime_model_override(runtime_path: str | None) -> tuple[str | None, str] | None:
-    """Return an optional runtime-path-specific profile/model override."""
-    if not runtime_path:
+def _runtime_path_match_kind(pattern: str, runtime_path: str | None) -> str | None:
+    """Return whether a config pattern matches the runtime path exactly or via glob."""
+    if runtime_path is None:
         return None
-    for raw_entry in settings.runtime_model_overrides.split(","):
+    normalized_pattern = pattern.strip()
+    if not normalized_pattern:
+        return None
+    if normalized_pattern == runtime_path:
+        return "exact"
+    if any(char in normalized_pattern for char in "*?[]") and fnmatchcase(runtime_path, normalized_pattern):
+        return "pattern"
+    return None
+
+
+def _select_runtime_entry(raw_entries: str, *, runtime_path: str | None, separator: str) -> str | None:
+    """Return the best matching config value for a runtime path.
+
+    Exact path matches win over wildcard matches. If multiple wildcard entries
+    match, the first configured wildcard wins.
+    """
+    wildcard_value: str | None = None
+    for raw_entry in raw_entries.split(separator):
         entry = raw_entry.strip()
         if not entry or "=" not in entry:
             continue
         path, _, raw_value = entry.partition("=")
-        if path.strip() != runtime_path:
-            continue
-        value = raw_value.strip()
-        if not value:
-            return None
-        if ":" in value:
-            maybe_profile, model_id = value.split(":", 1)
-            normalized_profile = maybe_profile.strip()
-            normalized_model_id = model_id.strip()
-            if normalized_profile in {"default", "local"} and normalized_model_id:
-                return normalized_profile, normalized_model_id
-        return None, value
-    return None
+        match_kind = _runtime_path_match_kind(path, runtime_path)
+        if match_kind == "exact":
+            return raw_value.strip()
+        if match_kind == "pattern" and wildcard_value is None:
+            wildcard_value = raw_value.strip()
+    return wildcard_value
+
+
+def prefers_local_runtime_path(runtime_path: str | None) -> bool:
+    """Return whether the runtime path should prefer the local profile."""
+    return any(
+        _runtime_path_match_kind(path, runtime_path)
+        for path in local_runtime_paths()
+    )
+
+
+def _runtime_model_override(runtime_path: str | None) -> tuple[str | None, str] | None:
+    """Return an optional runtime-path-specific profile/model override."""
+    value = _select_runtime_entry(
+        settings.runtime_model_overrides,
+        runtime_path=runtime_path,
+        separator=",",
+    )
+    if not value:
+        return None
+    if ":" in value:
+        maybe_profile, model_id = value.split(":", 1)
+        normalized_profile = maybe_profile.strip()
+        normalized_model_id = model_id.strip()
+        if normalized_profile in {"default", "local"} and normalized_model_id:
+            return normalized_profile, normalized_model_id
+    return None, value
 
 
 def _normalize_runtime_profile(profile: str) -> str | None:
@@ -80,23 +117,19 @@ def _normalize_runtime_profile(profile: str) -> str | None:
 
 def runtime_profile_preferences(runtime_path: str | None) -> list[str]:
     """Return the configured ordered profile preferences for a runtime path."""
-    if not runtime_path:
+    value = _select_runtime_entry(
+        settings.runtime_profile_preferences,
+        runtime_path=runtime_path,
+        separator=";",
+    )
+    if not value:
         return []
-
-    for raw_entry in settings.runtime_profile_preferences.split(";"):
-        entry = raw_entry.strip()
-        if not entry or "=" not in entry:
-            continue
-        path, _, raw_value = entry.partition("=")
-        if path.strip() != runtime_path:
-            continue
-        preferences: list[str] = []
-        for raw_profile in raw_value.split("|"):
-            normalized = _normalize_runtime_profile(raw_profile)
-            if normalized and normalized not in preferences:
-                preferences.append(normalized)
-        return preferences
-    return []
+    preferences: list[str] = []
+    for raw_profile in value.split("|"):
+        normalized = _normalize_runtime_profile(raw_profile)
+        if normalized and normalized not in preferences:
+            preferences.append(normalized)
+    return preferences
 
 
 def runtime_profile_candidates(
@@ -131,7 +164,7 @@ def runtime_profile_candidates(
             candidates.append(normalized)
 
     if not candidates:
-        if runtime_path and runtime_path in local_runtime_paths() and has_local_model_profile():
+        if prefers_local_runtime_path(runtime_path) and has_local_model_profile():
             candidates.append("local")
         else:
             candidates.append("default")
@@ -182,19 +215,16 @@ def _profile_api_base(profile: str) -> str:
 def fallback_model_ids(*, runtime_path: str | None = None) -> list[str]:
     """Return the ordered list of configured fallback model ids."""
     runtime_override_ids: list[str] = []
-    if runtime_path:
-        for raw_entry in settings.runtime_fallback_overrides.split(";"):
-            entry = raw_entry.strip()
-            if not entry or "=" not in entry:
-                continue
-            path, _, raw_value = entry.partition("=")
-            if path.strip() != runtime_path:
-                continue
-            for model_id in raw_value.split("|"):
-                normalized = model_id.strip()
-                if normalized and normalized not in runtime_override_ids:
-                    runtime_override_ids.append(normalized)
-            break
+    value = _select_runtime_entry(
+        settings.runtime_fallback_overrides,
+        runtime_path=runtime_path,
+        separator=";",
+    )
+    if value:
+        for model_id in value.split("|"):
+            normalized = model_id.strip()
+            if normalized and normalized not in runtime_override_ids:
+                runtime_override_ids.append(normalized)
     if runtime_override_ids:
         return runtime_override_ids
 

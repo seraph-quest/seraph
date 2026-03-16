@@ -32,7 +32,7 @@ Legend for the checklist column:
 |---|---|---|
 | 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret redaction are shipped; deeper isolation and narrower privileged execution paths are still left |
 | 02. Execution Plane | `[ ]` | Real tool execution, MCP, browser, shell, filesystem, goals, vault, and web search are shipped; richer workflow and external execution depth are still left |
-| 03. Runtime Reliability | `[ ]` | Profile preferences, fallback chains, runtime-path overrides, local routing, broad runtime audit coverage, and deterministic eval foundations are shipped; richer routing policy and broader eval depth are still left |
+| 03. Runtime Reliability | `[ ]` | Profile preferences, wildcard path rules, fallback chains, runtime-path overrides, local routing, broad runtime audit coverage, and deterministic eval foundations are shipped; richer routing policy and broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, and native daemon foundations are shipped; richer native presence, notifications, and channels are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, and observer-driven state are shipped foundations; stronger learning loops and intervention quality are still left |
 | 06. Embodied UX | `[ ]` | Village UI, avatar casting, quest surfaces, and settings exist; the fuller life-OS shell and stronger ambient UX are still left |
@@ -61,7 +61,7 @@ Legend for the checklist column:
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
-- [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing
+- [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing
 - [x] runtime audit visibility across chat, scheduler, observer, MCP, embedding, vector store, soul file, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, observer, storage, and tool-boundary contracts
 

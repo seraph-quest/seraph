@@ -57,6 +57,7 @@ title: Seraph Development Status
 - [x] ordered fallback chains across completion and agent-model paths
 - [x] health-aware rerouting away from recently failed targets
 - [x] runtime-path-specific profile preference chains across completion and agent-model paths
+- [x] wildcard runtime-path routing rules, with exact-path overrides taking precedence
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
@@ -83,7 +84,7 @@ title: Seraph Development Status
 
 ### Runtime Reliability
 
-- [ ] richer provider selection policy beyond explicit overrides, ordered fallbacks, and cooldown rerouting
+- [ ] richer provider selection policy beyond path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
 - [ ] broader local-model routing into any remaining runtime paths that are worth it
 - [ ] remaining edge observability beyond the already-covered chat, scheduler, observer, storage, and integration boundaries
 - [ ] broader eval coverage beyond deterministic seam checks

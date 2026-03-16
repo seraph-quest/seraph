@@ -21,7 +21,7 @@ from src.agent.onboarding import create_onboarding_agent
 from src.agent.strategist import create_strategist_agent
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
-from src.llm_runtime import FallbackLiteLLMModel
+from src.llm_runtime import FallbackLiteLLMModel, completion_with_fallback_sync
 from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue
@@ -187,6 +187,47 @@ def _eval_chat_model_wrapper() -> dict[str, Any]:
     return {
         "primary_model": model.model_id,
         "fallback_model": model._fallback_model.model_id,
+    }
+
+
+def _eval_provider_fallback_chain() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Resolved after ordered fallback chain.")
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(
+            settings,
+            "fallback_models",
+            "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+        ),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch(
+            "litellm.completion",
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("first fallback down"),
+                completion_response,
+            ],
+        ) as mock_completion,
+    ):
+        response = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "route around provider issues"}],
+            temperature=0.2,
+            max_tokens=128,
+        )
+
+    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
+    return {
+        "attempted_models": attempted_models,
+        "final_model": attempted_models[-1],
+        "response_excerpt": response.choices[0].message.content,
     }
 
 
@@ -477,6 +518,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Main agent model wiring exposes the shared fallback wrapper.",
         runner=_eval_chat_model_wrapper,
+    ),
+    EvalScenario(
+        name="provider_fallback_chain",
+        category="runtime",
+        description="Direct completion retries across an ordered fallback chain instead of a single backup target.",
+        runner=_eval_provider_fallback_chain,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

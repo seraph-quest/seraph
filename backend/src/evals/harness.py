@@ -874,6 +874,61 @@ def _eval_runtime_fallback_overrides() -> dict[str, Any]:
         _reset_target_health()
 
 
+def _eval_runtime_profile_preferences() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Recovered through the preferred remote profile.")
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(
+                settings,
+                "runtime_profile_preferences",
+                "chat_agent=local|default;session_consolidation=local|default",
+            ),
+            patch.object(settings, "fallback_model", "openai/gpt-4.1-mini"),
+            patch.object(settings, "fallback_models", ""),
+            patch.object(settings, "fallback_llm_api_key", ""),
+            patch.object(settings, "fallback_llm_api_base", ""),
+            patch(
+                "litellm.completion",
+                side_effect=[RuntimeError("local down"), completion_response],
+            ) as mock_completion,
+        ):
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "prefer the local runtime, then remote"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_consolidation",
+            )
+            chat_model = get_model(runtime_path="chat_agent")
+
+        attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+        assert attempted_models == [
+            "ollama/llama3.2",
+            "openrouter/anthropic/claude-sonnet-4",
+        ]
+        assert [fallback.model_id for fallback in chat_model._fallback_models] == [
+            "openrouter/anthropic/claude-sonnet-4",
+            "openai/gpt-4.1-mini",
+        ]
+        return {
+            "completion_runtime_profile": "local",
+            "completion_attempted_models": attempted_models,
+            "completion_final_model": attempted_models[-1],
+            "agent_runtime_profile": chat_model._runtime_profile,
+            "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+            "response_excerpt": response.choices[0].message.content,
+        }
+    finally:
+        _reset_target_health()
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -1510,6 +1565,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime paths can override their ordered fallback chain without changing the global fallback baseline.",
         runner=_eval_runtime_fallback_overrides,
+    ),
+    EvalScenario(
+        name="runtime_profile_preferences",
+        category="runtime",
+        description="Runtime paths can prefer an ordered local-vs-default profile chain before explicit fallback models.",
+        runner=_eval_runtime_profile_preferences,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

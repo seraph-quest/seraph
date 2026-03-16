@@ -10,6 +10,7 @@
 - [x] centralized provider-agnostic LLM runtime settings
 - [x] ordered fallback-chain routing across shared completion and agent-model paths
 - [x] health-aware cooldown rerouting across shared completion and agent-model paths
+- [x] runtime-path-specific profile preference chains across shared completion and agent-model paths
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime profile for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
@@ -25,7 +26,7 @@
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider routing beyond explicit overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
+- [ ] deepen provider routing beyond explicit profile preferences, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduler, core agent, delegation, and connected MCP-specialist paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths
 - [ ] expand eval coverage beyond deterministic seam checks into broader behavioral contracts

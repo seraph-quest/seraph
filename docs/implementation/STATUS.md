@@ -56,6 +56,7 @@ title: Seraph Development Status
 - [x] shared provider-agnostic LLM runtime settings
 - [x] ordered fallback chains across completion and agent-model paths
 - [x] health-aware rerouting away from recently failed targets
+- [x] runtime-path-specific profile preference chains across completion and agent-model paths
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, scheduler, core agent, delegation, and connected MCP-specialist paths

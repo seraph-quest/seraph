@@ -120,6 +120,29 @@ def test_build_model_kwargs_uses_runtime_profile_preferences_for_primary_target(
     assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+def test_build_model_kwargs_honors_unscoped_runtime_override_for_local_first_path():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local|default"),
+        patch.object(settings, "runtime_model_overrides", "chat_agent=openai/gpt-4.1-mini"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "openai/gpt-4.1-mini"
+    assert kwargs["runtime_profile"] == "local"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
 def test_build_model_kwargs_runtime_override_can_force_default_profile_over_local_path():
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -277,6 +300,37 @@ def test_build_completion_kwargs_uses_runtime_model_override():
     assert kwargs["model"] == "openai/gpt-4.1-mini"
     assert kwargs["api_key"] == "primary-key"
     assert kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+
+def test_build_completion_kwargs_honors_unscoped_runtime_override_for_local_first_path():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            "session_title_generation=local|default",
+        ),
+        patch.object(
+            settings,
+            "runtime_model_overrides",
+            "session_title_generation=openai/gpt-4.1-mini",
+        ),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert kwargs["model"] == "openai/gpt-4.1-mini"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
 def test_build_completion_kwargs_explicit_profile_wins_over_runtime_override():

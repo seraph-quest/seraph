@@ -156,7 +156,7 @@ def _resolved_primary_model_id(
     override = _runtime_model_override(runtime_path)
     if override:
         override_profile, override_model_id = override
-        if override_profile == profile or (override_profile is None and profile == "default"):
+        if override_profile is None or override_profile == profile:
             return override_model_id
     return _profile_model_id(profile)
 

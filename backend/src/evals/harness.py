@@ -22,7 +22,7 @@ from src.agent.specialists import create_specialist
 from src.agent.strategist import create_strategist_agent
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
-from src.llm_runtime import FallbackLiteLLMModel, completion_with_fallback_sync
+from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue
@@ -228,6 +228,55 @@ def _eval_provider_fallback_chain() -> dict[str, Any]:
     return {
         "attempted_models": attempted_models,
         "final_model": attempted_models[-1],
+        "response_excerpt": response.choices[0].message.content,
+    }
+
+
+def _eval_provider_health_reroute() -> dict[str, Any]:
+    first_fallback_response = _make_litellm_response("Recovered through the fallback chain.")
+    rerouted_response = _make_litellm_response("Rerouted straight to the healthy fallback.")
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "llm_target_cooldown_seconds", 300),
+            patch(
+                "litellm.completion",
+                side_effect=[
+                    RuntimeError("primary down"),
+                    first_fallback_response,
+                    rerouted_response,
+                ],
+            ) as mock_completion,
+        ):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "recover once"}],
+                temperature=0.2,
+                max_tokens=128,
+            )
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "recover again"}],
+                temperature=0.2,
+                max_tokens=128,
+            )
+    finally:
+        _reset_target_health()
+
+    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+    ]
+    return {
+        "cooldown_seconds": 300,
+        "rerouted_model": attempted_models[-1],
+        "attempted_models": attempted_models,
         "response_excerpt": response.choices[0].message.content,
     }
 
@@ -636,6 +685,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Direct completion retries across an ordered fallback chain instead of a single backup target.",
         runner=_eval_provider_fallback_chain,
+    ),
+    EvalScenario(
+        name="provider_health_reroute",
+        category="runtime",
+        description="A recently failed primary provider target is temporarily rerouted to a healthy fallback target.",
+        runner=_eval_provider_health_reroute,
     ),
     EvalScenario(
         name="local_runtime_profile",

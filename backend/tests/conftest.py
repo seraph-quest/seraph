@@ -14,6 +14,7 @@ os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 
 from src.app import create_app
+from src.llm_runtime import _reset_target_health
 
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
@@ -93,3 +94,10 @@ def mock_agent():
     agent = MagicMock()
     agent.run.return_value = "Mocked agent response"
     return agent
+
+
+@pytest.fixture(autouse=True)
+def reset_llm_target_health():
+    _reset_target_health()
+    yield
+    _reset_target_health()

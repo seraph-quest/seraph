@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     local_llm_api_key: str = ""
     local_llm_api_base: str = ""
     local_runtime_paths: str = ""  # comma-separated runtime paths that should prefer local profile
+    llm_target_cooldown_seconds: int = 300  # temporarily deprioritize failed LLM targets across requests
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10

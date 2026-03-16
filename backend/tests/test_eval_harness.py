@@ -42,6 +42,7 @@ def test_main_lists_available_scenarios(capsys):
     assert exit_code == 0
     assert "chat_model_wrapper" in captured.out
     assert "provider_fallback_chain" in captured.out
+    assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
     assert "agent_local_runtime_profile" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
@@ -64,6 +65,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
         run_runtime_evals(
             [
                 "provider_fallback_chain",
+                "provider_health_reroute",
                 "local_runtime_profile",
                 "agent_local_runtime_profile",
                 "scheduled_local_runtime_profile",
@@ -82,6 +84,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-mini",
     ]
     assert details_by_name["provider_fallback_chain"]["final_model"] == "openai/gpt-4.1-mini"
+    assert details_by_name["provider_health_reroute"]["attempted_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+    ]
+    assert details_by_name["provider_health_reroute"]["rerouted_model"] == "openai/gpt-4o-mini"
     assert details_by_name["local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"

@@ -48,6 +48,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "context_window_summary_audit" in captured.out
     assert "agent_local_runtime_profile" in captured.out
     assert "delegation_local_runtime_profile" in captured.out
+    assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "runtime_model_overrides" in captured.out
     assert "runtime_fallback_overrides" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
@@ -84,6 +85,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "context_window_summary_audit",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
+                "mcp_specialist_local_runtime_profile",
                 "runtime_model_overrides",
                 "runtime_fallback_overrides",
                 "scheduled_local_runtime_profile",
@@ -132,6 +134,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
+    assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
+    assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
     assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
     assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"

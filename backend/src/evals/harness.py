@@ -20,7 +20,7 @@ from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_orchestrator, get_model
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.specialists import create_specialist
+from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
 from src.agent.strategist import create_strategist_agent
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
@@ -500,6 +500,40 @@ def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
     return {
         "runtime_profile": "local",
         "routed_models": routed_models,
+    }
+
+
+def _eval_mcp_specialist_local_runtime_profile() -> dict[str, Any]:
+    runtime_path = mcp_specialist_runtime_path("github-actions")
+    tool = MagicMock()
+    tool.name = "list_workflows"
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", runtime_path),
+        patch("src.agent.specialists.ToolCallingAgent") as mock_agent_cls,
+    ):
+        def _make_agent(**kwargs: Any) -> MagicMock:
+            agent = MagicMock()
+            agent.name = kwargs["name"]
+            agent.model = kwargs["model"]
+            agent.description = kwargs["description"]
+            return agent
+
+        mock_agent_cls.side_effect = _make_agent
+        specialist = create_mcp_specialist("github-actions", [tool], description="GitHub workflows MCP")
+
+    assert specialist.name == runtime_path
+    assert specialist.model.model_id == "ollama/llama3.2"
+    return {
+        "runtime_profile": "local",
+        "runtime_path": runtime_path,
+        "routed_model": specialist.model.model_id,
     }
 
 
@@ -1200,6 +1234,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Delegation paths can route the orchestrator and remaining built-in specialists through the local profile.",
         runner=_eval_delegation_local_runtime_profile,
+    ),
+    EvalScenario(
+        name="mcp_specialist_local_runtime_profile",
+        category="runtime",
+        description="Dynamic MCP specialists can route through the local profile using their sanitized runtime path.",
+        runner=_eval_mcp_specialist_local_runtime_profile,
     ),
     EvalScenario(
         name="runtime_model_overrides",

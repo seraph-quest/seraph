@@ -42,6 +42,7 @@ uv run python -m src.evals.harness --scenario helper_local_runtime_paths
 uv run python -m src.evals.harness --scenario context_window_summary_audit
 uv run python -m src.evals.harness --scenario agent_local_runtime_profile
 uv run python -m src.evals.harness --scenario delegation_local_runtime_profile
+uv run python -m src.evals.harness --scenario mcp_specialist_local_runtime_profile
 uv run python -m src.evals.harness --scenario runtime_model_overrides
 uv run python -m src.evals.harness --scenario runtime_fallback_overrides
 uv run python -m src.evals.harness --scenario scheduled_local_runtime_profile
@@ -58,7 +59,7 @@ uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation profile routing, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -115,7 +116,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_shell_tool.py` | 9 | Shell execution — success, errors, size limits, timeout, connection errors, runtime audit logging |
 | `test_skills.py` | 27 | Skills system — loading, gating, enable/disable, frontmatter parsing, API |
 | `test_soul.py` | 9 | Soul file persistence — read/write, section update, ensure exists |
-| `test_specialists.py` | 28 | Specialist agents — factory, tool domains, MCP specialist generation |
+| `test_specialists.py` | 30 | Specialist agents — factory, tool domains, MCP specialist generation, runtime-path routing |
 | `test_strategist.py` | 12 | Strategist agent — JSON parsing (valid, fenced, invalid, empty, partial), agent creation |
 | `test_timeouts.py` | 5 | Execution timeouts — agent, briefing, consolidation timeouts |
 | `test_tool_registry.py` | 4 | Tool metadata registry — lookup, required fields, copy safety |

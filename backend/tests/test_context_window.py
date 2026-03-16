@@ -1,9 +1,11 @@
 """Tests for the token-aware context window."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.agent.context_window import (
     build_context_window,
     _format_messages,
@@ -196,6 +198,54 @@ class TestSummaryCache:
 
         assert result == "short summary"
         assert mock_completion.call_args.kwargs["runtime_path"] == "context_window_summary"
+
+    def test_cache_miss_logs_runtime_audit_success(self, async_db):
+        from src.agent.context_window import _summarize_middle
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "short summary"
+
+        with patch("src.agent.context_window.completion_with_fallback_sync", return_value=mock_response):
+            result = _summarize_middle(
+                [_msg("user", "hello world")],
+                session_id="sess",
+                range_key="0-1",
+            )
+
+        assert result == "short summary"
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "background_task_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "context_window_summary"
+        assert events[0]["details"]["runtime_path"] == "context_window_summary"
+        assert events[0]["details"]["message_count"] == 1
+
+    def test_cache_miss_logs_runtime_audit_degraded(self, async_db):
+        from src.agent.context_window import _summarize_middle
+
+        with patch("src.agent.context_window.completion_with_fallback_sync", side_effect=RuntimeError("provider down")):
+            result = _summarize_middle(
+                [_msg("user", "hello world")],
+                session_id="sess",
+                range_key="0-1-fail",
+            )
+
+        assert "truncated" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "background_task_degraded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "context_window_summary"
+        assert events[0]["details"]["runtime_path"] == "context_window_summary"
+        assert events[0]["details"]["fallback"] == "truncation"
 
 
 class TestSettingsIntegration:

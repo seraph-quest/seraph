@@ -1,5 +1,6 @@
 """Token-aware context window for conversation history."""
 
+import hashlib
 import logging
 import math
 from functools import lru_cache
@@ -7,6 +8,7 @@ from functools import lru_cache
 import tiktoken
 
 from config.settings import settings
+from src.audit.runtime import log_background_task_event_sync
 from src.llm_runtime import completion_with_fallback_sync
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,8 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
         return _summary_cache[cache_key]
 
     text = _format_messages(messages)
+    message_count = len(messages)
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
     try:
         response = completion_with_fallback_sync(
             messages=[{
@@ -70,9 +74,34 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
             runtime_path="context_window_summary",
         )
         summary = response.choices[0].message.content.strip()
+        log_background_task_event_sync(
+            task_name="context_window_summary",
+            session_id=session_id or None,
+            outcome="succeeded",
+            details={
+                "range_key": range_key,
+                "message_count": message_count,
+                "summary_length": len(summary),
+                "source_hash": text_hash,
+                "runtime_path": "context_window_summary",
+            },
+        )
     except Exception:
         logger.warning("Failed to summarize middle section, using truncation fallback")
         summary = text[:500] + "\n[...earlier conversation truncated...]"
+        log_background_task_event_sync(
+            task_name="context_window_summary",
+            session_id=session_id or None,
+            outcome="degraded",
+            details={
+                "range_key": range_key,
+                "message_count": message_count,
+                "summary_length": len(summary),
+                "source_hash": text_hash,
+                "fallback": "truncation",
+                "runtime_path": "context_window_summary",
+            },
+        )
 
     _summary_cache[cache_key] = summary
     # Keep cache bounded

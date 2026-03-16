@@ -44,7 +44,10 @@ def test_main_lists_available_scenarios(capsys):
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
+    assert "helper_local_runtime_paths" in captured.out
+    assert "context_window_summary_audit" in captured.out
     assert "agent_local_runtime_profile" in captured.out
+    assert "delegation_local_runtime_profile" in captured.out
     assert "runtime_model_overrides" in captured.out
     assert "runtime_fallback_overrides" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
@@ -77,7 +80,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "provider_fallback_chain",
                 "provider_health_reroute",
                 "local_runtime_profile",
+                "helper_local_runtime_paths",
+                "context_window_summary_audit",
                 "agent_local_runtime_profile",
+                "delegation_local_runtime_profile",
                 "runtime_model_overrides",
                 "runtime_fallback_overrides",
                 "scheduled_local_runtime_profile",
@@ -112,8 +118,20 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["provider_health_reroute"]["rerouted_model"] == "openai/gpt-4o-mini"
     assert details_by_name["local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
+    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["context_window_summary"] == "ollama/llama3.2"
+    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_title_generation"] == "ollama/llama3.2"
+    assert details_by_name["helper_local_runtime_paths"]["routed_models"]["session_consolidation"] == "ollama/llama3.2"
+    assert details_by_name["context_window_summary_audit"]["success_model"] == "ollama/llama3.2"
+    assert details_by_name["context_window_summary_audit"]["success_runtime_path"] == "context_window_summary"
+    assert details_by_name["context_window_summary_audit"]["degraded_runtime_path"] == "context_window_summary"
+    assert details_by_name["context_window_summary_audit"]["degraded_fallback"] == "truncation"
+    assert details_by_name["context_window_summary_audit"]["degraded_contains_truncation"] is True
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
+    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
+    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
+    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
+    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
     assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
     assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
     assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"

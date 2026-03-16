@@ -17,7 +17,8 @@ from smolagents import Tool
 
 from config.settings import settings
 from src.agent.session import SessionManager, session_manager
-from src.agent.factory import get_model
+from src.agent.context_window import _summarize_middle, _summary_cache
+from src.agent.factory import create_orchestrator, get_model
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.specialists import create_specialist
 from src.agent.strategist import create_strategist_agent
@@ -325,6 +326,93 @@ def _eval_local_runtime_profile() -> dict[str, Any]:
     }
 
 
+def _eval_helper_local_runtime_paths() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Handled by a local helper profile.")
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "local_runtime_paths",
+            "context_window_summary,session_title_generation,session_consolidation",
+        ),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        routed_models: dict[str, str] = {}
+        for runtime_path in (
+            "context_window_summary",
+            "session_title_generation",
+            "session_consolidation",
+        ):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": f"keep {runtime_path} local"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path=runtime_path,
+            )
+            routed_models[runtime_path] = mock_completion.call_args.kwargs["model"]
+
+    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    return {
+        "runtime_profile": "local",
+        "routed_models": routed_models,
+    }
+
+
+async def _eval_context_window_summary_audit() -> dict[str, Any]:
+    _summary_cache.clear()
+    success_response = _make_litellm_response("Condensed summary from local helper path.")
+    messages = [{"role": "user", "content": "important context " * 10}]
+
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", "context_window_summary"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", ""),
+            patch("litellm.completion", return_value=success_response) as mock_completion,
+            patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+        ):
+            success_summary = _summarize_middle(messages, session_id="ctx-success", range_key="0-1")
+            _summary_cache.clear()
+            with patch("src.agent.context_window.completion_with_fallback_sync", side_effect=RuntimeError("provider down")):
+                degraded_summary = _summarize_middle(messages, session_id="ctx-fail", range_key="1-2")
+            await asyncio.sleep(0)
+
+        success = _find_audit_call(
+            mock_log_event,
+            event_type="background_task_succeeded",
+            tool_name="context_window_summary",
+        )
+        degraded = _find_audit_call(
+            mock_log_event,
+            event_type="background_task_degraded",
+            tool_name="context_window_summary",
+        )
+        return {
+            "success_summary": success_summary,
+            "success_model": mock_completion.call_args.kwargs["model"],
+            "success_runtime_path": success["details"]["runtime_path"],
+            "degraded_fallback": degraded["details"]["fallback"],
+            "degraded_runtime_path": degraded["details"]["runtime_path"],
+            "degraded_contains_truncation": "truncated" in degraded_summary,
+        }
+    finally:
+        _summary_cache.clear()
+
+
 def _eval_agent_local_runtime_profile() -> dict[str, Any]:
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -355,6 +443,58 @@ def _eval_agent_local_runtime_profile() -> dict[str, Any]:
         "onboarding_agent": onboarding_agent.model.model_id,
         "strategist_agent": strategist_agent.model.model_id,
         "memory_keeper": specialist.model.model_id,
+    }
+    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    return {
+        "runtime_profile": "local",
+        "routed_models": routed_models,
+    }
+
+
+def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "local_runtime_paths",
+            "orchestrator_agent,goal_planner,web_researcher,file_worker",
+        ),
+        patch("src.agent.specialists.build_all_specialists", return_value=[]),
+        patch("src.agent.factory.skill_manager.get_active_skills", return_value=[]),
+    ):
+        orchestrator = create_orchestrator()
+        goal_planner = create_specialist(
+            "goal_planner",
+            "Goal planner specialist",
+            [],
+            temperature=0.4,
+            max_steps=5,
+        )
+        web_researcher = create_specialist(
+            "web_researcher",
+            "Web researcher specialist",
+            [],
+            temperature=0.3,
+            max_steps=8,
+        )
+        file_worker = create_specialist(
+            "file_worker",
+            "File worker specialist",
+            [],
+            temperature=0.3,
+            max_steps=6,
+        )
+
+    routed_models = {
+        "orchestrator_agent": orchestrator.model.model_id,
+        "goal_planner": goal_planner.model.model_id,
+        "web_researcher": web_researcher.model.model_id,
+        "file_worker": file_worker.model.model_id,
     }
     assert set(routed_models.values()) == {"ollama/llama3.2"}
     return {
@@ -1038,10 +1178,28 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_local_runtime_profile,
     ),
     EvalScenario(
+        name="helper_local_runtime_paths",
+        category="runtime",
+        description="The helper runtime-path matrix can route context window, title generation, and consolidation completions through the local profile.",
+        runner=_eval_helper_local_runtime_paths,
+    ),
+    EvalScenario(
+        name="context_window_summary_audit",
+        category="observability",
+        description="Context window summarization records success and degraded truncation outcomes while still routing through the named helper path.",
+        runner=_eval_context_window_summary_audit,
+    ),
+    EvalScenario(
         name="agent_local_runtime_profile",
         category="runtime",
         description="Core agent model factories can route through the first-class local runtime profile.",
         runner=_eval_agent_local_runtime_profile,
+    ),
+    EvalScenario(
+        name="delegation_local_runtime_profile",
+        category="runtime",
+        description="Delegation paths can route the orchestrator and remaining built-in specialists through the local profile.",
+        runner=_eval_delegation_local_runtime_profile,
     ),
     EvalScenario(
         name="runtime_model_overrides",

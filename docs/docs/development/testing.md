@@ -38,7 +38,10 @@ uv run python -m src.evals.harness
 uv run python -m src.evals.harness --scenario provider_fallback_chain
 uv run python -m src.evals.harness --scenario provider_health_reroute
 uv run python -m src.evals.harness --scenario local_runtime_profile
+uv run python -m src.evals.harness --scenario helper_local_runtime_paths
+uv run python -m src.evals.harness --scenario context_window_summary_audit
 uv run python -m src.evals.harness --scenario agent_local_runtime_profile
+uv run python -m src.evals.harness --scenario delegation_local_runtime_profile
 uv run python -m src.evals.harness --scenario runtime_model_overrides
 uv run python -m src.evals.harness --scenario runtime_fallback_overrides
 uv run python -m src.evals.harness --scenario scheduled_local_runtime_profile
@@ -55,7 +58,7 @@ uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation profile routing, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -81,7 +84,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_chat_api.py` | 5 | REST chat endpoint — success, session continuity, errors |
 | `test_consolidation_reliability.py` | 6 | Memory consolidation reliability — edge cases, retry behavior |
 | `test_consolidator.py` | 5 | Memory consolidation — extract facts, soul updates, markdown fences, LLM failure |
-| `test_context_window.py` | 17 | Token-aware context window — budget management, keep first/last, summarization |
+| `test_context_window.py` | 19 | Token-aware context window — budget management, keep first/last, summarization, runtime audit logging |
 | `test_daily_briefing.py` | 5 | Daily briefing — happy path, context/LLM failure, empty data, events in prompt |
 | `test_delegation.py` | 10 | Delegation architecture — orchestrator, specialist routing, depth limits |
 | `test_delivery.py` | 9 | Delivery coordinator — deliver/queue/drop routing, budget decrement, bundle formatting |

@@ -61,6 +61,29 @@ async def test_evening_review_happy_path():
 
 
 @pytest.mark.asyncio
+async def test_evening_review_uses_named_runtime_path():
+    ctx = _make_context(recent_git_activity=[{"msg": "fix bug"}])
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+    mock_response = _mock_litellm_response("Great day, Hero! You completed Exercise.")
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=15)),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=["Exercise"])),
+        patch(
+            "src.scheduler.jobs.evening_review.completion_with_fallback",
+            new=AsyncMock(return_value=mock_response),
+        ) as mock_completion,
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+    ):
+        await run_evening_review()
+
+    assert mock_completion.await_args.kwargs["runtime_path"] == "evening_review"
+
+
+@pytest.mark.asyncio
 async def test_evening_review_no_completed_goals():
     ctx = _make_context()
     mock_cm = MagicMock()

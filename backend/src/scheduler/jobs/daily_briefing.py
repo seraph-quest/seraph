@@ -85,6 +85,7 @@ async def run_daily_briefing() -> None:
                 temperature=0.6,
                 max_tokens=512,
                 timeout=settings.agent_briefing_timeout,
+                runtime_path="daily_briefing",
             )
         except asyncio.TimeoutError:
             logger.warning("daily_briefing: LLM timed out after %ds", settings.agent_briefing_timeout)

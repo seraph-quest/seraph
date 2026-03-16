@@ -80,6 +80,28 @@ async def test_daily_briefing_logs_success(async_db):
 
 
 @pytest.mark.asyncio
+async def test_daily_briefing_uses_named_runtime_path():
+    ctx = _make_context()
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+    mock_response = _mock_litellm_response("Good morning, Hero! Here's your briefing...")
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.vector_store.search_formatted", return_value="- [fact] User likes mornings"),
+        patch(
+            "src.scheduler.jobs.daily_briefing.completion_with_fallback",
+            new=AsyncMock(return_value=mock_response),
+        ) as mock_completion,
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+    ):
+        await run_daily_briefing()
+
+    assert mock_completion.await_args.kwargs["runtime_path"] == "daily_briefing"
+
+
+@pytest.mark.asyncio
 async def test_daily_briefing_context_refresh_failure():
     """Context refresh failure → early return (exception caught)."""
     mock_cm = MagicMock()

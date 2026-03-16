@@ -103,6 +103,7 @@ async def run_weekly_activity_review() -> None:
                 temperature=0.6,
                 max_tokens=1024,
                 timeout=settings.agent_briefing_timeout,
+                runtime_path="weekly_activity_review",
             )
         except asyncio.TimeoutError:
             await log_scheduler_job_event(

@@ -229,6 +229,39 @@ async def test_weekly_activity_review_logs_success(async_db):
 
 
 @pytest.mark.asyncio
+async def test_weekly_activity_review_uses_named_runtime_path():
+    mock_repo = MagicMock()
+    mock_repo.get_weekly_summary = AsyncMock(
+        return_value={
+            "week_start": "2026-03-09",
+            "week_end": "2026-03-15",
+            "total_observations": 12,
+            "total_tracked_minutes": 180,
+            "by_activity": {"coding": 7200},
+            "by_project": {"seraph": 5400},
+            "daily_breakdown": [
+                {"date": date.today().isoformat(), "tracked_minutes": 90, "observations": 6}
+            ],
+        }
+    )
+
+    with (
+        patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+        patch("src.memory.soul.read_soul", return_value="# Soul"),
+        patch(
+            "src.scheduler.jobs.weekly_activity_review.completion_with_fallback",
+            new=AsyncMock(return_value=_mock_llm_response("Solid week. Keep momentum.")),
+        ) as mock_completion,
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock(return_value=DeliveryDecision.deliver)),
+    ):
+        from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
+
+        await run_weekly_activity_review()
+
+    assert mock_completion.await_args.kwargs["runtime_path"] == "weekly_activity_review"
+
+
+@pytest.mark.asyncio
 async def test_weekly_activity_review_logs_timeout(async_db):
     mock_repo = MagicMock()
     mock_repo.get_weekly_summary = AsyncMock(

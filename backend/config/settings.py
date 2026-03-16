@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     local_model: str = ""
     local_llm_api_key: str = ""
     local_llm_api_base: str = ""
-    local_runtime_paths: str = ""  # comma-separated completion runtime paths that should prefer local profile
+    local_runtime_paths: str = ""  # comma-separated runtime paths that should prefer local profile
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10

@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from config.settings import settings
+
 from src.agent.specialists import (
     DOMAIN_TOOLS,
     SPECIALIST_CONFIGS,
@@ -94,6 +96,35 @@ class TestCreateSpecialist:
         agent_kwargs = mock_agent_cls.call_args[1]
         assert agent_kwargs["name"] == "test_agent"
         assert agent_kwargs["max_steps"] == 3
+
+    @patch("src.agent.specialists.ToolCallingAgent")
+    @patch("src.agent.specialists.LiteLLMModel")
+    def test_creates_agent_with_local_profile_for_named_runtime_path(self, mock_model_cls, mock_agent_cls):
+        mock_model_cls.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+        tool = MagicMock()
+        tool.name = "test_tool"
+
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", "test_agent"),
+        ):
+            create_specialist(
+                name="test_agent",
+                description="A test agent",
+                tools=[tool],
+                temperature=0.5,
+                max_steps=3,
+            )
+
+        call_kwargs = mock_model_cls.call_args[1]
+        assert call_kwargs["model_id"] == "ollama/llama3.2"
+        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
 
 
 class TestNamedFactories:

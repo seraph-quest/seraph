@@ -15,7 +15,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] centralized provider-agnostic LLM runtime settings
 - [x] direct LiteLLM fallback path
 - [x] ordered fallback-chain routing across shared completion and agent-model paths
-- [x] first-class local runtime profile for bounded helper flows and scheduled completion-based jobs
+- [x] first-class local runtime profile for bounded helper flows, scheduled completion-based jobs, and core agent model factories
 - [x] timeout-safe audit visibility into primary-vs-fallback LLM completion and agent-model behavior
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for core guardian, tool, and observer/audit-runtime reliability contracts
@@ -34,13 +34,13 @@ Make Seraph more resilient, observable, and predictable under real usage.
 ## Left To Do
 
 - [ ] deepen provider routing beyond the ordered fallback chain with smarter health- or policy-aware selection
-- [ ] broaden local-model routing beyond helper and scheduled completion paths into more agent and runtime paths where it makes sense
+- [ ] broaden local-model routing beyond the current helper, scheduled completion, and core agent-model paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, daemon ingest, proactive delivery gating, and current MCP lifecycle coverage
 - [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing, local-profile behavior, and remaining edge-path contracts
 
 ## Done Means
 
 - [ ] provider failure does not collapse the entire chat path
-- [ ] a local or non-OpenRouter path is demonstrably possible across more than the current helper and scheduled completion flows
+- [x] a local or non-OpenRouter path is demonstrably possible across more than the current helper and scheduled completion flows
 - [ ] key flows are observable and easier to debug
 - [ ] the project has repeatable eval coverage for core behavior

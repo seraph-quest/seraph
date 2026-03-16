@@ -88,10 +88,11 @@ def build_model_kwargs(
     temperature: float,
     max_tokens: int,
     model_id: str | None = None,
+    runtime_path: str | None = None,
     profile: str | None = None,
 ) -> dict[str, Any]:
     """Build LiteLLMModel kwargs from the shared runtime settings."""
-    resolved_profile = resolve_runtime_profile(profile=profile)
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
     kwargs: dict[str, Any] = {
         "model_id": model_id or _profile_model_id(resolved_profile),
         "temperature": temperature,

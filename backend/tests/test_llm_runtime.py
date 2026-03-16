@@ -57,6 +57,27 @@ def test_build_model_kwargs_uses_local_profile_settings():
     assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+def test_build_model_kwargs_uses_local_profile_for_runtime_path():
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "chat_agent"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "ollama/llama3.2"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
 def test_build_completion_kwargs_uses_fallback_settings():
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),

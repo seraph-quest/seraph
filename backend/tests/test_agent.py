@@ -25,6 +25,26 @@ class TestAgentFactory:
         mock_litellm_cls.assert_called_once()
         assert model is not None
 
+    @patch("src.agent.factory.LiteLLMModel")
+    def test_get_model_uses_local_profile_for_chat_runtime_path(self, mock_litellm_cls):
+        mock_litellm_cls.return_value = MagicMock()
+
+        from config.settings import settings
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", "chat_agent"),
+        ):
+            get_model()
+
+        call_kwargs = mock_litellm_cls.call_args[1]
+        assert call_kwargs["model_id"] == "ollama/llama3.2"
+        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+
     @patch("src.agent.factory.ToolCallingAgent")
     @patch("src.agent.factory.get_model")
     def test_create_agent(self, mock_get_model, mock_agent_cls):
@@ -32,6 +52,7 @@ class TestAgentFactory:
         mock_agent_cls.return_value = MagicMock()
 
         agent = create_agent()
+        mock_get_model.assert_called_once_with(runtime_path="chat_agent")
         mock_agent_cls.assert_called_once()
         assert agent is not None
 

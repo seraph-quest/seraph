@@ -67,6 +67,7 @@ class TestCreateOrchestrator:
         mock_agent_cls.return_value = mock_orch
 
         create_orchestrator(soul_context="test soul")
+        mock_get_model.assert_called_once_with(runtime_path="orchestrator_agent")
 
         # Orchestrator should be created with tools=[]
         orch_kwargs = mock_agent_cls.call_args[1]

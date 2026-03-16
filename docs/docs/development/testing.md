@@ -43,6 +43,7 @@ uv run python -m src.evals.harness --scenario context_window_summary_audit
 uv run python -m src.evals.harness --scenario agent_local_runtime_profile
 uv run python -m src.evals.harness --scenario delegation_local_runtime_profile
 uv run python -m src.evals.harness --scenario mcp_specialist_local_runtime_profile
+uv run python -m src.evals.harness --scenario embedding_runtime_audit
 uv run python -m src.evals.harness --scenario runtime_model_overrides
 uv run python -m src.evals.harness --scenario runtime_fallback_overrides
 uv run python -m src.evals.harness --scenario scheduled_local_runtime_profile
@@ -59,7 +60,7 @@ uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model load/encode failures, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -89,6 +90,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_daily_briefing.py` | 5 | Daily briefing — happy path, context/LLM failure, empty data, events in prompt |
 | `test_delegation.py` | 10 | Delegation architecture — orchestrator, specialist routing, depth limits |
 | `test_delivery.py` | 9 | Delivery coordinator — deliver/queue/drop routing, budget decrement, bundle formatting |
+| `test_embedder.py` | 3 | Embedding model boundary — load success, load failure, encode failure runtime audit logging |
 | `test_e2e_conversation.py` | 3 | End-to-end conversation flow — full agent interaction paths |
 | `test_evening_review.py` | 8 | Evening review — happy path, no goals/messages, DB/LLM failure, date filtering |
 | `test_goal_tree_integrity.py` | 12 | Goal tree integrity — parent-child relationships, path consistency, cascading |

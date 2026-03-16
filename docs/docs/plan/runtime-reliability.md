@@ -31,6 +31,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] strategist tool calls and background helper flows, including context-window summarization, now emit runtime audit coverage
 - [x] MCP server connection lifecycle emits runtime audit coverage for connect, disconnect, auth-required, and failure states
 - [x] the local embedding-model boundary emits runtime audit coverage for model load success/failure and encode failures
+- [x] the local vector-store boundary emits runtime audit coverage for add success, search empty-result, and storage failures
 - [x] sandbox, browser, and web-search tool boundaries emit runtime integration coverage for success, blocked, timeout, empty-result, and failure paths
 - [x] observer calendar, git, goal, and time source boundaries emit runtime integration coverage for unavailable, empty-result, success, and failure paths
 - [x] observer context refresh and queued-bundle delivery emit background runtime audit coverage
@@ -46,8 +47,8 @@ Make Seraph more resilient, observable, and predictable under real usage.
 
 - [ ] deepen provider routing beyond the current explicit runtime-path primary and fallback overrides, ordered fallback, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduled completion, core agent-model, delegation, and connected MCP specialist paths into any remaining runtime paths where it makes sense
-- [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, calendar/git/goal/time sources, daemon ingest, proactive delivery gating, current MCP lifecycle coverage, the embedding boundary, and the browser/sandbox/web-search tool boundaries
-- [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing and remaining edge-path contracts beyond the current MCP-specialist and embedding-model coverage
+- [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, calendar/git/goal/time sources, daemon ingest, proactive delivery gating, current MCP lifecycle coverage, the embedding/vector-store boundaries, and the browser/sandbox/web-search tool boundaries
+- [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing and remaining edge-path contracts beyond the current MCP-specialist, embedding-model, and vector-store coverage
 
 ## Acceptance Checklist
 

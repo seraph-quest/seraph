@@ -50,6 +50,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "delegation_local_runtime_profile" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
+    assert "vector_store_runtime_audit" in captured.out
     assert "runtime_model_overrides" in captured.out
     assert "runtime_fallback_overrides" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
@@ -88,6 +89,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "delegation_local_runtime_profile",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
+                "vector_store_runtime_audit",
                 "runtime_model_overrides",
                 "runtime_fallback_overrides",
                 "scheduled_local_runtime_profile",
@@ -143,6 +145,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["embedding_runtime_audit"]["vector_length"] == 2
     assert details_by_name["embedding_runtime_audit"]["failure_stage"] == "encode"
     assert details_by_name["embedding_runtime_audit"]["failure_error"] == "encode crashed"
+    assert details_by_name["vector_store_runtime_audit"]["memory_created"] is True
+    assert details_by_name["vector_store_runtime_audit"]["success_operation"] == "add"
+    assert details_by_name["vector_store_runtime_audit"]["empty_reason"] == "empty_table"
+    assert details_by_name["vector_store_runtime_audit"]["empty_query_length"] == len("missing memory")
+    assert details_by_name["vector_store_runtime_audit"]["failed_operation"] == "add"
+    assert details_by_name["vector_store_runtime_audit"]["failed_error"] == "db down"
+    assert details_by_name["vector_store_runtime_audit"]["failed_memory_id"] == ""
+    assert details_by_name["vector_store_runtime_audit"]["empty_results"] == 0
     assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
     assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
     assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"

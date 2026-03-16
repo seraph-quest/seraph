@@ -32,6 +32,7 @@ from src.observer.sources.goal_source import gather_goals
 from src.observer.sources.git_source import gather_git
 from src.observer.sources.time_source import gather_time
 from src.memory.consolidator import consolidate_session
+from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
@@ -592,6 +593,60 @@ async def _eval_embedding_runtime_audit() -> dict[str, Any]:
         }
     finally:
         _reset_embedder_state()
+
+
+async def _eval_vector_store_runtime_audit() -> dict[str, Any]:
+    success_table = MagicMock()
+    success_table.count_rows.return_value = 0
+    success_table.add.return_value = None
+
+    empty_table = MagicMock()
+    empty_table.count_rows.return_value = 0
+
+    _reset_vector_store_state()
+    try:
+        with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+            with (
+                patch("src.memory.vector_store._get_or_create_table", return_value=success_table),
+                patch("src.memory.vector_store.embed", return_value=[0.1, 0.2]),
+            ):
+                memory_id = add_memory("remember this", category="fact", source_session_id="sess-1")
+
+            with patch("src.memory.vector_store._get_or_create_table", return_value=empty_table):
+                results = search("missing memory", top_k=3)
+
+            with patch("src.memory.vector_store._get_or_create_table", side_effect=RuntimeError("db down")):
+                failed_id = add_memory("broken", category="fact", source_session_id="sess-2")
+
+            await asyncio.sleep(0)
+
+        success = _find_audit_call(
+            mock_log_event,
+            event_type="integration_succeeded",
+            tool_name="vector_store:memories",
+        )
+        empty = _find_audit_call(
+            mock_log_event,
+            event_type="integration_empty_result",
+            tool_name="vector_store:memories",
+        )
+        failed = _find_audit_call(
+            mock_log_event,
+            event_type="integration_failed",
+            tool_name="vector_store:memories",
+        )
+        return {
+            "memory_created": bool(memory_id),
+            "success_operation": success["details"]["operation"],
+            "empty_reason": empty["details"]["reason"],
+            "empty_query_length": empty["details"]["query_length"],
+            "failed_operation": failed["details"]["operation"],
+            "failed_error": failed["details"]["error"],
+            "failed_memory_id": failed_id,
+            "empty_results": len(results),
+        }
+    finally:
+        _reset_vector_store_state()
 
 
 def _eval_runtime_model_overrides() -> dict[str, Any]:
@@ -1303,6 +1358,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="The local embedding model boundary records load success and encode failures without live dependencies.",
         runner=_eval_embedding_runtime_audit,
+    ),
+    EvalScenario(
+        name="vector_store_runtime_audit",
+        category="observability",
+        description="The local vector-store boundary records add success, search empty-result, and storage failures without live dependencies.",
+        runner=_eval_vector_store_runtime_audit,
     ),
     EvalScenario(
         name="runtime_model_overrides",

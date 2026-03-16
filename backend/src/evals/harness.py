@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 import time
+import tempfile
 import types
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -32,6 +33,7 @@ from src.observer.sources.goal_source import gather_goals
 from src.observer.sources.git_source import gather_git
 from src.observer.sources.time_source import gather_time
 from src.memory.consolidator import consolidate_session
+from src.memory import soul as soul_mod
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue
@@ -647,6 +649,60 @@ async def _eval_vector_store_runtime_audit() -> dict[str, Any]:
         }
     finally:
         _reset_vector_store_state()
+
+
+async def _eval_soul_runtime_audit() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        soul_path = f"{tmpdir}/soul.md"
+        original_path = soul_mod._soul_path
+        soul_mod._soul_path = soul_path
+        try:
+            with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+                default_text = soul_mod.read_soul()
+                soul_mod.write_soul("# Soul\n\n## Identity\nHero")
+                read_back = soul_mod.read_soul()
+                soul_mod.ensure_soul_exists()
+                with patch("src.memory.soul.open", side_effect=PermissionError("denied")):
+                    try:
+                        soul_mod.write_soul("broken")
+                    except PermissionError:
+                        pass
+                await asyncio.sleep(0)
+
+            empty = _find_audit_call(
+                mock_log_event,
+                event_type="integration_empty_result",
+                tool_name="soul_file:soul.md",
+            )
+            success_calls = [
+                call.kwargs for call in mock_log_event.call_args_list
+                if call.kwargs.get("event_type") == "integration_succeeded"
+                and call.kwargs.get("tool_name") == "soul_file:soul.md"
+            ]
+            skipped = _find_audit_call(
+                mock_log_event,
+                event_type="integration_skipped",
+                tool_name="soul_file:soul.md",
+            )
+            failed = _find_audit_call(
+                mock_log_event,
+                event_type="integration_failed",
+                tool_name="soul_file:soul.md",
+            )
+            write_success = next(call for call in success_calls if call["details"]["operation"] == "write")
+            read_success = next(call for call in success_calls if call["details"]["operation"] == "read")
+            return {
+                "default_used": empty["details"]["used_default"],
+                "default_contains_title": "# Soul of the Traveler" in default_text,
+                "write_length": write_success["details"]["length"],
+                "read_length": read_success["details"]["length"],
+                "ensure_created": skipped["details"]["created"],
+                "failed_operation": failed["details"]["operation"],
+                "failed_error": failed["details"]["error"],
+                "read_back_contains_hero": "Hero" in read_back,
+            }
+        finally:
+            soul_mod._soul_path = original_path
 
 
 def _eval_runtime_model_overrides() -> dict[str, Any]:
@@ -1364,6 +1420,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="The local vector-store boundary records add success, search empty-result, and storage failures without live dependencies.",
         runner=_eval_vector_store_runtime_audit,
+    ),
+    EvalScenario(
+        name="soul_runtime_audit",
+        category="observability",
+        description="The local soul-file boundary records defaulted reads, writes, ensure skips, and write failures without live dependencies.",
+        runner=_eval_soul_runtime_audit,
     ),
     EvalScenario(
         name="runtime_model_overrides",

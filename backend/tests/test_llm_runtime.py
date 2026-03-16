@@ -10,6 +10,7 @@ from config.settings import settings
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    _reset_target_health,
     build_completion_kwargs,
     build_model_kwargs,
     completion_with_fallback,
@@ -315,6 +316,56 @@ def test_completion_with_fallback_sync_walks_fallback_chain(async_db):
     assert events[0]["details"]["fallback_attempts"] == 2
 
 
+def test_completion_with_fallback_sync_reroutes_away_from_unhealthy_primary(async_db):
+    first_fallback_response = MagicMock()
+    rerouted_response = MagicMock()
+
+    _reset_target_health()
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "llm_target_cooldown_seconds", 300),
+        patch(
+            "litellm.completion",
+            side_effect=[
+                RuntimeError("primary down"),
+                first_fallback_response,
+                rerouted_response,
+            ],
+        ) as mock_completion,
+    ):
+        first_result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+        )
+        second_result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello again"}],
+            temperature=0.3,
+            max_tokens=256,
+        )
+
+    assert first_result is first_fallback_response
+    assert second_result is rerouted_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_target_rerouted"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["primary_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert events[0]["details"]["rerouted_model"] == "openai/gpt-4o-mini"
+
+
 def test_completion_with_fallback_sync_logs_primary_success(async_db):
     success_response = MagicMock()
 
@@ -533,6 +584,62 @@ def test_fallback_litellm_model_walks_fallback_chain(async_db):
         "openai/gpt-4.1-mini",
     ]
     assert events[0]["details"]["fallback_attempts"] == 2
+
+
+def test_fallback_litellm_model_reroutes_away_from_unhealthy_primary(async_db):
+    first_fallback_response = MagicMock()
+    rerouted_response = MagicMock()
+
+    _reset_target_health()
+    with (
+        patch.object(settings, "fallback_model", "ollama/llama3.2"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "llm_target_cooldown_seconds", 300),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=[
+                RuntimeError("primary down"),
+                first_fallback_response,
+                rerouted_response,
+            ],
+        ) as mock_generate,
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        first_result = model.generate([{"role": "user", "content": "hello"}])
+
+        rerouted_model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            temperature=0.3,
+            max_tokens=256,
+        )
+        second_result = rerouted_model.generate([{"role": "user", "content": "hello again"}])
+
+    assert first_result is first_fallback_response
+    assert second_result is rerouted_response
+    assert [call.args[0].model_id for call in mock_generate.call_args_list] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "ollama/llama3.2",
+        "ollama/llama3.2",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_target_rerouted"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["primary_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert events[0]["details"]["rerouted_model"] == "ollama/llama3.2"
 
 
 def test_fallback_litellm_model_skips_duplicate_fallback_target():

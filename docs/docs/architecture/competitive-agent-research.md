@@ -52,8 +52,8 @@ Primary local files inspected:
 
 - `README.md`
 - `docs/docs/overview/vision.md`
-- `docs/docs/overview/roadmap.md`
-- `docs/docs/overview/status-report.md`
+- `docs/implementation/00-master-roadmap.md`
+- `docs/implementation/STATUS.md`
 - `docs/docs/architecture/feature-comparison.md`
 - `docs/docs/development/openclaw-feature-parity.md`
 - `backend/src/agent/factory.py`
@@ -803,8 +803,8 @@ If that happens, Seraph stops being "an interesting themed agent" and becomes th
 
 - `README.md`
 - `docs/docs/overview/vision.md`
-- `docs/docs/overview/roadmap.md`
-- `docs/docs/overview/status-report.md`
+- `docs/implementation/00-master-roadmap.md`
+- `docs/implementation/STATUS.md`
 - `docs/docs/architecture/feature-comparison.md`
 - `docs/docs/development/openclaw-feature-parity.md`
 - `backend/src/agent/factory.py`

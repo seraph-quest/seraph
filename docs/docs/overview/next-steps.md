@@ -9,7 +9,8 @@ This page is no longer the live planning surface.
 
 Use these instead:
 
-- [Master Plan](./roadmap)
-- the `Workstream` files under the `Plan` sidebar category
+- `docs/implementation/00-master-roadmap.md`
+- `docs/implementation/STATUS.md`
+- the numbered workstream files under `docs/implementation/`
 
 The old short-horizon page remains only so existing links do not break.

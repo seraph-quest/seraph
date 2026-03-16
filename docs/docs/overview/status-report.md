@@ -4,6 +4,8 @@ title: Development Status
 
 # Seraph Development Status
 
+> Legacy note: this page now lives under `/legacy`. The canonical shipped-status ledger is now `docs/implementation/STATUS.md`.
+
 ## Legend
 
 - `[x]` shipped on `develop`
@@ -14,7 +16,7 @@ title: Development Status
 
 - [x] Seraph is usable today as a local guardian prototype with a real browser UI, observer loop, and action layer.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong shipped foundations.
-- [x] The live planning surface is now one master plan plus one file per workstream.
+- [x] The live planning surface is now `docs/implementation/` plus `docs/research/`.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet a finished product or a production-ready guardian platform.
 

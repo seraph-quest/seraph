@@ -46,10 +46,10 @@ open http://localhost:8004/docs   # Swagger API docs
 | **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90 |
 | **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
 | **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
-| **Tools** | 12 native tools (auto-discovered) + plug-and-play MCP servers |
-| **Scheduler** | APScheduler — briefings, reviews, strategist ticks, memory consolidation |
+| **Tools** | 17 built-in tool capabilities (auto-discovered) + plug-and-play MCP servers |
+| **Scheduler** | APScheduler — 9 jobs across briefings, reviews, strategist, observer cleanup, and memory/goal maintenance |
 | **Daemon** | Native macOS — window tracking, optional OCR (Apple Vision / OpenRouter) |
-| **Infra** | Docker Compose (backend + frontend + snekbox sandbox), uv |
+| **Infra** | Docker Compose (backend + frontend + snekbox sandbox + http-mcp), uv |
 
 ---
 
@@ -71,8 +71,8 @@ backend/src/
   memory/            Soul file, LanceDB vector store, embedder, consolidator
   goals/             Hierarchical goal CRUD
   plugins/           Tool auto-discovery + registry
-  scheduler/         APScheduler jobs (briefing, review, strategist, consolidation)
-  observer/          Context manager, user state machine, delivery engine
+  scheduler/         APScheduler engine, connection manager, 9 background jobs
+  observer/          Context manager, data sources, user state machine, delivery engine
 
 daemon/              Native macOS screen daemon (window tracking + OCR)
 docs/                Docusaurus docs site
@@ -125,12 +125,22 @@ Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
 
 ## Development Status
 
-| Phase | Name | Status |
-|-------|------|--------|
-| 1 | **Persistent Identity** — soul, memory, goals, onboarding, quest UI | Complete |
-| 2 | **Capable Executor** — shell, browser, plugin system | Complete |
-| 3 | **The Observer** — scheduler, context awareness, proactive reasoning, screen daemon | Complete |
-| 4 | **The Network** — MCP integration, skills, channels, workflows, voice | In Progress |
-| 5 | **Security** — credential injection, leak detection, OAuth 2.1, capabilities | Planned |
+Seraph no longer uses the old phase model as the live planning surface.
 
-See [docs/](docs/) for full vision, roadmap, and phase specifications.
+Canonical docs now live in:
+
+- `docs/implementation/` — shipped state, workstreams, and current status
+- `docs/research/` — product thesis and design target
+
+Current truth:
+
+- [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
+- [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
+- [ ] no workstream is complete yet
+- [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
+
+Start with:
+
+- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
+- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)

@@ -29,8 +29,9 @@ const config: Config = {
       'classic',
       {
         docs: {
-          sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/seraph-quest/seraph/tree/main/docs/',
+          path: './implementation',
+          sidebarPath: './sidebars.implementation.ts',
+          editUrl: 'https://github.com/seraph-quest/seraph/tree/develop/docs/',
           routeBasePath: '/',
         },
         blog: false,
@@ -38,6 +39,28 @@ const config: Config = {
           customCss: './src/css/custom.css',
         },
       } satisfies Preset.Options,
+    ],
+  ],
+  plugins: [
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'research',
+        path: './research',
+        routeBasePath: 'research',
+        sidebarPath: './sidebars.research.ts',
+        editUrl: 'https://github.com/seraph-quest/seraph/tree/develop/docs/',
+      },
+    ],
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'legacy',
+        path: './docs',
+        routeBasePath: 'legacy',
+        sidebarPath: './sidebars.ts',
+        editUrl: 'https://github.com/seraph-quest/seraph/tree/develop/docs/',
+      },
     ],
   ],
 
@@ -51,13 +74,28 @@ const config: Config = {
       items: [
         {
           type: 'docSidebar',
-          sidebarId: 'docsSidebar',
+          sidebarId: 'implementationSidebar',
           position: 'left',
-          label: 'Docs',
+          label: 'Implementation',
         },
         {
-          to: '/overview/roadmap',
-          label: 'Roadmap',
+          type: 'doc',
+          docId: 'STATUS',
+          position: 'left',
+          label: 'Status',
+        },
+        {
+          type: 'docSidebar',
+          docsPluginId: 'research',
+          sidebarId: 'researchSidebar',
+          position: 'left',
+          label: 'Research',
+        },
+        {
+          type: 'doc',
+          docsPluginId: 'legacy',
+          docId: 'intro',
+          label: 'Legacy Docs',
           position: 'left',
         },
         {
@@ -74,33 +112,29 @@ const config: Config = {
           title: 'Documentation',
           items: [
             {
-              label: 'Getting Started',
+              label: 'Master Roadmap',
               to: '/',
             },
             {
-              label: 'Vision',
-              to: '/overview/vision',
+              label: 'Development Status',
+              to: '/status',
             },
             {
-              label: 'Roadmap',
-              to: '/overview/roadmap',
+              label: 'Research Synthesis',
+              to: '/research/synthesis',
             },
           ],
         },
         {
-          title: 'Development',
+          title: 'Reference',
           items: [
             {
-              label: 'Phase 1 — Persistent Identity',
-              to: '/development/phase-1-persistent-identity',
+              label: 'Legacy Docs',
+              to: '/legacy',
             },
             {
-              label: 'Phase 2 — Capable Executor',
-              to: '/development/phase-2-capable-executor',
-            },
-            {
-              label: 'Phase 3 — The Observer',
-              to: '/development/phase-3-the-observer',
+              label: 'Setup',
+              to: '/legacy/setup',
             },
           ],
         },

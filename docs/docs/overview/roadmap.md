@@ -5,19 +5,20 @@ title: Master Plan
 
 # Seraph Master Plan
 
+> Legacy note: this page now lives under `/legacy`. The canonical roadmap is `docs/implementation/00-master-roadmap.md`, and the canonical shipped-status ledger is `docs/implementation/STATUS.md`.
+
 ## Summary
 
-Seraph now uses one live planning structure only:
+Seraph now uses a `maas`-style live planning structure:
 
-- one master plan file
-- one live status file
-- one file per workstream
+- `docs/implementation/` for shipped state and delivery tracking
+- `docs/research/` for design and product thesis
 
-The old `sections / seasons / batches` split is not the live planning surface anymore. If an old roadmap file still exists in the repo, treat it as legacy reference material.
+The old `sections / seasons / batches` split is not the live planning surface anymore. This page itself is legacy reference material.
 
 ## Current Status
 
-This roadmap should be read alongside [Development Status](./status-report).
+This legacy roadmap should be read only as background context. For the live source of truth, use `docs/implementation/00-master-roadmap.md` and `docs/implementation/STATUS.md`.
 
 Legend for the checklist column:
 

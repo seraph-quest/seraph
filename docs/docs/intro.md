@@ -5,6 +5,8 @@ slug: /
 
 # Getting Started
 
+> Legacy note: this page now lives under `/legacy`. The canonical source of truth is `docs/implementation/` for shipped status and `docs/research/` for product/design intent.
+
 Seraph is a proactive AI guardian with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar casts magic effects when using tools while you chat via an RPG-style dialog box. The agent has persistent identity, long-term memory, a hierarchical goal/quest system, SKILL.md plugins, and plug-and-play MCP server integration.
 
 ## Setup
@@ -112,9 +114,10 @@ The old phase labels are not the live planning surface anymore.
 
 Use these for the current truth:
 
-- **[Development Status](./overview/status-report)**
-- **[Master Plan](./overview/roadmap)**
-- the per-workstream files under `docs/docs/plan/`
+- `docs/implementation/STATUS.md`
+- `docs/implementation/00-master-roadmap.md`
+- the numbered workstream files under `docs/implementation/`
+- the design/product thesis files under `docs/research/`
 
 - [x] Seraph has real shipped foundations across all seven workstreams
 - [x] Runtime Reliability, Trust Boundaries, and Execution Plane are the strongest foundations today

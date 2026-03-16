@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from src.audit.runtime import log_integration_event
 from src.tools.mcp_manager import mcp_manager
 
 router = APIRouter()
@@ -87,6 +88,15 @@ async def test_server(name: str):
     raw_headers = config.get("headers")
     missing_vars = mcp_manager._check_unresolved_vars(raw_headers)
     if missing_vars:
+        await log_integration_event(
+            integration_type="mcp_test",
+            name=name,
+            outcome="auth_required",
+            details={
+                "url": url,
+                "missing_env_vars": missing_vars,
+            },
+        )
         return {
             "status": "auth_required",
             "message": f"Missing environment variables: {', '.join(missing_vars)}",
@@ -104,9 +114,40 @@ async def test_server(name: str):
         tools = client.get_tools()
         tool_names = [t.name for t in tools]
         client.disconnect()
+        await log_integration_event(
+            integration_type="mcp_test",
+            name=name,
+            outcome="succeeded",
+            details={
+                "url": url,
+                "tool_count": len(tools),
+                "tool_names": tool_names,
+                "used_headers": bool(raw_headers),
+            },
+        )
         return {"status": "ok", "tool_count": len(tools), "tools": tool_names}
     except Exception as e:
         exc_str = str(e).lower()
         if any(kw in exc_str for kw in ("401", "403", "unauthorized", "forbidden")):
+            await log_integration_event(
+                integration_type="mcp_test",
+                name=name,
+                outcome="failed",
+                details={
+                    "url": url,
+                    "status": "auth_failed",
+                    "error": str(e),
+                },
+            )
             return {"status": "auth_failed", "message": f"Authentication failed: {e}"}
+        await log_integration_event(
+            integration_type="mcp_test",
+            name=name,
+            outcome="failed",
+            details={
+                "url": url,
+                "status": "connection_failed",
+                "error": str(e),
+            },
+        )
         raise HTTPException(status_code=502, detail=f"Connection failed: {e}")

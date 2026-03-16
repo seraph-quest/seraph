@@ -61,8 +61,8 @@ title: Seraph Development Status
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
-- [x] runtime audit visibility across chat, WebSocket, scheduler, strategist, proactive delivery transport, MCP, observer, embedding, vector store, soul file, filesystem, browser, sandbox, and web search flows
-- [x] deterministic runtime eval harness for fallback, routing, storage, observer, and integration seam contracts
+- [x] runtime audit visibility across chat, WebSocket, scheduler, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, observer, embedding, vector store, soul file, filesystem, browser, sandbox, and web search flows
+- [x] deterministic runtime eval harness for fallback, routing, storage, observer, and integration seam contracts, including the MCP test API boundary
 
 ### Guardian intelligence and proactive behavior
 
@@ -86,7 +86,7 @@ title: Seraph Development Status
 
 - [ ] richer provider selection policy beyond path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
 - [ ] broader local-model routing into any remaining runtime paths that are worth it
-- [ ] remaining edge observability beyond the already-covered chat, scheduler, observer, proactive delivery, storage, and integration boundaries
+- [ ] remaining edge observability beyond the already-covered chat, scheduler, observer, proactive delivery, storage, MCP management/test, and integration boundaries
 - [ ] broader eval coverage beyond deterministic seam checks
 
 ### Product expansion

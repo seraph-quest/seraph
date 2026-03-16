@@ -101,6 +101,37 @@ class TestWebSearch:
             result = web_search.forward("empty query")
         assert "No results found" in result
 
+    def test_web_search_no_results_logs_runtime_audit(self, async_db):
+        from unittest.mock import patch
+
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return []
+
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("empty query")
+
+        assert "No results found" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_empty_result"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "web_search:duckduckgo"
+        assert events[0]["details"]["query_length"] == len("empty query")
+        assert events[0]["details"]["result_count"] == 0
+
     def test_web_search_logs_runtime_audit(self, async_db):
         from unittest.mock import patch
 

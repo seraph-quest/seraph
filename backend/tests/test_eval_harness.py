@@ -48,6 +48,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "scheduled_local_runtime_profile" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "web_search_runtime_audit" in captured.out
+    assert "web_search_empty_result_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -73,6 +74,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "scheduled_local_runtime_profile",
                 "shell_tool_runtime_audit",
                 "web_search_runtime_audit",
+                "web_search_empty_result_audit",
                 "observer_delivery_gate_audit",
                 "observer_daemon_ingest_audit",
             ]
@@ -103,6 +105,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["shell_tool_runtime_audit"]["timeout_seconds"] == 35
     assert details_by_name["web_search_runtime_audit"]["timeout_seconds"] == 15
     assert details_by_name["web_search_runtime_audit"]["query_length"] == len("slow search")
+    assert details_by_name["web_search_empty_result_audit"]["query_length"] == len("empty query")
+    assert details_by_name["web_search_empty_result_audit"]["result_count"] == 0
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"

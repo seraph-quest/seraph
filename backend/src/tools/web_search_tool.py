@@ -32,6 +32,19 @@ def web_search(query: str, max_results: int = 5) -> str:
         with DDGS(timeout=settings.web_search_timeout) as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
 
+        if not results:
+            log_integration_event_sync(
+                integration_type="web_search",
+                name="duckduckgo",
+                outcome="empty_result",
+                details=_search_details(
+                    query,
+                    max_results,
+                    result_count=0,
+                ),
+            )
+            return f"No results found for: {query}"
+
         log_integration_event_sync(
             integration_type="web_search",
             name="duckduckgo",
@@ -42,8 +55,6 @@ def web_search(query: str, max_results: int = 5) -> str:
                 result_count=len(results),
             ),
         )
-        if not results:
-            return f"No results found for: {query}"
 
         formatted = []
         for i, r in enumerate(results, 1):

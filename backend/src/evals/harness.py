@@ -542,6 +542,40 @@ async def _eval_web_search_runtime_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_web_search_empty_result_audit() -> dict[str, Any]:
+    class MockDDGS:
+        def __init__(self, **kwargs: Any):
+            self.timeout = kwargs.get("timeout")
+
+        def __enter__(self) -> "MockDDGS":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def text(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+            return []
+
+    with (
+        patch("src.tools.web_search_tool.DDGS", MockDDGS),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        result = web_search("empty query", max_results=2)
+        await asyncio.sleep(0)
+
+    assert "no results found" in result.lower()
+    empty_result = _find_audit_call(
+        mock_log_event,
+        event_type="integration_empty_result",
+        tool_name="web_search:duckduckgo",
+    )
+    return {
+        "result": result,
+        "query_length": empty_result["details"]["query_length"],
+        "result_count": empty_result["details"]["result_count"],
+    }
+
+
 async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context())
@@ -805,6 +839,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Web search timeout records provider runtime audit coverage.",
         runner=_eval_web_search_runtime_audit,
+    ),
+    EvalScenario(
+        name="web_search_empty_result_audit",
+        category="observability",
+        description="Web search no-hit responses record a distinct empty-result audit outcome.",
+        runner=_eval_web_search_empty_result_audit,
     ),
     EvalScenario(
         name="strategist_tick_tool_audit",

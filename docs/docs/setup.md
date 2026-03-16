@@ -34,6 +34,31 @@ OPENROUTER_API_KEY=sk-or-v1-your-key-here
 | `AGENT_MAX_STEPS` | `10` | Max reasoning steps per turn |
 | `DEBUG` | `false` | Enable debug logging |
 
+### Optional runtime routing settings
+
+These control which model/profile a specific runtime path uses, plus how that path falls back if its primary target fails:
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOCAL_MODEL` | (empty) | Model id for the local runtime profile |
+| `LOCAL_LLM_API_BASE` | (empty) | API base for the local runtime profile |
+| `LOCAL_RUNTIME_PATHS` | (empty) | Comma-separated runtime paths that should prefer the local profile |
+| `RUNTIME_MODEL_OVERRIDES` | (empty) | Comma-separated `runtime_path=model` or `runtime_path=profile:model` entries |
+| `RUNTIME_FALLBACK_OVERRIDES` | (empty) | Semicolon-separated `runtime_path=model_a|model_b` fallback chains |
+| `FALLBACK_MODEL` | (empty) | Legacy single fallback target |
+| `FALLBACK_MODELS` | (empty) | Comma-separated ordered global fallback chain |
+| `FALLBACK_LLM_API_BASE` | (empty) | Optional API base override for fallback calls |
+
+Examples:
+
+```bash
+LOCAL_RUNTIME_PATHS=chat_agent,session_consolidation,daily_briefing
+RUNTIME_MODEL_OVERRIDES=chat_agent=default:openai/gpt-4.1-mini,session_consolidation=default:openai/gpt-4o-mini
+RUNTIME_FALLBACK_OVERRIDES=chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-mini
+```
+
+Current built-in runtime paths include `chat_agent`, `onboarding_agent`, `strategist_agent`, `context_window_summary`, `session_title_generation`, `session_consolidation`, `daily_briefing`, `evening_review`, `activity_digest`, and `weekly_activity_review`.
+
 ### Optional scheduling settings
 
 These control when proactive features run (briefings, reviews, working hours):

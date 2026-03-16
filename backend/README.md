@@ -68,11 +68,27 @@ Receive (streamed):
 | `AGENT_MAX_STEPS` | `10` | Max agent reasoning steps |
 | `DEBUG` | `false` | Enable debug mode |
 | `WORKSPACE_DIR` | `/app/data` | Agent file workspace |
+| `LOCAL_MODEL` | - | Model id for the local runtime profile |
+| `LOCAL_LLM_API_BASE` | - | API base for the local runtime profile |
+| `LOCAL_RUNTIME_PATHS` | - | Comma-separated runtime paths that should prefer the local profile |
+| `RUNTIME_MODEL_OVERRIDES` | - | Comma-separated `runtime_path=model` or `runtime_path=profile:model` overrides |
+| `RUNTIME_FALLBACK_OVERRIDES` | - | Semicolon-separated `runtime_path=model_a|model_b` fallback chains |
+| `FALLBACK_MODEL` | - | Legacy single fallback target |
+| `FALLBACK_MODELS` | - | Comma-separated ordered global fallback chain |
+| `FALLBACK_LLM_API_BASE` | - | Optional API base override for fallback calls |
 | `LLM_LOG_ENABLED` | `true` | Enable LLM call logging to JSONL file |
 | `LLM_LOG_CONTENT` | `false` | Include full messages/response in log |
 | `LLM_LOG_DIR` | `/app/logs` | Log file directory |
 | `LLM_LOG_MAX_BYTES` | `52428800` | Max bytes per log file before rotation (50 MB) |
 | `LLM_LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
+
+Runtime routing examples:
+
+```bash
+LOCAL_RUNTIME_PATHS=chat_agent,session_consolidation,daily_briefing
+RUNTIME_MODEL_OVERRIDES=chat_agent=default:openai/gpt-4.1-mini
+RUNTIME_FALLBACK_OVERRIDES=chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-mini
+```
 
 ## Testing
 

@@ -51,6 +51,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "web_search_empty_result_audit" in captured.out
     assert "observer_calendar_source_audit" in captured.out
     assert "observer_git_source_audit" in captured.out
+    assert "observer_goal_source_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -79,6 +80,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "web_search_empty_result_audit",
                 "observer_calendar_source_audit",
                 "observer_git_source_audit",
+                "observer_goal_source_audit",
                 "observer_delivery_gate_audit",
                 "observer_daemon_ingest_audit",
             ]
@@ -113,6 +115,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["web_search_empty_result_audit"]["result_count"] == 0
     assert details_by_name["observer_calendar_source_audit"]["upcoming_event_count"] == 1
     assert details_by_name["observer_git_source_audit"]["reason"] == "missing_git_dir"
+    assert details_by_name["observer_goal_source_audit"]["goal_count"] == 2
+    assert details_by_name["observer_goal_source_audit"]["domain_count"] == 2
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"

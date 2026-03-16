@@ -67,6 +67,7 @@ def create_strategist_agent(context_block: str) -> ToolCallingAgent:
     model = LiteLLMModel(**build_model_kwargs(
         temperature=0.4,
         max_tokens=settings.model_max_tokens,
+        runtime_path="strategist_agent",
     ))
 
     instructions = STRATEGIST_INSTRUCTIONS.format(

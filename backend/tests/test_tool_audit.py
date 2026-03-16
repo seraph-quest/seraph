@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 from smolagents import Tool
 
+from config.settings import settings
 from src.agent.onboarding import create_onboarding_agent
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
@@ -99,3 +100,22 @@ def test_onboarding_agent_uses_audited_tools():
 
     for tool_name in ("view_soul", "update_soul", "create_goal", "get_goals"):
         assert isinstance(agent.tools[tool_name], AuditedTool)
+
+
+@patch("src.agent.onboarding.LiteLLMModel")
+def test_onboarding_agent_uses_local_profile_runtime_path(mock_model_cls):
+    mock_model_cls.return_value = object()
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "onboarding_agent"),
+    ):
+        create_onboarding_agent()
+
+    call_kwargs = mock_model_cls.call_args[1]
+    assert call_kwargs["model_id"] == "ollama/llama3.2"
+    assert call_kwargs["api_base"] == "http://localhost:11434/v1"

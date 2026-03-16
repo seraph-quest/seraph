@@ -11,11 +11,12 @@ from src.tools.mcp_manager import mcp_manager
 from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 
 
-def get_model() -> LiteLLMModel:
+def get_model(*, runtime_path: str = "chat_agent") -> LiteLLMModel:
     """Create a LiteLLMModel from the shared runtime configuration."""
     return LiteLLMModel(**build_model_kwargs(
         temperature=settings.model_temperature,
         max_tokens=settings.model_max_tokens,
+        runtime_path=runtime_path,
     ))
 
 
@@ -67,7 +68,7 @@ def create_agent(
         memory_context: Relevant long-term memories for this conversation.
         observer_context: Current observer context (time, window, screen, etc.).
     """
-    model = get_model()
+    model = get_model(runtime_path="chat_agent")
     tools = get_tools()
     tool_names = [t.name for t in tools]
 
@@ -119,7 +120,7 @@ def create_orchestrator(
     """
     from src.agent.specialists import build_all_specialists
 
-    model = get_model()
+    model = get_model(runtime_path="orchestrator_agent")
     specialists = build_all_specialists()
 
     # Collect all tool names across specialists for skill gating

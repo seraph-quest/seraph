@@ -88,14 +88,16 @@ def build_model_kwargs(
     temperature: float,
     max_tokens: int,
     model_id: str | None = None,
+    runtime_path: str | None = None,
     profile: str | None = None,
 ) -> dict[str, Any]:
     """Build LiteLLMModel kwargs from the shared runtime settings."""
-    resolved_profile = resolve_runtime_profile(profile=profile)
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
     kwargs: dict[str, Any] = {
         "model_id": model_id or _profile_model_id(resolved_profile),
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "runtime_profile": resolved_profile,
     }
     api_key = _profile_api_key(resolved_profile)
     if api_key:
@@ -311,8 +313,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         api_key: str | None = None,
         custom_role_conversions: dict[str, str] | None = None,
         flatten_messages_as_text: bool | None = None,
+        runtime_profile: str | None = None,
         **kwargs,
     ):
+        self._runtime_profile = runtime_profile or "default"
         super().__init__(
             model_id=model_id,
             api_base=api_base,
@@ -332,6 +336,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             primary_model_id=self.model_id,
             primary_api_base=self.api_base,
             primary_api_key=self.api_key,
+            primary_profile=self._runtime_profile,
         ):
             fallback_models.append(
                 BaseLiteLLMModel(

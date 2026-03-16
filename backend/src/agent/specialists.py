@@ -102,11 +102,12 @@ def _sanitize_agent_name(name: str) -> str:
     return sanitized or "unnamed_agent"
 
 
-def _create_model(temperature: float) -> LiteLLMModel:
+def _create_model(temperature: float, runtime_path: str) -> LiteLLMModel:
     """Create a LiteLLMModel with specialist-specific temperature."""
     return LiteLLMModel(**build_model_kwargs(
         temperature=temperature,
         max_tokens=settings.model_max_tokens,
+        runtime_path=runtime_path,
     ))
 
 
@@ -118,7 +119,7 @@ def create_specialist(
     max_steps: int,
 ) -> ToolCallingAgent:
     """Create a specialist agent with the given tools and settings."""
-    model = _create_model(temperature)
+    model = _create_model(temperature, runtime_path=name)
     return ToolCallingAgent(
         tools=tools,
         model=model,

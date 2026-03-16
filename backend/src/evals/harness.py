@@ -18,6 +18,7 @@ from config.settings import settings
 from src.agent.session import SessionManager, session_manager
 from src.agent.factory import get_model
 from src.agent.onboarding import create_onboarding_agent
+from src.agent.specialists import create_specialist
 from src.agent.strategist import create_strategist_agent
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
@@ -265,6 +266,44 @@ def _eval_local_runtime_profile() -> dict[str, Any]:
         "runtime_profile": "local",
         "routed_model": mock_completion.call_args.kwargs["model"],
         "response_excerpt": response.choices[0].message.content,
+    }
+
+
+def _eval_agent_local_runtime_profile() -> dict[str, Any]:
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "local_runtime_paths",
+            "chat_agent,onboarding_agent,strategist_agent,memory_keeper",
+        ),
+    ):
+        chat_model = get_model()
+        onboarding_agent = create_onboarding_agent()
+        strategist_agent = create_strategist_agent("Time: morning\nGoals: 2 active")
+        specialist = create_specialist(
+            "memory_keeper",
+            "Memory specialist",
+            [],
+            temperature=0.5,
+            max_steps=3,
+        )
+
+    routed_models = {
+        "chat_agent": chat_model.model_id,
+        "onboarding_agent": onboarding_agent.model.model_id,
+        "strategist_agent": strategist_agent.model.model_id,
+        "memory_keeper": specialist.model.model_id,
+    }
+    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    return {
+        "runtime_profile": "local",
+        "routed_models": routed_models,
     }
 
 
@@ -603,6 +642,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Bounded helper completions can route through a first-class local runtime profile.",
         runner=_eval_local_runtime_profile,
+    ),
+    EvalScenario(
+        name="agent_local_runtime_profile",
+        category="runtime",
+        description="Core agent model factories can route through the first-class local runtime profile.",
+        runner=_eval_agent_local_runtime_profile,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

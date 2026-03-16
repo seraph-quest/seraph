@@ -56,6 +56,7 @@ def create_onboarding_agent() -> ToolCallingAgent:
     model = LiteLLMModel(**build_model_kwargs(
         temperature=0.8,
         max_tokens=settings.model_max_tokens,
+        runtime_path="onboarding_agent",
     ))
 
     return ToolCallingAgent(

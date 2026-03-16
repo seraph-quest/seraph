@@ -5,75 +5,36 @@ title: Master Plan
 
 # Seraph Master Plan
 
-Seraph now uses one planning structure only:
+## Summary
 
-- one **master plan** file
-- one file per **workstream**
+Seraph now uses one live planning structure only:
 
-The old `sections / seasons / batches` split is no longer the live planning surface. If an old roadmap file still exists in the repo, treat it as legacy reference material, not the current plan.
+- one master plan file
+- one live status file
+- one file per workstream
 
-## How To Read This
+The old `sections / seasons / batches` split is not the live planning surface anymore. If an old roadmap file still exists in the repo, treat it as legacy reference material.
 
-- `[x]` means the capability already has meaningful shipped foundations
-- `[ ]` means the work is not finished yet
+## Current Status
 
-If you want the current truth, use this page plus the workstream files linked below.
+This roadmap should be read alongside [Development Status](./status-report).
 
-## Project State
+Legend for the checklist column:
 
-- [x] one master plan plus one file per workstream is the live planning surface
-- [x] workstreams `01` to `03` have strong shipped foundations
-- [x] workstreams `04` to `07` have real starting foundations, not just ideas
-- [ ] no workstream is complete yet
-- [ ] the current active hardening track, Runtime Reliability, is not finished yet
+- `[x]` fully shipped on `develop`
+- `[ ]` not fully shipped on `develop`
 
-## Workstreams
+| Workstream | Checklist | Notes |
+|---|---|---|
+| 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, secret redaction, and scoped secret references are shipped; deeper execution isolation and narrower secret-use paths are still left |
+| 02. Execution Plane | `[ ]` | Shell, browser, MCP, discovery, and visible tool execution foundations are shipped; richer process, browser, and workflow execution are still left |
+| 03. Runtime Reliability | `[ ]` | Ordered fallbacks, local routing, runtime audit visibility, and deterministic eval foundations are shipped; richer provider selection, broader local routing, remaining edge coverage, and broader evals are still left |
+| 04. Presence And Reach | `[ ]` | Browser, WebSocket, proactive delivery, and the native observer daemon are shipped foundations; desktop presence, notifications, channels, and cross-surface continuity are still left |
+| 05. Guardian Intelligence | `[ ]` | Soul, memory, strategist, goals, daily briefing, and evening review foundations are shipped; the deeper adaptive guardian layer is still left |
+| 06. Embodied UX | `[ ]` | Village UI, quest log, avatar, ambient indicators, and settings surfaces are shipped; the fuller life-OS shell is still left |
+| 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, and delegation foundations are shipped; stronger workflow leverage and extension ergonomics are still left |
 
-### 01. [Trust Boundaries](../plan/trust-boundaries)
-
-- [x] policy modes, approvals, audit logging, and secret-redaction foundations are shipped
-- [ ] narrower secret-use paths and deeper privileged-runtime isolation are still left
-- focus: make Seraph safer and more governable before expanding autonomy further
-
-### 02. [Execution Plane](../plan/execution-plane)
-
-- [x] shell, browser, MCP, and visible tool-execution foundations are shipped
-- [ ] broader process execution, richer browser flows, and reusable workflows are still left
-- focus: make Seraph better at doing real work, not just reasoning about it
-
-### 03. [Runtime Reliability](../plan/runtime-reliability)
-
-- [x] ordered fallbacks, health-aware provider rerouting, local helper/agent/scheduler-profile routing, tool/integration observability across MCP, browser, sandbox, web search, and observer-source boundaries including time and goals, and eval foundations are shipped
-- [ ] deeper policy-aware provider selection and remaining edge coverage are still left
-- focus: routing, fallbacks, observability, evals, and degraded-mode behavior
-
-### 04. [Presence And Reach](../plan/presence-and-reach)
-
-- [x] browser, WebSocket, proactive delivery, and observer-daemon foundations exist
-- [ ] native shell presence, notifications, and external channels are still ahead
-- focus: make Seraph reachable outside a browser tab
-
-### 05. [Guardian Intelligence](../plan/guardian-intelligence)
-
-- [x] soul, memory, and strategist foundations exist
-- [ ] the deeper adaptive guardian model is still ahead
-- focus: move from retrieval + heuristics toward richer human understanding and adaptation
-
-### 06. [Embodied UX](../plan/embodied-ux)
-
-- [x] the village UX and ambient shell are real
-- [ ] the fuller life-OS and productivity-shell layer is still ahead
-- focus: make Seraph feel alive, legible, and motivating without becoming gimmicky
-
-### 07. [Ecosystem And Leverage](../plan/ecosystem-and-leverage)
-
-- [x] skills, MCP, and delegation foundations exist
-- [ ] stronger extension maturity and reusable workflow leverage are still left
-- focus: compound Seraph through reusable extensions without losing product clarity
-
-## Order Of Execution
-
-This is the intended order:
+## Delivery Order
 
 1. Trust Boundaries
 2. Execution Plane
@@ -83,4 +44,56 @@ This is the intended order:
 6. Embodied UX
 7. Ecosystem And Leverage
 
-This is not a claim that only one workstream can move at a time. It is the order that resolves the biggest product and runtime risks first.
+## Current Shipped Slice On `develop`
+
+- [x] policy-controlled tool and MCP access with approval gates, audit logging, secret redaction, and scoped secret references
+- [x] shell, browser, vault, filesystem, goals, and web-search tool foundations with live tool execution in chat
+- [x] ordered LLM fallbacks, health-aware rerouting, local helper and agent runtime paths, and broad runtime audit coverage
+- [x] deterministic runtime eval harness coverage for fallback routing, local routing, tool boundaries, observer boundaries, and audit seams
+- [x] browser UI, WebSocket chat, proactive delivery, and a native observer daemon
+- [x] soul, memory, goals, strategist, daily briefing, and evening review foundations
+- [x] skills, MCP integration, and recursive delegation foundations
+
+## Workstreams
+
+### 01. [Trust Boundaries](../plan/trust-boundaries)
+
+- [ ] not fully shipped on `develop`
+- focus: make Seraph safer and more governable before expanding autonomy further
+
+### 02. [Execution Plane](../plan/execution-plane)
+
+- [ ] not fully shipped on `develop`
+- focus: make Seraph better at doing real work, not just reasoning about it
+
+### 03. [Runtime Reliability](../plan/runtime-reliability)
+
+- [ ] not fully shipped on `develop`
+- focus: routing, fallbacks, observability, evals, and degraded-mode behavior
+
+### 04. [Presence And Reach](../plan/presence-and-reach)
+
+- [ ] not fully shipped on `develop`
+- focus: make Seraph reachable outside a browser tab
+
+### 05. [Guardian Intelligence](../plan/guardian-intelligence)
+
+- [ ] not fully shipped on `develop`
+- focus: move from retrieval + heuristics toward richer human understanding and adaptation
+
+### 06. [Embodied UX](../plan/embodied-ux)
+
+- [ ] not fully shipped on `develop`
+- focus: make Seraph feel alive, legible, and motivating without becoming gimmicky
+
+### 07. [Ecosystem And Leverage](../plan/ecosystem-and-leverage)
+
+- [ ] not fully shipped on `develop`
+- focus: compound Seraph through reusable extensions without losing product clarity
+
+## Recommended Reading Order
+
+1. Read [Development Status](./status-report) for the current shipped vs unfinished view.
+2. Read this file for workstream ordering and current scope.
+3. Read the workstream files under `Plan` for detailed shipped work, active focus, and remaining work.
+4. Treat the legacy phase docs as background material only.

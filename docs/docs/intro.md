@@ -108,9 +108,13 @@ See [Testing Guide](./development/testing) for full details.
 
 ## Current Status
 
-The old phase labels are no longer the live planning surface.
+The old phase labels are not the live planning surface anymore.
 
-Use the **[Master Plan](./overview/roadmap)** and the per-workstream files under `docs/docs/plan/` for the current truth.
+Use these for the current truth:
+
+- **[Development Status](./overview/status-report)**
+- **[Master Plan](./overview/roadmap)**
+- the per-workstream files under `docs/docs/plan/`
 
 - [x] Seraph has real shipped foundations across all seven workstreams
 - [x] Runtime Reliability, Trust Boundaries, and Execution Plane are the strongest foundations today

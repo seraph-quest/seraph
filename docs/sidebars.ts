@@ -7,7 +7,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Overview',
-      items: ['overview/vision', 'overview/roadmap'],
+      items: ['overview/vision', 'overview/status-report', 'overview/roadmap'],
     },
     {
       type: 'category',
@@ -24,7 +24,7 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Development Phases',
+      label: 'Legacy Phases',
       items: [
         'development/phase-1-persistent-identity',
         'development/phase-2-capable-executor',

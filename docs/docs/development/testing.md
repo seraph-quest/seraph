@@ -41,11 +41,12 @@ uv run python -m src.evals.harness --scenario local_runtime_profile
 uv run python -m src.evals.harness --scenario agent_local_runtime_profile
 uv run python -m src.evals.harness --scenario scheduled_local_runtime_profile
 uv run python -m src.evals.harness --scenario daily_briefing_fallback
+uv run python -m src.evals.harness --scenario shell_tool_runtime_audit
 uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, sandbox timeout auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -67,6 +68,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 |---|---|---|
 | `test_agent.py` | 8 | Agent factory — tool count, model creation, context injection |
 | `test_catalog_api.py` | 9 | Catalog API — browse catalog, install skills/MCP servers |
+| `test_browser_tool.py` | 2 | Browser tool — blocked internal URLs and successful runtime audit logging |
 | `test_chat_api.py` | 5 | REST chat endpoint — success, session continuity, errors |
 | `test_consolidation_reliability.py` | 6 | Memory consolidation reliability — edge cases, retry behavior |
 | `test_consolidator.py` | 5 | Memory consolidation — extract facts, soul updates, markdown fences, LLM failure |
@@ -98,7 +100,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_session.py` | 23 | SessionManager — async DB-backed CRUD, history, pagination, title generation |
 | `test_sessions_api.py` | 8 | Session HTTP endpoints — list, messages, update title, delete |
 | `test_settings_api.py` | 6 | Settings API — interruption mode get/set |
-| `test_shell_tool.py` | 7 | Shell execution — success, errors, size limits, timeout, connection errors |
+| `test_shell_tool.py` | 9 | Shell execution — success, errors, size limits, timeout, connection errors, runtime audit logging |
 | `test_skills.py` | 27 | Skills system — loading, gating, enable/disable, frontmatter parsing, API |
 | `test_soul.py` | 9 | Soul file persistence — read/write, section update, ensure exists |
 | `test_specialists.py` | 28 | Specialist agents — factory, tool domains, MCP specialist generation |
@@ -174,7 +176,6 @@ These areas are intentionally excluded from the test suite:
 
 - **Phaser game objects** (VillageScene, AgentSprite, UserSprite, SpeechBubble) — require WebGL context, fragile mocking
 - **EventBus.ts** — single-line Phaser EventEmitter wrapper
-- **Browser tool** — thin wrapper around Playwright
 - **LanceDB vector_store.py** — requires real embeddings model loaded
 - **Full WS message streaming** — complex sync/async interaction with agent streaming; basic WS tests cover ping, error handling, and skip_onboarding
 

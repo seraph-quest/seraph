@@ -102,6 +102,11 @@ def _sanitize_agent_name(name: str) -> str:
     return sanitized or "unnamed_agent"
 
 
+def mcp_specialist_runtime_path(server_name: str) -> str:
+    """Return the runtime path/name used for a connected MCP specialist."""
+    return _sanitize_agent_name(f"mcp_{server_name}")
+
+
 def _create_model(temperature: float, runtime_path: str) -> LiteLLMModel:
     """Create a LiteLLMModel with specialist-specific temperature."""
     return LiteLLMModel(**build_model_kwargs(
@@ -171,7 +176,7 @@ def create_mcp_specialist(
     description: str = "",
 ) -> ToolCallingAgent:
     """Create a specialist agent for a single MCP server's tools."""
-    name = _sanitize_agent_name(f"mcp_{server_name}")
+    name = mcp_specialist_runtime_path(server_name)
     if not description:
         tool_names = [getattr(t, "name", str(t)) for t in tools]
         description = f"MCP server '{server_name}' with tools: {', '.join(tool_names)}"

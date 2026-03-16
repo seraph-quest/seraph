@@ -22,10 +22,10 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] health-aware cooldown rerouting across shared completion and agent-model paths
 - [x] runtime-path-specific primary model overrides across shared completion and agent-model paths
 - [x] runtime-path-specific ordered fallback-chain overrides across shared completion and agent-model paths
-- [x] first-class local runtime profile for bounded helper flows, scheduled completion-based jobs, core agent model factories, and delegation paths
+- [x] first-class local runtime profile for bounded helper flows, scheduled completion-based jobs, core agent model factories, delegation paths, and connected MCP specialists
 - [x] timeout-safe audit visibility into primary-vs-fallback LLM completion and agent-model behavior
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
-- [x] repeatable runtime eval harness for core guardian, tool, and observer/audit-runtime reliability contracts
+- [x] repeatable runtime eval harness for core guardian, tool, MCP specialist, and observer/audit-runtime reliability contracts
 - [x] lifecycle audit events for REST chat, WebSocket chat, and the full scheduler job surface
 - [x] real tool execution audit events for call, result, and failure across agent transports
 - [x] strategist tool calls and background helper flows, including context-window summarization, now emit runtime audit coverage
@@ -44,14 +44,14 @@ Make Seraph more resilient, observable, and predictable under real usage.
 ## Still To Do On `develop`
 
 - [ ] deepen provider routing beyond the current explicit runtime-path primary and fallback overrides, ordered fallback, and cooldown rerouting with richer policy-aware selection
-- [ ] broaden local-model routing beyond the current helper, scheduled completion, core agent-model, and delegation paths into any remaining runtime paths where it makes sense
+- [ ] broaden local-model routing beyond the current helper, scheduled completion, core agent-model, delegation, and connected MCP specialist paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, calendar/git/goal/time sources, daemon ingest, proactive delivery gating, current MCP lifecycle coverage, and the browser/sandbox/web-search tool boundaries
 - [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing and remaining edge-path contracts
 
 ## Acceptance Checklist
 
 - [x] provider failure with configured fallbacks does not collapse the entire chat path
-- [x] a local or non-OpenRouter path is demonstrably possible across helper, scheduled completion, core agent, and delegation flows
+- [x] a local or non-OpenRouter path is demonstrably possible across helper, scheduled completion, core agent, delegation, and connected MCP specialist flows
 - [x] runtime paths can force distinct primary and fallback routing without changing the global runtime baseline
 - [ ] key flows are observable and easier to debug
 - [ ] the project has repeatable eval coverage for core behavior

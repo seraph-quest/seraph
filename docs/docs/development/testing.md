@@ -66,9 +66,10 @@ uv run python -m src.evals.harness --scenario observer_delivery_transport_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 uv run python -m src.evals.harness --scenario mcp_test_api_audit
 uv run python -m src.evals.harness --scenario skills_api_audit
+uv run python -m src.evals.harness --scenario screen_repository_runtime_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -114,6 +115,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_observer_git.py` | 7 | Git observer source — commit parsing, missing repo/reflog handling, runtime audit logging |
 | `test_observer_goals.py` | 4 | Goals observer source — active goals summary and runtime audit logging |
 | `test_observer_manager.py` | 20 | ContextManager — refresh, state transitions, budget reset |
+| `test_screen_observation.py` | 14 | Screen observation repository — create, backfill, summaries, cleanup, and runtime audit logging |
 | `test_observer_time.py` | 14 | Time observer source — time-of-day, working hours, timezone, runtime audit logging |
 | `test_onboarding_edge_cases.py` | 2 | Onboarding edge cases — skip, restart |
 | `test_plugin_loader.py` | 5 | Tool auto-discovery — scan, expected tools, no duplicates, caching, reload |

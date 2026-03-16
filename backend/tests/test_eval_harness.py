@@ -71,6 +71,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_daemon_ingest_audit" in captured.out
     assert "mcp_test_api_audit" in captured.out
     assert "skills_api_audit" in captured.out
+    assert "screen_repository_runtime_audit" in captured.out
 
 
 def test_main_emits_json_summary(capsys):
@@ -118,6 +119,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_daemon_ingest_audit",
                 "mcp_test_api_audit",
                 "skills_api_audit",
+                "screen_repository_runtime_audit",
             ]
         )
     )
@@ -268,3 +270,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["skills_api_audit"]["reload_count"] == 2
     assert details_by_name["skills_api_audit"]["reload_enabled_count"] == 2
     assert details_by_name["skills_api_audit"]["reload_skill_names"] == ["test-skill", "simple-skill"]
+    assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
+    assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
+    assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1
+    assert details_by_name["screen_repository_runtime_audit"]["weekly_total_observations"] == 1
+    assert details_by_name["screen_repository_runtime_audit"]["weekly_active_days"] == 1
+    assert details_by_name["screen_repository_runtime_audit"]["cleanup_deleted_count"] == 1
+    assert details_by_name["screen_repository_runtime_audit"]["cleanup_logged_deleted_count"] == 1
+    assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_count"] == 0
+    assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_logged_deleted_count"] == 0

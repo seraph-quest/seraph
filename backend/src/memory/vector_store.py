@@ -9,6 +9,7 @@ import lancedb
 import pyarrow as pa
 
 from config.settings import settings
+from src.audit.runtime import log_integration_event_sync
 from src.memory.embedder import embed
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,22 @@ _SCHEMA = pa.schema([
 
 _db: Optional[lancedb.DBConnection] = None
 _db_lock = threading.Lock()
+
+
+def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
+    log_integration_event_sync(
+        integration_type="vector_store",
+        name=_TABLE_NAME,
+        outcome=outcome,
+        details=details,
+    )
+
+
+def _safe_query_length(query: object) -> int | None:
+    try:
+        return len(query)  # type: ignore[arg-type]
+    except Exception:
+        return None
 
 
 def _get_db() -> lancedb.DBConnection:
@@ -70,6 +87,15 @@ def add_memory(
                         results[0]["_distance"],
                         results[0]["id"][:8],
                     )
+                    _log_vector_store_event(
+                        "succeeded",
+                        details={
+                            "operation": "add",
+                            "category": category,
+                            "deduplicated": True,
+                            "source_session_id": source_session_id or None,
+                        },
+                    )
                     return results[0]["id"]
         except Exception:
             logger.debug("Dedup check failed, proceeding with insert", exc_info=True)
@@ -86,9 +112,27 @@ def add_memory(
         }])
 
         logger.info("Added memory %s (category=%s)", memory_id[:8], category)
+        _log_vector_store_event(
+            "succeeded",
+            details={
+                "operation": "add",
+                "category": category,
+                "deduplicated": False,
+                "source_session_id": source_session_id or None,
+            },
+        )
         return memory_id
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to add memory")
+        _log_vector_store_event(
+            "failed",
+            details={
+                "operation": "add",
+                "category": category,
+                "source_session_id": source_session_id or None,
+                "error": str(exc),
+            },
+        )
         return ""
 
 
@@ -109,6 +153,16 @@ def search(
         table = _get_or_create_table()
 
         if table.count_rows() == 0:
+            _log_vector_store_event(
+                "empty_result",
+                details={
+                    "operation": "search",
+                    "reason": "empty_table",
+                    "query_length": _safe_query_length(query),
+                    "category_filter": category_filter,
+                    "top_k": top_k,
+                },
+            )
             return []
 
         query_vector = embed(query)
@@ -124,6 +178,30 @@ def search(
 
         rows = results.to_list()
 
+        if not rows:
+            _log_vector_store_event(
+                "empty_result",
+                details={
+                    "operation": "search",
+                    "reason": "no_match",
+                    "query_length": _safe_query_length(query),
+                    "category_filter": category_filter,
+                    "top_k": top_k,
+                },
+            )
+            return []
+
+        _log_vector_store_event(
+            "succeeded",
+            details={
+                "operation": "search",
+                "query_length": _safe_query_length(query),
+                "category_filter": category_filter,
+                "top_k": top_k,
+                "result_count": len(rows),
+            },
+        )
+
         return [
             {
                 "id": r["id"],
@@ -134,8 +212,18 @@ def search(
             }
             for r in rows
         ]
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to search memories")
+        _log_vector_store_event(
+            "failed",
+            details={
+                "operation": "search",
+                "query_length": _safe_query_length(query),
+                "category_filter": category_filter,
+                "top_k": top_k,
+                "error": str(exc),
+            },
+        )
         return []
 
 
@@ -159,3 +247,10 @@ def search_formatted(
     except Exception:
         logger.exception("Failed to format memory search results")
         return ""
+
+
+def _reset_vector_store_state() -> None:
+    """Reset cached DB state for tests and deterministic evals."""
+    global _db
+    with _db_lock:
+        _db = None

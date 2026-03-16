@@ -56,6 +56,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_model_overrides" in captured.out
     assert "runtime_fallback_overrides" in captured.out
     assert "runtime_profile_preferences" in captured.out
+    assert "runtime_path_patterns" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "browser_runtime_audit" in captured.out
@@ -98,6 +99,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_model_overrides",
                 "runtime_fallback_overrides",
                 "runtime_profile_preferences",
+                "runtime_path_patterns",
                 "scheduled_local_runtime_profile",
                 "shell_tool_runtime_audit",
                 "browser_runtime_audit",
@@ -202,6 +204,19 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["runtime_profile_preferences"]["agent_runtime_profile"] == "local"
     assert details_by_name["runtime_profile_preferences"]["agent_fallback_models"] == [
         "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-mini",
+    ]
+    assert details_by_name["runtime_path_patterns"]["wildcard_runtime_profile"] == "local"
+    assert details_by_name["runtime_path_patterns"]["wildcard_model"] == "openai/gpt-4.1-mini"
+    assert details_by_name["runtime_path_patterns"]["wildcard_fallback_models"] == [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano",
+    ]
+    assert details_by_name["runtime_path_patterns"]["exact_runtime_profile"] == "local"
+    assert details_by_name["runtime_path_patterns"]["exact_model"] == "ollama/coder"
+    assert details_by_name["runtime_path_patterns"]["exact_fallback_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
         "openai/gpt-4.1-mini",
     ]
     assert details_by_name["scheduled_local_runtime_profile"]["job_name"] == "daily_briefing"

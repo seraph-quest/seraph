@@ -4,6 +4,8 @@ sidebar_position: 2
 
 # OpenClaw vs Seraph — Feature Gap Analysis
 
+> This document is a historical comparison snapshot, not the live product-status source of truth. For current status, use the **[Master Plan](../overview/roadmap)** and the per-workstream files in `docs/docs/plan/`.
+
 > **Date**: 2026-02-09 (updated)
 > **OpenClaw version context**: v2026.1.x (145k+ GitHub stars, formerly Clawdbot/Moltbot)
 > **Seraph branch**: `main` (Phases 0–3.5 mostly complete, Phase 4 partial)
@@ -22,7 +24,7 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
 - Tool execution with visual feedback (animated RPG avatar casts magic effects in village)
-- **12 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
+- **17 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
 - **Memory consolidation** — Background extraction of facts/preferences/decisions after each conversation

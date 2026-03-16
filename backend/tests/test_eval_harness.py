@@ -47,6 +47,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "agent_local_runtime_profile" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
+    assert "web_search_runtime_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -71,6 +72,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "agent_local_runtime_profile",
                 "scheduled_local_runtime_profile",
                 "shell_tool_runtime_audit",
+                "web_search_runtime_audit",
                 "observer_delivery_gate_audit",
                 "observer_daemon_ingest_audit",
             ]
@@ -99,6 +101,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["scheduled_local_runtime_profile"]["job_name"] == "daily_briefing"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["shell_tool_runtime_audit"]["timeout_seconds"] == 35
+    assert details_by_name["web_search_runtime_audit"]["timeout_seconds"] == 15
+    assert details_by_name["web_search_runtime_audit"]["query_length"] == len("slow search")
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"

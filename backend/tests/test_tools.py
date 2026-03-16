@@ -1,5 +1,8 @@
+import asyncio
+
 import pytest
 
+from src.audit.repository import audit_repository
 from src.tools.filesystem_tool import _safe_resolve, read_file, write_file
 from src.tools.template_tool import fill_template
 from src.tools.web_search_tool import web_search
@@ -97,3 +100,67 @@ class TestWebSearch:
         with patch("src.tools.web_search_tool.DDGS", MockDDGS):
             result = web_search.forward("empty query")
         assert "No results found" in result
+
+    def test_web_search_logs_runtime_audit(self, async_db):
+        from unittest.mock import patch
+
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Result 1", "href": "https://example.com", "body": "A test result"},
+                    {"title": "Result 2", "href": "https://example.org", "body": "Another test result"},
+                ]
+
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("search reliability", max_results=2)
+
+        assert "Result 1" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "web_search:duckduckgo"
+        assert events[0]["details"]["query_length"] == len("search reliability")
+        assert events[0]["details"]["result_count"] == 2
+
+    def test_web_search_timeout_logs_runtime_audit(self, async_db):
+        from unittest.mock import patch
+
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                raise TimeoutError("Timed out")
+
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("slow query")
+
+        assert "timed out" in result.lower()
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_timed_out"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "web_search:duckduckgo"
+        assert events[0]["details"]["timeout_seconds"] == 15

@@ -30,6 +30,7 @@ from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.shell_tool import shell_execute
+from src.tools.web_search_tool import web_search
 from src.models.schemas import WSResponse
 
 
@@ -507,6 +508,40 @@ async def _eval_shell_tool_runtime_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_web_search_runtime_audit() -> dict[str, Any]:
+    class MockDDGS:
+        def __init__(self, **kwargs: Any):
+            self.timeout = kwargs.get("timeout")
+
+        def __enter__(self) -> "MockDDGS":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def text(self, query: str, max_results: int = 5) -> list[dict[str, str]]:
+            raise TimeoutError("Timed out")
+
+    with (
+        patch("src.tools.web_search_tool.DDGS", MockDDGS),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        result = web_search("slow search", max_results=3)
+        await asyncio.sleep(0)
+
+    assert "timed out" in result.lower()
+    timed_out = _find_audit_call(
+        mock_log_event,
+        event_type="integration_timed_out",
+        tool_name="web_search:duckduckgo",
+    )
+    return {
+        "result": result,
+        "timeout_seconds": timed_out["details"]["timeout_seconds"],
+        "query_length": timed_out["details"]["query_length"],
+    }
+
+
 async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context())
@@ -764,6 +799,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Shell tool timeout records sandbox runtime audit coverage.",
         runner=_eval_shell_tool_runtime_audit,
+    ),
+    EvalScenario(
+        name="web_search_runtime_audit",
+        category="observability",
+        description="Web search timeout records provider runtime audit coverage.",
+        runner=_eval_web_search_runtime_audit,
     ),
     EvalScenario(
         name="strategist_tick_tool_audit",

@@ -16,8 +16,8 @@ See the **[Setup Guide](./setup)** for complete installation and configuration i
 - **Frontend**: React 19, Vite 6, TypeScript 5.6, Tailwind CSS 3, Zustand 5, Phaser 3.90
 - **Backend**: Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter)
 - **Database**: SQLModel + SQLite (aiosqlite), LanceDB (vector memory)
-- **Tools**: 16 built-in tools (auto-discovered) + MCP integrations — web search, file I/O, shell (snekbox sandbox), browser (Playwright), soul/memory, goals, vault
-- **Scheduler**: APScheduler — 6 background jobs (memory consolidation, goal check, calendar scan, strategist tick, daily briefing, evening review)
+- **Tools**: 17 built-in tools (auto-discovered) + MCP integrations — web search, file I/O, shell (snekbox sandbox), browser (Playwright), soul/memory, goals, vault
+- **Scheduler**: APScheduler — 9 background jobs (memory consolidation, goal check, calendar scan, strategist tick, daily briefing, evening review, activity digest, weekly activity review, screen cleanup)
 - **Observer**: Native macOS daemon → context manager → user state machine → attention guardian → insight queue
 - **Infra**: Docker Compose (4 services: backend, frontend, snekbox sandbox, http-mcp), uv package manager
 
@@ -56,7 +56,7 @@ backend/
 │   ├── goals/           # Hierarchical goal CRUD repository
 │   ├── observer/        # Context manager, user state machine, delivery gate, insight queue, data sources
 │   ├── vault/           # Fernet-encrypted secret store (crypto, repository)
-│   └── scheduler/       # APScheduler engine, connection manager, 6 background jobs
+│   └── scheduler/       # APScheduler engine, connection manager, 9 background jobs
 ├── data/
 │   ├── skills/          # SKILL.md plugin files (YAML frontmatter + instructions)
 │   └── mcp-servers.json # MCP server configuration (runtime-managed)
@@ -108,10 +108,11 @@ See [Testing Guide](./development/testing) for full details.
 
 ## Current Status
 
-- **Phase 0** (Foundation): Complete — chat, WebSocket streaming, Phaser village, day/night cycle
-- **Phase 1** (Persistent Identity): Complete — DB, soul/memory, goals, onboarding, quest UI, chat sidebar, session management, sprite system
-- **Phase 2** (Capable Executor): Complete — shell, browser, plugin system, MCP integrations
-- **Phase 3** (The Observer): Complete — background scheduler, context awareness, user state machine, proactive strategist, daily briefing, evening review, attention guardian, insight queue, ambient/nudge frontend, native macOS screen daemon
-- **Phase 3.5** (Polish): Mostly complete — goal management UI, interruption mode toggle, token-aware context window, agent execution timeouts, frontend accessibility. Tauri desktop app and infra hardening remain planned.
-- **Phase 4** (The Strategist): Partially complete — proactive reasoning engine, interruption intelligence, morning briefing, evening review, SKILL.md plugins, recursive delegation architecture are done. Decision support, mistake prevention, weekly strategy remain planned.
-- **Phase 5** (Security): Planned — credential injection, leak detection, OAuth 2.1 for MCP, capability permissions
+The old phase labels are no longer the live planning surface.
+
+Use the **[Master Plan](./overview/roadmap)** and the per-workstream files under `docs/docs/plan/` for the current truth.
+
+- [x] Seraph has real shipped foundations across all seven workstreams
+- [x] Runtime Reliability, Trust Boundaries, and Execution Plane are the strongest foundations today
+- [ ] no workstream is complete yet
+- [ ] major product work is still ahead in Presence And Reach, Guardian Intelligence, Embodied UX, and Ecosystem And Leverage

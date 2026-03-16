@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 
 from src.models.schemas import WSResponse
-from src.scheduler.connection_manager import ConnectionManager
+from src.scheduler.connection_manager import BroadcastResult, ConnectionManager
 
 
 # ── ConnectionManager ──────────────────────────────────────
@@ -45,11 +45,16 @@ class TestConnectionManager:
         mgr.connect(ws2)
 
         msg = WSResponse(type="proactive", content="hello")
-        await mgr.broadcast(msg)
+        result = await mgr.broadcast(msg)
 
         expected_payload = msg.model_dump_json()
         ws1.send_text.assert_called_once_with(expected_payload)
         ws2.send_text.assert_called_once_with(expected_payload)
+        assert result == BroadcastResult(
+            attempted_connections=2,
+            delivered_connections=2,
+            failed_connections=0,
+        )
 
     @pytest.mark.asyncio
     async def test_broadcast_removes_dead_connections(self):
@@ -62,16 +67,26 @@ class TestConnectionManager:
         assert mgr.active_count == 2
 
         msg = WSResponse(type="ambient", content="tick", state="idle")
-        await mgr.broadcast(msg)
+        result = await mgr.broadcast(msg)
 
         alive.send_text.assert_called_once()
         assert mgr.active_count == 1
+        assert result == BroadcastResult(
+            attempted_connections=2,
+            delivered_connections=1,
+            failed_connections=1,
+        )
 
     @pytest.mark.asyncio
     async def test_broadcast_no_connections(self):
         mgr = ConnectionManager()
         msg = WSResponse(type="proactive", content="nobody home")
-        await mgr.broadcast(msg)  # should not raise
+        result = await mgr.broadcast(msg)  # should not raise
+        assert result == BroadcastResult(
+            attempted_connections=0,
+            delivered_connections=0,
+            failed_connections=0,
+        )
 
 
 # ── Scheduler engine ───────────────────────────────────────

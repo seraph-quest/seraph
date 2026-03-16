@@ -37,9 +37,10 @@ from src.memory.consolidator import consolidate_session
 from src.memory import soul as soul_mod
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
-from src.observer.delivery import deliver_or_queue
+from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
+from src.scheduler.connection_manager import BroadcastResult
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
 from src.tools.filesystem_tool import read_file, write_file
@@ -1435,7 +1436,11 @@ async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
     mock_context_manager.get_context.side_effect = [delivered_ctx, queued_ctx]
     mock_context_manager.decrement_attention_budget = MagicMock()
     mock_ws_manager = MagicMock()
-    mock_ws_manager.broadcast = AsyncMock()
+    mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=2,
+        delivered_connections=2,
+        failed_connections=0,
+    ))
     mock_insight_queue = MagicMock()
     mock_insight_queue.enqueue = AsyncMock()
     mock_log_event = AsyncMock()
@@ -1466,8 +1471,78 @@ async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
     return {
         "delivered_user_state": delivered["details"]["user_state"],
         "queued_user_state": queued["details"]["user_state"],
+        "delivered_connections": delivered["details"]["delivered_connections"],
         "broadcast_calls": mock_ws_manager.broadcast.await_count,
         "enqueue_calls": mock_insight_queue.enqueue.await_count,
+    }
+
+
+async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
+    delivered_ctx = _make_context(user_state="available", interruption_mode="balanced", attention_budget_remaining=3)
+    failed_ctx = _make_context(user_state="available", interruption_mode="balanced", attention_budget_remaining=3)
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.side_effect = [delivered_ctx, failed_ctx]
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock(
+        side_effect=[
+            BroadcastResult(attempted_connections=2, delivered_connections=2, failed_connections=0),
+            BroadcastResult(attempted_connections=1, delivered_connections=0, failed_connections=1),
+            BroadcastResult(attempted_connections=2, delivered_connections=2, failed_connections=0),
+            BroadcastResult(attempted_connections=1, delivered_connections=0, failed_connections=1),
+        ]
+    )
+    mock_insight_queue = MagicMock()
+    mock_insight_queue.enqueue = AsyncMock()
+    mock_insight_queue.drain = AsyncMock(
+        side_effect=[
+            [MagicMock(content="Calendar alert: standup")],
+            [MagicMock(content="Goal reminder: exercise")],
+        ]
+    )
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await deliver_or_queue(
+            WSResponse(type="proactive", content="Ship it", intervention_type="advisory", urgency=3)
+        )
+        await deliver_or_queue(
+            WSResponse(type="proactive", content="Missed transport", intervention_type="advisory", urgency=3)
+        )
+        delivered_bundle_count = await deliver_queued_bundle()
+        failed_bundle_count = await deliver_queued_bundle()
+
+    direct_failure = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_failed",
+        tool_name="observer_delivery_gate",
+    )
+    bundle_delivered = None
+    bundle_failed = None
+    for call in mock_log_event.call_args_list:
+        kwargs = call.kwargs
+        if kwargs.get("tool_name") != "observer_delivery_gate":
+            continue
+        details = kwargs.get("details", {})
+        if kwargs.get("event_type") == "observer_delivery_delivered" and details.get("intervention_type") == "proactive_bundle":
+            bundle_delivered = kwargs
+        if kwargs.get("event_type") == "observer_delivery_failed" and details.get("intervention_type") == "proactive_bundle":
+            bundle_failed = kwargs
+    assert bundle_delivered is not None
+    assert bundle_failed is not None
+
+    return {
+        "direct_failure_error": direct_failure["details"]["error"],
+        "direct_failure_delivered_connections": direct_failure["details"]["delivered_connections"],
+        "bundle_delivered_count": delivered_bundle_count,
+        "bundle_delivered_connections": bundle_delivered["details"]["delivered_connections"],
+        "bundle_failed_count": failed_bundle_count,
+        "bundle_failed_error": bundle_failed["details"]["error"],
     }
 
 
@@ -1732,6 +1807,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Proactive delivery gate records delivered and queued audit outcomes with observer context details.",
         runner=_eval_observer_delivery_gate_audit,
+    ),
+    EvalScenario(
+        name="observer_delivery_transport_audit",
+        category="observability",
+        description="Direct and bundled proactive delivery record transport-level delivered versus failed audit outcomes.",
+        runner=_eval_observer_delivery_transport_audit,
     ),
     EvalScenario(
         name="observer_daemon_ingest_audit",

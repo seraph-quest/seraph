@@ -62,10 +62,11 @@ uv run python -m src.evals.harness --scenario observer_git_source_audit
 uv run python -m src.evals.harness --scenario observer_goal_source_audit
 uv run python -m src.evals.harness --scenario observer_time_source_audit
 uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
+uv run python -m src.evals.harness --scenario observer_delivery_transport_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery transport, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 

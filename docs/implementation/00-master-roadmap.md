@@ -62,7 +62,7 @@ Legend for the checklist column:
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing
-- [x] runtime audit visibility across chat, scheduler, observer, MCP, embedding, vector store, soul file, filesystem, browser, sandbox, and web search paths
+- [x] runtime audit visibility across chat, scheduler, observer, proactive delivery transport, MCP, embedding, vector store, soul file, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, observer, storage, and tool-boundary contracts
 
 ## Recommended Reading Order

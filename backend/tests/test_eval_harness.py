@@ -66,6 +66,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_git_source_audit" in captured.out
     assert "observer_goal_source_audit" in captured.out
     assert "observer_time_source_audit" in captured.out
+    assert "observer_delivery_gate_audit" in captured.out
+    assert "observer_delivery_transport_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -110,6 +112,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_goal_source_audit",
                 "observer_time_source_audit",
                 "observer_delivery_gate_audit",
+                "observer_delivery_transport_audit",
                 "observer_daemon_ingest_audit",
             ]
         )
@@ -236,5 +239,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["observer_time_source_audit"]["timezone"] == "UTC"
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
+    assert details_by_name["observer_delivery_gate_audit"]["delivered_connections"] == 2
+    assert details_by_name["observer_delivery_transport_audit"]["direct_failure_error"] == "all_connections_failed"
+    assert details_by_name["observer_delivery_transport_audit"]["direct_failure_delivered_connections"] == 0
+    assert details_by_name["observer_delivery_transport_audit"]["bundle_delivered_count"] == 1
+    assert details_by_name["observer_delivery_transport_audit"]["bundle_delivered_connections"] == 2
+    assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_count"] == 0
+    assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_error"] == "all_connections_failed"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"
     assert details_by_name["observer_daemon_ingest_audit"]["persist_failed_error"] == "db down"

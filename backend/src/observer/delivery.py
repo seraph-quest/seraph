@@ -9,6 +9,14 @@ from src.observer.user_state import DeliveryDecision, user_state_machine
 logger = logging.getLogger(__name__)
 
 
+def _transport_failure_reason(*, attempted_connections: int, failed_connections: int) -> str:
+    if attempted_connections <= 0:
+        return "no_active_connections"
+    if failed_connections >= attempted_connections:
+        return "all_connections_failed"
+    return "unknown_transport_failure"
+
+
 async def deliver_or_queue(
     message: WSResponse,
     is_scheduled: bool = False,
@@ -44,7 +52,36 @@ async def deliver_or_queue(
         }
 
         if decision == DeliveryDecision.deliver:
-            await ws_manager.broadcast(message)
+            broadcast_result = await ws_manager.broadcast(message)
+            event_details.update(
+                {
+                    "attempted_connections": broadcast_result.attempted_connections,
+                    "delivered_connections": broadcast_result.delivered_connections,
+                    "failed_connections": broadcast_result.failed_connections,
+                }
+            )
+            if broadcast_result.delivered_connections <= 0:
+                logger.warning(
+                    "Failed to deliver proactive message over WebSocket transport (attempted=%d failed=%d)",
+                    broadcast_result.attempted_connections,
+                    broadcast_result.failed_connections,
+                )
+                await log_observer_delivery_event(
+                    decision="failed",
+                    message_type=message.type,
+                    intervention_type=intervention_type,
+                    urgency=urgency,
+                    is_scheduled=is_scheduled,
+                    details={
+                        **event_details,
+                        "delivery_decision": decision.value,
+                        "error": _transport_failure_reason(
+                            attempted_connections=broadcast_result.attempted_connections,
+                            failed_connections=broadcast_result.failed_connections,
+                        ),
+                    },
+                )
+                return decision
             # Decrement budget if this delivery costs budget
             if user_state_machine.should_cost_budget(
                 intervention_type=intervention_type,
@@ -128,14 +165,50 @@ async def deliver_queued_bundle() -> int:
         parts.append(f"- {item.content}")
     bundle_content = f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
 
-    await ws_manager.broadcast(
-        WSResponse(
-            type="proactive",
-            content=bundle_content,
-            intervention_type="proactive_bundle",
-            urgency=3,
-            reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
-        )
+    message = WSResponse(
+        type="proactive",
+        content=bundle_content,
+        intervention_type="proactive_bundle",
+        urgency=3,
+        reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
     )
+    broadcast_result = await ws_manager.broadcast(message)
+    details = {
+        "bundle_item_count": len(items),
+        "attempted_connections": broadcast_result.attempted_connections,
+        "delivered_connections": broadcast_result.delivered_connections,
+        "failed_connections": broadcast_result.failed_connections,
+        "delivery_decision": "deliver",
+    }
+    if broadcast_result.delivered_connections <= 0:
+        logger.warning(
+            "Failed to deliver queued bundle over WebSocket transport (attempted=%d failed=%d)",
+            broadcast_result.attempted_connections,
+            broadcast_result.failed_connections,
+        )
+        await log_observer_delivery_event(
+            decision="failed",
+            message_type=message.type,
+            intervention_type=message.intervention_type,
+            urgency=message.urgency,
+            is_scheduled=False,
+            details={
+                **details,
+                "error": _transport_failure_reason(
+                    attempted_connections=broadcast_result.attempted_connections,
+                    failed_connections=broadcast_result.failed_connections,
+                ),
+            },
+        )
+        return 0
+
     logger.info("Delivered bundle of %d queued insight(s)", len(items))
+    await log_observer_delivery_event(
+        decision="delivered",
+        message_type=message.type,
+        intervention_type=message.intervention_type,
+        urgency=message.urgency,
+        is_scheduled=False,
+        details=details,
+    )
     return len(items)

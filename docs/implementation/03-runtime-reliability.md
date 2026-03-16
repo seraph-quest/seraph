@@ -18,7 +18,7 @@
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for guardian, observer, storage, and integration seam checks
-- [x] runtime audit coverage across chat, WebSocket, scheduler jobs, strategist helpers, MCP lifecycle, observer lifecycle, embedding, vector store, soul file, filesystem, browser, sandbox, and web search paths
+- [x] runtime audit coverage across chat, WebSocket, scheduler jobs, strategist helpers, proactive delivery transport, MCP lifecycle, observer lifecycle, embedding, vector store, soul file, filesystem, browser, sandbox, and web search paths
 
 ## Working On Now
 
@@ -29,7 +29,7 @@
 
 - [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduler, core agent, delegation, and connected MCP-specialist paths into any remaining runtime paths where it makes sense
-- [ ] add observability coverage across any remaining edge helpers and external integration paths
+- [ ] add observability coverage across any remaining edge helpers and external integration paths beyond the proactive delivery transport boundary
 - [ ] expand eval coverage beyond deterministic seam checks into broader behavioral contracts
 
 ## Non-Goals

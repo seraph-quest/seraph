@@ -9,6 +9,7 @@ from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.user_state import DeliveryDecision
+from src.scheduler.connection_manager import BroadcastResult
 
 
 def _make_context(**overrides) -> CurrentContext:
@@ -26,7 +27,11 @@ def _patch_deps(ctx):
     mock_cm = MagicMock()
     mock_cm.get_context.return_value = ctx
     mock_ws = MagicMock()
-    mock_ws.broadcast = AsyncMock()
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=1,
+        delivered_connections=1,
+        failed_connections=0,
+    ))
     mock_iq = MagicMock()
     mock_iq.enqueue = AsyncMock()
     mock_iq.drain = AsyncMock(return_value=[])
@@ -73,6 +78,7 @@ async def test_deliver_logs_runtime_audit(async_db):
             and event["tool_name"] == "observer_delivery_gate"
             and event["details"]["intervention_type"] == "advisory"
             and event["details"]["user_state"] == "available"
+            and event["details"]["delivered_connections"] == 1
             for event in events
         )
     finally:
@@ -218,6 +224,39 @@ async def test_delivery_failure_logs_runtime_audit(async_db):
 
 
 @pytest.mark.asyncio
+async def test_delivery_transport_failure_logs_runtime_audit(async_db):
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=1,
+        delivered_connections=0,
+        failed_connections=1,
+    ))
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
+        decision = await deliver_or_queue(msg)
+
+        assert decision == DeliveryDecision.deliver
+        mock_cm.decrement_attention_budget.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_failed"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["delivery_decision"] == "deliver"
+            and event["details"]["error"] == "all_connections_failed"
+            and event["details"]["attempted_connections"] == 1
+            and event["details"]["delivered_connections"] == 0
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_delivery_audit_fails_open():
     ctx = _make_context()
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
@@ -240,7 +279,11 @@ async def test_deliver_queued_bundle_empty():
     mock_iq = MagicMock()
     mock_iq.drain = AsyncMock(return_value=[])
     mock_ws = MagicMock()
-    mock_ws.broadcast = AsyncMock()
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=1,
+        delivered_connections=1,
+        failed_connections=0,
+    ))
 
     with (
         patch("src.observer.insight_queue.insight_queue", mock_iq),
@@ -260,7 +303,11 @@ async def test_deliver_queued_bundle_formats_correctly():
     mock_iq = MagicMock()
     mock_iq.drain = AsyncMock(return_value=[mock_item1, mock_item2])
     mock_ws = MagicMock()
-    mock_ws.broadcast = AsyncMock()
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=1,
+        delivered_connections=1,
+        failed_connections=0,
+    ))
 
     with (
         patch("src.observer.insight_queue.insight_queue", mock_iq),
@@ -285,7 +332,11 @@ async def test_deliver_queued_bundle_single_item():
     mock_iq = MagicMock()
     mock_iq.drain = AsyncMock(return_value=[mock_item])
     mock_ws = MagicMock()
-    mock_ws.broadcast = AsyncMock()
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=1,
+        delivered_connections=1,
+        failed_connections=0,
+    ))
 
     with (
         patch("src.observer.insight_queue.insight_queue", mock_iq),
@@ -296,3 +347,63 @@ async def test_deliver_queued_bundle_single_item():
         assert count == 1
         call_args = mock_ws.broadcast.call_args[0][0]
         assert "1 update)" in call_args.content
+
+
+@pytest.mark.asyncio
+async def test_deliver_queued_bundle_logs_delivery_runtime_audit(async_db):
+    mock_item = MagicMock(content="Bundle update")
+    mock_iq = MagicMock()
+    mock_iq.drain = AsyncMock(return_value=[mock_item])
+    mock_ws = MagicMock()
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=2,
+        delivered_connections=2,
+        failed_connections=0,
+    ))
+
+    with (
+        patch("src.observer.insight_queue.insight_queue", mock_iq),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws),
+    ):
+        count = await deliver_queued_bundle()
+
+    assert count == 1
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "observer_delivery_delivered"
+        and event["tool_name"] == "observer_delivery_gate"
+        and event["details"]["intervention_type"] == "proactive_bundle"
+        and event["details"]["bundle_item_count"] == 1
+        and event["details"]["delivered_connections"] == 2
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_deliver_queued_bundle_logs_transport_failure(async_db):
+    mock_item = MagicMock(content="Bundle update")
+    mock_iq = MagicMock()
+    mock_iq.drain = AsyncMock(return_value=[mock_item])
+    mock_ws = MagicMock()
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=1,
+        delivered_connections=0,
+        failed_connections=1,
+    ))
+
+    with (
+        patch("src.observer.insight_queue.insight_queue", mock_iq),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws),
+    ):
+        count = await deliver_queued_bundle()
+
+    assert count == 0
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "observer_delivery_failed"
+        and event["tool_name"] == "observer_delivery_gate"
+        and event["details"]["intervention_type"] == "proactive_bundle"
+        and event["details"]["bundle_item_count"] == 1
+        and event["details"]["error"] == "all_connections_failed"
+        for event in events
+    )

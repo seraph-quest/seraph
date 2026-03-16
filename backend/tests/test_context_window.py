@@ -179,6 +179,24 @@ class TestSummaryCache:
             )
             assert "truncated" in result or len(result) > 0
 
+    @patch("src.agent.context_window.completion_with_fallback_sync")
+    def test_cache_miss_routes_summary_through_context_window_runtime_path(self, mock_completion):
+        from src.agent.context_window import _summarize_middle
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "short summary"
+        mock_completion.return_value = mock_response
+
+        result = _summarize_middle(
+            [_msg("user", "hello world")],
+            session_id="sess",
+            range_key="0-1",
+        )
+
+        assert result == "short summary"
+        assert mock_completion.call_args.kwargs["runtime_path"] == "context_window_summary"
+
 
 class TestSettingsIntegration:
     """Tests that build_context_window reads defaults from settings."""

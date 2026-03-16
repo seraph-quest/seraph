@@ -62,6 +62,7 @@ async def consolidate_session(session_id: str) -> None:
                 temperature=0.3,
                 max_tokens=1024,
                 timeout=settings.consolidation_llm_timeout,
+                runtime_path="session_consolidation",
             )
         except asyncio.TimeoutError:
             logger.warning(

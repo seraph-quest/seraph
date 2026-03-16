@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     fallback_models: str = ""  # comma-separated ordered fallback chain
     fallback_llm_api_key: str = ""
     fallback_llm_api_base: str = ""
+    local_model: str = ""
+    local_llm_api_key: str = ""
+    local_llm_api_base: str = ""
+    local_runtime_paths: str = ""  # comma-separated completion runtime paths that should prefer local profile
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10

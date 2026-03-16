@@ -239,6 +239,7 @@ class SessionManager:
                 }],
                 temperature=0.3,
                 max_tokens=20,
+                runtime_path="session_title_generation",
             )
 
             title = response.choices[0].message.content.strip().strip('"\'')

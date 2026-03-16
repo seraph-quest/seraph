@@ -1,7 +1,7 @@
 """Tests for memory consolidator (src/memory/consolidator.py)."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -54,6 +54,29 @@ class TestConsolidateSession:
             and event["details"]["stored_memory_count"] == 2
             for event in events
         )
+
+    async def test_extracts_facts_uses_session_consolidation_runtime_path(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "My name is Alice and I work at ACME Corp as a software engineer.")
+        await sm.add_message("s1", "assistant", "Nice to meet you, Alice! That sounds like a great position at ACME Corp.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with (
+            patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=mock_resp)) as mock_completion,
+            patch("src.memory.consolidator.add_memory"),
+        ):
+            await consolidate_session("s1")
+
+        assert mock_completion.await_args.kwargs["runtime_path"] == "session_consolidation"
 
     async def test_applies_soul_updates(self, async_db, sm):
         await sm.get_or_create("s1")

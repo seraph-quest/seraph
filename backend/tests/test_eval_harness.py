@@ -20,12 +20,12 @@ def test_run_runtime_evals_passes_all_scenarios():
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():
-    summary = asyncio.run(run_runtime_evals(["provider_fallback_chain", "observer_delivery_gate_audit"]))
+    summary = asyncio.run(run_runtime_evals(["local_runtime_profile", "observer_delivery_gate_audit"]))
 
     assert summary.total == 2
     assert summary.failed == 0
     assert [result.name for result in summary.results] == [
-        "provider_fallback_chain",
+        "local_runtime_profile",
         "observer_delivery_gate_audit",
     ]
 
@@ -42,6 +42,7 @@ def test_main_lists_available_scenarios(capsys):
     assert exit_code == 0
     assert "chat_model_wrapper" in captured.out
     assert "provider_fallback_chain" in captured.out
+    assert "local_runtime_profile" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -61,6 +62,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
         run_runtime_evals(
             [
                 "provider_fallback_chain",
+                "local_runtime_profile",
                 "observer_delivery_gate_audit",
                 "observer_daemon_ingest_audit",
             ]
@@ -76,6 +78,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-mini",
     ]
     assert details_by_name["provider_fallback_chain"]["final_model"] == "openai/gpt-4.1-mini"
+    assert details_by_name["local_runtime_profile"]["runtime_profile"] == "local"
+    assert details_by_name["local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"

@@ -178,3 +178,36 @@ def log_integration_event_sync(
         ))
     except Exception:
         logger.debug("Failed to run integration runtime audit logger", exc_info=True)
+
+
+def log_background_task_event_sync(
+    *,
+    task_name: str,
+    outcome: str,
+    session_id: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Sync wrapper for background/helper runtime events used by non-async callers."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(log_background_task_event(
+                task_name=task_name,
+                outcome=outcome,
+                session_id=session_id,
+                details=details,
+            ))
+        except Exception:
+            logger.debug("Failed to run background runtime audit logger", exc_info=True)
+        return
+
+    try:
+        loop.create_task(log_background_task_event(
+            task_name=task_name,
+            outcome=outcome,
+            session_id=session_id,
+            details=details,
+        ))
+    except Exception:
+        logger.debug("Failed to run background runtime audit logger", exc_info=True)

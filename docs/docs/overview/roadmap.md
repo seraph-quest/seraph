@@ -28,7 +28,7 @@ Legend for the checklist column:
 |---|---|---|
 | 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, secret redaction, and scoped secret references are shipped; deeper execution isolation and narrower secret-use paths are still left |
 | 02. Execution Plane | `[ ]` | Shell, browser, MCP, discovery, and visible tool execution foundations are shipped; richer process, browser, and workflow execution are still left |
-| 03. Runtime Reliability | `[ ]` | Ordered fallbacks, runtime-path primary and fallback overrides, local routing, runtime audit visibility, and deterministic eval foundations are shipped; richer provider selection, broader local routing, remaining edge coverage, and broader evals are still left |
+| 03. Runtime Reliability | `[ ]` | Ordered fallbacks, runtime-path primary and fallback overrides, local routing across helper/agent/delegation paths, runtime audit visibility, and deterministic eval foundations are shipped; richer provider selection, remaining edge coverage, and broader evals are still left |
 | 04. Presence And Reach | `[ ]` | Browser, WebSocket, proactive delivery, and the native observer daemon are shipped foundations; desktop presence, notifications, channels, and cross-surface continuity are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, strategist, goals, daily briefing, and evening review foundations are shipped; the deeper adaptive guardian layer is still left |
 | 06. Embodied UX | `[ ]` | Village UI, quest log, avatar, ambient indicators, and settings surfaces are shipped; the fuller life-OS shell is still left |
@@ -48,7 +48,7 @@ Legend for the checklist column:
 
 - [x] policy-controlled tool and MCP access with approval gates, audit logging, secret redaction, and scoped secret references
 - [x] shell, browser, vault, filesystem, goals, and web-search tool foundations with live tool execution in chat
-- [x] ordered LLM fallbacks, health-aware rerouting, runtime-path primary and fallback overrides, local helper and agent runtime paths, and broad runtime audit coverage
+- [x] ordered LLM fallbacks, health-aware rerouting, runtime-path primary and fallback overrides, local helper, agent, and delegation runtime paths, and broad runtime audit coverage
 - [x] deterministic runtime eval harness coverage for fallback routing, local routing, browser/sandbox/web-search tool boundaries, observer boundaries, and audit seams
 - [x] browser UI, WebSocket chat, proactive delivery, and a native observer daemon
 - [x] soul, memory, goals, strategist, daily briefing, and evening review foundations

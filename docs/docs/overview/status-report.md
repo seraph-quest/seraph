@@ -48,9 +48,9 @@ title: Development Status
 - [x] Health-aware rerouting away from recently failed targets
 - [x] Runtime-path-specific primary model overrides for completion and agent-model paths
 - [x] Runtime-path-specific fallback-chain overrides for completion and agent-model paths
-- [x] First-class local runtime routing for helper, scheduler, and core agent paths
+- [x] First-class local runtime routing for helper, scheduler, core agent, and delegation paths
 - [x] Runtime audit visibility across chat, WebSocket, scheduler, strategist, MCP, observer, browser, sandbox, and web search flows
-- [x] Deterministic runtime eval harness for fallback, routing, browser/sandbox/web-search tool, and observer contracts
+- [x] Deterministic runtime eval harness for fallback, local routing, context-window degradation, browser/sandbox/web-search tool, and observer contracts
 
 ### Product surfaces
 

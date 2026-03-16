@@ -96,6 +96,7 @@ async def run_activity_digest() -> None:
                 temperature=0.6,
                 max_tokens=768,
                 timeout=settings.agent_briefing_timeout,
+                runtime_path="activity_digest",
             )
         except asyncio.TimeoutError:
             logger.warning("activity_digest: LLM timed out after %ds", settings.agent_briefing_timeout)

@@ -108,6 +108,7 @@ async def run_evening_review() -> None:
                 temperature=0.6,
                 max_tokens=512,
                 timeout=settings.agent_briefing_timeout,
+                runtime_path="evening_review",
             )
         except asyncio.TimeoutError:
             logger.warning("evening_review: LLM timed out after %ds", settings.agent_briefing_timeout)

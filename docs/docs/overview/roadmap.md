@@ -43,8 +43,8 @@ If you want the current truth, use this page plus the workstream files linked be
 
 ### 03. [Runtime Reliability](../plan/runtime-reliability)
 
-- [x] ordered fallbacks, local helper-profile routing, observability, and eval foundations are shipped
-- [ ] smarter provider selection, broader local routing, and remaining edge coverage are still left
+- [x] ordered fallbacks, local helper/scheduler-profile routing, observability, and eval foundations are shipped
+- [ ] smarter provider selection, broader agent-path local routing, and remaining edge coverage are still left
 - focus: routing, fallbacks, observability, evals, and degraded-mode behavior
 
 ### 04. [Presence And Reach](../plan/presence-and-reach)

@@ -345,6 +345,42 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
     }
 
 
+async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
+    ctx = _make_context(upcoming_events=[{"summary": "Ship local routing", "start": "09:30"}])
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=ctx)
+    mock_deliver = AsyncMock()
+    local_response = _make_litellm_response("Morning briefing via local profile.")
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "daily_briefing,evening_review,activity_digest,weekly_activity_review"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.vector_store.search_formatted", return_value="- [memory] Prefer local summaries"),
+        patch("litellm.completion", return_value=local_response) as mock_completion,
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+    ):
+        await run_daily_briefing()
+
+    assert mock_completion.call_count == 1
+    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
+    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+    return {
+        "job_name": "daily_briefing",
+        "runtime_profile": "local",
+        "routed_model": mock_completion.call_args.kwargs["model"],
+        "delivered_excerpt": mock_deliver.call_args.args[0].content,
+    }
+
+
 def _eval_shell_tool_timeout_contract() -> dict[str, Any]:
     mock_client = MagicMock()
     mock_client.post.side_effect = httpx.TimeoutException("timeout")
@@ -585,6 +621,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="proactive",
         description="Daily briefing survives a primary provider failure and still delivers via fallback.",
         runner=_eval_daily_briefing_fallback,
+    ),
+    EvalScenario(
+        name="scheduled_local_runtime_profile",
+        category="runtime",
+        description="Scheduled completion-based jobs can route through the first-class local runtime profile.",
+        runner=_eval_scheduled_local_runtime_profile,
     ),
     EvalScenario(
         name="shell_tool_timeout_contract",

@@ -89,6 +89,40 @@ class TestActivityDigest:
         assert call_args[1]["is_scheduled"] is True
 
     @pytest.mark.asyncio
+    async def test_uses_named_runtime_path(self):
+        """Digest should use its explicit runtime path when calling the shared LLM runtime."""
+        mock_repo = MagicMock()
+        mock_repo.get_daily_summary = AsyncMock(return_value={
+            "date": date.today().isoformat(),
+            "total_observations": 15,
+            "total_tracked_minutes": 120,
+            "switch_count": 15,
+            "by_activity": {"coding": 5400, "browsing": 1800},
+            "by_project": {"seraph": 3600},
+            "longest_streaks": [
+                {"activity": "coding", "duration_minutes": 45, "started_at": "2025-01-01T09:00"},
+            ],
+        })
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Your daily digest text here."
+
+        with (
+            patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+            patch("src.memory.soul.read_soul", return_value="Test soul content"),
+            patch(
+                "src.scheduler.jobs.activity_digest.completion_with_fallback",
+                new=AsyncMock(return_value=mock_response),
+            ) as mock_completion,
+            patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+        ):
+            from src.scheduler.jobs.activity_digest import run_activity_digest
+            await run_activity_digest()
+
+        assert mock_completion.await_args.kwargs["runtime_path"] == "activity_digest"
+
+    @pytest.mark.asyncio
     async def test_llm_timeout(self):
         """Digest should handle LLM timeout gracefully."""
         mock_repo = MagicMock()

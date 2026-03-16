@@ -214,6 +214,35 @@ def test_completion_with_fallback_sync_keeps_remote_fallback_base_for_local_runt
     assert mock_completion.call_args_list[1].kwargs["api_base"] == "https://openrouter.ai/api/v1"
 
 
+def test_fallback_litellm_model_keeps_remote_fallback_base_for_local_runtime_path():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", "local-key"),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "chat_agent"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+    ):
+        model = FallbackLiteLLMModel(**build_model_kwargs(
+            temperature=0.3,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        ))
+
+    assert model.model_id == "ollama/llama3.2"
+    assert model.api_key == "local-key"
+    assert model.api_base == "http://localhost:11434/v1"
+    assert model._fallback_model is not None
+    assert model._fallback_model.model_id == "openai/gpt-4o-mini"
+    assert model._fallback_model.api_key == "primary-key"
+    assert model._fallback_model.api_base == "https://openrouter.ai/api/v1"
+
+
 def test_completion_with_fallback_sync_retries_with_fallback():
     primary_error = RuntimeError("primary down")
     fallback_response = MagicMock()

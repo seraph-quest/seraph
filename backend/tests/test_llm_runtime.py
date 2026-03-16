@@ -98,6 +98,51 @@ def test_build_model_kwargs_uses_runtime_model_override():
     assert kwargs["api_base"] == "https://openrouter.ai/api/v1"
 
 
+def test_build_model_kwargs_uses_runtime_profile_preferences_for_primary_target():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local|default"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "ollama/llama3.2"
+    assert kwargs["runtime_profile"] == "local"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+def test_build_model_kwargs_honors_unscoped_runtime_override_for_local_first_path():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local|default"),
+        patch.object(settings, "runtime_model_overrides", "chat_agent=openai/gpt-4.1-mini"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "openai/gpt-4.1-mini"
+    assert kwargs["runtime_profile"] == "local"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
 def test_build_model_kwargs_runtime_override_can_force_default_profile_over_local_path():
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -255,6 +300,37 @@ def test_build_completion_kwargs_uses_runtime_model_override():
     assert kwargs["model"] == "openai/gpt-4.1-mini"
     assert kwargs["api_key"] == "primary-key"
     assert kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+
+def test_build_completion_kwargs_honors_unscoped_runtime_override_for_local_first_path():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            "session_title_generation=local|default",
+        ),
+        patch.object(
+            settings,
+            "runtime_model_overrides",
+            "session_title_generation=openai/gpt-4.1-mini",
+        ),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert kwargs["model"] == "openai/gpt-4.1-mini"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
 def test_build_completion_kwargs_explicit_profile_wins_over_runtime_override():
@@ -875,6 +951,38 @@ def test_fallback_litellm_model_uses_runtime_fallback_override_chain():
     ]
 
 
+def test_fallback_litellm_model_uses_runtime_profile_preferences_before_fallback_chain():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local|default"),
+        patch.object(settings, "fallback_model", "openai/gpt-4.1-mini"),
+        patch.object(settings, "fallback_models", ""),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+    ):
+        model = FallbackLiteLLMModel(
+            **build_model_kwargs(
+                temperature=0.3,
+                max_tokens=256,
+                runtime_path="chat_agent",
+            )
+        )
+
+    assert model.model_id == "ollama/llama3.2"
+    assert model._runtime_profile == "local"
+    assert [fallback.model_id for fallback in model._fallback_models] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-mini",
+    ]
+    assert getattr(model._fallback_models[0], "runtime_profile") == "default"
+    assert getattr(model._fallback_models[1], "runtime_profile") is None
+
+
 def test_fallback_litellm_model_reroutes_away_from_unhealthy_primary(async_db):
     first_fallback_response = MagicMock()
     rerouted_response = MagicMock()
@@ -929,6 +1037,56 @@ def test_fallback_litellm_model_reroutes_away_from_unhealthy_primary(async_db):
     assert events
     assert events[0]["details"]["primary_model"] == "openrouter/anthropic/claude-sonnet-4"
     assert events[0]["details"]["rerouted_model"] == "ollama/llama3.2"
+
+
+def test_completion_with_fallback_prefers_alternate_runtime_profile_before_explicit_fallback(async_db):
+    completion_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            "session_consolidation=local|default",
+        ),
+        patch.object(settings, "fallback_model", "openai/gpt-4.1-mini"),
+        patch.object(settings, "fallback_models", ""),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+        patch(
+            "litellm.completion",
+            side_effect=[RuntimeError("local down"), completion_response],
+        ) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "prefer local before remote"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_consolidation",
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "ollama/llama3.2",
+        "openrouter/anthropic/claude-sonnet-4",
+    ]
+    assert mock_completion.call_args_list[1].kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_fallback_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["fallback_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert events[0]["details"]["attempted_fallback_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+    ]
 
 
 def test_fallback_litellm_model_skips_duplicate_fallback_target():

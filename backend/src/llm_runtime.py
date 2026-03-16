@@ -20,6 +20,7 @@ _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
+_KNOWN_RUNTIME_PROFILES = {"default", "local"}
 _runtime_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "llm_runtime_request_id",
     default=None,
@@ -68,20 +69,83 @@ def _runtime_model_override(runtime_path: str | None) -> tuple[str | None, str] 
     return None
 
 
+def _normalize_runtime_profile(profile: str) -> str | None:
+    normalized = profile.strip()
+    if normalized not in _KNOWN_RUNTIME_PROFILES:
+        return None
+    if normalized == "local" and not has_local_model_profile():
+        return None
+    return normalized
+
+
+def runtime_profile_preferences(runtime_path: str | None) -> list[str]:
+    """Return the configured ordered profile preferences for a runtime path."""
+    if not runtime_path:
+        return []
+
+    for raw_entry in settings.runtime_profile_preferences.split(";"):
+        entry = raw_entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        path, _, raw_value = entry.partition("=")
+        if path.strip() != runtime_path:
+            continue
+        preferences: list[str] = []
+        for raw_profile in raw_value.split("|"):
+            normalized = _normalize_runtime_profile(raw_profile)
+            if normalized and normalized not in preferences:
+                preferences.append(normalized)
+        return preferences
+    return []
+
+
+def runtime_profile_candidates(
+    *,
+    runtime_path: str | None = None,
+    profile: str | None = None,
+) -> list[str]:
+    """Return the ordered runtime profiles to try for an implicit runtime path."""
+    if profile:
+        return [profile]
+
+    candidates: list[str] = []
+    override = _runtime_model_override(runtime_path)
+    override_profile = override[0] if override else None
+    configured_preferences = runtime_profile_preferences(runtime_path)
+    ordered_preferences = configured_preferences
+
+    if override_profile:
+        if override_profile in configured_preferences:
+            ordered_preferences = [
+                override_profile,
+                *[candidate for candidate in configured_preferences if candidate != override_profile],
+            ]
+        elif configured_preferences:
+            ordered_preferences = [override_profile, *configured_preferences]
+        else:
+            ordered_preferences = [override_profile]
+
+    for candidate in ordered_preferences:
+        normalized = _normalize_runtime_profile(candidate)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    if not candidates:
+        if runtime_path and runtime_path in local_runtime_paths() and has_local_model_profile():
+            candidates.append("local")
+        else:
+            candidates.append("default")
+
+    return candidates
+
+
 def resolve_runtime_profile(
     *,
     runtime_path: str | None = None,
     profile: str | None = None,
 ) -> str:
     """Resolve the runtime profile name for the current call."""
-    if profile:
-        return profile
-    override = _runtime_model_override(runtime_path)
-    if override and override[0]:
-        return override[0]
-    if runtime_path and runtime_path in local_runtime_paths() and has_local_model_profile():
-        return "local"
-    return "default"
+    return runtime_profile_candidates(runtime_path=runtime_path, profile=profile)[0]
 
 
 def _resolved_primary_model_id(
@@ -91,7 +155,9 @@ def _resolved_primary_model_id(
 ) -> str:
     override = _runtime_model_override(runtime_path)
     if override:
-        return override[1]
+        override_profile, override_model_id = override
+        if override_profile is None or override_profile == profile:
+            return override_model_id
     return _profile_model_id(profile)
 
 
@@ -263,9 +329,8 @@ def _fallback_targets(
     primary_api_key: str | None,
     primary_profile: str = "default",
     runtime_path: str | None = None,
+    profile: str | None = None,
 ) -> list[dict[str, str | None]]:
-    fallback_api_key = _fallback_api_key(primary_api_key, primary_profile=primary_profile)
-    fallback_api_base = _fallback_api_base(primary_api_base, primary_profile=primary_profile)
     seen_targets = {
         _target_key(
             model_id=primary_model_id,
@@ -274,6 +339,36 @@ def _fallback_targets(
         ),
     }
     targets: list[dict[str, str | None]] = []
+
+    for candidate_profile in runtime_profile_candidates(
+        runtime_path=runtime_path,
+        profile=profile,
+    )[1:]:
+        candidate_api_key = _profile_api_key(candidate_profile)
+        candidate_api_base = _profile_api_base(candidate_profile)
+        candidate_model_id = _resolved_primary_model_id(
+            runtime_path=runtime_path,
+            profile=candidate_profile,
+        )
+        target_key = _target_key(
+            model_id=candidate_model_id,
+            api_base=candidate_api_base,
+            api_key=candidate_api_key,
+        )
+        if target_key in seen_targets:
+            continue
+        seen_targets.add(target_key)
+        targets.append(
+            {
+                "model_id": candidate_model_id,
+                "api_base": candidate_api_base,
+                "api_key": candidate_api_key,
+                "profile": candidate_profile,
+            }
+        )
+
+    fallback_api_key = _fallback_api_key(primary_api_key, primary_profile=primary_profile)
+    fallback_api_base = _fallback_api_base(primary_api_base, primary_profile=primary_profile)
     for fallback_model_id in fallback_model_ids(runtime_path=runtime_path):
         target_key = _target_key(
             model_id=fallback_model_id,
@@ -288,6 +383,7 @@ def _fallback_targets(
                 "model_id": fallback_model_id,
                 "api_base": fallback_api_base,
                 "api_key": fallback_api_key,
+                "profile": None,
             }
         )
     return targets
@@ -489,15 +585,15 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             primary_profile=self._runtime_profile,
             runtime_path=self._runtime_path,
         ):
-            fallback_models.append(
-                BaseLiteLLMModel(
+            fallback_model = BaseLiteLLMModel(
                     model_id=str(target["model_id"]),
                     api_base=target["api_base"] or None,
                     api_key=target["api_key"] or None,
                     custom_role_conversions=custom_role_conversions,
                     **fallback_kwargs,
                 )
-            )
+            setattr(fallback_model, "runtime_profile", target.get("profile"))
+            fallback_models.append(fallback_model)
 
         self._fallback_models = tuple(fallback_models)
         self._fallback_model = self._fallback_models[0] if self._fallback_models else None
@@ -518,6 +614,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 "api_base": fallback_model.api_base,
                 "api_key": fallback_model.api_key,
                 "model": fallback_model,
+                "profile": getattr(fallback_model, "runtime_profile", None),
             }
             for fallback_model in self._fallback_models
         ]
@@ -540,6 +637,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     "runtime_path": "agent_generate",
                     "primary_model": primary_model,
                     "rerouted_model": healthy_fallbacks[0]["model_id"],
+                    "rerouted_profile": healthy_fallbacks[0].get("profile"),
                     "unhealthy_models": [primary_model],
                     "cooldown_seconds": _target_cooldown_seconds(),
                 },
@@ -717,6 +815,7 @@ def completion_with_fallback_sync(
             primary_api_key=primary_kwargs.get("api_key"),
             primary_profile=resolved_profile,
             runtime_path=runtime_path,
+            profile=profile,
         )
         healthy_fallbacks, unhealthy_fallbacks = _partition_targets_by_health(fallback_targets)
         primary_unhealthy = not _is_target_healthy(
@@ -738,6 +837,7 @@ def completion_with_fallback_sync(
                     "runtime_profile": resolved_profile,
                     "primary_model": primary_model,
                     "rerouted_model": healthy_fallbacks[0]["model_id"],
+                    "rerouted_profile": healthy_fallbacks[0].get("profile"),
                     "unhealthy_models": [primary_model],
                     "cooldown_seconds": _target_cooldown_seconds(),
                 },

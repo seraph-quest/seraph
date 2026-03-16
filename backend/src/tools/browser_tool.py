@@ -98,6 +98,11 @@ async def _browse(url: str, action: str) -> str:
             await browser.close()
 
 
+def _run_browse_sync(url: str, action: str) -> str:
+    """Bridge the async browser implementation into the thread pool."""
+    return asyncio.run(_browse(url, action))
+
+
 @tool
 def browse_webpage(url: str, action: str = "extract") -> str:
     """Browse a webpage and extract its content.
@@ -132,9 +137,14 @@ def browse_webpage(url: str, action: str = "extract") -> str:
         return f"Error: action must be 'extract', 'html', or 'screenshot', got '{action}'"
 
     try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+    except Exception:  # pragma: no cover - playwright import failures are handled below
+        PlaywrightTimeoutError = TimeoutError
+
+    try:
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            result = pool.submit(asyncio.run, _browse(url, action)).result()
+            result = pool.submit(_run_browse_sync, url, action).result()
         log_integration_event_sync(
             integration_type="browser",
             name="playwright",
@@ -142,6 +152,19 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             details=_browser_details(url, action),
         )
         return result
+    except (TimeoutError, PlaywrightTimeoutError) as e:
+        log_integration_event_sync(
+            integration_type="browser",
+            name="playwright",
+            outcome="timed_out",
+            details={
+                **_browser_details(url, action),
+                "timeout_seconds": settings.browser_timeout,
+                "error": str(e),
+            },
+        )
+        logger.exception("Browser automation timed out")
+        return f"Error browsing {url}: timed out after {settings.browser_timeout}s"
     except Exception as e:
         log_integration_event_sync(
             integration_type="browser",

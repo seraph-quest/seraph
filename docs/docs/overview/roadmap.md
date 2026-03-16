@@ -49,7 +49,7 @@ Legend for the checklist column:
 - [x] policy-controlled tool and MCP access with approval gates, audit logging, secret redaction, and scoped secret references
 - [x] shell, browser, vault, filesystem, goals, and web-search tool foundations with live tool execution in chat
 - [x] ordered LLM fallbacks, health-aware rerouting, runtime-path primary and fallback overrides, local helper and agent runtime paths, and broad runtime audit coverage
-- [x] deterministic runtime eval harness coverage for fallback routing, local routing, tool boundaries, observer boundaries, and audit seams
+- [x] deterministic runtime eval harness coverage for fallback routing, local routing, browser/sandbox/web-search tool boundaries, observer boundaries, and audit seams
 - [x] browser UI, WebSocket chat, proactive delivery, and a native observer daemon
 - [x] soul, memory, goals, strategist, daily briefing, and evening review foundations
 - [x] skills, MCP integration, and recursive delegation foundations

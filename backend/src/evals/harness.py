@@ -34,6 +34,7 @@ from src.observer.delivery import deliver_or_queue
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.tools.audit import wrap_tools_for_audit
+from src.tools.browser_tool import browse_webpage
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
 from src.models.schemas import WSResponse
@@ -684,6 +685,42 @@ async def _eval_web_search_empty_result_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_browser_runtime_audit() -> dict[str, Any]:
+    class _ImmediateFuture:
+        def result(self):
+            raise TimeoutError("Timed out")
+
+    class _ImmediateExecutor:
+        def __enter__(self) -> "_ImmediateExecutor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def submit(self, _fn, *args, **kwargs) -> _ImmediateFuture:
+            return _ImmediateFuture()
+
+    with (
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        result = browse_webpage("https://example.com/slow", action="extract")
+        await asyncio.sleep(0)
+
+    assert "timed out after" in result.lower()
+    timed_out = _find_audit_call(
+        mock_log_event,
+        event_type="integration_timed_out",
+        tool_name="browser:playwright",
+    )
+    return {
+        "result": result,
+        "timeout_seconds": timed_out["details"]["timeout_seconds"],
+        "hostname": timed_out["details"]["hostname"],
+        "action": timed_out["details"]["action"],
+    }
+
+
 async def _eval_observer_calendar_source_audit() -> dict[str, Any]:
     mock_path = MagicMock()
     mock_path.exists.return_value = True
@@ -1065,6 +1102,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Web search no-hit responses record a distinct empty-result audit outcome.",
         runner=_eval_web_search_empty_result_audit,
+    ),
+    EvalScenario(
+        name="browser_runtime_audit",
+        category="observability",
+        description="Browser timeouts record a distinct runtime audit outcome instead of collapsing into generic failures.",
+        runner=_eval_browser_runtime_audit,
     ),
     EvalScenario(
         name="observer_calendar_source_audit",

@@ -50,6 +50,25 @@ def test_search_logs_runtime_audit_empty_result(async_db):
     assert events[0]["details"]["reason"] == "empty_table"
 
 
+def test_search_with_invalid_query_still_fails_open(async_db):
+    table = MagicMock()
+    table.count_rows.return_value = 0
+
+    with patch("src.memory.vector_store._get_or_create_table", return_value=table):
+        results = vector_store.search(None, top_k=3)
+
+    assert results == []
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "integration_empty_result"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["tool_name"] == "vector_store:memories"
+    assert events[0]["details"]["query_length"] is None
+
+
 def test_add_memory_logs_runtime_audit_failure(async_db):
     with patch("src.memory.vector_store._get_or_create_table", side_effect=RuntimeError("db down")):
         memory_id = vector_store.add_memory("broken", category="fact", source_session_id="sess")

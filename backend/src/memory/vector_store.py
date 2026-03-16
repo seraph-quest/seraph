@@ -40,6 +40,13 @@ def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
     )
 
 
+def _safe_query_length(query: object) -> int | None:
+    try:
+        return len(query)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
 def _get_db() -> lancedb.DBConnection:
     """Lazy-open the LanceDB connection (thread-safe)."""
     global _db
@@ -151,7 +158,7 @@ def search(
                 details={
                     "operation": "search",
                     "reason": "empty_table",
-                    "query_length": len(query),
+                    "query_length": _safe_query_length(query),
                     "category_filter": category_filter,
                     "top_k": top_k,
                 },
@@ -177,7 +184,7 @@ def search(
                 details={
                     "operation": "search",
                     "reason": "no_match",
-                    "query_length": len(query),
+                    "query_length": _safe_query_length(query),
                     "category_filter": category_filter,
                     "top_k": top_k,
                 },
@@ -188,7 +195,7 @@ def search(
             "succeeded",
             details={
                 "operation": "search",
-                "query_length": len(query),
+                "query_length": _safe_query_length(query),
                 "category_filter": category_filter,
                 "top_k": top_k,
                 "result_count": len(rows),
@@ -211,7 +218,7 @@ def search(
             "failed",
             details={
                 "operation": "search",
-                "query_length": len(query),
+                "query_length": _safe_query_length(query),
                 "category_filter": category_filter,
                 "top_k": top_k,
                 "error": str(exc),

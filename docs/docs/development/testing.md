@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Testing Guide
 
-Seraph has 624 automated tests (500 backend, 124 frontend) with CI running on every push and PR.
+Seraph has automated backend and frontend coverage with CI running on every push and PR.
 
 ## Running Tests
 
@@ -36,12 +36,13 @@ cd backend
 uv run python -m src.evals.harness --list
 uv run python -m src.evals.harness
 uv run python -m src.evals.harness --scenario provider_fallback_chain
+uv run python -m src.evals.harness --scenario local_runtime_profile
 uv run python -m src.evals.harness --scenario daily_briefing_fallback
 uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, proactive delivery, daemon ingest, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, local helper-profile routing, proactive delivery, daemon ingest, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 

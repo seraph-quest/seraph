@@ -67,6 +67,7 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
             }],
             temperature=0.3,
             max_tokens=200,
+            runtime_path="context_window_summary",
         )
         summary = response.choices[0].message.content.strip()
     except Exception:

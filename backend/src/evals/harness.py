@@ -231,6 +231,43 @@ def _eval_provider_fallback_chain() -> dict[str, Any]:
     }
 
 
+def _eval_local_runtime_profile() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Handled by a local helper profile.")
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(
+            settings,
+            "local_runtime_paths",
+            "context_window_summary,session_title_generation,session_consolidation",
+        ),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        response = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "keep helper work local"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_consolidation",
+        )
+
+    assert mock_completion.call_count == 1
+    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
+    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+    return {
+        "runtime_path": "session_consolidation",
+        "runtime_profile": "local",
+        "routed_model": mock_completion.call_args.kwargs["model"],
+        "response_excerpt": response.choices[0].message.content,
+    }
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -524,6 +561,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Direct completion retries across an ordered fallback chain instead of a single backup target.",
         runner=_eval_provider_fallback_chain,
+    ),
+    EvalScenario(
+        name="local_runtime_profile",
+        category="runtime",
+        description="Bounded helper completions can route through a first-class local runtime profile.",
+        runner=_eval_local_runtime_profile,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

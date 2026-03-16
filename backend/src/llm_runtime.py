@@ -27,6 +27,51 @@ def _primary_api_key() -> str:
     return settings.llm_api_key or settings.openrouter_api_key
 
 
+def has_local_model_profile() -> bool:
+    """Return whether a local-model profile is configured."""
+    return bool(settings.local_model.strip())
+
+
+def local_runtime_paths() -> set[str]:
+    """Return the configured runtime-path names that should prefer the local profile."""
+    return {
+        path.strip()
+        for path in settings.local_runtime_paths.split(",")
+        if path.strip()
+    }
+
+
+def resolve_runtime_profile(
+    *,
+    runtime_path: str | None = None,
+    profile: str | None = None,
+) -> str:
+    """Resolve the runtime profile name for the current call."""
+    if profile:
+        return profile
+    if runtime_path and runtime_path in local_runtime_paths() and has_local_model_profile():
+        return "local"
+    return "default"
+
+
+def _profile_model_id(profile: str) -> str:
+    if profile == "local" and has_local_model_profile():
+        return settings.local_model
+    return settings.default_model
+
+
+def _profile_api_key(profile: str) -> str:
+    if profile == "local" and has_local_model_profile():
+        return settings.local_llm_api_key or _primary_api_key()
+    return _primary_api_key()
+
+
+def _profile_api_base(profile: str) -> str:
+    if profile == "local" and has_local_model_profile():
+        return settings.local_llm_api_base or settings.llm_api_base
+    return settings.llm_api_base
+
+
 def fallback_model_ids() -> list[str]:
     """Return the ordered list of configured fallback model ids."""
     fallback_ids: list[str] = []
@@ -43,18 +88,21 @@ def build_model_kwargs(
     temperature: float,
     max_tokens: int,
     model_id: str | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Build LiteLLMModel kwargs from the shared runtime settings."""
+    resolved_profile = resolve_runtime_profile(profile=profile)
     kwargs: dict[str, Any] = {
-        "model_id": model_id or settings.default_model,
+        "model_id": model_id or _profile_model_id(resolved_profile),
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    api_key = _primary_api_key()
+    api_key = _profile_api_key(resolved_profile)
     if api_key:
         kwargs["api_key"] = api_key
-    if settings.llm_api_base:
-        kwargs["api_base"] = settings.llm_api_base
+    api_base = _profile_api_base(resolved_profile)
+    if api_base:
+        kwargs["api_base"] = api_base
     return kwargs
 
 
@@ -68,6 +116,8 @@ def build_completion_kwargs(
     fallback_model_id: str | None = None,
     fallback_api_key: str | None = None,
     fallback_api_base: str | None = None,
+    runtime_path: str | None = None,
+    profile: str | None = None,
 ) -> dict[str, Any]:
     """Build litellm.completion kwargs for either the primary or fallback path."""
     if use_fallback:
@@ -83,14 +133,15 @@ def build_completion_kwargs(
         api_key = fallback_api_key or settings.fallback_llm_api_key or _primary_api_key()
         api_base = fallback_api_base or settings.fallback_llm_api_base or settings.llm_api_base
     else:
+        resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
         kwargs = {
-            "model": model_id or settings.default_model,
+            "model": model_id or _profile_model_id(resolved_profile),
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        api_key = _primary_api_key()
-        api_base = settings.llm_api_base
+        api_key = _profile_api_key(resolved_profile)
+        api_base = _profile_api_base(resolved_profile)
 
     if api_key:
         kwargs["api_key"] = api_key
@@ -104,12 +155,20 @@ def has_fallback_model() -> bool:
     return bool(fallback_model_ids())
 
 
-def _fallback_api_key(primary_api_key: str | None) -> str:
-    return settings.fallback_llm_api_key or primary_api_key or _primary_api_key()
+def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "default") -> str:
+    if settings.fallback_llm_api_key:
+        return settings.fallback_llm_api_key
+    if primary_profile == "local":
+        return _primary_api_key()
+    return primary_api_key or _primary_api_key()
 
 
-def _fallback_api_base(primary_api_base: str | None) -> str:
-    return settings.fallback_llm_api_base or primary_api_base or settings.llm_api_base
+def _fallback_api_base(primary_api_base: str | None, *, primary_profile: str = "default") -> str:
+    if settings.fallback_llm_api_base:
+        return settings.fallback_llm_api_base
+    if primary_profile == "local":
+        return settings.llm_api_base
+    return primary_api_base or settings.llm_api_base
 
 
 def _safe_model_name(kwargs: dict[str, Any]) -> str:
@@ -125,9 +184,10 @@ def _fallback_targets(
     primary_model_id: str,
     primary_api_base: str | None,
     primary_api_key: str | None,
+    primary_profile: str = "default",
 ) -> list[dict[str, str | None]]:
-    fallback_api_key = _fallback_api_key(primary_api_key)
-    fallback_api_base = _fallback_api_base(primary_api_base)
+    fallback_api_key = _fallback_api_key(primary_api_key, primary_profile=primary_profile)
+    fallback_api_base = _fallback_api_base(primary_api_base, primary_profile=primary_profile)
     seen_targets = {
         _target_key(
             model_id=primary_model_id,
@@ -410,16 +470,21 @@ def completion_with_fallback_sync(
     max_tokens: int,
     model_id: str | None = None,
     request_id: str | None = None,
+    runtime_path: str = "completion",
+    profile: str | None = None,
 ):
     """Execute a litellm completion with an optional fallback target."""
     import litellm
 
     try:
+        resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
         primary_kwargs = build_completion_kwargs(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             model_id=model_id,
+            runtime_path=runtime_path,
+            profile=resolved_profile,
         )
         primary_model = _safe_model_name(primary_kwargs)
         try:
@@ -429,7 +494,8 @@ def completion_with_fallback_sync(
                     event_type="llm_primary_success",
                     summary=f"Primary LLM completion succeeded via {primary_model}",
                     details={
-                        "runtime_path": "completion",
+                        "runtime_path": runtime_path,
+                        "runtime_profile": resolved_profile,
                         "primary_model": primary_model,
                         "used_fallback": False,
                     },
@@ -440,6 +506,7 @@ def completion_with_fallback_sync(
                 primary_model_id=primary_model,
                 primary_api_base=primary_kwargs.get("api_base"),
                 primary_api_key=primary_kwargs.get("api_key"),
+                primary_profile=resolved_profile,
             )
             if not fallback_targets:
                 if _can_log_request(request_id):
@@ -447,7 +514,8 @@ def completion_with_fallback_sync(
                         event_type="llm_primary_failure",
                         summary=f"Primary LLM completion failed via {primary_model}",
                         details={
-                            "runtime_path": "completion",
+                            "runtime_path": runtime_path,
+                            "runtime_profile": resolved_profile,
                             "primary_model": primary_model,
                             "used_fallback": False,
                             "error": str(primary_error),
@@ -484,7 +552,8 @@ def completion_with_fallback_sync(
                             event_type="llm_fallback_success",
                             summary=f"Fallback LLM completion succeeded via {fallback_model}",
                             details={
-                                "runtime_path": "completion",
+                                "runtime_path": runtime_path,
+                                "runtime_profile": resolved_profile,
                                 "primary_model": primary_model,
                                 "fallback_model": fallback_model,
                                 "attempted_fallback_models": attempted_fallback_models,
@@ -516,7 +585,8 @@ def completion_with_fallback_sync(
                     event_type="llm_fallback_failure",
                     summary=f"Fallback LLM completion failed via {final_fallback_model}",
                     details={
-                        "runtime_path": "completion",
+                        "runtime_path": runtime_path,
+                        "runtime_profile": resolved_profile,
                         "primary_model": primary_model,
                         "fallback_model": final_fallback_model,
                         "attempted_fallback_models": attempted_fallback_models,
@@ -540,10 +610,13 @@ async def completion_with_fallback(
     max_tokens: int,
     timeout: int | None = None,
     model_id: str | None = None,
+    runtime_path: str = "completion",
+    profile: str | None = None,
 ):
     """Async wrapper around the shared completion fallback flow."""
     request_id = uuid4().hex
     _register_request(request_id)
+    resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
     coro = asyncio.to_thread(
         completion_with_fallback_sync,
         messages=messages,
@@ -551,6 +624,8 @@ async def completion_with_fallback(
         max_tokens=max_tokens,
         model_id=model_id,
         request_id=request_id,
+        runtime_path=runtime_path,
+        profile=resolved_profile,
     )
     try:
         if timeout is None:
@@ -560,10 +635,11 @@ async def completion_with_fallback(
         _mark_request_timed_out(request_id)
         await _log_llm_runtime_event(
             event_type="llm_timed_out",
-            summary=f"LLM completion timed out via {model_id or settings.default_model}",
+            summary=f"LLM completion timed out via {model_id or _profile_model_id(resolved_profile)}",
             details={
-                "runtime_path": "completion",
-                "primary_model": model_id or settings.default_model,
+                "runtime_path": runtime_path,
+                "runtime_profile": resolved_profile,
+                "primary_model": model_id or _profile_model_id(resolved_profile),
                 "timeout_seconds": timeout,
                 "fallback_configured": has_fallback_model(),
             },

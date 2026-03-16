@@ -37,6 +37,26 @@ def test_build_model_kwargs_uses_provider_agnostic_settings():
     assert kwargs["max_tokens"] == 512
 
 
+def test_build_model_kwargs_uses_local_profile_settings():
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            profile="local",
+        )
+
+    assert kwargs["model_id"] == "ollama/llama3.2"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
 def test_build_completion_kwargs_uses_fallback_settings():
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -50,6 +70,28 @@ def test_build_completion_kwargs_uses_fallback_settings():
             temperature=0.2,
             max_tokens=128,
             use_fallback=True,
+        )
+
+    assert kwargs["model"] == "ollama/llama3.2"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+def test_build_completion_kwargs_uses_local_profile_settings():
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_consolidation",
+            profile="local",
         )
 
     assert kwargs["model"] == "ollama/llama3.2"
@@ -76,6 +118,79 @@ def test_build_completion_kwargs_uses_first_model_from_fallback_chain():
     assert kwargs["model"] == "openai/gpt-4o-mini"
     assert kwargs["api_key"] == "primary-key"
     assert kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+
+def test_completion_with_fallback_sync_uses_local_profile_for_runtime_path(async_db):
+    success_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "session_consolidation"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("litellm.completion", return_value=success_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+            runtime_path="session_consolidation",
+        )
+
+    assert result is success_response
+    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
+    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "session_consolidation"
+    assert events[0]["details"]["runtime_profile"] == "local"
+    assert events[0]["details"]["primary_model"] == "ollama/llama3.2"
+
+
+def test_completion_with_fallback_sync_keeps_remote_fallback_base_for_local_runtime_path():
+    fallback_response = MagicMock()
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", "local-key"),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "session_consolidation"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+        patch(
+            "litellm.completion",
+            side_effect=[RuntimeError("local down"), fallback_response],
+        ) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=256,
+            runtime_path="session_consolidation",
+        )
+
+    assert result is fallback_response
+    assert mock_completion.call_args_list[0].kwargs["model"] == "ollama/llama3.2"
+    assert mock_completion.call_args_list[0].kwargs["api_key"] == "local-key"
+    assert mock_completion.call_args_list[0].kwargs["api_base"] == "http://localhost:11434/v1"
+    assert mock_completion.call_args_list[1].kwargs["model"] == "openai/gpt-4o-mini"
+    assert mock_completion.call_args_list[1].kwargs["api_key"] == "primary-key"
+    assert mock_completion.call_args_list[1].kwargs["api_base"] == "https://openrouter.ai/api/v1"
 
 
 def test_completion_with_fallback_sync_retries_with_fallback():

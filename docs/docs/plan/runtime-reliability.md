@@ -20,6 +20,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] direct LiteLLM fallback path
 - [x] ordered fallback-chain routing across shared completion and agent-model paths
 - [x] health-aware cooldown rerouting across shared completion and agent-model paths
+- [x] runtime-path-specific primary model overrides across shared completion and agent-model paths
 - [x] first-class local runtime profile for bounded helper flows, scheduled completion-based jobs, and core agent model factories
 - [x] timeout-safe audit visibility into primary-vs-fallback LLM completion and agent-model behavior
 - [x] fallback-capable `smolagents` model wrappers for chat, onboarding, strategist, and specialists
@@ -41,7 +42,7 @@ Make Seraph more resilient, observable, and predictable under real usage.
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider routing beyond the current ordered fallback and cooldown rerouting with richer policy-aware selection
+- [ ] deepen provider routing beyond the current explicit runtime-path overrides, ordered fallback, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduled completion, and core agent-model paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, calendar/git/goal/time sources, daemon ingest, proactive delivery gating, current MCP lifecycle coverage, and the browser/sandbox/web-search tool boundaries
 - [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing, local-profile behavior, and remaining edge-path contracts

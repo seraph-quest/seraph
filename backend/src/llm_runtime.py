@@ -44,6 +44,30 @@ def local_runtime_paths() -> set[str]:
     }
 
 
+def _runtime_model_override(runtime_path: str | None) -> tuple[str | None, str] | None:
+    """Return an optional runtime-path-specific profile/model override."""
+    if not runtime_path:
+        return None
+    for raw_entry in settings.runtime_model_overrides.split(","):
+        entry = raw_entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        path, _, raw_value = entry.partition("=")
+        if path.strip() != runtime_path:
+            continue
+        value = raw_value.strip()
+        if not value:
+            return None
+        if ":" in value:
+            maybe_profile, model_id = value.split(":", 1)
+            normalized_profile = maybe_profile.strip()
+            normalized_model_id = model_id.strip()
+            if normalized_profile in {"default", "local"} and normalized_model_id:
+                return normalized_profile, normalized_model_id
+        return None, value
+    return None
+
+
 def resolve_runtime_profile(
     *,
     runtime_path: str | None = None,
@@ -52,9 +76,23 @@ def resolve_runtime_profile(
     """Resolve the runtime profile name for the current call."""
     if profile:
         return profile
+    override = _runtime_model_override(runtime_path)
+    if override and override[0]:
+        return override[0]
     if runtime_path and runtime_path in local_runtime_paths() and has_local_model_profile():
         return "local"
     return "default"
+
+
+def _resolved_primary_model_id(
+    *,
+    runtime_path: str | None = None,
+    profile: str = "default",
+) -> str:
+    override = _runtime_model_override(runtime_path)
+    if override:
+        return override[1]
+    return _profile_model_id(profile)
 
 
 def _profile_model_id(profile: str) -> str:
@@ -97,7 +135,10 @@ def build_model_kwargs(
     """Build LiteLLMModel kwargs from the shared runtime settings."""
     resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
     kwargs: dict[str, Any] = {
-        "model_id": model_id or _profile_model_id(resolved_profile),
+        "model_id": model_id or _resolved_primary_model_id(
+            runtime_path=runtime_path,
+            profile=resolved_profile,
+        ),
         "temperature": temperature,
         "max_tokens": max_tokens,
         "runtime_profile": resolved_profile,
@@ -140,7 +181,10 @@ def build_completion_kwargs(
     else:
         resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
         kwargs = {
-            "model": model_id or _profile_model_id(resolved_profile),
+            "model": model_id or _resolved_primary_model_id(
+                runtime_path=runtime_path,
+                profile=resolved_profile,
+            ),
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,

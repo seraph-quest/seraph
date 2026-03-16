@@ -46,6 +46,7 @@ title: Development Status
 - [x] Shared provider-agnostic LLM runtime settings
 - [x] Ordered fallback chains across completion and agent-model paths
 - [x] Health-aware rerouting away from recently failed targets
+- [x] Runtime-path-specific primary model overrides for completion and agent-model paths
 - [x] First-class local runtime routing for helper, scheduler, and core agent paths
 - [x] Runtime audit visibility across chat, WebSocket, scheduler, strategist, MCP, observer, browser, sandbox, and web search flows
 - [x] Deterministic runtime eval harness for fallback, routing, tool, and observer contracts
@@ -68,7 +69,7 @@ title: Development Status
 
 ### Runtime Reliability
 
-- [ ] richer provider selection beyond ordered fallback chains and cooldown rerouting
+- [ ] richer provider selection beyond explicit runtime-path overrides, ordered fallback chains, and cooldown rerouting
 - [ ] broader local-model routing into any remaining runtime paths where it makes sense
 - [ ] remaining edge observability beyond the already-covered agent, scheduler, observer, and integration paths
 - [ ] broader eval coverage beyond deterministic seam checks

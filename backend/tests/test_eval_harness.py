@@ -45,6 +45,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
     assert "agent_local_runtime_profile" in captured.out
+    assert "runtime_model_overrides" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "web_search_runtime_audit" in captured.out
@@ -75,6 +76,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "provider_health_reroute",
                 "local_runtime_profile",
                 "agent_local_runtime_profile",
+                "runtime_model_overrides",
                 "scheduled_local_runtime_profile",
                 "shell_tool_runtime_audit",
                 "web_search_runtime_audit",
@@ -108,6 +110,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
+    assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
+    assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
+    assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"
+    assert details_by_name["runtime_model_overrides"]["agent_model"] == "openai/gpt-4.1-mini"
     assert details_by_name["scheduled_local_runtime_profile"]["job_name"] == "daily_briefing"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["shell_tool_runtime_audit"]["timeout_seconds"] == 35

@@ -46,6 +46,7 @@ uv run python -m src.evals.harness --scenario mcp_specialist_local_runtime_profi
 uv run python -m src.evals.harness --scenario embedding_runtime_audit
 uv run python -m src.evals.harness --scenario vector_store_runtime_audit
 uv run python -m src.evals.harness --scenario soul_runtime_audit
+uv run python -m src.evals.harness --scenario filesystem_runtime_audit
 uv run python -m src.evals.harness --scenario runtime_model_overrides
 uv run python -m src.evals.harness --scenario runtime_fallback_overrides
 uv run python -m src.evals.harness --scenario scheduled_local_runtime_profile
@@ -62,7 +63,7 @@ uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, and soul-file boundary failures, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -124,7 +125,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_strategist.py` | 12 | Strategist agent — JSON parsing (valid, fenced, invalid, empty, partial), agent creation |
 | `test_timeouts.py` | 5 | Execution timeouts — agent, briefing, consolidation timeouts |
 | `test_tool_registry.py` | 4 | Tool metadata registry — lookup, required fields, copy safety |
-| `test_tools.py` | 14 | Filesystem tools, template tool, web search, runtime audit logging |
+| `test_tools.py` | 20 | Filesystem tools, template tool, web search, and filesystem/web-search runtime audit logging |
 | `test_user_state.py` | 57 | User state machine — derive_state, IDE deep work, should_deliver, budget, interruption modes |
 | `test_vault_api.py` | 4 | Vault API — list keys, delete keys |
 | `test_vault_crypto.py` | 4 | Vault crypto — Fernet encrypt/decrypt, key generation |

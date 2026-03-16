@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import tempfile
@@ -41,6 +42,7 @@ from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
+from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
 from src.models.schemas import WSResponse
@@ -703,6 +705,70 @@ async def _eval_soul_runtime_audit() -> dict[str, Any]:
             }
         finally:
             soul_mod._soul_path = original_path
+
+
+async def _eval_filesystem_runtime_audit() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with (
+            patch.object(settings, "workspace_dir", tmpdir),
+            patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+        ):
+            missing_result = read_file.forward("missing.txt")
+            write_result = write_file.forward("notes/today.txt", "hello filesystem")
+            read_result = read_file.forward("notes/today.txt")
+            directory_path = f"{tmpdir}/directory_only"
+            os.mkdir(directory_path)
+            not_a_file_result = read_file.forward("directory_only")
+            try:
+                read_file.forward("../../etc/passwd")
+            except ValueError as blocked_error:
+                blocked_message = str(blocked_error)
+            else:  # pragma: no cover - defensive guard
+                raise AssertionError("Expected path traversal guard to raise")
+
+            with patch("pathlib.Path.write_text", side_effect=PermissionError("denied")):
+                write_failure = write_file.forward("blocked.txt", "denied content")
+
+            await asyncio.sleep(0)
+
+        empty = _find_audit_call(
+            mock_log_event,
+            event_type="integration_empty_result",
+            tool_name="filesystem:workspace",
+        )
+        success_calls = [
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_succeeded"
+            and call.kwargs.get("tool_name") == "filesystem:workspace"
+        ]
+        blocked = _find_audit_call(
+            mock_log_event,
+            event_type="integration_blocked",
+            tool_name="filesystem:workspace",
+        )
+        failed_calls = [
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_failed"
+            and call.kwargs.get("tool_name") == "filesystem:workspace"
+        ]
+        read_success = next(call for call in success_calls if call["details"]["operation"] == "read")
+        write_success = next(call for call in success_calls if call["details"]["operation"] == "write")
+        not_a_file = next(call for call in failed_calls if call["details"].get("reason") == "not_a_file")
+        write_failed = next(call for call in failed_calls if call["details"]["operation"] == "write")
+        return {
+            "missing_reason": empty["details"]["reason"],
+            "write_length": write_success["details"]["length"],
+            "read_length": read_success["details"]["length"],
+            "blocked_path": blocked["details"]["file_path"],
+            "blocked_error_contains_traversal": "Path traversal blocked" in blocked_message,
+            "not_a_file_reason": not_a_file["details"]["reason"],
+            "write_failed_error": write_failed["details"]["error"],
+            "write_result_contains_success": "Successfully wrote" in write_result,
+            "missing_result_contains_not_found": "File not found" in missing_result,
+            "read_result_matches": read_result == "hello filesystem",
+            "not_a_file_result_contains_error": "Not a file" in not_a_file_result,
+            "write_failure_contains_error": "Failed to write file" in write_failure,
+        }
 
 
 def _eval_runtime_model_overrides() -> dict[str, Any]:
@@ -1426,6 +1492,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="The local soul-file boundary records defaulted reads, writes, ensure skips, and write failures without live dependencies.",
         runner=_eval_soul_runtime_audit,
+    ),
+    EvalScenario(
+        name="filesystem_runtime_audit",
+        category="observability",
+        description="Filesystem tool reads and writes record workspace runtime audit coverage for success, empty, blocked, and failure outcomes.",
+        runner=_eval_filesystem_runtime_audit,
     ),
     EvalScenario(
         name="runtime_model_overrides",

@@ -47,11 +47,12 @@ uv run python -m src.evals.harness --scenario web_search_empty_result_audit
 uv run python -m src.evals.harness --scenario observer_calendar_source_audit
 uv run python -m src.evals.harness --scenario observer_git_source_audit
 uv run python -m src.evals.harness --scenario observer_goal_source_audit
+uv run python -m src.evals.harness --scenario observer_time_source_audit
 uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, observer source availability and goal summaries, sandbox and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -96,7 +97,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_observer_git.py` | 7 | Git observer source — commit parsing, missing repo/reflog handling, runtime audit logging |
 | `test_observer_goals.py` | 4 | Goals observer source — active goals summary and runtime audit logging |
 | `test_observer_manager.py` | 20 | ContextManager — refresh, state transitions, budget reset |
-| `test_observer_time.py` | 12 | Time observer source — time-of-day, working hours, timezone |
+| `test_observer_time.py` | 14 | Time observer source — time-of-day, working hours, timezone, runtime audit logging |
 | `test_onboarding_edge_cases.py` | 2 | Onboarding edge cases — skip, restart |
 | `test_plugin_loader.py` | 5 | Tool auto-discovery — scan, expected tools, no duplicates, caching, reload |
 | `test_profile.py` | 7 | User profile + onboarding — get/create, mark/reset complete, HTTP endpoints |

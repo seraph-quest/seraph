@@ -8,6 +8,7 @@ import json
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completi
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
 from src.observer.sources.git_source import gather_git
+from src.observer.sources.time_source import gather_time
 from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue
@@ -650,6 +652,35 @@ async def _eval_observer_goal_source_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_observer_time_source_audit() -> dict[str, Any]:
+    fixed = datetime(2025, 6, 2, 10, 0)
+    mock_dt = MagicMock(wraps=datetime)
+    mock_dt.now.return_value = fixed
+
+    with (
+        patch("src.observer.sources.time_source.datetime", mock_dt),
+        patch("src.observer.sources.time_source.settings", MagicMock(
+            user_timezone="UTC",
+            working_hours_start=9,
+            working_hours_end=17,
+        )),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        result = gather_time()
+        await asyncio.sleep(0)
+
+    success = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="observer_source:time",
+    )
+    return {
+        "time_of_day": result["time_of_day"],
+        "timezone": success["details"]["timezone"],
+        "is_working_hours": success["details"]["is_working_hours"],
+    }
+
+
 async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context())
@@ -937,6 +968,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Observer goal source records runtime integration coverage for active-goal summaries.",
         runner=_eval_observer_goal_source_audit,
+    ),
+    EvalScenario(
+        name="observer_time_source_audit",
+        category="observability",
+        description="Observer time source records runtime integration coverage for successful time classification.",
+        runner=_eval_observer_time_source_audit,
     ),
     EvalScenario(
         name="strategist_tick_tool_audit",

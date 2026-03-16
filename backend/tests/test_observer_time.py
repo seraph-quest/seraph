@@ -1,6 +1,10 @@
 from datetime import datetime
+import asyncio
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+from src.audit.repository import audit_repository
 from src.observer.sources.time_source import gather_time
 
 
@@ -76,3 +80,39 @@ class TestDayOfWeek:
         # June 4, 2025 = Wednesday
         with _mock_time(day=4, hour=10), _mock_settings():
             assert gather_time()["day_of_week"] == "Wednesday"
+
+
+class TestRuntimeAudit:
+    def test_success_logs_runtime_audit(self, async_db):
+        with _mock_time(hour=10), _mock_settings():
+            result = gather_time()
+
+        assert result["time_of_day"] == "morning"
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert any(
+            event["tool_name"] == "observer_source:time"
+            and event["details"]["timezone"] == "UTC"
+            and event["details"]["time_of_day"] == "morning"
+            for event in events
+        )
+
+    def test_failure_logs_runtime_audit(self, async_db):
+        with _mock_settings(user_timezone="Bad/Timezone"):
+            with pytest.raises(Exception):
+                gather_time()
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_failed"]
+
+        events = asyncio.run(_fetch())
+        assert any(
+            event["tool_name"] == "observer_source:time"
+            and event["details"]["timezone"] == "Bad/Timezone"
+            for event in events
+        )

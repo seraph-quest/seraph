@@ -52,6 +52,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_calendar_source_audit" in captured.out
     assert "observer_git_source_audit" in captured.out
     assert "observer_goal_source_audit" in captured.out
+    assert "observer_time_source_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
 
 
@@ -81,6 +82,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_calendar_source_audit",
                 "observer_git_source_audit",
                 "observer_goal_source_audit",
+                "observer_time_source_audit",
                 "observer_delivery_gate_audit",
                 "observer_daemon_ingest_audit",
             ]
@@ -117,6 +119,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["observer_git_source_audit"]["reason"] == "missing_git_dir"
     assert details_by_name["observer_goal_source_audit"]["goal_count"] == 2
     assert details_by_name["observer_goal_source_audit"]["domain_count"] == 2
+    assert details_by_name["observer_time_source_audit"]["time_of_day"] == "morning"
+    assert details_by_name["observer_time_source_audit"]["timezone"] == "UTC"
     assert details_by_name["observer_delivery_gate_audit"]["delivered_user_state"] == "available"
     assert details_by_name["observer_delivery_gate_audit"]["queued_user_state"] == "deep_work"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"

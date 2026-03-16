@@ -1,3 +1,7 @@
+---
+slug: /
+---
+
 # Seraph Research Synthesis
 
 **Status:** canonical design synthesis for the current Seraph thesis

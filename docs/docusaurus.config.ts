@@ -121,7 +121,7 @@ const config: Config = {
             },
             {
               label: 'Research Synthesis',
-              to: '/research/synthesis',
+              to: '/research',
             },
           ],
         },

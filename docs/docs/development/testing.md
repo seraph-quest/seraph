@@ -64,9 +64,10 @@ uv run python -m src.evals.harness --scenario observer_time_source_audit
 uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_delivery_transport_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
+uv run python -m src.evals.harness --scenario mcp_test_api_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery transport, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -105,7 +106,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_http_mcp_server.py` | 16 | HTTP MCP server — request handling, internal URL blocking, timeout, truncation |
 | `test_insight_queue.py` | 12 | Insight queue — enqueue, drain, peek, ordering, expiry |
 | `test_insight_queue_expiry.py` | 8 | Insight queue expiry — TTL, cleanup, edge cases |
-| `test_mcp_api.py` | 3 | MCP HTTP API endpoints — list, add, remove servers |
+| `test_mcp_api.py` | 7 | MCP HTTP API endpoints — token update, manual server test auth/success/failure flows, and runtime audit logging |
 | `test_mcp_manager.py` | 31 | MCP server integration — connect, disconnect, failure handling, token auth, env var resolution |
 | `test_observer_api.py` | 7 | Observer API endpoints — state, context POST, daemon status |
 | `test_observer_calendar.py` | 4 | Calendar observer source — event parsing, empty/failure handling, runtime audit logging |

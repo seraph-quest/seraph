@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from fastapi import HTTPException
 from smolagents import Tool
 
 from config.settings import settings
@@ -25,6 +26,7 @@ from src.agent.factory import create_orchestrator, get_model
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
 from src.agent.strategist import create_strategist_agent
+from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
@@ -1603,6 +1605,67 @@ async def _eval_observer_daemon_ingest_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_mcp_test_api_audit() -> dict[str, Any]:
+    mock_tool = MagicMock()
+    mock_tool.name = "list_prs"
+    mock_client = MagicMock()
+    mock_client.get_tools.return_value = [mock_tool]
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.api.mcp.mcp_manager") as mock_mgr,
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        mock_mgr._config = {
+            "gh": {
+                "url": "http://gh/mcp",
+                "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+            }
+        }
+        mock_mgr._check_unresolved_vars.side_effect = [["GITHUB_TOKEN"], [], []]
+        mock_mgr._resolve_env_vars.side_effect = lambda value: value.replace("${GITHUB_TOKEN}", "ghp_test")
+
+        auth_required = await test_mcp_server("gh")
+
+        with patch("smolagents.MCPClient", return_value=mock_client):
+            success = await test_mcp_server("gh")
+
+        with patch("smolagents.MCPClient", side_effect=ConnectionError("refused")):
+            try:
+                await test_mcp_server("gh")
+            except HTTPException as exc:
+                failure_status_code = exc.status_code
+            else:  # pragma: no cover - defensive guard
+                raise AssertionError("Expected MCP test API failure to raise HTTPException")
+
+    auth_required_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_auth_required",
+        tool_name="mcp_test:gh",
+    )
+    success_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="mcp_test:gh",
+    )
+    failed_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_failed",
+        tool_name="mcp_test:gh",
+    )
+    return {
+        "auth_required_status": auth_required["status"],
+        "missing_env_vars": auth_required_event["details"]["missing_env_vars"],
+        "success_status": success["status"],
+        "tool_count": success_event["details"]["tool_count"],
+        "tool_names": success_event["details"]["tool_names"],
+        "used_headers": success_event["details"]["used_headers"],
+        "failure_status_code": failure_status_code,
+        "failure_status": failed_event["details"]["status"],
+        "failure_error": failed_event["details"]["error"],
+    }
+
+
 _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="chat_model_wrapper",
@@ -1819,6 +1882,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Observer daemon screen-context ingest records receive, persist success, and persist failure audit events.",
         runner=_eval_observer_daemon_ingest_audit,
+    ),
+    EvalScenario(
+        name="mcp_test_api_audit",
+        category="observability",
+        description="Manual MCP server test requests record auth-required and successful tool-discovery audit events.",
+        runner=_eval_mcp_test_api_audit,
     ),
 )
 

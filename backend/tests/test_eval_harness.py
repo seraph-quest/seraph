@@ -69,6 +69,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_delivery_gate_audit" in captured.out
     assert "observer_delivery_transport_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
+    assert "mcp_test_api_audit" in captured.out
 
 
 def test_main_emits_json_summary(capsys):
@@ -114,6 +115,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_delivery_gate_audit",
                 "observer_delivery_transport_audit",
                 "observer_daemon_ingest_audit",
+                "mcp_test_api_audit",
             ]
         )
     )
@@ -248,3 +250,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_error"] == "all_connections_failed"
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"
     assert details_by_name["observer_daemon_ingest_audit"]["persist_failed_error"] == "db down"
+    assert details_by_name["mcp_test_api_audit"]["auth_required_status"] == "auth_required"
+    assert details_by_name["mcp_test_api_audit"]["missing_env_vars"] == ["GITHUB_TOKEN"]
+    assert details_by_name["mcp_test_api_audit"]["success_status"] == "ok"
+    assert details_by_name["mcp_test_api_audit"]["tool_count"] == 1
+    assert details_by_name["mcp_test_api_audit"]["tool_names"] == ["list_prs"]
+    assert details_by_name["mcp_test_api_audit"]["used_headers"] is True
+    assert details_by_name["mcp_test_api_audit"]["failure_status_code"] == 502
+    assert details_by_name["mcp_test_api_audit"]["failure_status"] == "connection_failed"
+    assert details_by_name["mcp_test_api_audit"]["failure_error"] == "refused"

@@ -407,6 +407,64 @@ def _eval_runtime_model_overrides() -> dict[str, Any]:
     }
 
 
+def _eval_runtime_fallback_overrides() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Recovered through a runtime-specific fallback chain.")
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+            patch.object(
+                settings,
+                "runtime_fallback_overrides",
+                (
+                    "chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;"
+                    "session_consolidation=openai/gpt-4.1-mini|openai/gpt-4.1-nano"
+                ),
+            ),
+            patch.object(settings, "fallback_llm_api_key", ""),
+            patch.object(settings, "fallback_llm_api_base", ""),
+            patch(
+                "litellm.completion",
+                side_effect=[
+                    RuntimeError("primary down"),
+                    RuntimeError("first runtime fallback down"),
+                    completion_response,
+                ],
+            ) as mock_completion,
+        ):
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "keep the shared fallback chain path-specific"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_consolidation",
+            )
+            chat_model = get_model(runtime_path="chat_agent")
+
+        attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+        assert attempted_models == [
+            "openrouter/anthropic/claude-sonnet-4",
+            "openai/gpt-4.1-mini",
+            "openai/gpt-4.1-nano",
+        ]
+        assert [fallback.model_id for fallback in chat_model._fallback_models] == [
+            "openai/gpt-4.1-mini",
+            "openai/gpt-4.1-nano",
+        ]
+        return {
+            "completion_attempted_models": attempted_models,
+            "completion_final_model": attempted_models[-1],
+            "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+            "response_excerpt": response.choices[0].message.content,
+        }
+    finally:
+        _reset_target_health()
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -953,6 +1011,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime paths can override their primary model selection without changing the global default or local-routing baseline.",
         runner=_eval_runtime_model_overrides,
+    ),
+    EvalScenario(
+        name="runtime_fallback_overrides",
+        category="runtime",
+        description="Runtime paths can override their ordered fallback chain without changing the global fallback baseline.",
+        runner=_eval_runtime_fallback_overrides,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

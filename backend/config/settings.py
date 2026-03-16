@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     local_llm_api_base: str = ""
     local_runtime_paths: str = ""  # comma-separated runtime paths that should prefer local profile
     runtime_model_overrides: str = ""  # comma-separated runtime_path=model or runtime_path=profile:model entries
+    runtime_fallback_overrides: str = ""  # semicolon-separated runtime_path=model_a|model_b entries
     llm_target_cooldown_seconds: int = 300  # temporarily deprioritize failed LLM targets across requests
     model_temperature: float = 0.7
     model_max_tokens: int = 4096

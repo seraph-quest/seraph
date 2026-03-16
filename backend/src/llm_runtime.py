@@ -113,8 +113,25 @@ def _profile_api_base(profile: str) -> str:
     return settings.llm_api_base
 
 
-def fallback_model_ids() -> list[str]:
+def fallback_model_ids(*, runtime_path: str | None = None) -> list[str]:
     """Return the ordered list of configured fallback model ids."""
+    runtime_override_ids: list[str] = []
+    if runtime_path:
+        for raw_entry in settings.runtime_fallback_overrides.split(";"):
+            entry = raw_entry.strip()
+            if not entry or "=" not in entry:
+                continue
+            path, _, raw_value = entry.partition("=")
+            if path.strip() != runtime_path:
+                continue
+            for model_id in raw_value.split("|"):
+                normalized = model_id.strip()
+                if normalized and normalized not in runtime_override_ids:
+                    runtime_override_ids.append(normalized)
+            break
+    if runtime_override_ids:
+        return runtime_override_ids
+
     fallback_ids: list[str] = []
     for raw_value in (settings.fallback_model, settings.fallback_models):
         for model_id in raw_value.split(","):
@@ -147,6 +164,7 @@ def build_model_kwargs(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "runtime_profile": resolved_profile,
+        "runtime_path": runtime_path,
     }
     api_key = _profile_api_key(resolved_profile)
     if api_key:
@@ -172,7 +190,7 @@ def build_completion_kwargs(
 ) -> dict[str, Any]:
     """Build litellm.completion kwargs for either the primary or fallback path."""
     if use_fallback:
-        fallback_model = fallback_model_id or next(iter(fallback_model_ids()), "")
+        fallback_model = fallback_model_id or next(iter(fallback_model_ids(runtime_path=runtime_path)), "")
         if not fallback_model:
             raise ValueError("Fallback model is not configured")
         kwargs: dict[str, Any] = {
@@ -209,9 +227,9 @@ def build_completion_kwargs(
     return kwargs
 
 
-def has_fallback_model() -> bool:
+def has_fallback_model(*, runtime_path: str | None = None) -> bool:
     """Return whether a fallback completion target is configured."""
-    return bool(fallback_model_ids())
+    return bool(fallback_model_ids(runtime_path=runtime_path))
 
 
 def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "default") -> str:
@@ -244,6 +262,7 @@ def _fallback_targets(
     primary_api_base: str | None,
     primary_api_key: str | None,
     primary_profile: str = "default",
+    runtime_path: str | None = None,
 ) -> list[dict[str, str | None]]:
     fallback_api_key = _fallback_api_key(primary_api_key, primary_profile=primary_profile)
     fallback_api_base = _fallback_api_base(primary_api_base, primary_profile=primary_profile)
@@ -255,7 +274,7 @@ def _fallback_targets(
         ),
     }
     targets: list[dict[str, str | None]] = []
-    for fallback_model_id in fallback_model_ids():
+    for fallback_model_id in fallback_model_ids(runtime_path=runtime_path):
         target_key = _target_key(
             model_id=fallback_model_id,
             api_base=fallback_api_base,
@@ -442,9 +461,11 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         custom_role_conversions: dict[str, str] | None = None,
         flatten_messages_as_text: bool | None = None,
         runtime_profile: str | None = None,
+        runtime_path: str | None = None,
         **kwargs,
     ):
         self._runtime_profile = runtime_profile or "default"
+        self._runtime_path = runtime_path
         super().__init__(
             model_id=model_id,
             api_base=api_base,
@@ -456,6 +477,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._fallback_models: tuple[BaseLiteLLMModel, ...] = ()
         self._fallback_model: BaseLiteLLMModel | None = None
         fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("runtime_path", None)
         if flatten_messages_as_text is not None:
             fallback_kwargs["flatten_messages_as_text"] = flatten_messages_as_text
 
@@ -465,6 +487,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             primary_api_base=self.api_base,
             primary_api_key=self.api_key,
             primary_profile=self._runtime_profile,
+            runtime_path=self._runtime_path,
         ):
             fallback_models.append(
                 BaseLiteLLMModel(
@@ -693,6 +716,7 @@ def completion_with_fallback_sync(
             primary_api_base=primary_kwargs.get("api_base"),
             primary_api_key=primary_kwargs.get("api_key"),
             primary_profile=resolved_profile,
+            runtime_path=runtime_path,
         )
         healthy_fallbacks, unhealthy_fallbacks = _partition_targets_by_health(fallback_targets)
         primary_unhealthy = not _is_target_healthy(
@@ -785,6 +809,7 @@ def completion_with_fallback_sync(
                 fallback_model_id=str(target["model_id"]),
                 fallback_api_key=target["api_key"],
                 fallback_api_base=target["api_base"],
+                runtime_path=runtime_path,
             )
             fallback_model = _safe_model_name(fallback_kwargs)
             attempted_fallback_models.append(fallback_model)
@@ -903,7 +928,7 @@ async def completion_with_fallback(
                 "runtime_profile": resolved_profile,
                 "primary_model": model_id or _profile_model_id(resolved_profile),
                 "timeout_seconds": timeout,
-                "fallback_configured": has_fallback_model(),
+                "fallback_configured": has_fallback_model(runtime_path=runtime_path),
             },
         )
         raise

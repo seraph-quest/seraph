@@ -59,3 +59,23 @@ def test_browse_webpage_logs_success_runtime_audit(async_db):
     assert events[0]["tool_name"] == "browser:playwright"
     assert events[0]["details"]["hostname"] == "example.com"
     assert events[0]["details"]["action"] == "extract"
+
+
+def test_browse_webpage_logs_timeout_runtime_audit(async_db):
+    with (
+        patch("src.tools.browser_tool._browse", new=AsyncMock(side_effect=TimeoutError("Timed out"))),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
+    ):
+        result = browse_webpage("https://example.com/slow")
+
+    assert "timed out after" in result.lower()
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "integration_timed_out"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["tool_name"] == "browser:playwright"
+    assert events[0]["details"]["hostname"] == "example.com"
+    assert events[0]["details"]["timeout_seconds"] == 30

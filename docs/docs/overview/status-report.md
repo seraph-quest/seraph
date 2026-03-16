@@ -50,7 +50,7 @@ title: Development Status
 - [x] Runtime-path-specific fallback-chain overrides for completion and agent-model paths
 - [x] First-class local runtime routing for helper, scheduler, and core agent paths
 - [x] Runtime audit visibility across chat, WebSocket, scheduler, strategist, MCP, observer, browser, sandbox, and web search flows
-- [x] Deterministic runtime eval harness for fallback, routing, tool, and observer contracts
+- [x] Deterministic runtime eval harness for fallback, routing, browser/sandbox/web-search tool, and observer contracts
 
 ### Product surfaces
 

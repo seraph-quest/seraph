@@ -44,6 +44,7 @@ uv run python -m src.evals.harness --scenario runtime_fallback_overrides
 uv run python -m src.evals.harness --scenario scheduled_local_runtime_profile
 uv run python -m src.evals.harness --scenario daily_briefing_fallback
 uv run python -m src.evals.harness --scenario shell_tool_runtime_audit
+uv run python -m src.evals.harness --scenario browser_runtime_audit
 uv run python -m src.evals.harness --scenario web_search_runtime_audit
 uv run python -m src.evals.harness --scenario web_search_empty_result_audit
 uv run python -m src.evals.harness --scenario observer_calendar_source_audit
@@ -54,7 +55,7 @@ uv run python -m src.evals.harness --scenario observer_delivery_gate_audit
 uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path primary and fallback overrides, local helper/agent/scheduler profile routing, proactive delivery, daemon ingest, observer source availability and time/goal summaries, sandbox, browser, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -76,7 +77,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 |---|---|---|
 | `test_agent.py` | 8 | Agent factory — tool count, model creation, context injection |
 | `test_catalog_api.py` | 9 | Catalog API — browse catalog, install skills/MCP servers |
-| `test_browser_tool.py` | 2 | Browser tool — blocked internal URLs and successful runtime audit logging |
+| `test_browser_tool.py` | 3 | Browser tool — blocked internal URLs plus success and timeout runtime audit logging |
 | `test_chat_api.py` | 5 | REST chat endpoint — success, session continuity, errors |
 | `test_consolidation_reliability.py` | 6 | Memory consolidation reliability — edge cases, retry behavior |
 | `test_consolidator.py` | 5 | Memory consolidation — extract facts, soul updates, markdown fences, LLM failure |

@@ -23,6 +23,8 @@ from src.agent.strategist import create_strategist_agent
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
+from src.observer.sources.calendar_source import gather_calendar
+from src.observer.sources.git_source import gather_git
 from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue
@@ -576,6 +578,53 @@ async def _eval_web_search_empty_result_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_observer_calendar_source_audit() -> dict[str, Any]:
+    mock_path = MagicMock()
+    mock_path.exists.return_value = True
+
+    with (
+        patch("src.observer.sources.calendar_source._CREDENTIALS_PATH", mock_path),
+        patch(
+            "src.observer.sources.calendar_source._fetch_events",
+            return_value={
+                "upcoming_events": [{"summary": "Standup", "start": "09:00", "end": "09:15"}],
+                "current_event": None,
+            },
+        ),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        result = await gather_calendar()
+
+    success = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="observer_source:calendar",
+    )
+    return {
+        "upcoming_event_count": len(result["upcoming_events"]),
+        "audit_event_count": success["details"]["upcoming_event_count"],
+    }
+
+
+async def _eval_observer_git_source_audit() -> dict[str, Any]:
+    with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+        with patch("src.observer.sources.git_source.settings") as mock_settings:
+            mock_settings.observer_git_repo_path = "/tmp/missing"
+            mock_settings.workspace_dir = "/tmp/missing"
+            result = gather_git()
+        await asyncio.sleep(0)
+
+    unavailable = _find_audit_call(
+        mock_log_event,
+        event_type="integration_unavailable",
+        tool_name="observer_source:git",
+    )
+    return {
+        "result": result,
+        "reason": unavailable["details"]["reason"],
+    }
+
+
 async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context())
@@ -845,6 +894,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Web search no-hit responses record a distinct empty-result audit outcome.",
         runner=_eval_web_search_empty_result_audit,
+    ),
+    EvalScenario(
+        name="observer_calendar_source_audit",
+        category="observability",
+        description="Observer calendar source records runtime integration coverage for successful fetches.",
+        runner=_eval_observer_calendar_source_audit,
+    ),
+    EvalScenario(
+        name="observer_git_source_audit",
+        category="observability",
+        description="Observer git source records runtime integration coverage when the workspace has no git context.",
+        runner=_eval_observer_git_source_audit,
     ),
     EvalScenario(
         name="strategist_tick_tool_audit",

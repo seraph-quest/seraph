@@ -5,11 +5,15 @@ title: Workstream 03 - Runtime Reliability
 
 # Workstream 03: Runtime Reliability
 
+## Status On `develop`
+
+- [ ] Workstream 03 is only partially shipped on `develop`.
+
 ## Goal
 
 Make Seraph more resilient, observable, and predictable under real usage.
 
-## Done
+## Shipped On `develop`
 
 - [x] degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
 - [x] centralized provider-agnostic LLM runtime settings
@@ -30,18 +34,19 @@ Make Seraph more resilient, observable, and predictable under real usage.
 - [x] proactive delivery-gate decisions emit runtime audit coverage for delivered, queued, and failed paths
 - [x] observer daemon screen-context ingest emits runtime audit coverage for receive, persist success, and persist failure
 
-## In Progress
+## Working On Now
 
+- [x] Runtime Reliability remains the current repo-wide hardening track
 - [ ] close the remaining runtime observability gaps outside the main agent, scheduler/helper flows, current integration lifecycle coverage, and observer surfaces already instrumented
 
-## Left To Do
+## Still To Do On `develop`
 
 - [ ] deepen provider routing beyond the current ordered fallback and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduled completion, and core agent-model paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond observer refresh, calendar/git/goal/time sources, daemon ingest, proactive delivery gating, current MCP lifecycle coverage, and the browser/sandbox/web-search tool boundaries
 - [ ] expand eval coverage beyond the current runtime seam checks, including broader provider-routing, local-profile behavior, and remaining edge-path contracts
 
-## Done Means
+## Acceptance Checklist
 
 - [x] provider failure with configured fallbacks does not collapse the entire chat path
 - [x] a local or non-OpenRouter path is demonstrably possible across more than the current helper and scheduled completion flows

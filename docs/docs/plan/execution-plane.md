@@ -5,11 +5,15 @@ title: Workstream 02 - Execution Plane
 
 # Workstream 02: Execution Plane
 
+## Status On `develop`
+
+- [ ] Workstream 02 is only partially shipped on `develop`.
+
 ## Goal
 
 Expand Seraph's ability to do real work so the guardian thesis is backed by a serious action layer.
 
-## Done
+## Shipped On `develop`
 
 - [x] shell execution foundation exists
 - [x] browser automation foundation exists
@@ -17,18 +21,18 @@ Expand Seraph's ability to do real work so the guardian thesis is backed by a se
 - [x] plugin and tool discovery foundations exist
 - [x] step streaming exists for visible tool execution in chat
 
-## In Progress
+## Working On Now
 
 - [ ] expand execution beyond the current bounded shell path
 
-## Left To Do
+## Still To Do On `develop`
 
 - [ ] support broader shell and process execution beyond Python-only snippets
 - [ ] improve browser tooling from extract-oriented flows toward stronger interaction flows
 - [ ] add background process and session handling
 - [ ] define a workflow engine for repeatable multi-step execution
 
-## Done Means
+## Acceptance Checklist
 
 - [ ] Seraph can run bounded shell and process tasks under policy control
 - [ ] browser automation supports richer interactive flows

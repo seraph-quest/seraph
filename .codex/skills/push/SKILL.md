@@ -54,11 +54,12 @@ the workspace yet.
    - update it if it already exists,
    - if the branch is tied to a closed or merged PR, create a fresh branch and
      PR instead of reusing it.
-8. Write a concise PR body that reflects the full current scope using concrete
-   sections such as:
-   - `## Summary`
+8. Write a concise PR body that reflects the full current scope using the
+   repo-preferred checklist sections:
+   - `## Done on develop`
+   - `## Working in this PR`
+   - `## Still to do after this PR`
    - `## Validation`
-   - `## Risks`
 9. Ensure the PR has label `symphony`.
 10. Reply with the PR URL.
 
@@ -82,14 +83,17 @@ gh label create symphony --color 1f6feb --description "Managed by Symphony" || t
 pr_title="<clear PR title>"
 tmp_pr_body=$(mktemp)
 cat >"$tmp_pr_body" <<'EOF'
-## Summary
-- <what changed>
+## Done on develop
+- [x] <already shipped baseline that this PR builds on>
+
+## Working in this PR
+- [ ] <concrete change in this PR>
+
+## Still to do after this PR
+- [ ] <real remaining work after merge>
 
 ## Validation
 - <commands run>
-
-## Risks
-- <risk or "None noted">
 EOF
 
 if [ -z "$pr_state" ]; then
@@ -109,3 +113,5 @@ rm -f "$tmp_pr_body"
 - Treat non-fast-forward failures as sync problems for the `pull` skill.
 - Treat auth or workflow restriction failures as blockers, not as a prompt to
   rewrite remotes.
+- Keep the checklist factual against `develop`. Do not mark branch-only work as
+  done on `develop`.

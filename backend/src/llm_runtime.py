@@ -155,12 +155,20 @@ def has_fallback_model() -> bool:
     return bool(fallback_model_ids())
 
 
-def _fallback_api_key(primary_api_key: str | None) -> str:
-    return settings.fallback_llm_api_key or primary_api_key or _primary_api_key()
+def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "default") -> str:
+    if settings.fallback_llm_api_key:
+        return settings.fallback_llm_api_key
+    if primary_profile == "local":
+        return _primary_api_key()
+    return primary_api_key or _primary_api_key()
 
 
-def _fallback_api_base(primary_api_base: str | None) -> str:
-    return settings.fallback_llm_api_base or primary_api_base or settings.llm_api_base
+def _fallback_api_base(primary_api_base: str | None, *, primary_profile: str = "default") -> str:
+    if settings.fallback_llm_api_base:
+        return settings.fallback_llm_api_base
+    if primary_profile == "local":
+        return settings.llm_api_base
+    return primary_api_base or settings.llm_api_base
 
 
 def _safe_model_name(kwargs: dict[str, Any]) -> str:
@@ -176,9 +184,10 @@ def _fallback_targets(
     primary_model_id: str,
     primary_api_base: str | None,
     primary_api_key: str | None,
+    primary_profile: str = "default",
 ) -> list[dict[str, str | None]]:
-    fallback_api_key = _fallback_api_key(primary_api_key)
-    fallback_api_base = _fallback_api_base(primary_api_base)
+    fallback_api_key = _fallback_api_key(primary_api_key, primary_profile=primary_profile)
+    fallback_api_base = _fallback_api_base(primary_api_base, primary_profile=primary_profile)
     seen_targets = {
         _target_key(
             model_id=primary_model_id,
@@ -497,6 +506,7 @@ def completion_with_fallback_sync(
                 primary_model_id=primary_model,
                 primary_api_base=primary_kwargs.get("api_base"),
                 primary_api_key=primary_kwargs.get("api_key"),
+                primary_profile=resolved_profile,
             )
             if not fallback_targets:
                 if _can_log_request(request_id):

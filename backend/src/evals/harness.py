@@ -24,6 +24,7 @@ from src.api.observer import ScreenContextRequest, ScreenObservationData, post_s
 from src.audit.repository import audit_repository
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.observer.sources.calendar_source import gather_calendar
+from src.observer.sources.goal_source import gather_goals
 from src.observer.sources.git_source import gather_git
 from src.memory.consolidator import consolidate_session
 from src.observer.context import CurrentContext
@@ -625,6 +626,30 @@ async def _eval_observer_git_source_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_observer_goal_source_audit() -> dict[str, Any]:
+    goal1 = MagicMock(domain="productivity", title="Write docs")
+    goal2 = MagicMock(domain="health", title="Exercise")
+    mock_repo = AsyncMock()
+    mock_repo.list_goals.return_value = [goal1, goal2]
+
+    with (
+        patch("src.goals.repository.goal_repository", mock_repo),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        result = await gather_goals()
+
+    success = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="observer_source:goals",
+    )
+    return {
+        "summary": result["active_goals_summary"],
+        "goal_count": success["details"]["goal_count"],
+        "domain_count": success["details"]["domain_count"],
+    }
+
+
 async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context())
@@ -906,6 +931,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Observer git source records runtime integration coverage when the workspace has no git context.",
         runner=_eval_observer_git_source_audit,
+    ),
+    EvalScenario(
+        name="observer_goal_source_audit",
+        category="observability",
+        description="Observer goal source records runtime integration coverage for active-goal summaries.",
+        runner=_eval_observer_goal_source_audit,
     ),
     EvalScenario(
         name="strategist_tick_tool_audit",

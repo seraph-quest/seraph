@@ -134,11 +134,16 @@ def build_model_kwargs(
 ) -> dict[str, Any]:
     """Build LiteLLMModel kwargs from the shared runtime settings."""
     resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
-    kwargs: dict[str, Any] = {
-        "model_id": model_id or _resolved_primary_model_id(
+    resolved_model_id = (
+        _profile_model_id(resolved_profile)
+        if profile is not None
+        else _resolved_primary_model_id(
             runtime_path=runtime_path,
             profile=resolved_profile,
-        ),
+        )
+    )
+    kwargs: dict[str, Any] = {
+        "model_id": model_id or resolved_model_id,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "runtime_profile": resolved_profile,
@@ -180,11 +185,16 @@ def build_completion_kwargs(
         api_base = fallback_api_base or settings.fallback_llm_api_base or settings.llm_api_base
     else:
         resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
-        kwargs = {
-            "model": model_id or _resolved_primary_model_id(
+        resolved_model_id = (
+            _profile_model_id(resolved_profile)
+            if profile is not None
+            else _resolved_primary_model_id(
                 runtime_path=runtime_path,
                 profile=resolved_profile,
-            ),
+            )
+        )
+        kwargs = {
+            "model": model_id or resolved_model_id,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -675,7 +685,7 @@ def completion_with_fallback_sync(
             max_tokens=max_tokens,
             model_id=model_id,
             runtime_path=runtime_path,
-            profile=resolved_profile,
+            profile=profile,
         )
         primary_model = _safe_model_name(primary_kwargs)
         fallback_targets = _fallback_targets(
@@ -877,7 +887,7 @@ async def completion_with_fallback(
         model_id=model_id,
         request_id=request_id,
         runtime_path=runtime_path,
-        profile=resolved_profile,
+        profile=profile,
     )
     try:
         if timeout is None:

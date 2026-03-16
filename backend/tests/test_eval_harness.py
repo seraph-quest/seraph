@@ -70,6 +70,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_delivery_transport_audit" in captured.out
     assert "observer_daemon_ingest_audit" in captured.out
     assert "mcp_test_api_audit" in captured.out
+    assert "skills_api_audit" in captured.out
 
 
 def test_main_emits_json_summary(capsys):
@@ -116,6 +117,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_delivery_transport_audit",
                 "observer_daemon_ingest_audit",
                 "mcp_test_api_audit",
+                "skills_api_audit",
             ]
         )
     )
@@ -259,3 +261,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["mcp_test_api_audit"]["failure_status_code"] == 502
     assert details_by_name["mcp_test_api_audit"]["failure_status"] == "connection_failed"
     assert details_by_name["mcp_test_api_audit"]["failure_error"] == "refused"
+    assert details_by_name["skills_api_audit"]["updated_status"] == "updated"
+    assert details_by_name["skills_api_audit"]["updated_enabled"] is False
+    assert details_by_name["skills_api_audit"]["missing_status_code"] == 404
+    assert details_by_name["skills_api_audit"]["missing_status"] == "not_found"
+    assert details_by_name["skills_api_audit"]["reload_count"] == 2
+    assert details_by_name["skills_api_audit"]["reload_enabled_count"] == 2
+    assert details_by_name["skills_api_audit"]["reload_skill_names"] == ["test-skill", "simple-skill"]

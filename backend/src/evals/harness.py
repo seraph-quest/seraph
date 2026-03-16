@@ -28,6 +28,7 @@ from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_
 from src.agent.strategist import create_strategist_agent
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
+from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.memory.embedder import _reset_embedder_state, embed
@@ -1666,6 +1667,69 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_skills_api_audit() -> dict[str, Any]:
+    mock_log_event = AsyncMock()
+    mock_skill_manager = MagicMock()
+    mock_skill_manager.disable.return_value = True
+    mock_skill_manager.enable.return_value = False
+    mock_skill_manager.reload.return_value = [
+        {
+            "name": "test-skill",
+            "description": "A test skill",
+            "requires_tools": ["web_search"],
+            "user_invocable": True,
+            "enabled": True,
+            "file_path": "/tmp/skills/test-skill.md",
+        },
+        {
+            "name": "simple-skill",
+            "description": "No tool requirements",
+            "requires_tools": [],
+            "user_invocable": False,
+            "enabled": True,
+            "file_path": "/tmp/skills/simple-skill.md",
+        },
+    ]
+
+    with (
+        patch("src.api.skills.skill_manager", mock_skill_manager),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        updated = await update_skill_api("test-skill", UpdateSkillRequest(enabled=False))
+        try:
+            await update_skill_api("missing-skill", UpdateSkillRequest(enabled=True))
+        except HTTPException as exc:
+            missing_status_code = exc.status_code
+        else:  # pragma: no cover - defensive guard
+            raise AssertionError("Expected missing skill update to raise HTTPException")
+        reloaded = await reload_skill_api()
+
+    updated_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="skill:test-skill",
+    )
+    missing_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_failed",
+        tool_name="skill:missing-skill",
+    )
+    reloaded_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="skills:reload",
+    )
+    return {
+        "updated_status": updated["status"],
+        "updated_enabled": updated_event["details"]["enabled"],
+        "missing_status_code": missing_status_code,
+        "missing_status": missing_event["details"]["status"],
+        "reload_count": reloaded["count"],
+        "reload_enabled_count": reloaded_event["details"]["enabled_count"],
+        "reload_skill_names": reloaded_event["details"]["skill_names"],
+    }
+
+
 _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="chat_model_wrapper",
@@ -1888,6 +1952,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Manual MCP server test requests record auth-required and successful tool-discovery audit events.",
         runner=_eval_mcp_test_api_audit,
+    ),
+    EvalScenario(
+        name="skills_api_audit",
+        category="observability",
+        description="Skill toggle and reload requests record succeeded and failed runtime audit events.",
+        runner=_eval_skills_api_audit,
     ),
 )
 

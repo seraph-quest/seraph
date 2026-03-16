@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from src.audit.runtime import log_integration_event
+
 logger = logging.getLogger(__name__)
 
 # Default credential paths (match Docker mount layout)
@@ -57,10 +59,45 @@ def _fetch_events() -> dict:
 async def gather_calendar() -> dict:
     """Async wrapper — returns empty dict if credentials missing or error."""
     if not _CREDENTIALS_PATH.exists():
+        await log_integration_event(
+            integration_type="observer_source",
+            name="calendar",
+            outcome="unavailable",
+            details={"reason": "missing_credentials"},
+        )
         return {"upcoming_events": [], "current_event": None}
 
     try:
-        return await asyncio.to_thread(_fetch_events)
-    except Exception:
+        result = await asyncio.to_thread(_fetch_events)
+        upcoming_events = result.get("upcoming_events", [])
+        current_event = result.get("current_event")
+        if not upcoming_events and not current_event:
+            await log_integration_event(
+                integration_type="observer_source",
+                name="calendar",
+                outcome="empty_result",
+                details={
+                    "upcoming_event_count": 0,
+                    "has_current_event": False,
+                },
+            )
+        else:
+            await log_integration_event(
+                integration_type="observer_source",
+                name="calendar",
+                outcome="succeeded",
+                details={
+                    "upcoming_event_count": len(upcoming_events),
+                    "has_current_event": bool(current_event),
+                },
+            )
+        return result
+    except Exception as exc:
+        await log_integration_event(
+            integration_type="observer_source",
+            name="calendar",
+            outcome="failed",
+            details={"error": str(exc)},
+        )
         logger.exception("Calendar source failed")
         return {"upcoming_events": [], "current_event": None}

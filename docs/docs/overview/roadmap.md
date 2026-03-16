@@ -43,7 +43,7 @@ If you want the current truth, use this page plus the workstream files linked be
 
 ### 03. [Runtime Reliability](../plan/runtime-reliability)
 
-- [x] ordered fallbacks, health-aware provider rerouting, local helper/agent/scheduler-profile routing, tool/integration observability across MCP, browser, sandbox, and web search, and eval foundations are shipped
+- [x] ordered fallbacks, health-aware provider rerouting, local helper/agent/scheduler-profile routing, tool/integration observability across MCP, browser, sandbox, web search, and observer-source boundaries, and eval foundations are shipped
 - [ ] deeper policy-aware provider selection and remaining edge coverage are still left
 - focus: routing, fallbacks, observability, evals, and degraded-mode behavior
 

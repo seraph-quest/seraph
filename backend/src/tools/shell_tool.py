@@ -6,6 +6,7 @@ import httpx
 from smolagents import tool
 
 from config.settings import settings
+from src.audit.runtime import log_integration_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +49,54 @@ def shell_execute(code: str, language: str = "python") -> str:
         returncode = result.get("returncode", -1)
 
         if returncode != 0:
+            log_integration_event_sync(
+                integration_type="sandbox",
+                name="snekbox",
+                outcome="returned_nonzero",
+                details={
+                    "returncode": returncode,
+                    "stdout_length": len(stdout),
+                    "stderr_present": bool(result.get("stderr", "")),
+                },
+            )
             stderr = result.get("stderr", "")
             if stderr:
                 return f"Exit code {returncode}:\n{stdout}\n--- stderr ---\n{stderr}"
             return f"Exit code {returncode}:\n{stdout}" if stdout else f"Execution failed with exit code {returncode}."
 
+        log_integration_event_sync(
+            integration_type="sandbox",
+            name="snekbox",
+            outcome="succeeded",
+            details={
+                "returncode": returncode,
+                "stdout_length": len(stdout),
+            },
+        )
         return stdout if stdout else "(no output)"
 
     except httpx.TimeoutException:
+        log_integration_event_sync(
+            integration_type="sandbox",
+            name="snekbox",
+            outcome="timed_out",
+            details={"timeout_seconds": settings.sandbox_timeout},
+        )
         return f"Error: Code execution timed out after {settings.sandbox_timeout}s."
     except httpx.ConnectError:
+        log_integration_event_sync(
+            integration_type="sandbox",
+            name="snekbox",
+            outcome="unavailable",
+            details={"sandbox_url": sandbox_url},
+        )
         return "Error: Sandbox service is not available. The snekbox container may not be running."
     except Exception as e:
+        log_integration_event_sync(
+            integration_type="sandbox",
+            name="snekbox",
+            outcome="failed",
+            details={"error": str(e)},
+        )
         logger.exception("Shell execution failed")
         return f"Error: {e}"

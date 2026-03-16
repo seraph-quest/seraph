@@ -49,8 +49,8 @@ title: Development Status
 - [x] Runtime-path-specific primary model overrides for completion and agent-model paths
 - [x] Runtime-path-specific fallback-chain overrides for completion and agent-model paths
 - [x] First-class local runtime routing for helper, scheduler, core agent, delegation, and connected MCP specialist paths
-- [x] Runtime audit visibility across chat, WebSocket, scheduler, strategist, MCP, observer, embedding, vector-store, soul-file, browser, sandbox, and web search flows
-- [x] Deterministic runtime eval harness for fallback, local routing, context-window degradation, MCP specialist routing, embedding/vector-store/soul-file boundaries, browser/sandbox/web-search tool, and observer contracts
+- [x] Runtime audit visibility across chat, WebSocket, scheduler, strategist, MCP, observer, embedding, vector-store, soul-file, filesystem, browser, sandbox, and web search flows
+- [x] Deterministic runtime eval harness for fallback, local routing, context-window degradation, MCP specialist routing, embedding/vector-store/soul-file/filesystem boundaries, browser/sandbox/web-search tool, and observer contracts
 
 ### Product surfaces
 

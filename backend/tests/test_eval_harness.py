@@ -52,6 +52,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
     assert "soul_runtime_audit" in captured.out
+    assert "filesystem_runtime_audit" in captured.out
     assert "runtime_model_overrides" in captured.out
     assert "runtime_fallback_overrides" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
@@ -92,6 +93,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
                 "soul_runtime_audit",
+                "filesystem_runtime_audit",
                 "runtime_model_overrides",
                 "runtime_fallback_overrides",
                 "scheduled_local_runtime_profile",
@@ -163,6 +165,18 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["soul_runtime_audit"]["failed_operation"] == "write"
     assert details_by_name["soul_runtime_audit"]["failed_error"] == "denied"
     assert details_by_name["soul_runtime_audit"]["read_back_contains_hero"] is True
+    assert details_by_name["filesystem_runtime_audit"]["missing_reason"] == "missing_file"
+    assert details_by_name["filesystem_runtime_audit"]["write_length"] == len("hello filesystem")
+    assert details_by_name["filesystem_runtime_audit"]["read_length"] == len("hello filesystem")
+    assert details_by_name["filesystem_runtime_audit"]["blocked_path"] == "../../etc/passwd"
+    assert details_by_name["filesystem_runtime_audit"]["blocked_error_contains_traversal"] is True
+    assert details_by_name["filesystem_runtime_audit"]["not_a_file_reason"] == "not_a_file"
+    assert details_by_name["filesystem_runtime_audit"]["write_failed_error"] == "denied"
+    assert details_by_name["filesystem_runtime_audit"]["write_result_contains_success"] is True
+    assert details_by_name["filesystem_runtime_audit"]["missing_result_contains_not_found"] is True
+    assert details_by_name["filesystem_runtime_audit"]["read_result_matches"] is True
+    assert details_by_name["filesystem_runtime_audit"]["not_a_file_result_contains_error"] is True
+    assert details_by_name["filesystem_runtime_audit"]["write_failure_contains_error"] is True
     assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
     assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
     assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"

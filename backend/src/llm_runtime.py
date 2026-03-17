@@ -14,6 +14,7 @@ from uuid import uuid4
 from smolagents import LiteLLMModel as BaseLiteLLMModel
 
 from config.settings import settings
+from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
 
 logger = logging.getLogger(__name__)
@@ -777,16 +778,24 @@ async def _log_llm_runtime_event(
     event_type: str,
     summary: str,
     details: dict[str, Any],
+    session_id: str | None = None,
+    request_id: str | None = None,
 ) -> None:
+    event_details = dict(details)
+    effective_request_id = request_id or _current_llm_request_id()
+    effective_session_id = session_id if session_id is not None else get_current_session_id()
+    if effective_request_id and "request_id" not in event_details:
+        event_details["request_id"] = effective_request_id
     try:
         await audit_repository.log_event(
+            session_id=effective_session_id,
             event_type=event_type,
             actor="system",
             tool_name="llm_runtime",
             risk_level="low",
             policy_mode="full",
             summary=summary,
-            details=details,
+            details=event_details,
         )
     except Exception:
         logger.debug("Failed to record LLM runtime audit event", exc_info=True)
@@ -797,7 +806,9 @@ def _log_llm_runtime_event_sync(
     event_type: str,
     summary: str,
     details: dict[str, Any],
+    request_id: str | None = None,
 ) -> None:
+    session_id = get_current_session_id()
     try:
         try:
             loop = asyncio.get_running_loop()
@@ -806,6 +817,8 @@ def _log_llm_runtime_event_sync(
                 event_type=event_type,
                 summary=summary,
                 details=details,
+                session_id=session_id,
+                request_id=request_id,
             ))
             return
 
@@ -813,6 +826,8 @@ def _log_llm_runtime_event_sync(
             event_type=event_type,
             summary=summary,
             details=details,
+            session_id=session_id,
+            request_id=request_id,
         ))
     except Exception:
         logger.debug("Failed to run LLM runtime audit logger", exc_info=True)
@@ -919,6 +934,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     ordered_fallbacks=ordered_fallbacks,
                     rerouted=rerouted,
                 ),
+                request_id=request_id,
             )
 
         if rerouted and _can_log_request(request_id):
@@ -936,6 +952,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     "unhealthy_models": [primary_model],
                     "cooldown_seconds": _target_cooldown_seconds(),
                 },
+                request_id=request_id,
             )
 
         primary_attempted = False
@@ -966,6 +983,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                             "primary_model": primary_model,
                             "used_fallback": False,
                         },
+                        request_id=request_id,
                     )
                 return response
             except Exception as error:
@@ -987,6 +1005,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                                 "used_fallback": False,
                                 "error": str(error),
                             },
+                            request_id=request_id,
                         )
                     raise
                 logger.warning(
@@ -1032,6 +1051,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         event_type="llm_fallback_success",
                         summary=f"Fallback agent model generate succeeded via {fallback_model.model_id}",
                         details=details,
+                        request_id=request_id,
                     )
                 return response
             except Exception as fallback_error:
@@ -1075,6 +1095,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 event_type="llm_fallback_failure",
                 summary=f"Fallback agent model generate failed via {attempted_fallback_models[-1]}",
                 details=details,
+                request_id=request_id,
             )
         raise last_error
 
@@ -1138,6 +1159,7 @@ def completion_with_fallback_sync(
                     ordered_fallbacks=ordered_fallbacks,
                     rerouted=rerouted,
                 ),
+                request_id=request_id,
             )
 
         if rerouted and _can_log_request(request_id):
@@ -1156,6 +1178,7 @@ def completion_with_fallback_sync(
                     "unhealthy_models": [primary_model],
                     "cooldown_seconds": _target_cooldown_seconds(),
                 },
+                request_id=request_id,
             )
 
         primary_attempted = False
@@ -1181,6 +1204,7 @@ def completion_with_fallback_sync(
                             "primary_model": primary_model,
                             "used_fallback": False,
                         },
+                        request_id=request_id,
                     )
                 return response
             except Exception as error:
@@ -1203,6 +1227,7 @@ def completion_with_fallback_sync(
                                 "used_fallback": False,
                                 "error": str(error),
                             },
+                            request_id=request_id,
                         )
                     raise
                 logger.warning(
@@ -1253,6 +1278,7 @@ def completion_with_fallback_sync(
                         event_type="llm_fallback_success",
                         summary=f"Fallback LLM completion succeeded via {fallback_model}",
                         details=details,
+                        request_id=request_id,
                     )
                 return response
             except Exception as fallback_error:
@@ -1297,6 +1323,7 @@ def completion_with_fallback_sync(
                 event_type="llm_fallback_failure",
                 summary=f"Fallback LLM completion failed via {attempted_fallback_models[-1]}",
                 details=details,
+                request_id=request_id,
             )
         raise last_error
     finally:
@@ -1344,6 +1371,7 @@ async def completion_with_fallback(
                 "timeout_seconds": timeout,
                 "fallback_configured": has_fallback_model(runtime_path=runtime_path),
             },
+            request_id=request_id,
         )
         raise
     finally:

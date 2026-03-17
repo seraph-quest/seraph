@@ -7,6 +7,7 @@ from time import perf_counter
 from sqlmodel import select, col
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
 from src.db.models import Session, Message
@@ -228,10 +229,12 @@ class SessionManager:
             return None
 
         transcript = "\n".join(f"{m.role.capitalize()}: {m.content[:200]}" for m in messages)
+        runtime_tokens = None
 
         try:
             from src.llm_runtime import completion_with_fallback
 
+            runtime_tokens = set_runtime_context(session_id, "high_risk")
             response = await completion_with_fallback(
                 messages=[{
                     "role": "user",
@@ -269,6 +272,9 @@ class SessionManager:
             )
             logger.exception("Failed to generate title for session %s", session_id[:8])
             return None
+        finally:
+            if runtime_tokens is not None:
+                reset_runtime_context(runtime_tokens)
 
     async def count_messages(self, session_id: str) -> int:
         """Count user+assistant messages in a session."""

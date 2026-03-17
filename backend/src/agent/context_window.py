@@ -8,6 +8,7 @@ from functools import lru_cache
 import tiktoken
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event_sync
 from src.llm_runtime import completion_with_fallback_sync
 
@@ -59,7 +60,10 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
     text = _format_messages(messages)
     message_count = len(messages)
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    runtime_tokens = None
     try:
+        if session_id:
+            runtime_tokens = set_runtime_context(session_id, "high_risk")
         response = completion_with_fallback_sync(
             messages=[{
                 "role": "user",
@@ -102,6 +106,9 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
                 "runtime_path": "context_window_summary",
             },
         )
+    finally:
+        if runtime_tokens is not None:
+            reset_runtime_context(runtime_tokens)
 
     _summary_cache[cache_key] = summary
     # Keep cache bounded

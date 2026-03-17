@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
@@ -1012,6 +1013,38 @@ def test_completion_with_fallback_sync_logs_primary_success(async_db):
 
 
 @pytest.mark.asyncio
+async def test_completion_with_fallback_logs_session_and_request_context(async_db):
+    success_response = MagicMock()
+    runtime_tokens = set_runtime_context("session-123", "high_risk")
+
+    try:
+        with (
+            patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", ""),
+            patch("litellm.completion", return_value=success_response),
+        ):
+            result = await completion_with_fallback(
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0.3,
+                max_tokens=256,
+                runtime_path="session_title_generation",
+            )
+    finally:
+        reset_runtime_context(runtime_tokens)
+
+    assert result is success_response
+    events = await audit_repository.list_events(limit=5, session_id="session-123")
+    success_events = [e for e in events if e["event_type"] == "llm_primary_success"]
+    assert success_events
+    assert success_events[0]["session_id"] == "session-123"
+    assert success_events[0]["details"]["runtime_path"] == "session_title_generation"
+    assert success_events[0]["details"]["request_id"]
+
+
+@pytest.mark.asyncio
 async def test_completion_with_fallback_sync_logs_inside_running_loop(async_db):
     success_response = MagicMock()
 
@@ -1035,6 +1068,48 @@ async def test_completion_with_fallback_sync_logs_inside_running_loop(async_db):
     success_events = [e for e in events if e["event_type"] == "llm_primary_success"]
     assert success_events
     assert success_events[0]["details"]["primary_model"] == "openai/gpt-4o-mini"
+
+
+def test_fallback_litellm_model_logs_session_and_request_context(async_db):
+    success_response = MagicMock()
+    runtime_tokens = set_runtime_context("session-agent", "high_risk")
+    _register_request("req-agent-123")
+    request_token = set_current_llm_request_id("req-agent-123")
+
+    try:
+        with (
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", ""),
+            patch(
+                "src.llm_runtime.BaseLiteLLMModel.generate",
+                autospec=True,
+                return_value=success_response,
+            ),
+        ):
+            model = FallbackLiteLLMModel(
+                model_id="openai/gpt-4o-mini",
+                api_key="primary-key",
+                api_base="http://localhost:11434/v1",
+                temperature=0.3,
+                max_tokens=256,
+            )
+            result = model.generate([{"role": "user", "content": "hello"}])
+    finally:
+        reset_current_llm_request_id(request_token)
+        _finish_request("req-agent-123")
+        reset_runtime_context(runtime_tokens)
+
+    assert result is success_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5, session_id="session-agent")
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["session_id"] == "session-agent"
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["request_id"] == "req-agent-123"
 
 
 def test_completion_with_fallback_sync_logs_fallback_success(async_db):

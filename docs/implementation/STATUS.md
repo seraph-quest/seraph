@@ -24,7 +24,7 @@ title: Seraph Development Status
 - [x] Runtime Reliability is still the active hardening track.
 - [ ] Runtime Reliability is not complete yet.
 - [x] The numbered next-PR sequence is tracked in `docs/implementation/03-runtime-reliability.md`.
-- [x] The active in-flight Runtime Reliability slice is `local-routing-gap-closure`.
+- [x] The active in-flight Runtime Reliability slice is `incident-trace-gap-closure`.
 
 ## Shipped On `develop`
 
@@ -63,7 +63,7 @@ title: Seraph Development Status
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
-- [x] runtime audit visibility across chat, WebSocket, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search flows
+- [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search flows
 - [x] deterministic runtime eval harness for fallback, routing, core chat behavior, proactive flow behavior, delegated workflow behavior, storage, observer, and integration seam contracts, including vault repository, the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
 
 ### Guardian intelligence and proactive behavior
@@ -87,7 +87,6 @@ title: Seraph Development Status
 ### Runtime Reliability
 
 - [ ] richer provider selection policy beyond path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] remaining edge observability beyond the already-covered chat, scheduler, observer, screen observation repository, proactive delivery, storage, MCP management/test, skills state-management, and integration boundaries
 - [ ] broader eval coverage beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts
 
 ### Product expansion

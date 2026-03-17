@@ -54,6 +54,14 @@ class TestConsolidateSession:
             and event["details"]["stored_memory_count"] == 2
             for event in events
         )
+        assert any(
+            event["event_type"] == "llm_primary_success"
+            and event["tool_name"] == "llm_runtime"
+            and event["session_id"] == "s1"
+            and event["details"]["runtime_path"] == "session_consolidation"
+            and event["details"]["request_id"]
+            for event in events
+        )
 
     async def test_extracts_facts_uses_session_consolidation_runtime_path(self, async_db, sm):
         await sm.get_or_create("s1")

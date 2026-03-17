@@ -3,6 +3,7 @@ import logging
 from time import perf_counter
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.session import session_manager
 from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
@@ -55,8 +56,10 @@ async def consolidate_session(session_id: str) -> None:
 
         soul = read_soul()
         prompt = _CONSOLIDATION_PROMPT.format(conversation=history, soul=soul)
+        runtime_tokens = None
 
         try:
+            runtime_tokens = set_runtime_context(session_id, "high_risk")
             response = await completion_with_fallback(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
@@ -81,6 +84,9 @@ async def consolidate_session(session_id: str) -> None:
                 },
             )
             return
+        finally:
+            if runtime_tokens is not None:
+                reset_runtime_context(runtime_tokens)
 
         text = response.choices[0].message.content.strip()
 

@@ -92,3 +92,10 @@ The research tree should now do two things at once:
 - show exactly where that target comes from and where the evidence is still thin
 
 That keeps the roadmap anchored to verifiable gaps rather than taste alone.
+
+The implementation tree should mirror that work explicitly:
+
+- research evidence rules should have an implementation-side docs contract mirror
+- benchmark logic in research should have a benchmark-status mirror in implementation
+- superiority-program logic in research should have a delivery mirror in implementation
+- the live PR queue should live only in implementation, not as a stale duplicate in research

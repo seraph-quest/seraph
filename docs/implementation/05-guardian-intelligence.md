@@ -4,6 +4,10 @@
 
 - [ ] Workstream 05 is only partially shipped on `develop`.
 
+## Paired Research
+
+- primary design docs: [01. Guardian Thesis](/research/guardian-thesis) and [02. Human Model And Memory](/research/human-model-and-memory)
+
 ## Shipped On `develop`
 
 - [x] soul-backed persistent identity

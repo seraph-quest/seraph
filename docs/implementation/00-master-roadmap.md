@@ -16,13 +16,25 @@ Seraph uses the same high-level documentation split as `maas`:
 This implementation tree is the canonical answer to four questions:
 
 1. What is shipped on `develop`?
-2. What is the target product shape?
-3. What is still left before Seraph gets there?
+2. How does the target product shape translate into delivery on `develop`?
+3. What is still left before Seraph reaches that target?
 4. What are the next most valuable PRs?
+
+## Docs Contract
+
+- `docs/research/` defines target product shape, evidence rules, benchmark logic, and superiority program logic.
+- `docs/implementation/STATUS.md` is the fastest shipped-state snapshot.
+- this roadmap owns the live 10-PR queue and queue refresh rule.
+- `docs/implementation/08-docs-contract.md` explains the boundary between research truth and implementation truth.
+- `docs/implementation/09-benchmark-status.md` mirrors the benchmark axes from research as shipped implementation status.
+- `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
+- `docs/implementation/01` through `07` are the only workstream docs; `08` through `10` are cross-cutting implementation mirrors, not extra workstreams.
+- if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
 
 ## Current Status
 
 Read this roadmap together with [Development Status](./STATUS.md).
+For the implementation-side mirrors of the evidence, benchmark, and superiority layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), and [10. Superiority Delivery](./10-superiority-delivery.md).
 
 Legend for the checklist column:
 
@@ -36,8 +48,8 @@ Legend for the checklist column:
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, and first native notifications are shipped; broader channel reach and a richer desktop shell are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, explicit guardian state, and intervention policy are shipped foundations; salience modeling and feedback loops are still left |
-| 06. Embodied UX | `[ ]` | The current village UI is shipped, but the target interface is now a dense guardian cockpit rather than a village-first shell |
-| 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, catalog/install surfaces, and delegation foundations are shipped; workflow composition and stronger extension ergonomics are still left |
+| 06. Embodied Interface | `[ ]` | The current village UI is shipped, but the target interface is now a dense guardian cockpit rather than a village-first shell |
+| 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, and delegation foundations are shipped; workflow composition and stronger extension ergonomics are still left |
 
 ## Progress Summary
 
@@ -85,8 +97,10 @@ This is the rolling execution queue. It should always show the next 10 most valu
 3. Runtime Reliability
 4. Presence And Reach
 5. Guardian Intelligence
-6. Embodied UX
-7. Ecosystem And Leverage
+6. Embodied Interface
+7. Ecosystem And Delegation
+
+Implementation docs `08` through `10` are supporting mirror layers for this roadmap, not additional workstreams.
 
 ## Stable Interfaces
 
@@ -113,6 +127,7 @@ This is the rolling execution queue. It should always show the next 10 most valu
 
 1. Read [Development Status](./STATUS.md) for the live shipped vs unfinished view.
 2. Read this file for workstream ordering and current scope.
-3. Read `01` through `07` for detailed per-workstream checklists.
-4. Read the research docs for the benchmark and superiority target.
-5. Treat `/legacy` docs as supporting history, not the live source of truth.
+3. Read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), and [10. Superiority Delivery](./10-superiority-delivery.md) for the implementation-side mirrors of the research benchmark/program docs.
+4. Read `01` through `07` for detailed per-workstream checklists.
+5. Read the research docs for the benchmark and superiority target.
+6. Treat `/legacy` docs as supporting history, not the live source of truth.

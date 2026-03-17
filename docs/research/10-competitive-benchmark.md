@@ -10,6 +10,10 @@ This file records the current evidence-backed comparison between Seraph on `deve
 
 The goal is not to win every category on paper. The goal is to identify exactly where Seraph is ahead, behind, or still unknown, then tie that to implementation work.
 
+Implementation mirror:
+
+- `docs/implementation/09-benchmark-status.md` owns the shipped-on-`develop` translation of these axes
+
 ## How To Read This
 
 - `Ahead` means Seraph’s currently shipped repo surface is stronger on the reviewed evidence.

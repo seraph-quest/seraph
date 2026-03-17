@@ -1,8 +1,12 @@
-# Workstream 06: Embodied UX
+# Workstream 06: Embodied Interface
 
 ## Status On `develop`
 
 - [ ] Workstream 06 is only partially shipped on `develop`.
+
+## Paired Research
+
+- primary design doc: [07. Embodied Interface](/research/embodied-interface)
 
 ## Shipped On `develop`
 
@@ -14,7 +18,7 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
+- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
 - [x] this workstream owns `operator-cockpit-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`

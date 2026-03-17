@@ -20,6 +20,16 @@ title: Seraph Development Status
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
+## Docs Contract
+
+- [x] `docs/research/00-synthesis.md` defines what Seraph is trying to become.
+- [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment.
+- [x] `docs/research/11-superiority-program.md` owns the design-level superiority program.
+- [x] this file owns the fastest shipped snapshot on `develop`.
+- [x] `docs/implementation/00-master-roadmap.md` owns the live 10-PR queue.
+- [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, and `docs/implementation/10-superiority-delivery.md` are the implementation-side mirrors of the research evidence/benchmark/program docs.
+- [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `10` are meta mirrors, not extra workstreams.
+
 ## Current Focus On `develop`
 
 - [x] Guardian Intelligence is now the active implementation track.
@@ -142,5 +152,5 @@ title: Seraph Development Status
 - [ ] Workstream 03: Runtime Reliability is only partially complete
 - [ ] Workstream 04: Presence And Reach is only partially complete
 - [ ] Workstream 05: Guardian Intelligence is only partially complete
-- [ ] Workstream 06: Embodied UX is only partially complete
-- [ ] Workstream 07: Ecosystem And Leverage is only partially complete
+- [ ] Workstream 06: Embodied Interface is only partially complete
+- [ ] Workstream 07: Ecosystem And Delegation is only partially complete

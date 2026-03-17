@@ -4,6 +4,10 @@
 
 - [ ] Workstream 02 is only partially shipped on `develop`.
 
+## Paired Research
+
+- primary design doc: [05. Execution Plane](/research/execution-plane)
+
 ## Shipped On `develop`
 
 - [x] 17 built-in tool capabilities registered through the native tool registry
@@ -18,7 +22,7 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
+- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
 - [x] this workstream owns `workflow-composition-v1` and shares `execution-safety-hardening-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`

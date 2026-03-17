@@ -1,8 +1,12 @@
-# Workstream 07: Ecosystem And Leverage
+# Workstream 07: Ecosystem And Delegation
 
 ## Status On `develop`
 
 - [ ] Workstream 07 is only partially shipped on `develop`.
+
+## Paired Research
+
+- primary design doc: [08. Ecosystem And Delegation](/research/ecosystem-and-delegation)
 
 ## Shipped On `develop`
 
@@ -15,7 +19,7 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
+- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
 - [x] this workstream owns `workflow-composition-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`

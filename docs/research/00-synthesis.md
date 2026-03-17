@@ -15,6 +15,7 @@ The working model is:
 
 - `docs/research/` answers: what should Seraph become?
 - `docs/implementation/` answers: what is true on `develop` right now?
+- the trees should mirror each other closely enough that no major program layer exists only on one side
 
 This tree now has a narrower standard than before: every major product claim should either be grounded in direct Seraph repo evidence, official reference-system docs, or primary research. If that evidence is missing, the claim should be marked `Unknown`, not rounded into confidence.
 
@@ -94,13 +95,23 @@ Seraph should be judged against OpenClaw, Hermes, and IronClaw on explicit axes:
 
 ## Implementation Mapping
 
-- Workstream 01 maps to trust and governance
-- Workstream 02 maps to execution plane
-- Workstream 03 maps to runtime and reliability
-- Workstream 04 maps to presence and reach
-- Workstream 05 maps to human model and guardian intelligence
-- Workstream 06 maps to embodied interface
-- Workstream 07 maps to ecosystem and delegation
+- Research 01 and 02 map to Workstream 05 in `docs/implementation/05-guardian-intelligence.md`
+- Research 03 maps to Workstream 03 in `docs/implementation/03-runtime-reliability.md`
+- Research 04 maps to Workstream 01 in `docs/implementation/01-trust-boundaries.md`
+- Research 05 maps to Workstream 02 in `docs/implementation/02-execution-plane.md`
+- Research 06 maps to Workstream 04 in `docs/implementation/04-presence-and-reach.md`
+- Research 07 maps to Workstream 06 in `docs/implementation/06-embodied-ux.md`
+- Research 08 maps to Workstream 07 in `docs/implementation/07-ecosystem-and-leverage.md`
+- Research 09 is mirrored by `docs/implementation/08-docs-contract.md`
+- Research 10 is mirrored by `docs/implementation/09-benchmark-status.md`
+- Research 11 is mirrored by `docs/implementation/10-superiority-delivery.md`
+
+## Docs Contract
+
+- research docs define the target shape, evidence rules, and benchmark/program logic
+- implementation docs define shipped truth on `develop`, delivery ownership, and the live PR queue
+- if a new benchmark or program layer appears in research, implementation needs a mirror doc in the same PR
+- if implementation changes the live queue or shipped-state translation, research should not keep a stale competing version
 
 ## What “Superior” Means Here
 

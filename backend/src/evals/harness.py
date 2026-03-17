@@ -10,6 +10,7 @@ import sys
 import time
 import tempfile
 import types
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable, Sequence
@@ -17,7 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from smolagents import Tool
+from sqlmodel import SQLModel
 
 from config.settings import settings
 from src.agent.session import SessionManager, session_manager
@@ -53,6 +58,7 @@ from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
 from src.models.schemas import WSResponse
+from src.vault.repository import VaultRepository
 
 
 Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
@@ -226,6 +232,37 @@ class _FakeScreenRepoContext:
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
+
+
+@asynccontextmanager
+async def _patched_async_db(*patch_targets: str):
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    @asynccontextmanager
+    async def _get_session():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    try:
+        with ExitStack() as stack:
+            for target in patch_targets:
+                stack.enter_context(patch(target, _get_session))
+            yield
+    finally:
+        await engine.dispose()
 
 
 def _eval_chat_model_wrapper() -> dict[str, Any]:
@@ -812,6 +849,84 @@ async def _eval_filesystem_runtime_audit() -> dict[str, Any]:
             "not_a_file_result_contains_error": "Not a file" in not_a_file_result,
             "write_failure_contains_error": "Failed to write file" in write_failure,
         }
+
+
+async def _eval_vault_runtime_audit() -> dict[str, Any]:
+    repo = VaultRepository()
+
+    def _encrypt(value: str) -> str:
+        return f"ENC:{value}"
+
+    def _decrypt(value: str) -> str:
+        return value.removeprefix("ENC:")
+
+    with (
+        patch("src.vault.repository.encrypt", side_effect=_encrypt),
+        patch("src.vault.repository.decrypt", side_effect=_decrypt),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        async with _patched_async_db("src.vault.repository.get_session"):
+            await repo.store("service_token", "super-secret-token", description="Service token")
+            stored = await repo.get("service_token")
+            missing = await repo.get("missing")
+            keys = await repo.list_keys()
+            values = await repo.list_secret_values()
+            delete_success = await repo.delete("service_token")
+            delete_missing = await repo.delete("missing")
+            await repo.store("broken", "cipher")
+
+            with patch("src.vault.repository.decrypt", side_effect=ValueError("bad decrypt")):
+                try:
+                    await repo.get("broken")
+                except ValueError:
+                    pass
+
+        store_success = next(
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_succeeded"
+            and call.kwargs.get("tool_name") == "vault:secrets"
+            and call.kwargs["details"]["operation"] == "store"
+        )
+        list_values_success = next(
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_succeeded"
+            and call.kwargs.get("tool_name") == "vault:secrets"
+            and call.kwargs["details"]["operation"] == "list_secret_values"
+        )
+        missing_get = next(
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_empty_result"
+            and call.kwargs.get("tool_name") == "vault:secrets"
+            and call.kwargs["details"]["operation"] == "get"
+        )
+        missing_delete = next(
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_empty_result"
+            and call.kwargs.get("tool_name") == "vault:secrets"
+            and call.kwargs["details"]["operation"] == "delete"
+        )
+        failed_get = next(
+            call.kwargs for call in mock_log_event.call_args_list
+            if call.kwargs.get("event_type") == "integration_failed"
+            and call.kwargs.get("tool_name") == "vault:secrets"
+            and call.kwargs["details"]["operation"] == "get"
+        )
+
+    return {
+        "stored_value_matches": stored == "super-secret-token",
+        "missing_get_is_none": missing is None,
+        "store_action": store_success["details"]["action"],
+        "list_key_count": len(keys),
+        "redaction_value_count": len(values),
+        "decryptable_count": list_values_success["details"]["decryptable_count"],
+        "undecryptable_count": list_values_success["details"]["undecryptable_count"],
+        "delete_success": delete_success,
+        "delete_missing": delete_missing,
+        "missing_get_reason": missing_get["details"]["reason"],
+        "missing_delete_reason": missing_delete["details"]["reason"],
+        "failed_operation": failed_get["details"]["operation"],
+        "failed_error": failed_get["details"]["error"],
+    }
 
 
 def _eval_runtime_model_overrides() -> dict[str, Any]:
@@ -2065,6 +2180,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Filesystem tool reads and writes record workspace runtime audit coverage for success, empty, blocked, and failure outcomes.",
         runner=_eval_filesystem_runtime_audit,
+    ),
+    EvalScenario(
+        name="vault_runtime_audit",
+        category="observability",
+        description="Vault repository reads and writes record success, missing-secret, and decrypt-failure audit outcomes without exposing secret values.",
+        runner=_eval_vault_runtime_audit,
     ),
     EvalScenario(
         name="runtime_model_overrides",

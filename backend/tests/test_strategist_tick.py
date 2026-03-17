@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.audit.repository import audit_repository
+from src.guardian.state import GuardianState, GuardianStateConfidence
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
@@ -33,6 +34,23 @@ class DummyStrategistTool(Tool):
         return "2 active goals"
 
 
+def _make_guardian_state() -> GuardianState:
+    return GuardianState(
+        soul_context="# Soul\n\n## Goals\n- Ship guardian state",
+        observer_context=_make_context(),
+        memory_context="- [goal] Ship guardian state",
+        current_session_history="",
+        recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
+        confidence=GuardianStateConfidence(
+            overall="grounded",
+            observer="good",
+            memory="grounded",
+            current_session="not_requested",
+            recent_sessions="grounded",
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_strategist_tick_logs_skip(async_db):
     mock_cm = MagicMock()
@@ -44,7 +62,7 @@ async def test_strategist_tick_logs_skip(async_db):
     )
 
     with (
-        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=_make_guardian_state())),
         patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
     ):
         await run_strategist_tick()
@@ -70,7 +88,7 @@ async def test_strategist_tick_logs_success(async_db):
     mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
 
     with (
-        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=_make_guardian_state())),
         patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -100,7 +118,7 @@ async def test_strategist_tick_binds_runtime_context_for_tool_audit(async_db):
             )
 
     with (
-        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=_make_guardian_state())),
         patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=DummyAgent()),
     ):
         await run_strategist_tick()

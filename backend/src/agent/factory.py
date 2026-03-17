@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from smolagents import ToolCallingAgent
 
 from config.settings import settings
+from src.guardian.state import GuardianState
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.plugins.loader import discover_tools
 from src.skills.manager import skill_manager
@@ -59,6 +62,7 @@ def create_agent(
     soul_context: str = "",
     memory_context: str = "",
     observer_context: str = "",
+    guardian_state: GuardianState | None = None,
 ) -> ToolCallingAgent:
     """Create a ToolCallingAgent with LiteLLM model and tools.
 
@@ -78,12 +82,18 @@ def create_agent(
         "their highest potential across productivity, performance, health, influence, "
         "and growth. Be concise, strategic, and helpful."
     )
+    if guardian_state is not None:
+        soul_context = guardian_state.soul_context
+        memory_context = guardian_state.memory_context
+        additional_context = guardian_state.current_session_history or additional_context
+        instructions += f"\n\n--- GUARDIAN STATE ---\n{guardian_state.to_prompt_block()}"
+    elif observer_context:
+        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
+
     if soul_context:
         instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
     if memory_context:
         instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
-    if observer_context:
-        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
 
     # Inject active skills into instructions
     active_skills = skill_manager.get_active_skills(tool_names)
@@ -111,6 +121,7 @@ def create_orchestrator(
     soul_context: str = "",
     memory_context: str = "",
     observer_context: str = "",
+    guardian_state: GuardianState | None = None,
 ) -> ToolCallingAgent:
     """Create an orchestrator agent that delegates to specialist sub-agents.
 
@@ -142,12 +153,18 @@ def create_orchestrator(
         "- Give clear, specific task descriptions when delegating.\n"
         "- Synthesize specialist results into a natural response."
     )
+    if guardian_state is not None:
+        soul_context = guardian_state.soul_context
+        memory_context = guardian_state.memory_context
+        additional_context = guardian_state.current_session_history or additional_context
+        instructions += f"\n\n--- GUARDIAN STATE ---\n{guardian_state.to_prompt_block()}"
+    elif observer_context:
+        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
+
     if soul_context:
         instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
     if memory_context:
         instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
-    if observer_context:
-        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
 
     # Inject active skills into instructions
     active_skills = skill_manager.get_active_skills(all_tool_names)
@@ -176,11 +193,38 @@ def build_agent(
     soul_context: str = "",
     memory_context: str = "",
     observer_context: str = "",
+    guardian_state: GuardianState | None = None,
 ) -> ToolCallingAgent:
     """Build the appropriate agent based on delegation feature flag.
 
     Drop-in replacement for create_agent() at call sites.
     """
     if settings.use_delegation:
-        return create_orchestrator(additional_context, soul_context, memory_context, observer_context)
-    return create_agent(additional_context, soul_context, memory_context, observer_context)
+        if guardian_state is not None:
+            return create_orchestrator(
+                additional_context,
+                soul_context,
+                memory_context,
+                observer_context,
+                guardian_state=guardian_state,
+            )
+        return create_orchestrator(
+            additional_context,
+            soul_context,
+            memory_context,
+            observer_context,
+        )
+    if guardian_state is not None:
+        return create_agent(
+            additional_context,
+            soul_context,
+            memory_context,
+            observer_context,
+            guardian_state=guardian_state,
+        )
+    return create_agent(
+        additional_context,
+        soul_context,
+        memory_context,
+        observer_context,
+    )

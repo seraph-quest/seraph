@@ -33,10 +33,11 @@ from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
-from src.agent.factory import create_orchestrator, get_model
+from src.agent.factory import create_agent, create_orchestrator, get_model
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
 from src.agent.strategist import create_strategist_agent
+from src.guardian.state import build_guardian_state
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
@@ -2799,7 +2800,7 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
             )
 
     with (
-        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
         patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=DummyAgent()),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
@@ -2825,7 +2826,7 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     mock_log_event = AsyncMock()
 
     with (
-        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
         patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
@@ -2950,6 +2951,50 @@ async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
         "session_id": success["session_id"],
         "title_length": success["details"]["title_length"],
     }
+
+
+async def _eval_guardian_state_synthesis() -> dict[str, Any]:
+    async with _patched_async_db("src.agent.session.get_session"):
+        await session_manager.get_or_create("current")
+        await session_manager.add_message("current", "user", "What should Seraph improve next?")
+        await session_manager.add_message("current", "assistant", "Build explicit guardian state.")
+        await session_manager.get_or_create("prior")
+        await session_manager.update_title("prior", "Prior roadmap")
+        await session_manager.add_message("prior", "assistant", "Land guardian-state synthesis next.")
+
+        ctx = _make_context(
+            active_goals_summary="Ship guardian state",
+            active_window="VS Code",
+            screen_context="Editing roadmap",
+            data_quality="good",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+            patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
+            patch("src.agent.factory.get_model", return_value=MagicMock()),
+            patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
+        ):
+            state = await build_guardian_state(
+                session_id="current",
+                user_message="What should Seraph improve next?",
+            )
+            create_agent(guardian_state=state)
+
+        instructions = mock_agent_cls.call_args.kwargs["instructions"]
+        return {
+            "overall_confidence": state.confidence.overall,
+            "observer_confidence": state.confidence.observer,
+            "memory_confidence": state.confidence.memory,
+            "current_session_confidence": state.confidence.current_session,
+            "recent_sessions_confidence": state.confidence.recent_sessions,
+            "goal_summary": state.active_goals_summary,
+            "recent_sessions_contains_title": "Prior roadmap" in state.recent_sessions_summary,
+            "current_history_mentions_guardian_state": "Build explicit guardian state." in state.current_session_history,
+            "instructions_include_guardian_state": "--- GUARDIAN STATE ---" in instructions,
+            "instructions_include_recent_sessions": "Recent sessions:" in instructions,
+        }
 
 
 async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
@@ -3712,6 +3757,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Strategist tick delivers the modeled intervention and records the resulting delivery outcome.",
         runner=_eval_strategist_tick_behavior,
+    ),
+    EvalScenario(
+        name="guardian_state_synthesis",
+        category="guardian",
+        description="Guardian state synthesis unifies observer context, memories, recent sessions, and confidence into one downstream state object.",
+        runner=_eval_guardian_state_synthesis,
     ),
     EvalScenario(
         name="observer_refresh_behavior",

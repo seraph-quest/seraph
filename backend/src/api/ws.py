@@ -18,8 +18,7 @@ from src.audit.formatting import format_tool_call_summary
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
-from src.memory.soul import read_soul
-from src.memory.vector_store import search_formatted
+from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
@@ -66,19 +65,11 @@ async def _build_agent(session_id: str, message: str):
     if not profile.onboarding_completed:
         return create_onboarding_agent(), True, set()
 
-    history = await session_manager.get_history_text(session_id)
-    soul = read_soul()
-    memories = await asyncio.to_thread(search_formatted, message)
-
-    from src.observer.manager import context_manager as obs_manager
-    observer_context = obs_manager.get_context().to_prompt_block()
-
-    agent = build_agent(
-        additional_context=history,
-        soul_context=soul,
-        memory_context=memories,
-        observer_context=observer_context,
+    guardian_state = await build_guardian_state(
+        session_id=session_id,
+        user_message=message,
     )
+    agent = build_agent(guardian_state=guardian_state)
     specialist_names = (
         set(agent.managed_agents.keys())
         if hasattr(agent, "managed_agents") and agent.managed_agents

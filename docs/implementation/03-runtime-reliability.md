@@ -23,9 +23,9 @@
 
 ## Working On Now
 
-- [x] Runtime Reliability remains the repo-wide hardening track
+- [x] Runtime Reliability is no longer the repo-wide active focus after the first guardian behavior baseline shipped
 - [x] this workstream has shipped the first two items in the current repo-wide 10-PR horizon
-- [ ] richer provider policy and broader eval depth still remain after the current guardian-flow branch
+- [ ] richer provider policy and broader eval depth still remain in the queue after the current guardian-intelligence slice
 
 ## Still To Do On `develop`
 

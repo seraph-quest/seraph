@@ -15,8 +15,7 @@ from src.agent.session import session_manager
 from src.audit.runtime import log_agent_run_event
 from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
-from src.memory.soul import read_soul
-from src.memory.vector_store import search_formatted
+from src.guardian.state import build_guardian_state
 from src.models.schemas import ChatRequest, ChatResponse
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
@@ -44,19 +43,11 @@ async def chat(request: ChatRequest):
     if not profile.onboarding_completed:
         agent = create_onboarding_agent()
     else:
-        history = await session_manager.get_history_text(session.id)
-        soul = read_soul()
-        memories = await asyncio.to_thread(search_formatted, request.message)
-
-        from src.observer.manager import context_manager as obs_manager
-        observer_context = obs_manager.get_context().to_prompt_block()
-
-        agent = build_agent(
-            additional_context=history,
-            soul_context=soul,
-            memory_context=memories,
-            observer_context=observer_context,
+        guardian_state = await build_guardian_state(
+            session_id=session.id,
+            user_message=request.message,
         )
+        agent = build_agent(guardian_state=guardian_state)
 
     try:
         from src.observer.manager import context_manager as obs_manager

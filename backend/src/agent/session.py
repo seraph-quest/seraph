@@ -88,6 +88,46 @@ class SessionManager:
                 for r in rows
             ]
 
+    async def get_recent_sessions_summary(
+        self,
+        *,
+        exclude_session_id: str | None = None,
+        limit_sessions: int = 3,
+        snippet_chars: int = 140,
+    ) -> str:
+        """Summarize recent sessions outside the current thread for guardian state."""
+        async with get_session() as db:
+            stmt = select(Session)
+            if exclude_session_id:
+                stmt = stmt.where(Session.id != exclude_session_id)
+            result = await db.execute(
+                stmt.order_by(col(Session.updated_at).desc()).limit(limit_sessions)
+            )
+            sessions = result.scalars().all()
+            if not sessions:
+                return ""
+
+            lines: list[str] = []
+            for session in sessions:
+                msg_result = await db.execute(
+                    select(Message)
+                    .where(Message.session_id == session.id)
+                    .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                    .order_by(col(Message.created_at).desc())
+                    .limit(1)
+                )
+                latest = msg_result.scalars().first()
+                title = session.title or "Untitled session"
+                if latest and latest.content:
+                    snippet = latest.content.replace("\n", " ").strip()
+                    if len(snippet) > snippet_chars:
+                        snippet = snippet[:snippet_chars] + "..."
+                    lines.append(f"- {title}: {latest.role} said \"{snippet}\"")
+                else:
+                    lines.append(f"- {title}: no user-facing messages yet")
+
+            return "\n".join(lines)
+
     async def update_title(self, session_id: str, title: str) -> bool:
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))

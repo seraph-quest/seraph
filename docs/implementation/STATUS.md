@@ -61,8 +61,8 @@ title: Seraph Development Status
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
-- [x] runtime audit visibility across chat, WebSocket, scheduler including daily-briefing and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, filesystem, browser, sandbox, and web search flows
-- [x] deterministic runtime eval harness for fallback, routing, storage, observer, and integration seam contracts, including the MCP test API, skills API, screen repository boundaries, and daily-briefing plus evening-review degraded-input audit behavior
+- [x] runtime audit visibility across chat, WebSocket, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, filesystem, browser, sandbox, and web search flows
+- [x] deterministic runtime eval harness for fallback, routing, storage, observer, and integration seam contracts, including the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
 
 ### Guardian intelligence and proactive behavior
 

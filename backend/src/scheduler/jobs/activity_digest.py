@@ -6,7 +6,7 @@ from datetime import date
 from time import perf_counter
 
 from config.settings import settings
-from src.audit.runtime import log_scheduler_job_event
+from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
@@ -42,6 +42,27 @@ Write a short activity digest (4-8 sentences) covering:
 Be concise. No preamble. Just the digest text."""
 
 
+def _normalize_summary(summary: dict) -> tuple[dict, list[str]]:
+    """Fill optional summary fields and surface degraded inputs when they are missing."""
+    degraded_inputs = []
+    normalized = dict(summary)
+
+    defaults = {
+        "total_tracked_minutes": 0,
+        "switch_count": 0,
+        "by_activity": {},
+        "by_project": {},
+        "longest_streaks": [],
+    }
+
+    for key, fallback in defaults.items():
+        if key not in normalized:
+            normalized[key] = fallback
+            degraded_inputs.append(key)
+
+    return normalized, degraded_inputs
+
+
 async def run_activity_digest() -> None:
     """Generate and send the daily activity digest to connected clients."""
     started_at = perf_counter()
@@ -62,6 +83,18 @@ async def run_activity_digest() -> None:
             )
             logger.info("activity_digest: no observations today — skipping")
             return
+
+        summary, degraded_inputs = _normalize_summary(summary)
+        if degraded_inputs:
+            await log_background_task_event(
+                task_name="activity_digest_inputs",
+                outcome="degraded",
+                details={
+                    "source": "screen_summary",
+                    "missing_fields": degraded_inputs,
+                },
+            )
+        data_quality = "degraded" if degraded_inputs else "good"
 
         soul = read_soul()
 
@@ -130,6 +163,8 @@ async def run_activity_digest() -> None:
                 "response_length": len(digest_text),
                 "total_tracked_minutes": summary.get("total_tracked_minutes", 0),
                 "switch_count": summary.get("switch_count", 0),
+                "data_quality": data_quality,
+                "degraded_inputs": degraded_inputs,
             },
         )
         logger.info("activity_digest: delivered daily digest")

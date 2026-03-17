@@ -25,6 +25,7 @@
 
 - [x] Runtime Reliability remains the repo-wide hardening track
 - [x] `incident-trace-gap-closure` is the active PR from the numbered sequence below
+- [x] the next repo-wide value sequence after this PR is prepared below so follow-on work is explicit before this queue lands
 - [ ] close the remaining routing and eval gaps outside the already-covered seams
 
 ## Still To Do On `develop`
@@ -32,9 +33,9 @@
 - [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
 - [ ] expand eval coverage beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts into broader behavioral coverage
 
-## Planned PR Sequence
+## Completed PR Sequence
 
-This sequence is execution order for upcoming PRs. A checked item can be in an open PR before it is shipped on `develop`.
+This sequence is the finished Runtime Reliability execution order. A checked item can be in an open PR before it is shipped on `develop`.
 
 1. [x] `behavioral-evals-core-chat`:
    add behavioral eval contracts for REST chat and WebSocket chat, including fallback, timeout, approval, and audit expectations
@@ -50,6 +51,25 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
    verify the remaining worthwhile local-routing surface across onboarding, strategist, and all scheduled completion jobs so the queue does not stay open on assumed gaps
 7. [x] `incident-trace-gap-closure`:
    bind session-aware helper and agent LLM runtime events into the same audit trace so target choice, reroutes, and fallback outcomes can be explained for one session incident
+
+## Next Most Valuable PR Sequence
+
+This is the next ordered PR list after `incident-trace-gap-closure`. It mixes the remaining highest-value Runtime Reliability work with the next highest-leverage product-system gaps from Guardian Intelligence, Presence, and Ecosystem.
+
+1. [ ] `provider-policy-scoring`:
+   deepen provider routing with weighted policy scoring, explicit capability preferences, and clearer target ranking so runtime-path selection is stronger than simple preference chains and cooldown skips
+2. [ ] `behavioral-evals-guardian-flows`:
+   expand behavioral eval coverage beyond chat and scheduler seams into observer refresh, consolidation, proactive delivery, and policy-mode guardrails so broader guardian behavior is regression-tested
+3. [ ] `guardian-state-synthesis`:
+   build an explicit guardian-state layer that merges observer context, goals, memory, and recent sessions into one structured decision input instead of spreading that reasoning across separate call sites
+4. [ ] `intervention-policy-v1`:
+   improve proactive delivery quality by making intervene, defer, bundle, and stay-silent decisions depend on guardian state, confidence, and interruption cost instead of only the current heuristic gate
+5. [ ] `native-presence-notifications`:
+   add the first real non-browser presence path with native notifications and system-level reach so Seraph is not trapped inside the open web tab
+6. [ ] `workflow-composition-v1`:
+   add first-class multi-step workflow composition across specialists and tools so meaningful work can be expressed as reusable flows rather than isolated tool calls
+7. [ ] `guardian-feedback-loop`:
+   capture intervention outcomes and explicit or implicit feedback so Seraph can learn which actions were helpful instead of restarting from static heuristics every session
 
 ## Non-Goals
 

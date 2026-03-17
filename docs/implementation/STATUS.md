@@ -25,6 +25,7 @@ title: Seraph Development Status
 - [ ] Runtime Reliability is not complete yet.
 - [x] The numbered next-PR sequence is tracked in `docs/implementation/03-runtime-reliability.md`.
 - [x] The active in-flight Runtime Reliability slice is `incident-trace-gap-closure`.
+- [x] The next most valuable PR sequence after `incident-trace-gap-closure` is also tracked in `docs/implementation/03-runtime-reliability.md`.
 
 ## Shipped On `develop`
 
@@ -91,6 +92,8 @@ title: Seraph Development Status
 
 ### Product expansion
 
+- [ ] explicit guardian-state synthesis that unifies observer context, memory, goals, and recent sessions for downstream decision-making
+- [ ] stronger intervention selection and feedback loops so proactive behavior improves over time instead of staying heuristic-only
 - [ ] native desktop shell, notifications, and non-browser presence
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality
 - [ ] fuller life-OS UX beyond the current village and quest surfaces

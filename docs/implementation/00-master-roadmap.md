@@ -69,7 +69,22 @@ Legend for the checklist column:
 
 - [x] Runtime Reliability is the active hardening track.
 - [x] `incident-trace-gap-closure` is the current queued PR after the shipped behavioral-eval and routing-policy slices.
+- [x] the next most valuable PR sequence after this branch starts with `provider-policy-scoring` and is tracked in `03-runtime-reliability.md`.
 - [ ] richer provider routing policy and broader behavioral eval depth are still ahead.
+
+## Next Most Valuable PR Sequence
+
+After `incident-trace-gap-closure`, the next ordered PR list is:
+
+1. [ ] `provider-policy-scoring`
+2. [ ] `behavioral-evals-guardian-flows`
+3. [ ] `guardian-state-synthesis`
+4. [ ] `intervention-policy-v1`
+5. [ ] `native-presence-notifications`
+6. [ ] `workflow-composition-v1`
+7. [ ] `guardian-feedback-loop`
+
+Use [Workstream 03: Runtime Reliability](./03-runtime-reliability.md) for the detailed rationale and scope for each item.
 
 ## Recommended Reading Order
 

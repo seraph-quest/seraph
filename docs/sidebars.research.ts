@@ -12,6 +12,8 @@ const sidebars: SidebarsConfig = {
     'embodied-interface',
     'ecosystem-and-delegation',
     'reference-systems-and-evidence',
+    'competitive-benchmark',
+    'superiority-program',
   ],
 };
 

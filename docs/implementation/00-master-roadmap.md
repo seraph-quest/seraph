@@ -7,17 +7,18 @@ title: Seraph Master Roadmap
 
 ## Summary
 
-Seraph now uses the same high-level documentation split as `maas`:
+Seraph uses the same high-level documentation split as `maas`:
 
-- `docs/research/` is the design and product thesis surface
+- `docs/research/` is the design, benchmark, and product-thesis surface
 - `docs/implementation/` is the shipped-state and delivery surface
 - `docs/implementation/STATUS.md` is the live status ledger
 
-This implementation tree is the canonical answer to three questions:
+This implementation tree is the canonical answer to four questions:
 
 1. What is shipped on `develop`?
-2. What is being hardened right now?
-3. What is still left before Seraph is the product we want?
+2. What is the target product shape?
+3. What is still left before Seraph gets there?
+4. What are the next most valuable PRs?
 
 ## Current Status
 
@@ -30,13 +31,52 @@ Legend for the checklist column:
 
 | Workstream | Checklist | Notes |
 |---|---|---|
-| 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret redaction are shipped; deeper isolation and narrower privileged execution paths are still left |
-| 02. Execution Plane | `[ ]` | Real tool execution, MCP, browser, shell, filesystem, goals, vault, and web search are shipped; richer workflow and external execution depth are still left |
-| 03. Runtime Reliability | `[ ]` | Profile preferences, wildcard path rules, fallback chains, runtime-path overrides, local routing across helper, scheduled, agent, delegation, and MCP-specialist paths, session-bound helper and agent LLM traceability, broad runtime audit coverage including MCP test, skills API, and screen repository boundaries, plus core chat, proactive, and delegated behavioral eval contracts are shipped; richer routing policy and broader eval depth are still left |
-| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, and native daemon foundations are shipped; richer native presence, notifications, and channels are still left |
-| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, and observer-driven state are shipped foundations; stronger learning loops and intervention quality are still left |
-| 06. Embodied UX | `[ ]` | Village UI, avatar casting, quest surfaces, and settings exist; the fuller life-OS shell and stronger ambient UX are still left |
-| 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, catalog/install surfaces, and delegation foundations are shipped; stronger workflow composition and extension ergonomics are still left |
+| 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret handling are shipped; deeper isolation and narrower privileged execution paths are still left |
+| 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, and web search are shipped; richer workflow execution and stronger execution safety are still left |
+| 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, broad audit visibility, and deterministic runtime evals are shipped; provider scoring and broader guardian eval depth are still left |
+| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, and native daemon foundations are shipped; native notifications and broader channel reach are still left |
+| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, and observer-driven state are shipped foundations; explicit guardian state, intervention policy, and feedback loops are still left |
+| 06. Embodied UX | `[ ]` | The current village UI is shipped, but the target interface is now a dense guardian cockpit rather than a village-first shell |
+| 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, catalog/install surfaces, and delegation foundations are shipped; workflow composition and stronger extension ergonomics are still left |
+
+## Progress Summary
+
+- [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
+- [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
+- [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
+- [ ] Seraph is still behind the strongest reference systems on dense interface efficiency, workflow composition, native reach, and execution hardening.
+- [ ] No workstream is complete yet.
+
+## Next Recommended PR Sequence
+
+This is the rolling execution queue. It should always show the next 10 most valuable PRs, and a checked item may remain visible until the next scheduled refresh.
+
+1. [x] `provider-policy-scoring`:
+   add weighted capability scoring on top of the current routing stack so target selection reflects value, not only explicit preference order
+2. [ ] `behavioral-evals-guardian-flows`:
+   extend behavioral evals into observer refresh, consolidation, proactive delivery, and guardrail-sensitive guardian flows
+3. [ ] `guardian-state-synthesis`:
+   merge observer signals, memory, goals, sessions, and confidence into one structured guardian-state input
+4. [ ] `intervention-policy-v1`:
+   make intervene, defer, bundle, request-approval, and stay-silent decisions explicit and state-aware
+5. [ ] `native-presence-notifications`:
+   add the first real non-browser presence path with desktop notifications and interrupt-aware reach
+6. [ ] `workflow-composition-v1`:
+   add first-class reusable multi-step workflows across tools, specialists, skills, and MCP
+7. [ ] `guardian-feedback-loop`:
+   capture intervention outcomes and user feedback so timing and action quality can improve
+8. [ ] `operator-cockpit-v1`:
+   replace the village as the default workflow surface with a dense multi-pane guardian cockpit
+9. [ ] `observer-salience-and-confidence-model`:
+   score observer inputs by confidence, urgency, and interruption cost before they reach strategy and delivery layers
+10. [ ] `execution-safety-hardening-v1`:
+   deepen isolation, policy visibility, and privileged execution boundaries to close the gap versus stronger execution-first systems
+
+## Queue Maintenance Rule
+
+- keep exactly 10 future PRs visible here
+- rerank and rewrite the queue whenever the number of landed PRs from the published queue is divisible by 5
+- rerank earlier if new evidence from `docs/research/` materially changes the priority order
 
 ## Delivery Order
 
@@ -55,6 +95,7 @@ Legend for the checklist column:
 - `SKILL.md`-based skill loading
 - runtime-path-based LLM routing and fallback settings
 - runtime audit and eval harness contracts
+- MCP server configuration and server-management APIs
 
 ## Current Shipped Slice On `develop`
 
@@ -65,31 +106,10 @@ Legend for the checklist column:
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, proactive flow behavior, delegated workflow behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
 
-## Working On Now
-
-- [x] Runtime Reliability is the active hardening track.
-- [x] `provider-policy-scoring` is the current queued PR after the finished incident-trace slice.
-- [x] the next most valuable PR sequence after this branch starts with `provider-policy-scoring` and is tracked in `03-runtime-reliability.md`.
-- [ ] richer provider routing policy and broader behavioral eval depth are still ahead.
-
-## Next Most Valuable PR Sequence
-
-After `incident-trace-gap-closure`, the next ordered PR list is:
-
-1. [x] `provider-policy-scoring`
-2. [ ] `behavioral-evals-guardian-flows`
-3. [ ] `guardian-state-synthesis`
-4. [ ] `intervention-policy-v1`
-5. [ ] `native-presence-notifications`
-6. [ ] `workflow-composition-v1`
-7. [ ] `guardian-feedback-loop`
-
-Use [Workstream 03: Runtime Reliability](./03-runtime-reliability.md) for the detailed rationale and scope for each item.
-
 ## Recommended Reading Order
 
 1. Read [Development Status](./STATUS.md) for the live shipped vs unfinished view.
 2. Read this file for workstream ordering and current scope.
 3. Read `01` through `07` for detailed per-workstream checklists.
-4. Read the `Research` section for the product and architecture target.
+4. Read the research docs for the benchmark and superiority target.
 5. Treat `/legacy` docs as supporting history, not the live source of truth.

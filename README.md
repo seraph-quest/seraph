@@ -1,7 +1,7 @@
 <h1 align="center">Seraph</h1>
 
 <p align="center">
-  <strong>A proactive AI guardian with a retro 16-bit RPG village UI</strong>
+  <strong>A proactive AI guardian with persistent memory, observation, and real-world action</strong>
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  An animated pixel-art avatar casts magic effects when using tools in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration.
+  Seraph ships today with a retro village browser UI, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The current research direction is a denser guardian cockpit for power users, not a village-first shell.
 </p>
 
 ---
@@ -29,7 +29,7 @@ cp .env.dev.example .env.dev
 ./manage.sh -e dev up -d
 
 # 3. Open
-open http://localhost:3000        # Retro village UI
+open http://localhost:3000        # Current shipped browser UI
 open http://localhost:8004/docs   # Swagger API docs
 
 # 4. (Optional) Screen awareness daemon
@@ -80,7 +80,7 @@ docs/                Docusaurus docs site
 
 ---
 
-## Village & Avatar
+## Current Embodiment Surface
 
 ```
 User sends message  -->  THINKING
@@ -88,7 +88,7 @@ User sends message  -->  THINKING
   Response ready    -->  SPEAKING  -->  IDLE  -->  WANDERING
 ```
 
-Tool use triggers a casting animation with a magic effect overlay at the agent's position.
+Tool use currently triggers a casting animation with a magic effect overlay at the agent's position. This is the shipped surface today, but the live docs now treat the dense guardian cockpit as the future primary interface direction.
 
 ---
 
@@ -136,6 +136,7 @@ Current truth:
 
 - [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
+- [x] the source-of-truth docs now target a power-user guardian cockpit as the future primary UI
 - [ ] no workstream is complete yet
 - [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
 
@@ -144,3 +145,5 @@ Start with:
 - [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
 - [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
 - [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
+- [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
+- [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)

@@ -958,13 +958,28 @@ def test_completion_with_fallback_sync_reroutes_away_from_unhealthy_primary(asyn
     ]
 
     async def _fetch():
-        events = await audit_repository.list_events(limit=10)
-        return [e for e in events if e["event_type"] == "llm_target_rerouted"]
+        return await audit_repository.list_events(limit=20)
 
     events = asyncio.run(_fetch())
-    assert events
-    assert events[0]["details"]["primary_model"] == "openrouter/anthropic/claude-sonnet-4"
-    assert events[0]["details"]["rerouted_model"] == "openai/gpt-4o-mini"
+    reroute_events = [e for e in events if e["event_type"] == "llm_target_rerouted"]
+    assert reroute_events
+    assert reroute_events[0]["details"]["primary_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert reroute_events[0]["details"]["rerouted_model"] == "openai/gpt-4o-mini"
+
+    routing_events = [e for e in events if e["event_type"] == "llm_routing_decision"]
+    assert routing_events
+    rerouted_details = routing_events[0]["details"]
+    assert rerouted_details["runtime_path"] == "completion"
+    assert rerouted_details["selected_model"] == "openai/gpt-4o-mini"
+    assert rerouted_details["rerouted_from_unhealthy_primary"] is True
+    assert rerouted_details["attempt_order"] == ["openai/gpt-4o-mini"]
+    primary_candidate = next(
+        candidate
+        for candidate in rerouted_details["candidate_targets"]
+        if candidate["source"] == "primary"
+    )
+    assert primary_candidate["decision"] == "skipped"
+    assert "unhealthy_cooldown" in primary_candidate["reason_codes"]
 
 
 def test_completion_with_fallback_sync_logs_primary_success(async_db):
@@ -1349,6 +1364,58 @@ def test_completion_with_fallback_prefers_alternate_runtime_profile_before_expli
     assert events[0]["details"]["attempted_fallback_models"] == [
         "openrouter/anthropic/claude-sonnet-4",
     ]
+
+
+def test_completion_with_fallback_logs_routing_decision(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="fast path won"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            "openai/gpt-4.1-nano=cheap;openai/gpt-4o-mini=fast|cheap",
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
+        patch(
+            "litellm.completion",
+            side_effect=[RuntimeError("primary down"), completion_response],
+        ),
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick the fastest fallback"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert result is completion_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["runtime_path"] == "session_title_generation"
+    assert details["selected_model"] == "openrouter/anthropic/claude-sonnet-4"
+    assert details["attempt_order"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
+    ]
+    assert details["policy_intents"] == ["fast", "cheap"]
+    assert details["candidate_targets"][1]["model_id"] == "openai/gpt-4o-mini"
+    assert details["candidate_targets"][1]["matched_policy_intents"] == ["fast", "cheap"]
+    assert details["candidate_targets"][1]["decision"] == "deferred"
+    assert details["candidate_targets"][2]["model_id"] == "openai/gpt-4.1-nano"
+    assert details["candidate_targets"][2]["matched_policy_intents"] == ["cheap"]
 
 
 def test_fallback_litellm_model_skips_duplicate_fallback_target():

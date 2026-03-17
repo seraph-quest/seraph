@@ -68,7 +68,7 @@ Legend for the checklist column:
 ## Working On Now
 
 - [x] Runtime Reliability is the active hardening track.
-- [x] `provider-policy-capabilities` is the current queued PR after the shipped behavioral-eval slices.
+- [x] `provider-routing-decision-audit` is the current queued PR after the shipped behavioral-eval slices.
 - [ ] richer provider routing policy and broader behavioral eval depth are still ahead.
 
 ## Recommended Reading Order

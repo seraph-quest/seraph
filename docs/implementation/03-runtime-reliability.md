@@ -23,12 +23,12 @@
 ## Working On Now
 
 - [x] Runtime Reliability remains the repo-wide hardening track
-- [x] `provider-policy-capabilities` is the active PR from the numbered sequence below
+- [x] `provider-routing-decision-audit` is the active PR from the numbered sequence below
 - [ ] close the remaining routing, observability, and eval gaps outside the already-covered seams
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection and decision visibility
+- [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduler, core agent, delegation, and connected MCP-specialist paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond the proactive delivery transport, MCP management/test, skills state-management, and screen observation repository boundaries
 - [ ] expand eval coverage beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts into broader behavioral coverage
@@ -45,7 +45,7 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
    add one delegated tool-heavy workflow contract covering routing, tool execution, audit, and degraded or failure handling
 4. [x] `provider-policy-capabilities`:
    add provider capability metadata and runtime-path policy intents such as `fast`, `cheap`, `reasoning`, and `local_first`
-5. [ ] `provider-routing-decision-audit`:
+5. [x] `provider-routing-decision-audit`:
    log structured routing decisions that explain the chosen target, rejected targets, and rejection reasons
 6. [ ] `local-routing-gap-closure`:
    extend local routing only into the remaining runtime paths that still have clear product value after the eval and policy work lands

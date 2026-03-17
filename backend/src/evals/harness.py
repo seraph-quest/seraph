@@ -1894,6 +1894,92 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
     }
 
 
+def _eval_provider_policy_scoring() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Weighted policy score chose the strongest fallback.")
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", ""),
+            patch.object(
+                settings,
+                "runtime_fallback_overrides",
+                (
+                    "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano;"
+                    "chat_agent=openai/gpt-4o-mini|openai/gpt-4.1-mini"
+                ),
+            ),
+            patch.object(
+                settings,
+                "provider_capability_overrides",
+                (
+                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                    "openai/gpt-4o-mini=fast;"
+                    "openai/gpt-4.1-nano=cheap|tool_use;"
+                    "openai/gpt-4.1-mini=reasoning|tool_use"
+                ),
+            ),
+            patch.object(
+                settings,
+                "runtime_policy_intents",
+                (
+                    "session_title_generation=fast|cheap|tool_use;"
+                    "chat_agent=fast|reasoning|tool_use"
+                ),
+            ),
+            patch.object(
+                settings,
+                "runtime_policy_scores",
+                (
+                    "session_title_generation=fast:5|cheap:4|tool_use:4;"
+                    "chat_agent=fast:6|reasoning:4|tool_use:4"
+                ),
+            ),
+            patch(
+                "litellm.completion",
+                side_effect=[RuntimeError("primary down"), completion_response],
+            ) as mock_completion,
+        ):
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "pick the highest weighted fallback"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_title_generation",
+            )
+            chat_model = FallbackLiteLLMModel(
+                model_id="openrouter/anthropic/claude-sonnet-4",
+                api_key="primary-key",
+                api_base="https://openrouter.ai/api/v1",
+                runtime_profile="default",
+                runtime_path="chat_agent",
+            )
+    finally:
+        _reset_target_health()
+
+    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-nano",
+    ]
+    assert [fallback.model_id for fallback in chat_model._fallback_models] == [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini",
+    ]
+
+    return {
+        "completion_attempted_models": attempted_models,
+        "completion_final_model": attempted_models[-1],
+        "completion_weighted_scores": {"fast": 5.0, "cheap": 4.0, "tool_use": 4.0},
+        "agent_weighted_scores": {"fast": 6.0, "reasoning": 4.0, "tool_use": 4.0},
+        "agent_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "response_excerpt": response.choices[0].message.content,
+    }
+
+
 async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
     completion_response = _make_litellm_response("Policy matched the fast fallback.")
     first_agent_response = MagicMock()
@@ -3385,6 +3471,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime-path policy intents can prefer local-first primary routing and capability-matched fallback targets.",
         runner=_eval_provider_policy_capabilities,
+    ),
+    EvalScenario(
+        name="provider_policy_scoring",
+        category="runtime",
+        description="Runtime-path policy scoring can rank targets by weighted capability value instead of only intent order.",
+        runner=_eval_provider_policy_scoring,
     ),
     EvalScenario(
         name="provider_routing_decision_audit",

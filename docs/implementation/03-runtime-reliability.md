@@ -24,8 +24,8 @@
 ## Working On Now
 
 - [x] Runtime Reliability remains the repo-wide hardening track
-- [x] `incident-trace-gap-closure` is the active PR from the numbered sequence below
-- [x] the next repo-wide value sequence after this PR is prepared below so follow-on work is explicit before this queue lands
+- [x] `provider-policy-scoring` is the active PR from the numbered sequence below
+- [x] the next repo-wide value sequence is prepared below so follow-on work stays explicit as this sequence advances
 - [ ] close the remaining routing and eval gaps outside the already-covered seams
 
 ## Still To Do On `develop`
@@ -54,9 +54,9 @@ This sequence is the finished Runtime Reliability execution order. A checked ite
 
 ## Next Most Valuable PR Sequence
 
-This is the next ordered PR list after `incident-trace-gap-closure`. It mixes the remaining highest-value Runtime Reliability work with the next highest-leverage product-system gaps from Guardian Intelligence, Presence, and Ecosystem.
+This is the next ordered PR list after `incident-trace-gap-closure`. It mixes the remaining highest-value Runtime Reliability work with the next highest-leverage product-system gaps from Guardian Intelligence, Presence, and Ecosystem. A checked item can be in an open PR before it is shipped on `develop`.
 
-1. [ ] `provider-policy-scoring`:
+1. [x] `provider-policy-scoring`:
    deepen provider routing with weighted policy scoring, explicit capability preferences, and clearer target ranking so runtime-path selection is stronger than simple preference chains and cooldown skips
 2. [ ] `behavioral-evals-guardian-flows`:
    expand behavioral eval coverage beyond chat and scheduler seams into observer refresh, consolidation, proactive delivery, and policy-mode guardrails so broader guardian behavior is regression-tested

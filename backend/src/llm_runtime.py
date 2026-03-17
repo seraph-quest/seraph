@@ -158,6 +158,35 @@ def runtime_policy_intents(runtime_path: str | None) -> list[str]:
     return _parse_policy_tags(value)
 
 
+def runtime_policy_scores(runtime_path: str | None) -> dict[str, float]:
+    """Return optional weighted policy scores for a runtime path."""
+    value = _select_runtime_entry(
+        settings.runtime_policy_scores,
+        runtime_path=runtime_path,
+        separator=";",
+    )
+    if not value:
+        return {}
+
+    scores: dict[str, float] = {}
+    for raw_entry in value.split("|"):
+        entry = raw_entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        raw_intent, _, raw_weight = entry.partition(":")
+        intent = _normalize_policy_tag(raw_intent)
+        if not intent:
+            continue
+        try:
+            weight = float(raw_weight.strip())
+        except ValueError:
+            continue
+        if weight <= 0:
+            continue
+        scores[intent] = weight
+    return scores
+
+
 def provider_capabilities(
     model_id: str | None,
     *,
@@ -555,8 +584,9 @@ def _order_targets_by_policy(
 
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
+    score_weights = runtime_policy_scores(runtime_path)
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, tuple[int, ...], int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, float, tuple[int, ...], int]:
         index, target = item
         capabilities = set(
             provider_capabilities(
@@ -564,12 +594,19 @@ def _order_targets_by_policy(
                 profile=target.get("profile"),
             )
         )
-        local_score = 1 if prefer_local and target.get("profile") == "local" else 0
+        local_score = score_weights.get("local_first", 1.0) if prefer_local and target.get("profile") == "local" else 0.0
         capability_priority = tuple(
             0 if capability in capabilities else 1
             for capability in desired_capabilities
         )
-        return (-local_score, capability_priority, index)
+        capability_score = 0.0
+        if score_weights:
+            capability_score = sum(
+                score_weights.get(capability, 0.0)
+                for capability in desired_capabilities
+                if capability in capabilities
+            )
+        return (-local_score, -capability_score, capability_priority, index)
 
     return [
         target
@@ -593,6 +630,23 @@ def _matched_policy_intents(
         if intent != "local_first" and intent in capabilities
     )
     return matched
+
+
+def _policy_score(
+    *,
+    model_id: str,
+    profile: str | None,
+    policy_intents: list[str],
+    policy_scores: dict[str, float],
+) -> float:
+    if not policy_scores:
+        return 0.0
+    matched = _matched_policy_intents(
+        model_id=model_id,
+        profile=profile,
+        policy_intents=policy_intents,
+    )
+    return sum(policy_scores.get(intent, 0.0) for intent in matched)
 
 
 def _candidate_reason_codes(
@@ -639,6 +693,7 @@ def _build_routing_decision_details(
     rerouted: bool,
 ) -> dict[str, Any]:
     policy_intents = runtime_policy_intents(runtime_path)
+    policy_scores = runtime_policy_scores(runtime_path)
     selected_target = (
         ordered_fallbacks[0]
         if rerouted and ordered_fallbacks
@@ -705,6 +760,12 @@ def _build_routing_decision_details(
                     profile=target.get("profile"),
                     policy_intents=policy_intents,
                 ),
+                "policy_score": _policy_score(
+                    model_id=str(target["model_id"]),
+                    profile=target.get("profile"),
+                    policy_intents=policy_intents,
+                    policy_scores=policy_scores,
+                ),
                 "reason_codes": _candidate_reason_codes(
                     source=target["source"],
                     decision=decision,
@@ -718,6 +779,7 @@ def _build_routing_decision_details(
         "runtime_path": runtime_path,
         "runtime_profile": runtime_profile,
         "policy_intents": policy_intents,
+        "policy_scores": policy_scores,
         "primary_model": primary_model,
         "selected_model": str(selected_target["model_id"]),
         "selected_profile": selected_target.get("profile"),

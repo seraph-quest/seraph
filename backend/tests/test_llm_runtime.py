@@ -395,6 +395,55 @@ def test_fallback_policy_respects_intent_priority_before_config_order():
     ]
 
 
+def test_completion_with_fallback_sync_prefers_highest_weighted_policy_score():
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="weighted score won"))]
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+            patch.object(
+                settings,
+                "provider_capability_overrides",
+                (
+                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                    "openai/gpt-4o-mini=fast;"
+                    "openai/gpt-4.1-nano=cheap|tool_use"
+                ),
+            ),
+            patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap|tool_use"),
+            patch.object(
+                settings,
+                "runtime_policy_scores",
+                "session_title_generation=fast:5|cheap:4|tool_use:4",
+            ),
+            patch(
+                "litellm.completion",
+                side_effect=[RuntimeError("primary down"), completion_response],
+            ) as mock_completion,
+        ):
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "pick the highest weighted fallback"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_title_generation",
+            )
+    finally:
+        _reset_target_health()
+
+    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-nano",
+    ]
+    assert response.choices[0].message.content == "weighted score won"
+
+
 def test_build_completion_kwargs_uses_fallback_settings():
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -1441,6 +1490,43 @@ def test_completion_with_fallback_prefers_alternate_runtime_profile_before_expli
     ]
 
 
+def test_fallback_litellm_model_orders_targets_by_weighted_policy_score():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                "openai/gpt-4o-mini=fast;"
+                "openai/gpt-4.1-mini=reasoning|tool_use"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "chat_agent=fast|reasoning|tool_use"),
+        patch.object(
+            settings,
+            "runtime_policy_scores",
+            "chat_agent=fast:6|reasoning:4|tool_use:4",
+        ),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            runtime_profile="default",
+            runtime_path="chat_agent",
+        )
+
+    assert [fallback.model_id for fallback in model._fallback_models] == [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini",
+    ]
+
+
 def test_completion_with_fallback_logs_routing_decision(async_db):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="fast path won"))]
@@ -1486,11 +1572,68 @@ def test_completion_with_fallback_logs_routing_decision(async_db):
         "openai/gpt-4.1-nano",
     ]
     assert details["policy_intents"] == ["fast", "cheap"]
+    assert details["policy_scores"] == {}
     assert details["candidate_targets"][1]["model_id"] == "openai/gpt-4o-mini"
     assert details["candidate_targets"][1]["matched_policy_intents"] == ["fast", "cheap"]
+    assert details["candidate_targets"][1]["policy_score"] == 0.0
     assert details["candidate_targets"][1]["decision"] == "deferred"
     assert details["candidate_targets"][2]["model_id"] == "openai/gpt-4.1-nano"
     assert details["candidate_targets"][2]["matched_policy_intents"] == ["cheap"]
+    assert details["candidate_targets"][2]["policy_score"] == 0.0
+
+
+def test_completion_with_fallback_logs_weighted_policy_scores(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="weighted policy path"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            "openai/gpt-4o-mini=fast;openai/gpt-4.1-nano=cheap|tool_use",
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap|tool_use"),
+        patch.object(
+            settings,
+            "runtime_policy_scores",
+            "session_title_generation=fast:5|cheap:4|tool_use:4",
+        ),
+        patch(
+            "litellm.completion",
+            side_effect=[RuntimeError("primary down"), completion_response],
+        ),
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick the highest weighted fallback"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert result is completion_response
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["policy_scores"] == {"fast": 5.0, "cheap": 4.0, "tool_use": 4.0}
+    assert details["attempt_order"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4o-mini",
+    ]
+    assert details["candidate_targets"][1]["model_id"] == "openai/gpt-4.1-nano"
+    assert details["candidate_targets"][1]["policy_score"] == 8.0
+    assert details["candidate_targets"][2]["model_id"] == "openai/gpt-4o-mini"
+    assert details["candidate_targets"][2]["policy_score"] == 5.0
 
 
 def test_fallback_litellm_model_skips_duplicate_fallback_target():

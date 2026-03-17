@@ -24,8 +24,8 @@ title: Seraph Development Status
 - [x] Runtime Reliability is still the active hardening track.
 - [ ] Runtime Reliability is not complete yet.
 - [x] The numbered next-PR sequence is tracked in `docs/implementation/03-runtime-reliability.md`.
-- [x] The active in-flight Runtime Reliability slice is `incident-trace-gap-closure`.
-- [x] The next most valuable PR sequence after `incident-trace-gap-closure` is also tracked in `docs/implementation/03-runtime-reliability.md`.
+- [x] The active in-flight Runtime Reliability slice is `provider-policy-scoring`.
+- [x] The next most valuable PR sequence after the finished incident-trace queue is also tracked in `docs/implementation/03-runtime-reliability.md`.
 
 ## Shipped On `develop`
 

@@ -71,6 +71,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_profile_preferences" in captured.out
     assert "runtime_path_patterns" in captured.out
     assert "provider_policy_capabilities" in captured.out
+    assert "provider_policy_scoring" in captured.out
     assert "provider_routing_decision_audit" in captured.out
     assert "session_bound_llm_trace" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
@@ -148,6 +149,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_profile_preferences",
                 "runtime_path_patterns",
                 "provider_policy_capabilities",
+                "provider_policy_scoring",
                 "provider_routing_decision_audit",
                 "session_bound_llm_trace",
                 "scheduled_local_runtime_profile",
@@ -363,6 +365,25 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4o-mini",
     ]
     assert details_by_name["provider_policy_capabilities"]["completion_final_model"] == "openai/gpt-4o-mini"
+    assert details_by_name["provider_policy_scoring"]["completion_attempted_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-nano",
+    ]
+    assert details_by_name["provider_policy_scoring"]["completion_final_model"] == "openai/gpt-4.1-nano"
+    assert details_by_name["provider_policy_scoring"]["completion_weighted_scores"] == {
+        "fast": 5.0,
+        "cheap": 4.0,
+        "tool_use": 4.0,
+    }
+    assert details_by_name["provider_policy_scoring"]["agent_weighted_scores"] == {
+        "fast": 6.0,
+        "reasoning": 4.0,
+        "tool_use": 4.0,
+    }
+    assert details_by_name["provider_policy_scoring"]["agent_fallback_models"] == [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini",
+    ]
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_model"] == (
         "openrouter/anthropic/claude-sonnet-4"
     )

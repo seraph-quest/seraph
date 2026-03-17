@@ -21,6 +21,7 @@ from src.llm_runtime import (
     _register_request,
     _finish_request,
     reset_current_llm_request_id,
+    runtime_policy_scores,
     set_current_llm_request_id,
 )
 
@@ -442,6 +443,17 @@ def test_completion_with_fallback_sync_prefers_highest_weighted_policy_score():
         "openai/gpt-4.1-nano",
     ]
     assert response.choices[0].message.content == "weighted score won"
+
+
+def test_runtime_policy_scores_ignores_non_finite_weights():
+    with patch.object(
+        settings,
+        "runtime_policy_scores",
+        "session_title_generation=fast:nan|cheap:inf|tool_use:4|reasoning:-1",
+    ):
+        scores = runtime_policy_scores("session_title_generation")
+
+    assert scores == {"tool_use": 4.0}
 
 
 def test_build_completion_kwargs_uses_fallback_settings():

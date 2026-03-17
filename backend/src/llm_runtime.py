@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import math
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
@@ -180,6 +181,8 @@ def runtime_policy_scores(runtime_path: str | None) -> dict[str, float]:
         try:
             weight = float(raw_weight.strip())
         except ValueError:
+            continue
+        if not math.isfinite(weight):
             continue
         if weight <= 0:
             continue

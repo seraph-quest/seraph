@@ -5,7 +5,7 @@ import logging
 from time import perf_counter
 
 from config.settings import settings
-from src.audit.runtime import log_scheduler_job_event
+from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
@@ -40,6 +40,31 @@ Write a short morning briefing (3-6 sentences) covering:
 Be concise. No preamble. Just the briefing text."""
 
 
+async def _get_relevant_memories() -> tuple[str, bool]:
+    """Fetch memory context for the briefing while preserving fail-open behavior."""
+    from src.memory.vector_store import search_formatted
+
+    try:
+        memories = await asyncio.to_thread(
+            search_formatted,
+            "daily priorities and routines",
+            top_k=3,
+        )
+        return memories or "No relevant memories yet.", False
+    except Exception as exc:
+        logger.exception("Failed to load relevant memories for daily briefing")
+        await log_background_task_event(
+            task_name="daily_briefing_inputs",
+            outcome="degraded",
+            details={
+                "source": "relevant_memories",
+                "fallback_value": "No relevant memories yet.",
+                "error": str(exc),
+            },
+        )
+        return "No relevant memories yet.", True
+
+
 async def run_daily_briefing() -> None:
     """Generate and send the morning briefing to connected clients."""
     started_at = perf_counter()
@@ -61,13 +86,11 @@ async def run_daily_briefing() -> None:
 
         goals_text = ctx.active_goals_summary or "No active goals."
 
-        from src.memory.vector_store import search_formatted
-        memories = await asyncio.to_thread(
-            search_formatted,
-            "daily priorities and routines",
-            top_k=3,
-        )
-        memories_text = memories or "No relevant memories yet."
+        memories_text, memories_degraded = await _get_relevant_memories()
+        degraded_inputs = []
+        if memories_degraded:
+            degraded_inputs.append("relevant_memories")
+        data_quality = "degraded" if degraded_inputs else "good"
 
         context_text = ctx.to_prompt_block()
 
@@ -118,6 +141,8 @@ async def run_daily_briefing() -> None:
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "response_length": len(briefing_text),
                 "upcoming_event_count": len(ctx.upcoming_events),
+                "data_quality": data_quality,
+                "degraded_inputs": degraded_inputs,
             },
         )
         logger.info("daily_briefing: delivered morning briefing")

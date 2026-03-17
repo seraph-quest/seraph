@@ -191,3 +191,35 @@ async def test_daily_briefing_with_events():
         prompt_text = captured_prompt["messages"][0]["content"]
         assert "Team standup" in prompt_text
         assert "1:1 with manager" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_daily_briefing_logs_degraded_runtime_details(async_db):
+    ctx = _make_context()
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.vector_store.search_formatted", side_effect=Exception("vector store down")),
+        patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+    ):
+        await run_daily_briefing()
+
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        event["event_type"] == "background_task_degraded"
+        and event["tool_name"] == "daily_briefing_inputs"
+        and event["details"]["source"] == "relevant_memories"
+        and event["details"]["error"] == "vector store down"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "scheduler_job_succeeded"
+        and event["tool_name"] == "daily_briefing"
+        and event["details"]["data_quality"] == "degraded"
+        and event["details"]["degraded_inputs"] == ["relevant_memories"]
+        for event in events
+    )

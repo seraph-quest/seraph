@@ -59,6 +59,7 @@ from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.evening_review import run_evening_review
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
+from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
 from src.scheduler.connection_manager import BroadcastResult
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
@@ -2323,8 +2324,30 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
     ctx = _make_context(upcoming_events=[{"summary": "Ship local routing", "start": "09:30"}])
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=ctx)
-    mock_deliver = AsyncMock()
-    local_response = _make_litellm_response("Morning briefing via local profile.")
+    mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
+    daily_summary = {
+        "total_observations": 4,
+        "total_tracked_minutes": 180,
+        "switch_count": 7,
+        "by_activity": {"coding": 7200},
+        "by_project": {"seraph": 7200},
+        "longest_streaks": [{"activity": "coding", "duration_minutes": 90, "started_at": "2026-03-17T09:00:00Z"}],
+    }
+    weekly_summary = {
+        "week_start": "2026-03-16",
+        "week_end": "2026-03-22",
+        "total_observations": 19,
+        "total_tracked_minutes": 840,
+        "by_activity": {"coding": 32400},
+        "by_project": {"seraph": 28800},
+        "daily_breakdown": [{"date": "2026-03-17", "tracked_minutes": 180, "observations": 4}],
+    }
+    local_responses = [
+        _make_litellm_response("Morning briefing via local profile."),
+        _make_litellm_response("Evening review via local profile."),
+        _make_litellm_response("Activity digest via local profile."),
+        _make_litellm_response("Weekly review via local profile."),
+    ]
 
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -2337,21 +2360,40 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         patch.object(settings, "fallback_model", ""),
         patch.object(settings, "fallback_models", ""),
         patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.observer.screen_repository.screen_observation_repo.get_daily_summary", AsyncMock(return_value=daily_summary)),
+        patch("src.observer.screen_repository.screen_observation_repo.get_weekly_summary", AsyncMock(return_value=weekly_summary)),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Close routing gap"], False))),
         patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False)),
-        patch("litellm.completion", return_value=local_response) as mock_completion,
+        patch("litellm.completion", side_effect=local_responses) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
         await run_daily_briefing()
+        await run_evening_review()
+        await run_activity_digest()
+        await run_weekly_activity_review()
 
-    assert mock_completion.call_count == 1
-    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
-    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
+    assert mock_completion.call_count == 4
+    routed_models = {
+        "daily_briefing": mock_completion.call_args_list[0].kwargs["model"],
+        "evening_review": mock_completion.call_args_list[1].kwargs["model"],
+        "activity_digest": mock_completion.call_args_list[2].kwargs["model"],
+        "weekly_activity_review": mock_completion.call_args_list[3].kwargs["model"],
+    }
+    routed_api_bases = {
+        "daily_briefing": mock_completion.call_args_list[0].kwargs["api_base"],
+        "evening_review": mock_completion.call_args_list[1].kwargs["api_base"],
+        "activity_digest": mock_completion.call_args_list[2].kwargs["api_base"],
+        "weekly_activity_review": mock_completion.call_args_list[3].kwargs["api_base"],
+    }
+    assert set(routed_models.values()) == {"ollama/llama3.2"}
+    assert set(routed_api_bases.values()) == {"http://localhost:11434/v1"}
     return {
-        "job_name": "daily_briefing",
         "runtime_profile": "local",
-        "routed_model": mock_completion.call_args.kwargs["model"],
-        "delivered_excerpt": mock_deliver.call_args.args[0].content,
+        "routed_models": routed_models,
+        "routed_api_bases": routed_api_bases,
+        "delivery_count": mock_deliver.await_count,
     }
 
 
@@ -3356,7 +3398,7 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="scheduled_local_runtime_profile",
         category="runtime",
-        description="Scheduled completion-based jobs can route through the first-class local runtime profile.",
+        description="All current scheduled completion-based jobs can route through the first-class local runtime profile.",
         runner=_eval_scheduled_local_runtime_profile,
     ),
     EvalScenario(

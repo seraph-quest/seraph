@@ -40,7 +40,7 @@ async def test_daily_briefing_happy_path():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [fact] User likes mornings"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "fact", "text": "User likes mornings"}], False)),
         patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -65,7 +65,7 @@ async def test_daily_briefing_logs_success(async_db):
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [fact] User likes mornings"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "fact", "text": "User likes mornings"}], False)),
         patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
         patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
     ):
@@ -89,7 +89,7 @@ async def test_daily_briefing_uses_named_runtime_path():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [fact] User likes mornings"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "fact", "text": "User likes mornings"}], False)),
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             new=AsyncMock(return_value=mock_response),
@@ -130,7 +130,7 @@ async def test_daily_briefing_llm_failure():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.memory.vector_store.search_formatted", return_value=""),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
         patch("litellm.completion", side_effect=Exception("LLM API error")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -150,7 +150,7 @@ async def test_daily_briefing_empty_calendar_goals():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.memory.vector_store.search_formatted", return_value=""),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
         patch("litellm.completion", return_value=_mock_litellm_response("A quiet morning ahead.")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -181,7 +181,7 @@ async def test_daily_briefing_with_events():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.memory.vector_store.search_formatted", return_value=""),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
         patch("litellm.completion", side_effect=mock_completion),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -191,3 +191,35 @@ async def test_daily_briefing_with_events():
         prompt_text = captured_prompt["messages"][0]["content"]
         assert "Team standup" in prompt_text
         assert "1:1 with manager" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_daily_briefing_logs_degraded_runtime_details(async_db):
+    ctx = _make_context()
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
+        patch("litellm.completion", return_value=_mock_litellm_response("Good morning, Hero! Here's your briefing...")),
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+    ):
+        await run_daily_briefing()
+
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        event["event_type"] == "background_task_degraded"
+        and event["tool_name"] == "daily_briefing_inputs"
+        and event["details"]["source"] == "relevant_memories"
+        and event["details"]["error"] == "vector_store_search_failed"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "scheduler_job_succeeded"
+        and event["tool_name"] == "daily_briefing"
+        and event["details"]["data_quality"] == "degraded"
+        and event["details"]["degraded_inputs"] == ["relevant_memories"]
+        for event in events
+    )

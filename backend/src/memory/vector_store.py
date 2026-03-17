@@ -136,15 +136,15 @@ def add_memory(
         return ""
 
 
-def search(
+def search_with_status(
     query: str,
     top_k: int = 0,
     category_filter: Optional[str] = None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     """Search memories by semantic similarity.
 
     Returns list of dicts with: id, text, category, score, created_at.
-    Returns [] on any failure.
+    Returns `(results, degraded)` where degraded is true on fail-open fallback.
     """
     try:
         if top_k <= 0:
@@ -163,7 +163,7 @@ def search(
                     "top_k": top_k,
                 },
             )
-            return []
+            return [], False
 
         query_vector = embed(query)
 
@@ -189,7 +189,7 @@ def search(
                     "top_k": top_k,
                 },
             )
-            return []
+            return [], False
 
         _log_vector_store_event(
             "succeeded",
@@ -211,7 +211,7 @@ def search(
                 "created_at": r["created_at"],
             }
             for r in rows
-        ]
+        ], False
     except Exception as exc:
         logger.exception("Failed to search memories")
         _log_vector_store_event(
@@ -224,7 +224,21 @@ def search(
                 "error": str(exc),
             },
         )
-        return []
+        return [], True
+
+
+def search(
+    query: str,
+    top_k: int = 0,
+    category_filter: Optional[str] = None,
+) -> list[dict]:
+    """Search memories by semantic similarity.
+
+    Returns list of dicts with: id, text, category, score, created_at.
+    Returns [] on any failure.
+    """
+    results, _degraded = search_with_status(query, top_k, category_filter)
+    return results
 
 
 def search_formatted(
@@ -237,7 +251,7 @@ def search_formatted(
     Returns "" on any failure.
     """
     try:
-        results = search(query, top_k, category_filter)
+        results, _degraded = search_with_status(query, top_k, category_filter)
         if not results:
             return ""
         lines = []

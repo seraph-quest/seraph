@@ -1082,7 +1082,7 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [memory] Prioritize reliability"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prioritize reliability"}], False)),
         patch("src.llm_runtime.logger.warning"),
         patch("litellm.completion", side_effect=[primary_error, fallback_response]) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
@@ -1098,6 +1098,45 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
         "primary_model": mock_completion.call_args_list[0].kwargs["model"],
         "fallback_model": mock_completion.call_args_list[1].kwargs["model"],
         "delivered_excerpt": delivered_message.content,
+    }
+
+
+async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
+    ctx = _make_context(upcoming_events=[{"summary": "Ship reliable mornings", "start": "09:30"}])
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=ctx)
+    mock_deliver = AsyncMock()
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
+        patch(
+            "src.scheduler.jobs.daily_briefing.completion_with_fallback",
+            AsyncMock(return_value=_make_litellm_response("Good morning. Here is the plan.")),
+        ),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_daily_briefing()
+
+    degraded = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_degraded",
+        tool_name="daily_briefing_inputs",
+    )
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="daily_briefing",
+    )
+    return {
+        "background_source": degraded["details"]["source"],
+        "background_error": degraded["details"]["error"],
+        "data_quality": succeeded["details"]["data_quality"],
+        "degraded_inputs": succeeded["details"]["degraded_inputs"],
+        "delivered": mock_deliver.await_count == 1,
     }
 
 
@@ -1155,7 +1194,7 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         patch.object(settings, "fallback_models", ""),
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [memory] Prefer local summaries"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False)),
         patch("litellm.completion", return_value=local_response) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -2026,6 +2065,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="proactive",
         description="Daily briefing survives a primary provider failure and still delivers via fallback.",
         runner=_eval_daily_briefing_fallback,
+    ),
+    EvalScenario(
+        name="daily_briefing_degraded_memories_audit",
+        category="observability",
+        description="Daily briefing records degraded memory-input quality when vector recall falls back to an empty baseline.",
+        runner=_eval_daily_briefing_degraded_memories_audit,
     ),
     EvalScenario(
         name="evening_review_degraded_inputs_audit",

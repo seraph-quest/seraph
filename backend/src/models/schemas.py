@@ -37,6 +37,7 @@ class WSResponse(BaseModel):
     urgency: int | None = None
     intervention_type: str | None = None
     reasoning: str | None = None
+    requires_approval: bool | None = None
     # Phase 3 — Ambient state
     state: str | None = None
     tooltip: str | None = None

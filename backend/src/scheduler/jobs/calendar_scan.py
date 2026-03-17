@@ -8,6 +8,20 @@ from src.models.schemas import WSResponse
 logger = logging.getLogger(__name__)
 
 
+def _delivery_value(result) -> str | None:
+    delivery_decision = getattr(result, "delivery_decision", None)
+    if delivery_decision is not None:
+        return delivery_decision.value
+    return getattr(result, "value", None)
+
+
+def _policy_action_value(result) -> str | None:
+    action = getattr(result, "action", None)
+    if action is not None:
+        return action.value
+    return None
+
+
 async def run_calendar_scan() -> None:
     """Scan upcoming calendar events and alert user about imminent ones."""
     logger.info("calendar_scan started")
@@ -75,7 +89,8 @@ async def run_calendar_scan() -> None:
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "alert_count": len(alerts),
-                "delivery": result.value,
+                "delivery": _delivery_value(result),
+                "policy_action": _policy_action_value(result),
             },
         )
         logger.info("calendar_scan: alerted for %d event(s)", len(alerts))

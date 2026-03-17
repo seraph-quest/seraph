@@ -23,6 +23,20 @@ logger = logging.getLogger(__name__)
 _STRATEGIST_RUNTIME_SESSION_ID = "scheduler:strategist_tick"
 
 
+def _delivery_value(result) -> str | None:
+    delivery_decision = getattr(result, "delivery_decision", None)
+    if delivery_decision is not None:
+        return delivery_decision.value
+    return getattr(result, "value", None)
+
+
+def _policy_action_value(result) -> str | None:
+    action = getattr(result, "action", None)
+    if action is not None:
+        return action.value
+    return None
+
+
 async def run_strategist_tick() -> None:
     """Review context and decide if proactive intervention is warranted."""
     started_at = perf_counter()
@@ -71,7 +85,10 @@ async def run_strategist_tick() -> None:
             urgency=decision.urgency,
             reasoning=decision.reasoning,
         )
-        result = await deliver_or_queue(message)
+        result = await deliver_or_queue(
+            message,
+            guardian_confidence=guardian_state.confidence.overall,
+        )
         await log_scheduler_job_event(
             job_name="strategist_tick",
             outcome="succeeded",
@@ -79,14 +96,16 @@ async def run_strategist_tick() -> None:
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "intervention_type": decision.intervention_type,
                 "urgency": decision.urgency,
-                "delivery": result.value,
+                "delivery": _delivery_value(result),
+                "policy_action": _policy_action_value(result),
             },
         )
         logger.info(
-            "strategist_tick: intervention sent (type=%s, urgency=%d, delivery=%s)",
+            "strategist_tick: intervention handled (type=%s, urgency=%d, delivery=%s, action=%s)",
             decision.intervention_type,
             decision.urgency,
-            result.value,
+            _delivery_value(result),
+            _policy_action_value(result),
         )
 
     except asyncio.TimeoutError:

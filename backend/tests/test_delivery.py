@@ -8,7 +8,7 @@ from src.audit.repository import audit_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
-from src.observer.user_state import DeliveryDecision
+from src.observer.intervention_policy import InterventionAction
 from src.scheduler.connection_manager import BroadcastResult
 
 
@@ -54,7 +54,9 @@ async def test_deliver_broadcasts():
         msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
         decision = await deliver_or_queue(msg)
 
-        assert decision == DeliveryDecision.deliver
+        assert decision.action == InterventionAction.act
+        assert decision.delivery_decision is not None
+        assert decision.delivery_decision.value == "deliver"
         mock_ws.broadcast.assert_called_once_with(msg)
         mock_iq.enqueue.assert_not_called()
     finally:
@@ -78,6 +80,8 @@ async def test_deliver_logs_runtime_audit(async_db):
             and event["tool_name"] == "observer_delivery_gate"
             and event["details"]["intervention_type"] == "advisory"
             and event["details"]["user_state"] == "available"
+            and event["details"]["policy_action"] == "act"
+            and event["details"]["policy_reason"] == "available_capacity"
             and event["details"]["delivered_connections"] == 1
             for event in events
         )
@@ -110,8 +114,9 @@ async def test_deliver_ambient_no_budget_decrement():
         p.start()
     try:
         msg = WSResponse(type="ambient", content="", intervention_type="ambient", state="on_track")
-        await deliver_or_queue(msg)
+        decision = await deliver_or_queue(msg)
 
+        assert decision.action == InterventionAction.act
         mock_cm.decrement_attention_budget.assert_not_called()
     finally:
         for p in patches:
@@ -128,7 +133,9 @@ async def test_queue_when_blocked():
         msg = WSResponse(type="proactive", content="Queued msg", intervention_type="advisory", urgency=3)
         decision = await deliver_or_queue(msg)
 
-        assert decision == DeliveryDecision.queue
+        assert decision.action == InterventionAction.bundle
+        assert decision.delivery_decision is not None
+        assert decision.delivery_decision.value == "queue"
         mock_ws.broadcast.assert_not_called()
         mock_iq.enqueue.assert_called_once_with(
             content="Queued msg",
@@ -157,6 +164,8 @@ async def test_queue_logs_runtime_audit(async_db):
             and event["tool_name"] == "observer_delivery_gate"
             and event["details"]["user_state"] == "deep_work"
             and event["details"]["interruption_mode"] == "balanced"
+            and event["details"]["policy_action"] == "bundle"
+            and event["details"]["policy_reason"] == "blocked_state"
             for event in events
         )
     finally:
@@ -174,7 +183,8 @@ async def test_queue_when_no_budget():
         msg = WSResponse(type="proactive", content="Budget depleted", intervention_type="advisory", urgency=3)
         decision = await deliver_or_queue(msg)
 
-        assert decision == DeliveryDecision.queue
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "attention_budget_exhausted"
         mock_ws.broadcast.assert_not_called()
     finally:
         for p in patches:
@@ -191,7 +201,8 @@ async def test_urgent_delivers_through_blocked():
         msg = WSResponse(type="proactive", content="Urgent!", intervention_type="alert", urgency=5)
         decision = await deliver_or_queue(msg)
 
-        assert decision == DeliveryDecision.deliver
+        assert decision.action == InterventionAction.act
+        assert decision.reason == "urgent"
         mock_ws.broadcast.assert_called_once()
     finally:
         for p in patches:
@@ -238,7 +249,7 @@ async def test_delivery_transport_failure_logs_runtime_audit(async_db):
         msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
         decision = await deliver_or_queue(msg)
 
-        assert decision == DeliveryDecision.deliver
+        assert decision.action == InterventionAction.act
         mock_cm.decrement_attention_budget.assert_not_called()
 
         events = await audit_repository.list_events(limit=10)
@@ -267,8 +278,97 @@ async def test_delivery_audit_fails_open():
         with patch("src.audit.runtime.audit_repository.log_event", new_callable=AsyncMock, side_effect=RuntimeError("audit down")):
             decision = await deliver_or_queue(msg)
 
-        assert decision == DeliveryDecision.deliver
+        assert decision.action == InterventionAction.act
         mock_ws.broadcast.assert_called_once_with(msg)
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_defer_when_winding_down(async_db):
+    ctx = _make_context(user_state="winding_down")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Wrap up the inbox.", intervention_type="advisory", urgency=3)
+        decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.defer
+        assert decision.reason == "winding_down_quiet_hours"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_deferred"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["policy_action"] == "defer"
+            and event["details"]["policy_reason"] == "winding_down_quiet_hours"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_stay_silent_for_empty_proactive_message(async_db):
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="", intervention_type="advisory", urgency=2)
+        decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.stay_silent
+        assert decision.reason == "empty_content"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_silenced"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["policy_action"] == "stay_silent"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_approval_policy_action_is_logged(async_db):
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="Open a high-risk action suggestion.",
+            intervention_type="alert",
+            urgency=4,
+            reasoning="Needs confirmation",
+            requires_approval=True,
+        )
+        decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.request_approval
+        assert decision.reason == "requires_approval"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_approval_requested"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["policy_action"] == "request_approval"
+            for event in events
+        )
     finally:
         for p in patches:
             p.stop()

@@ -54,6 +54,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "guardian_state_synthesis" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
+    assert "intervention_policy_behavior" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
@@ -142,6 +143,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "guardian_state_synthesis",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
+                "intervention_policy_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
@@ -266,11 +268,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["observer_refresh_behavior"]["triggered_bundle_delivery"] is True
     assert details_by_name["observer_refresh_behavior"]["bundle_task_scheduled"] is True
     assert details_by_name["observer_delivery_decision_behavior"]["delivered_decision"] == "deliver"
+    assert details_by_name["observer_delivery_decision_behavior"]["delivered_action"] == "act"
     assert details_by_name["observer_delivery_decision_behavior"]["queued_decision"] == "queue"
+    assert details_by_name["observer_delivery_decision_behavior"]["queued_action"] == "bundle"
     assert details_by_name["observer_delivery_decision_behavior"]["budget_decremented"] is True
     assert details_by_name["observer_delivery_decision_behavior"]["queued_content_matches"] is True
     assert details_by_name["observer_delivery_decision_behavior"]["delivered_connections"] == 1
     assert details_by_name["observer_delivery_decision_behavior"]["queued_user_state"] == "deep_work"
+    assert details_by_name["intervention_policy_behavior"]["act_action"] == "act"
+    assert details_by_name["intervention_policy_behavior"]["act_reason"] == "available_capacity"
+    assert details_by_name["intervention_policy_behavior"]["bundle_action"] == "bundle"
+    assert details_by_name["intervention_policy_behavior"]["bundle_reason"] == "blocked_state"
+    assert details_by_name["intervention_policy_behavior"]["defer_action"] == "defer"
+    assert details_by_name["intervention_policy_behavior"]["defer_reason"] == "low_guardian_confidence"
+    assert details_by_name["intervention_policy_behavior"]["approval_action"] == "request_approval"
+    assert details_by_name["intervention_policy_behavior"]["approval_reason"] == "requires_approval"
+    assert details_by_name["intervention_policy_behavior"]["silent_action"] == "stay_silent"
+    assert details_by_name["intervention_policy_behavior"]["silent_reason"] == "empty_content"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"

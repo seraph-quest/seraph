@@ -12,6 +12,20 @@ from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
 
+
+def _delivery_value(result) -> str | None:
+    delivery_decision = getattr(result, "delivery_decision", None)
+    if delivery_decision is not None:
+        return delivery_decision.value
+    return getattr(result, "value", None)
+
+
+def _policy_action_value(result) -> str | None:
+    action = getattr(result, "action", None)
+    if action is not None:
+        return action.value
+    return None
+
 _WEEKLY_PROMPT = """\
 You are Seraph, a guardian intelligence. Generate a weekly activity review for your human.
 
@@ -134,7 +148,8 @@ async def run_weekly_activity_review() -> None:
             outcome="succeeded",
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
-                "delivery": result.value,
+                "delivery": _delivery_value(result),
+                "policy_action": _policy_action_value(result),
                 "total_observations": summary.get("total_observations", 0),
                 "total_tracked_minutes": summary.get("total_tracked_minutes", 0),
             },

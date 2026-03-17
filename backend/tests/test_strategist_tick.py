@@ -95,10 +95,12 @@ async def test_strategist_tick_logs_success(async_db):
         await run_strategist_tick()
 
     events = await audit_repository.list_events(limit=10)
+    assert mock_deliver.await_args.kwargs["guardian_confidence"] == "grounded"
     assert any(
         event["event_type"] == "scheduler_job_succeeded"
         and event["tool_name"] == "strategist_tick"
         and event["details"]["delivery"] == "deliver"
+        and event["details"]["policy_action"] is None
         for event in events
     )
 

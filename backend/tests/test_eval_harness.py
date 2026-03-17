@@ -50,6 +50,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_behavior" in captured.out
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
+    assert "strategist_tick_behavior" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
@@ -68,6 +69,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_profile_preferences" in captured.out
     assert "runtime_path_patterns" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
+    assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "browser_runtime_audit" in captured.out
     assert "web_search_runtime_audit" in captured.out
@@ -83,7 +85,9 @@ def test_main_lists_available_scenarios(capsys):
     assert "skills_api_audit" in captured.out
     assert "screen_repository_runtime_audit" in captured.out
     assert "daily_briefing_degraded_memories_audit" in captured.out
+    assert "activity_digest_degraded_delivery_behavior" in captured.out
     assert "activity_digest_degraded_summary_audit" in captured.out
+    assert "evening_review_degraded_delivery_behavior" in captured.out
     assert "evening_review_degraded_inputs_audit" in captured.out
 
 
@@ -123,6 +127,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_behavior",
                 "websocket_chat_approval_contract",
                 "websocket_chat_timeout_contract",
+                "strategist_tick_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "mcp_specialist_local_runtime_profile",
@@ -136,6 +141,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_profile_preferences",
                 "runtime_path_patterns",
                 "scheduled_local_runtime_profile",
+                "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
                 "browser_runtime_audit",
                 "web_search_runtime_audit",
@@ -151,7 +157,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "skills_api_audit",
                 "screen_repository_runtime_audit",
                 "daily_briefing_degraded_memories_audit",
+                "activity_digest_degraded_delivery_behavior",
                 "activity_digest_degraded_summary_audit",
+                "evening_review_degraded_delivery_behavior",
                 "evening_review_degraded_inputs_audit",
             ]
         )
@@ -211,6 +219,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["websocket_chat_timeout_contract"]["final_contains_timeout_copy"] is True
     assert details_by_name["websocket_chat_timeout_contract"]["timeout_seconds"] == 120
     assert details_by_name["websocket_chat_timeout_contract"]["succeeded_event_present"] is False
+    assert details_by_name["strategist_tick_behavior"]["message_type"] == "proactive"
+    assert details_by_name["strategist_tick_behavior"]["intervention_type"] == "advisory"
+    assert details_by_name["strategist_tick_behavior"]["urgency"] == 3
+    assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
+    assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
+    assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
@@ -305,6 +319,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["scheduled_local_runtime_profile"]["job_name"] == "daily_briefing"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
+    assert details_by_name["daily_briefing_delivery_behavior"]["message_type"] == "proactive"
+    assert details_by_name["daily_briefing_delivery_behavior"]["intervention_type"] == "advisory"
+    assert details_by_name["daily_briefing_delivery_behavior"]["scheduled_delivery"] is True
+    assert details_by_name["daily_briefing_delivery_behavior"]["content_contains_design_review"] is True
+    assert details_by_name["daily_briefing_delivery_behavior"]["upcoming_event_count"] == 1
+    assert details_by_name["daily_briefing_delivery_behavior"]["data_quality"] == "good"
     assert details_by_name["shell_tool_runtime_audit"]["timeout_seconds"] == 35
     assert details_by_name["browser_runtime_audit"]["timeout_seconds"] == 30
     assert details_by_name["browser_runtime_audit"]["hostname"] == "example.com"
@@ -338,6 +358,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["daily_briefing_degraded_memories_audit"]["data_quality"] == "degraded"
     assert details_by_name["daily_briefing_degraded_memories_audit"]["degraded_inputs"] == ["relevant_memories"]
     assert details_by_name["daily_briefing_degraded_memories_audit"]["delivered"] is True
+    assert details_by_name["activity_digest_degraded_delivery_behavior"]["message_type"] == "proactive"
+    assert details_by_name["activity_digest_degraded_delivery_behavior"]["scheduled_delivery"] is True
+    assert details_by_name["activity_digest_degraded_delivery_behavior"]["content_mentions_coding"] is True
+    assert details_by_name["activity_digest_degraded_delivery_behavior"]["background_source"] == "screen_summary"
+    assert details_by_name["activity_digest_degraded_delivery_behavior"]["degraded_inputs"] == [
+        "total_tracked_minutes",
+        "switch_count",
+        "by_project",
+        "longest_streaks",
+    ]
+    assert details_by_name["activity_digest_degraded_delivery_behavior"]["data_quality"] == "degraded"
     assert details_by_name["activity_digest_degraded_summary_audit"]["background_source"] == "screen_summary"
     assert details_by_name["activity_digest_degraded_summary_audit"]["missing_fields"] == [
         "total_tracked_minutes",
@@ -353,6 +384,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "longest_streaks",
     ]
     assert details_by_name["activity_digest_degraded_summary_audit"]["delivered"] is True
+    assert details_by_name["evening_review_degraded_delivery_behavior"]["message_type"] == "proactive"
+    assert details_by_name["evening_review_degraded_delivery_behavior"]["scheduled_delivery"] is True
+    assert details_by_name["evening_review_degraded_delivery_behavior"]["content_mentions_tomorrow"] is True
+    assert details_by_name["evening_review_degraded_delivery_behavior"]["data_quality"] == "degraded"
+    assert details_by_name["evening_review_degraded_delivery_behavior"]["degraded_inputs"] == [
+        "messages_today",
+        "completed_goals_today",
+    ]
+    assert details_by_name["evening_review_degraded_delivery_behavior"]["message_count"] == 0
     assert details_by_name["evening_review_degraded_inputs_audit"]["data_quality"] == "degraded"
     assert details_by_name["evening_review_degraded_inputs_audit"]["degraded_inputs"] == [
         "messages_today",

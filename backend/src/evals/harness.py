@@ -54,6 +54,7 @@ from src.memory import soul as soul_mod
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
+from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.evening_review import run_evening_review
@@ -1655,6 +1656,53 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_daily_briefing_delivery_behavior() -> dict[str, Any]:
+    ctx = _make_context(
+        upcoming_events=[{"summary": "Design review", "start": "09:30"}],
+        active_goals_summary="Close the proactive eval gap",
+    )
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=ctx)
+    mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch(
+            "src.memory.vector_store.search_with_status",
+            return_value=([{"category": "fact", "text": "Morning briefings should be concrete."}], False),
+        ),
+        patch(
+            "src.scheduler.jobs.daily_briefing.completion_with_fallback",
+            AsyncMock(
+                return_value=_make_litellm_response(
+                    "Good morning. Design review at 09:30. Focus on proactive eval coverage."
+                )
+            ),
+        ),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_daily_briefing()
+
+    delivered_message = mock_deliver.await_args.args[0]
+    delivered_kwargs = mock_deliver.await_args.kwargs
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="daily_briefing",
+    )
+    return {
+        "message_type": delivered_message.type,
+        "intervention_type": delivered_message.intervention_type,
+        "scheduled_delivery": delivered_kwargs["is_scheduled"],
+        "content_contains_design_review": "design review" in delivered_message.content.lower(),
+        "upcoming_event_count": succeeded["details"]["upcoming_event_count"],
+        "data_quality": succeeded["details"]["data_quality"],
+    }
+
+
 async def _eval_activity_digest_degraded_summary_audit() -> dict[str, Any]:
     mock_repo = MagicMock()
     mock_repo.get_daily_summary = AsyncMock(return_value={
@@ -1696,6 +1744,50 @@ async def _eval_activity_digest_degraded_summary_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_activity_digest_degraded_delivery_behavior() -> dict[str, Any]:
+    mock_repo = MagicMock()
+    mock_repo.get_daily_summary = AsyncMock(return_value={
+        "date": date.today().isoformat(),
+        "total_observations": 5,
+        "by_activity": {"coding": 3600},
+    })
+    mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch(
+            "src.scheduler.jobs.activity_digest.completion_with_fallback",
+            AsyncMock(return_value=_make_litellm_response("You spent most of today coding. Keep tomorrow calmer.")),
+        ),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_activity_digest()
+
+    delivered_message = mock_deliver.await_args.args[0]
+    delivered_kwargs = mock_deliver.await_args.kwargs
+    degraded = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_degraded",
+        tool_name="activity_digest_inputs",
+    )
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="activity_digest",
+    )
+    return {
+        "message_type": delivered_message.type,
+        "scheduled_delivery": delivered_kwargs["is_scheduled"],
+        "content_mentions_coding": "coding" in delivered_message.content.lower(),
+        "background_source": degraded["details"]["source"],
+        "degraded_inputs": succeeded["details"]["degraded_inputs"],
+        "data_quality": succeeded["details"]["data_quality"],
+    }
+
+
 async def _eval_evening_review_degraded_inputs_audit() -> dict[str, Any]:
     ctx = _make_context(time_of_day="evening", is_working_hours=False)
     mock_context_manager = MagicMock()
@@ -1728,6 +1820,44 @@ async def _eval_evening_review_degraded_inputs_audit() -> dict[str, Any]:
         "message_count": succeeded["details"]["message_count"],
         "completed_goal_count": succeeded["details"]["completed_goal_count"],
         "delivered": mock_deliver.await_count == 1,
+    }
+
+
+async def _eval_evening_review_degraded_delivery_behavior() -> dict[str, Any]:
+    ctx = _make_context(time_of_day="evening", is_working_hours=False, recent_git_activity=[{"msg": "fix eval gap"}])
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=ctx)
+    mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(0, True))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=([], True))),
+        patch(
+            "src.scheduler.jobs.evening_review.completion_with_fallback",
+            AsyncMock(return_value=_make_litellm_response("Quiet day. Rest well and reset for tomorrow.")),
+        ),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_evening_review()
+
+    delivered_message = mock_deliver.await_args.args[0]
+    delivered_kwargs = mock_deliver.await_args.kwargs
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="evening_review",
+    )
+    return {
+        "message_type": delivered_message.type,
+        "scheduled_delivery": delivered_kwargs["is_scheduled"],
+        "content_mentions_tomorrow": "tomorrow" in delivered_message.content.lower(),
+        "data_quality": succeeded["details"]["data_quality"],
+        "degraded_inputs": succeeded["details"]["degraded_inputs"],
+        "message_count": succeeded["details"]["message_count"],
     }
 
 
@@ -2035,6 +2165,41 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
         "tool_name": tool_call["tool_name"],
         "session_id": tool_call["session_id"],
         "policy_mode": tool_call["policy_mode"],
+    }
+
+
+async def _eval_strategist_tick_behavior() -> dict[str, Any]:
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=_make_context(time_of_day="afternoon"))
+    mock_agent = MagicMock()
+    mock_agent.run.return_value = (
+        '{"should_intervene": true, "content": "Time to refocus on the eval roadmap.", '
+        '"intervention_type": "advisory", "urgency": 3, "reasoning": "Focus drift"}'
+    )
+    mock_deliver = AsyncMock(return_value=DeliveryDecision.deliver)
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_strategist_tick()
+
+    delivered_message = mock_deliver.await_args.args[0]
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="strategist_tick",
+    )
+    return {
+        "message_type": delivered_message.type,
+        "intervention_type": delivered_message.intervention_type,
+        "urgency": delivered_message.urgency,
+        "content_mentions_refocus": "refocus" in delivered_message.content.lower(),
+        "delivery": succeeded["details"]["delivery"],
+        "reasoning": delivered_message.reasoning,
     }
 
 
@@ -2659,10 +2824,22 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_strategist_model_wrapper,
     ),
     EvalScenario(
+        name="strategist_tick_behavior",
+        category="behavior",
+        description="Strategist tick delivers the modeled intervention and records the resulting delivery outcome.",
+        runner=_eval_strategist_tick_behavior,
+    ),
+    EvalScenario(
         name="daily_briefing_fallback",
         category="proactive",
         description="Daily briefing survives a primary provider failure and still delivers via fallback.",
         runner=_eval_daily_briefing_fallback,
+    ),
+    EvalScenario(
+        name="daily_briefing_delivery_behavior",
+        category="behavior",
+        description="Daily briefing delivers a scheduled proactive message and records a good-quality success contract.",
+        runner=_eval_daily_briefing_delivery_behavior,
     ),
     EvalScenario(
         name="daily_briefing_degraded_memories_audit",
@@ -2671,10 +2848,22 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_daily_briefing_degraded_memories_audit,
     ),
     EvalScenario(
+        name="activity_digest_degraded_delivery_behavior",
+        category="behavior",
+        description="Activity digest still delivers a scheduled message when summary inputs degrade, while surfacing the degraded contract.",
+        runner=_eval_activity_digest_degraded_delivery_behavior,
+    ),
+    EvalScenario(
         name="activity_digest_degraded_summary_audit",
         category="observability",
         description="Activity digest records degraded input quality when the daily screen summary is structurally incomplete.",
         runner=_eval_activity_digest_degraded_summary_audit,
+    ),
+    EvalScenario(
+        name="evening_review_degraded_delivery_behavior",
+        category="behavior",
+        description="Evening review still delivers a scheduled message when helper inputs degrade, while surfacing the degraded contract.",
+        runner=_eval_evening_review_degraded_delivery_behavior,
     ),
     EvalScenario(
         name="evening_review_degraded_inputs_audit",

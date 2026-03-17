@@ -178,6 +178,81 @@ class _DummyStrategistTool(Tool):
         return "2 active goals"
 
 
+class _DelegatedSearchTool(Tool):
+    name = "web_search"
+    description = "Dummy delegated web search"
+    inputs = {
+        "query": {"type": "string", "description": "Search query"},
+    }
+    output_type = "string"
+
+    def forward(self, query: str) -> str:
+        return (
+            "1. Runtime reliability queue\n"
+            "   URL: https://example.com/runtime\n"
+            "   Finish delegated behavioral evals before policy work.\n\n"
+            "2. Provider policy draft\n"
+            "   URL: https://example.com/providers\n"
+            "   Add capability-aware selection and decision logs."
+        )
+
+
+class _DelegatedFailingSearchTool(Tool):
+    name = "web_search"
+    description = "Dummy delegated failing web search"
+    inputs = {
+        "query": {"type": "string", "description": "Search query"},
+    }
+    output_type = "string"
+
+    def forward(self, query: str) -> str:
+        raise RuntimeError("search backend unavailable")
+
+
+class _DelegatedBrowseTool(Tool):
+    name = "browse_webpage"
+    description = "Dummy delegated browser reader"
+    inputs = {
+        "url": {"type": "string", "description": "Page URL"},
+    }
+    output_type = "string"
+
+    def forward(self, url: str) -> str:
+        return (
+            "Runtime roadmap note: delegated tool-heavy evals land before provider policy. "
+            "Routing decision audit follows after capability metadata."
+        )
+
+
+class _DelegatedFailingBrowseTool(Tool):
+    name = "browse_webpage"
+    description = "Dummy delegated failing browser reader"
+    inputs = {
+        "url": {"type": "string", "description": "Page URL"},
+    }
+    output_type = "string"
+
+    def forward(self, url: str) -> str:
+        raise RuntimeError("browser timed out")
+
+
+class _DelegatedWriteFileTool(Tool):
+    name = "write_file"
+    description = "Dummy delegated file writer"
+    inputs = {
+        "file_path": {"type": "string", "description": "Relative workspace path"},
+        "content": {"type": "string", "description": "File contents"},
+    }
+    output_type = "string"
+
+    def forward(self, file_path: str, content: str) -> str:
+        resolved = os.path.join(settings.workspace_dir, file_path)
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        with open(resolved, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return f"Successfully wrote {len(content)} characters to {file_path}"
+
+
 class _FakeScalarResult:
     def __init__(self, messages: list[Any]):
         self._messages = messages
@@ -368,6 +443,80 @@ def _make_agent_steps(final_output: str = "It's sunny and 72°F today!") -> list
         ),
         FinalAnswerStep(output=final_output),
     ]
+
+
+def _make_delegated_tool_workflow_steps(*, degrade_browse: bool = False) -> list[Any]:
+    plan_path = "plans/runtime-tool-heavy-plan.md"
+    research_task = "Research the strongest remaining runtime reliability gaps."
+    write_task = f"Save a short action plan to {plan_path}."
+    search_tool = wrap_tools_for_audit([_DelegatedSearchTool()])[0]
+    browse_tool = wrap_tools_for_audit([
+        _DelegatedFailingBrowseTool() if degrade_browse else _DelegatedBrowseTool()
+    ])[0]
+    write_tool = wrap_tools_for_audit([_DelegatedWriteFileTool()])[0]
+
+    query = "seraph runtime reliability remaining gaps"
+    url = "https://example.com/runtime"
+    steps: list[Any] = [
+        ToolCall(name="web_researcher", arguments={"task": research_task}, id="spec1"),
+        ToolCall(name="web_search", arguments={"query": query}, id="tc1"),
+    ]
+
+    degraded = False
+    try:
+        search_result = search_tool(query=query)
+        steps.append(ToolCall(name="browse_webpage", arguments={"url": url}, id="tc2"))
+        page_summary = browse_tool(url=url)
+        observation = f"Web researcher found:\n{search_result}\n\nPage summary:\n{page_summary}"
+        plan_content = (
+            "# Runtime reliability action plan\n"
+            "- Finish delegated tool-heavy behavioral evals.\n"
+            "- Add provider capability policy.\n"
+            "- Add routing decision audit.\n"
+        )
+    except Exception as exc:
+        degraded = True
+        observation = (
+            f"Web researcher hit an error: {exc}. "
+            "Falling back to search snippets plus the in-repo runtime plan."
+        )
+        plan_content = (
+            "# Runtime reliability fallback plan\n"
+            "- Finish delegated tool-heavy behavioral evals.\n"
+            "- Add provider capability policy.\n"
+            "- Add routing decision audit.\n"
+            "- Re-check incident trace blind spots.\n"
+        )
+
+    steps.append(
+        ActionStep(
+            step_number=1,
+            timing=_TIMING,
+            observations=observation,
+            is_final_answer=False,
+        )
+    )
+    steps.extend([
+        ToolCall(name="file_worker", arguments={"task": write_task}, id="spec2"),
+        ToolCall(name="write_file", arguments={"file_path": plan_path, "content": plan_content}, id="tc2"),
+    ])
+    write_result = write_tool(file_path=plan_path, content=plan_content)
+    steps.append(
+        ActionStep(
+            step_number=2,
+            timing=_TIMING,
+            observations=write_result,
+            is_final_answer=False,
+        )
+    )
+
+    final_output = (
+        f"Live research failed, but I saved a fallback action plan to {plan_path}."
+        if degraded
+        else f"I researched the current runtime gaps and saved an action plan to {plan_path}."
+    )
+    steps.append(FinalAnswerStep(output=final_output))
+    return steps
 
 
 def _eval_chat_model_wrapper() -> dict[str, Any]:
@@ -679,6 +828,138 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
                 and event["details"]["transport"] == "websocket"
                 for event in events
             ),
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_delegated_tool_workflow_behavior() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = lambda *_args, **_kwargs: iter(_make_delegated_tool_workflow_steps())
+
+        with (
+            patch("src.api.ws._build_agent", return_value=(mock_agent, False, {"web_researcher", "file_worker"})),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            with client.websocket_connect("/ws/chat") as ws:
+                _ = _receive_ws_json(ws)
+                ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                _ = _receive_ws_json(ws)
+                ws.send_text(json.dumps({
+                    "type": "message",
+                    "message": "Research the runtime gap and save a note.",
+                    "session_id": None,
+                }))
+
+                messages: list[dict[str, Any]] = []
+                for _ in range(12):
+                    msg = _receive_ws_json(ws)
+                    messages.append(msg)
+                    if msg["type"] == "final":
+                        break
+
+            events = client.get("/api/audit/events").json()
+            saved_path = os.path.join(settings.workspace_dir, "plans/runtime-tool-heavy-plan.md")
+            with open(saved_path, encoding="utf-8") as handle:
+                saved_content = handle.read()
+
+        steps = [msg for msg in messages if msg["type"] == "step"]
+        final = next(msg for msg in messages if msg["type"] == "final")
+        success_event = next(
+            event for event in events
+            if event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "chat_agent"
+            and event["details"]["transport"] == "websocket"
+        )
+        return {
+            "delegated_to_web_researcher": any("Delegating to web_researcher" in msg["content"] for msg in steps),
+            "delegated_to_file_worker": any("Delegating to file_worker" in msg["content"] for msg in steps),
+            "tool_steps_present": {
+                "browse_webpage": any("Calling tool: browse_webpage" in msg["content"] for msg in steps),
+                "web_search": any("Calling tool: web_search" in msg["content"] for msg in steps),
+                "write_file": any("Calling tool: write_file" in msg["content"] for msg in steps),
+            },
+            "final_mentions_saved_plan": "runtime-tool-heavy-plan.md" in final["content"],
+            "audit_result_tools": sorted(
+                event["tool_name"]
+                for event in events
+                if event["event_type"] == "tool_result"
+            ),
+            "saved_plan_mentions_provider_policy": "provider capability policy" in saved_content.lower(),
+            "tool_call_count": success_event["details"]["tool_call_count"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = lambda *_args, **_kwargs: iter(
+            _make_delegated_tool_workflow_steps(degrade_browse=True)
+        )
+
+        with (
+            patch("src.api.ws._build_agent", return_value=(mock_agent, False, {"web_researcher", "file_worker"})),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            with client.websocket_connect("/ws/chat") as ws:
+                _ = _receive_ws_json(ws)
+                ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                _ = _receive_ws_json(ws)
+                ws.send_text(json.dumps({
+                    "type": "message",
+                    "message": "Research the runtime gap and save a note.",
+                    "session_id": None,
+                }))
+
+                messages: list[dict[str, Any]] = []
+                for _ in range(12):
+                    msg = _receive_ws_json(ws)
+                    messages.append(msg)
+                    if msg["type"] == "final":
+                        break
+
+            events = client.get("/api/audit/events").json()
+            saved_path = os.path.join(settings.workspace_dir, "plans/runtime-tool-heavy-plan.md")
+            with open(saved_path, encoding="utf-8") as handle:
+                saved_content = handle.read()
+
+        steps = [msg for msg in messages if msg["type"] == "step"]
+        final = next(msg for msg in messages if msg["type"] == "final")
+        success_event = next(
+            event for event in events
+            if event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "chat_agent"
+            and event["details"]["transport"] == "websocket"
+        )
+        return {
+            "delegated_to_web_researcher": any("Delegating to web_researcher" in msg["content"] for msg in steps),
+            "web_search_failed_audited": any(
+                event["event_type"] == "tool_failed"
+                and event["tool_name"] == "web_search"
+                for event in events
+            ),
+            "browse_failed_audited": any(
+                event["event_type"] == "tool_failed"
+                and event["tool_name"] == "browse_webpage"
+                for event in events
+            ),
+            "write_file_still_succeeded": any(
+                event["event_type"] == "tool_result"
+                and event["tool_name"] == "write_file"
+                for event in events
+            ),
+            "final_mentions_fallback": "fallback action plan" in final["content"].lower(),
+            "saved_plan_mentions_incident_trace": "incident trace blind spots" in saved_content.lower(),
+            "tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
         stack.close()
@@ -2750,6 +3031,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Delegation paths can route the orchestrator and remaining built-in specialists through the local profile.",
         runner=_eval_delegation_local_runtime_profile,
+    ),
+    EvalScenario(
+        name="delegated_tool_workflow_behavior",
+        category="behavior",
+        description="A delegated WebSocket workflow routes through specialists, executes audited tools, and saves the resulting plan.",
+        runner=_eval_delegated_tool_workflow_behavior,
+    ),
+    EvalScenario(
+        name="delegated_tool_workflow_degraded_behavior",
+        category="behavior",
+        description="A delegated WebSocket workflow degrades after tool failure but still saves a fallback plan and surfaces the failure audit.",
+        runner=_eval_delegated_tool_workflow_degraded_behavior,
     ),
     EvalScenario(
         name="mcp_specialist_local_runtime_profile",

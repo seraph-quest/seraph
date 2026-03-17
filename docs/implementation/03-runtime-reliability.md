@@ -23,7 +23,7 @@
 ## Working On Now
 
 - [x] Runtime Reliability remains the repo-wide hardening track
-- [x] `behavioral-evals-proactive-flows` is the active PR from the numbered sequence below
+- [x] `behavioral-evals-tool-heavy-flow` is the active PR from the numbered sequence below
 - [ ] close the remaining routing, observability, and eval gaps outside the already-covered seams
 
 ## Still To Do On `develop`
@@ -41,7 +41,7 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
    add behavioral eval contracts for REST chat and WebSocket chat, including fallback, timeout, approval, and audit expectations
 2. [x] `behavioral-evals-proactive-flows`:
    add behavioral evals for strategist tick, daily briefing, evening review, and activity digest with expected degraded behavior and delivery outcomes
-3. [ ] `behavioral-evals-tool-heavy-flow`:
+3. [x] `behavioral-evals-tool-heavy-flow`:
    add one delegated tool-heavy workflow contract covering routing, tool execution, audit, and degraded or failure handling
 4. [ ] `provider-policy-capabilities`:
    add provider capability metadata and runtime-path policy intents such as `fast`, `cheap`, `reasoning`, and `local_first`

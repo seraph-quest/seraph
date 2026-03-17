@@ -51,6 +51,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
+    assert "observer_refresh_behavior" in captured.out
+    assert "observer_delivery_decision_behavior" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
@@ -74,6 +76,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "provider_policy_scoring" in captured.out
     assert "provider_routing_decision_audit" in captured.out
     assert "session_bound_llm_trace" in captured.out
+    assert "session_consolidation_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
@@ -89,6 +92,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_daemon_ingest_audit" in captured.out
     assert "mcp_test_api_audit" in captured.out
     assert "skills_api_audit" in captured.out
+    assert "tool_policy_guardrails_behavior" in captured.out
     assert "screen_repository_runtime_audit" in captured.out
     assert "daily_briefing_degraded_memories_audit" in captured.out
     assert "activity_digest_degraded_delivery_behavior" in captured.out
@@ -134,6 +138,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_approval_contract",
                 "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
+                "observer_refresh_behavior",
+                "observer_delivery_decision_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
@@ -152,6 +158,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "provider_policy_scoring",
                 "provider_routing_decision_audit",
                 "session_bound_llm_trace",
+                "session_consolidation_behavior",
                 "scheduled_local_runtime_profile",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
@@ -167,6 +174,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_daemon_ingest_audit",
                 "mcp_test_api_audit",
                 "skills_api_audit",
+                "tool_policy_guardrails_behavior",
                 "screen_repository_runtime_audit",
                 "daily_briefing_degraded_memories_audit",
                 "activity_digest_degraded_delivery_behavior",
@@ -237,6 +245,20 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
+    assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
+    assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
+    assert details_by_name["observer_refresh_behavior"]["screen_context_preserved"] is True
+    assert details_by_name["observer_refresh_behavior"]["active_window_preserved"] is True
+    assert details_by_name["observer_refresh_behavior"]["goal_summary"] == "Ship guardian behavioral evals"
+    assert details_by_name["observer_refresh_behavior"]["upcoming_event_count"] == 1
+    assert details_by_name["observer_refresh_behavior"]["triggered_bundle_delivery"] is True
+    assert details_by_name["observer_refresh_behavior"]["bundle_task_scheduled"] is True
+    assert details_by_name["observer_delivery_decision_behavior"]["delivered_decision"] == "deliver"
+    assert details_by_name["observer_delivery_decision_behavior"]["queued_decision"] == "queue"
+    assert details_by_name["observer_delivery_decision_behavior"]["budget_decremented"] is True
+    assert details_by_name["observer_delivery_decision_behavior"]["queued_content_matches"] is True
+    assert details_by_name["observer_delivery_decision_behavior"]["delivered_connections"] == 1
+    assert details_by_name["observer_delivery_decision_behavior"]["queued_user_state"] == "deep_work"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
@@ -412,6 +434,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["session_bound_llm_trace"]["title_trace_has_request_id"] is True
     assert details_by_name["session_bound_llm_trace"]["consolidation_trace_has_request_id"] is True
     assert details_by_name["session_bound_llm_trace"]["request_ids_differ"] is True
+    assert details_by_name["session_consolidation_behavior"]["stored_memory_count"] == 2
+    assert details_by_name["session_consolidation_behavior"]["soul_update_count"] == 1
+    assert details_by_name["session_consolidation_behavior"]["memory_categories"] == ["fact", "goal"]
+    assert details_by_name["session_consolidation_behavior"]["stored_texts"] == [
+        "User is building a guardian cockpit",
+        "Ship behavioral guardian evals",
+    ]
+    assert details_by_name["session_consolidation_behavior"]["updated_soul_section"] == "Goals"
+    assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_cockpit"] is True
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",
@@ -520,6 +551,19 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["skills_api_audit"]["reload_count"] == 2
     assert details_by_name["skills_api_audit"]["reload_enabled_count"] == 2
     assert details_by_name["skills_api_audit"]["reload_skill_names"] == ["test-skill", "simple-skill"]
+    assert details_by_name["tool_policy_guardrails_behavior"]["safe_status"] == 200
+    assert details_by_name["tool_policy_guardrails_behavior"]["balanced_status"] == 200
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_status"] == 200
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_status"] == 200
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_status"] == 200
+    assert details_by_name["tool_policy_guardrails_behavior"]["safe_hides_write_file"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["safe_hides_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["balanced_shows_write_file"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_hides_tool"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_shows_tool"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_requires_approval"] is True
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1

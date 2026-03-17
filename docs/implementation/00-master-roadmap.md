@@ -49,9 +49,9 @@ Legend for the checklist column:
 
 ## Next Recommended PR Sequence
 
-This is the rolling future queue. It should always show the next 10 most valuable PRs.
+This is the rolling execution queue. It should always show the next 10 most valuable PRs, and a checked item may remain visible until the next scheduled refresh.
 
-1. [ ] `provider-policy-scoring`:
+1. [x] `provider-policy-scoring`:
    add weighted capability scoring on top of the current routing stack so target selection reflects value, not only explicit preference order
 2. [ ] `behavioral-evals-guardian-flows`:
    extend behavioral evals into observer refresh, consolidation, proactive delivery, and guardrail-sensitive guardian flows

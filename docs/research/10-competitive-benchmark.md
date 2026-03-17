@@ -90,7 +90,6 @@ Seraph is currently ahead of IronClaw on guardian-style intervention scaffolding
 - [IronClaw official site](https://www.ironclaw.com/)
 - [IronClaw official README](https://github.com/nearai/ironclaw/blob/staging/README.md)
 - [IronClaw feature parity](https://github.com/nearai/ironclaw/blob/staging/FEATURE_PARITY.md)
-- [NEAR page](https://near.ai/openclaw)
 
 ## What This Means
 

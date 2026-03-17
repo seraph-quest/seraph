@@ -55,8 +55,8 @@ This sequence is the finished Runtime Reliability execution order on `develop`.
 
 This is the next ordered Runtime Reliability slice after the completed incident-trace queue. The repo-wide cross-workstream queue lives in `00-master-roadmap.md`.
 
-1. [ ] `provider-policy-scoring`:
-   deepen provider routing with weighted policy scoring so runtime-path selection reflects value, not only explicit preference order
+1. [x] `provider-policy-scoring`:
+   deepen provider routing with weighted policy scoring, explicit capability preferences, and clearer target ranking so runtime-path selection is stronger than simple preference chains and cooldown skips
 2. [ ] `behavioral-evals-guardian-flows`:
    expand behavioral eval coverage beyond chat and scheduler seams into observer refresh, consolidation, proactive delivery, and policy-mode guardrails so broader guardian behavior is regression-tested
 

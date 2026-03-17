@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+from unittest.mock import patch
 
 import pytest
 
+from config.settings import settings
+from src.evals import harness
 from src.evals.harness import available_scenarios, main, run_runtime_evals
 
 
@@ -41,6 +44,12 @@ def test_main_lists_available_scenarios(capsys):
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "chat_model_wrapper" in captured.out
+    assert "rest_chat_behavior" in captured.out
+    assert "rest_chat_approval_contract" in captured.out
+    assert "rest_chat_timeout_contract" in captured.out
+    assert "websocket_chat_behavior" in captured.out
+    assert "websocket_chat_approval_contract" in captured.out
+    assert "websocket_chat_timeout_contract" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
@@ -89,6 +98,16 @@ def test_main_emits_json_summary(capsys):
     assert payload["results"][0]["name"] == "shell_tool_timeout_contract"
 
 
+def test_make_sync_client_with_db_unwinds_patches_when_client_startup_fails():
+    original_workspace_dir = settings.workspace_dir
+
+    with patch("src.evals.harness.TestClient", side_effect=RuntimeError("startup failed")):
+        with pytest.raises(RuntimeError, match="startup failed"):
+            harness._make_sync_client_with_db()
+
+    assert settings.workspace_dir == original_workspace_dir
+
+
 def test_runtime_eval_scenarios_expose_expected_details():
     summary = asyncio.run(
         run_runtime_evals(
@@ -98,6 +117,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "local_runtime_profile",
                 "helper_local_runtime_paths",
                 "context_window_summary_audit",
+                "rest_chat_behavior",
+                "rest_chat_approval_contract",
+                "rest_chat_timeout_contract",
+                "websocket_chat_behavior",
+                "websocket_chat_approval_contract",
+                "websocket_chat_timeout_contract",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "mcp_specialist_local_runtime_profile",
@@ -157,6 +182,35 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["context_window_summary_audit"]["degraded_runtime_path"] == "context_window_summary"
     assert details_by_name["context_window_summary_audit"]["degraded_fallback"] == "truncation"
     assert details_by_name["context_window_summary_audit"]["degraded_contains_truncation"] is True
+    assert details_by_name["rest_chat_behavior"]["first_status"] == 200
+    assert details_by_name["rest_chat_behavior"]["second_status"] == 200
+    assert details_by_name["rest_chat_behavior"]["session_reused"] is True
+    assert details_by_name["rest_chat_behavior"]["first_response"] == "Hello from Seraph."
+    assert details_by_name["rest_chat_behavior"]["follow_up_response"] == "Follow-up response"
+    assert details_by_name["rest_chat_behavior"]["audit_transport"] == "rest"
+    assert details_by_name["rest_chat_approval_contract"]["status_code"] == 409
+    assert details_by_name["rest_chat_approval_contract"]["detail_type"] == "approval_required"
+    assert details_by_name["rest_chat_approval_contract"]["approval_id"] == "approval-123"
+    assert details_by_name["rest_chat_approval_contract"]["tool_name"] == "shell_execute"
+    assert details_by_name["rest_chat_approval_contract"]["audit_summary_contains_shell"] is True
+    assert details_by_name["rest_chat_timeout_contract"]["status_code"] == 504
+    assert "timed out" in details_by_name["rest_chat_timeout_contract"]["detail"]
+    assert details_by_name["rest_chat_timeout_contract"]["timeout_seconds"] == 120
+    assert details_by_name["websocket_chat_behavior"]["welcome_type"] == "proactive"
+    assert details_by_name["websocket_chat_behavior"]["skip_type"] == "final"
+    assert details_by_name["websocket_chat_behavior"]["step_count"] >= 2
+    assert details_by_name["websocket_chat_behavior"]["final_content"] == "It's sunny and 72°F today!"
+    assert details_by_name["websocket_chat_behavior"]["seq_monotonic"] is True
+    assert details_by_name["websocket_chat_behavior"]["audit_tool_call_count"] == 1
+    assert details_by_name["websocket_chat_approval_contract"]["message_type"] == "approval_required"
+    assert details_by_name["websocket_chat_approval_contract"]["approval_id"] == "approval-1"
+    assert details_by_name["websocket_chat_approval_contract"]["tool_name"] == "shell_execute"
+    assert details_by_name["websocket_chat_approval_contract"]["risk_level"] == "high"
+    assert details_by_name["websocket_chat_approval_contract"]["audit_summary_contains_shell"] is True
+    assert details_by_name["websocket_chat_timeout_contract"]["final_type"] == "final"
+    assert details_by_name["websocket_chat_timeout_contract"]["final_contains_timeout_copy"] is True
+    assert details_by_name["websocket_chat_timeout_contract"]["timeout_seconds"] == 120
+    assert details_by_name["websocket_chat_timeout_contract"]["succeeded_event_present"] is False
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"

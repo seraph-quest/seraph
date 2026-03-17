@@ -39,6 +39,7 @@ This starts three containers:
 ```
 
 The daemon runs outside Docker and posts active window context to the backend every few seconds.
+It also polls for pending native Seraph notifications and displays them through macOS Notification Center when the browser surface is unavailable.
 
 ### Optional: Things3 MCP integration
 
@@ -206,6 +207,15 @@ Without `--ocr`, the payload is simpler (no `observation` field):
   "active_window": "VS Code — main.py"
 }
 ```
+
+## Native Notifications
+
+When the browser is not connected but the daemon is alive, Seraph can now fall back to native macOS notifications for selected proactive messages. The daemon polls the backend for one pending notification, shows it with `osascript`, then acknowledges it so it is not repeated.
+
+This is a first presence path, not a full desktop shell:
+- notification delivery is best-effort
+- pending notifications are currently in-memory on the backend
+- broader channel controls and richer desktop presence are still future work
 
 ## How It Works
 

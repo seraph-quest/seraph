@@ -45,6 +45,7 @@ uv run python -m src.evals.harness --scenario strategist_tick_behavior
 uv run python -m src.evals.harness --scenario guardian_state_synthesis
 uv run python -m src.evals.harness --scenario observer_refresh_behavior
 uv run python -m src.evals.harness --scenario observer_delivery_decision_behavior
+uv run python -m src.evals.harness --scenario native_presence_notification_behavior
 uv run python -m src.evals.harness --scenario intervention_policy_behavior
 uv run python -m src.evals.harness --scenario provider_fallback_chain
 uv run python -m src.evals.harness --scenario provider_health_reroute
@@ -95,7 +96,7 @@ uv run python -m src.evals.harness --scenario evening_review_degraded_delivery_b
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, intervention policy behavior, observer refresh and delivery behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, intervention policy behavior, observer refresh and delivery behavior, native notification fallback behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -125,7 +126,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_activity_digest.py` | 6 | Activity digest — skip/no data, happy path, runtime path, timeout, degraded summary-input audit visibility |
 | `test_daily_briefing.py` | 8 | Daily briefing — happy path, context/LLM failure, empty data, events in prompt, degraded memory-input audit visibility |
 | `test_delegation.py` | 10 | Delegation architecture — orchestrator, specialist routing, depth limits |
-| `test_delivery.py` | 9 | Delivery coordinator — deliver/queue/drop routing, budget decrement, bundle formatting |
+| `test_delivery.py` | 10 | Delivery coordinator — deliver/queue/drop routing, native notification fallback, budget decrement, bundle formatting |
 | `test_embedder.py` | 3 | Embedding model boundary — load success, load failure, encode failure runtime audit logging |
 | `test_e2e_conversation.py` | 3 | End-to-end conversation flow — full agent interaction paths |
 | `test_evening_review.py` | 10 | Evening review — happy path, no goals/messages, DB/LLM failure, date filtering, degraded-input audit visibility |
@@ -139,7 +140,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_insight_queue_expiry.py` | 8 | Insight queue expiry — TTL, cleanup, edge cases |
 | `test_mcp_api.py` | 7 | MCP HTTP API endpoints — token update, manual server test auth/success/failure flows, and runtime audit logging |
 | `test_mcp_manager.py` | 31 | MCP server integration — connect, disconnect, failure handling, token auth, env var resolution |
-| `test_observer_api.py` | 7 | Observer API endpoints — state, context POST, daemon status |
+| `test_observer_api.py` | 10 | Observer API endpoints — state, context POST, daemon status, native notification poll/ack |
 | `test_observer_calendar.py` | 4 | Calendar observer source — event parsing, empty/failure handling, runtime audit logging |
 | `test_observer_git.py` | 7 | Git observer source — commit parsing, missing repo/reflog handling, runtime audit logging |
 | `test_observer_goals.py` | 4 | Goals observer source — active goals summary and runtime audit logging |

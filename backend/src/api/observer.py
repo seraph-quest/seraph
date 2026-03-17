@@ -1,7 +1,6 @@
 """Observer API — context state and daemon integration endpoints."""
 
 import logging
-import time
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter
@@ -9,6 +8,7 @@ from pydantic import BaseModel
 
 from src.audit.runtime import log_integration_event
 from src.observer.manager import context_manager
+from src.observer.native_notification_queue import native_notification_queue
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,23 @@ class ScreenContextRequest(BaseModel):
     screen_context: str | None = None
     observation: ScreenObservationData | None = None
     switch_timestamp: float | None = None
+
+
+class NativeNotificationResponse(BaseModel):
+    id: str
+    title: str
+    body: str
+    intervention_type: str | None = None
+    urgency: int | None = None
+    created_at: str
+
+
+class NativeNotificationPollResponse(BaseModel):
+    notification: NativeNotificationResponse | None = None
+
+
+class NotificationAckResponse(BaseModel):
+    acked: bool
 
 
 @router.get("/observer/state")
@@ -108,16 +125,54 @@ async def post_screen_context(body: ScreenContextRequest):
 async def daemon_status():
     """Return daemon connectivity status based on heartbeat timestamp."""
     ctx = context_manager.get_context()
-    connected = (
-        ctx.last_daemon_post is not None
-        and (time.time() - ctx.last_daemon_post) < 30
-    )
+    connected = context_manager.is_daemon_connected()
     return {
         "connected": connected,
         "last_post": ctx.last_daemon_post,
         "active_window": ctx.active_window,
         "has_screen_context": bool(ctx.screen_context),
     }
+
+
+@router.get("/observer/notifications/next", response_model=NativeNotificationPollResponse)
+async def get_next_native_notification():
+    """Return the next pending native notification for the daemon, if any."""
+    notification = await native_notification_queue.peek()
+    if notification is None:
+        await log_integration_event(
+            integration_type="observer_daemon",
+            name="notifications",
+            outcome="empty_result",
+            details={"pending_count": 0},
+        )
+        return {"notification": None}
+
+    pending_count = await native_notification_queue.count()
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="succeeded",
+        details={
+            "notification_id": notification.id,
+            "pending_count": pending_count,
+            "intervention_type": notification.intervention_type,
+            "urgency": notification.urgency,
+        },
+    )
+    return {"notification": notification.to_dict()}
+
+
+@router.post("/observer/notifications/{notification_id}/ack", response_model=NotificationAckResponse)
+async def ack_native_notification(notification_id: str):
+    """Acknowledge and remove a native notification after the daemon displays it."""
+    acked = await native_notification_queue.ack(notification_id)
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="acked" if acked else "ack_missing",
+        details={"notification_id": notification_id},
+    )
+    return {"acked": acked}
 
 
 @router.get("/observer/activity/today")

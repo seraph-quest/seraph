@@ -9,6 +9,7 @@ from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.intervention_policy import InterventionAction
+from src.observer.native_notification_queue import native_notification_queue
 from src.scheduler.connection_manager import BroadcastResult
 
 
@@ -26,6 +27,7 @@ def _patch_deps(ctx):
     """Patch the lazy-imported singletons at their source modules."""
     mock_cm = MagicMock()
     mock_cm.get_context.return_value = ctx
+    mock_cm.is_daemon_connected.return_value = False
     mock_ws = MagicMock()
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
@@ -263,6 +265,41 @@ async def test_delivery_transport_failure_logs_runtime_audit(async_db):
             for event in events
         )
     finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_delivery_reroutes_to_native_notification_when_daemon_connected(async_db):
+    await native_notification_queue.clear()
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=0,
+        delivered_connections=0,
+        failed_connections=0,
+    ))
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Native fallback", intervention_type="alert", urgency=5)
+        decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.act
+        assert await native_notification_queue.count() == 1
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["tool_name"] == "observer_delivery_gate"
+            and event["details"]["transport"] == "native_notification"
+            and event["details"]["notification_id"] is not None
+            for event in events
+        )
+    finally:
+        await native_notification_queue.clear()
         for p in patches:
             p.stop()
 

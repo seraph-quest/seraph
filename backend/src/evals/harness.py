@@ -39,7 +39,13 @@ from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
 from src.api.mcp import test_server as test_mcp_server
-from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
+from src.api.observer import (
+    ScreenContextRequest,
+    ScreenObservationData,
+    ack_native_notification,
+    get_next_native_notification,
+    post_screen_context,
+)
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
 from src.app import create_app
@@ -57,6 +63,7 @@ from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.intervention_policy import decide_intervention
+from src.observer.native_notification_queue import native_notification_queue
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
@@ -3229,6 +3236,71 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    available_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        last_daemon_post=time.time(),
+    )
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.return_value = available_ctx
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_context_manager.is_daemon_connected.return_value = True
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+    mock_log_event = AsyncMock()
+    message = WSResponse(
+        type="proactive",
+        content="Guardian fallback through native notifications.",
+        intervention_type="alert",
+        urgency=5,
+        reasoning="Browser is not connected",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.api.observer.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        decision = await deliver_or_queue(message)
+        polled = await get_next_native_notification()
+        notification = polled["notification"]
+        acked = await ack_native_notification(notification["id"])
+
+    delivered_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_delivered",
+        tool_name="observer_delivery_gate",
+    )
+    integration_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="observer_daemon:notifications",
+    )
+    ack_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_acked",
+        tool_name="observer_daemon:notifications",
+    )
+    remaining = await native_notification_queue.count()
+    await native_notification_queue.clear()
+
+    return {
+        "action": decision.action.value,
+        "delivery_decision": decision.delivery_decision.value if decision.delivery_decision else None,
+        "transport": delivered_event["details"]["transport"],
+        "notification_title": notification["title"],
+        "notification_body_matches": notification["body"] == message.content,
+        "integration_pending_count": integration_event["details"]["pending_count"],
+        "acked": acked["acked"],
+        "ack_event_matches": ack_event["details"]["notification_id"] == notification["id"],
+        "remaining_notifications": remaining,
+    }
+
+
 def _eval_intervention_policy_behavior() -> dict[str, Any]:
     act = decide_intervention(
         message_type="proactive",
@@ -3840,6 +3912,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Proactive delivery delivers while available, queues while blocked, and decrements budget only for delivered guardian nudges.",
         runner=_eval_observer_delivery_decision_behavior,
+    ),
+    EvalScenario(
+        name="native_presence_notification_behavior",
+        category="presence",
+        description="When browser delivery is unavailable but the daemon is connected, proactive messages reroute through native notifications.",
+        runner=_eval_native_presence_notification_behavior,
     ),
     EvalScenario(
         name="intervention_policy_behavior",

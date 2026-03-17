@@ -98,6 +98,32 @@ def format_active_window(app_name: str | None, window_title: str | None) -> str 
     return app_name
 
 
+def _escape_applescript(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def show_notification(title: str, body: str) -> bool:
+    """Display a macOS notification via AppleScript."""
+    try:
+        result = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'display notification "{_escape_applescript(body)}" with title "{_escape_applescript(title)}"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    except Exception:
+        logger.debug("Failed to display native notification", exc_info=True)
+        return False
+
+
 # ─── Capture mode helper ─────────────────────────────────
 
 
@@ -110,6 +136,28 @@ async def fetch_capture_mode(client: httpx.AsyncClient, url: str) -> str:
     except Exception:
         pass
     return "on_switch"
+
+
+async def fetch_next_notification(client: httpx.AsyncClient, url: str) -> dict | None:
+    """Fetch the next pending native notification from the backend."""
+    try:
+        r = await client.get(f"{url}/api/observer/notifications/next")
+        if r.status_code == 200:
+            return r.json().get("notification")
+    except Exception:
+        pass
+    return None
+
+
+async def ack_notification(client: httpx.AsyncClient, url: str, notification_id: str) -> bool:
+    """Acknowledge a displayed native notification."""
+    try:
+        r = await client.post(f"{url}/api/observer/notifications/{notification_id}/ack")
+        if r.status_code == 200:
+            return bool(r.json().get("acked"))
+    except Exception:
+        pass
+    return False
 
 
 # ─── Main loop ────────────────────────────────────────────
@@ -137,6 +185,19 @@ async def poll_loop(
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
+                notification = await fetch_next_notification(client, url)
+                if notification is not None:
+                    displayed = await asyncio.to_thread(
+                        show_notification,
+                        notification.get("title", "Seraph"),
+                        notification.get("body", ""),
+                    )
+                    if displayed:
+                        await ack_notification(client, url, notification["id"])
+                        if verbose:
+                            ts = time.strftime("%H:%M:%S")
+                            logger.info("[%s] notification \u2192 %s", ts, notification.get("title", "Seraph"))
+
                 # Check idle state
                 idle_secs = get_idle_seconds()
                 is_idle = idle_secs > idle_timeout

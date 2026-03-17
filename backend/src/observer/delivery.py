@@ -5,6 +5,7 @@ import logging
 from src.audit.runtime import log_observer_delivery_event
 from src.models.schemas import WSResponse
 from src.observer.intervention_policy import InterventionDecision, decide_intervention
+from src.observer.native_notification_queue import native_notification_queue
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,28 @@ def _transport_failure_reason(*, attempted_connections: int, failed_connections:
     if failed_connections >= attempted_connections:
         return "all_connections_failed"
     return "unknown_transport_failure"
+
+
+def _should_offer_native_notification(message: WSResponse, *, is_scheduled: bool) -> bool:
+    if message.type != "proactive":
+        return False
+    if bool(message.requires_approval):
+        return False
+    if not message.content.strip():
+        return False
+    if is_scheduled:
+        return True
+    if message.intervention_type == "alert":
+        return True
+    return (message.urgency or 0) >= 3
+
+
+def _native_notification_title(message: WSResponse, *, is_scheduled: bool) -> str:
+    if message.intervention_type == "alert":
+        return "Seraph alert"
+    if is_scheduled:
+        return "Seraph update"
+    return "Seraph"
 
 
 async def deliver_or_queue(
@@ -72,6 +95,38 @@ async def deliver_or_queue(
                 }
             )
             if broadcast_result.delivered_connections <= 0:
+                if (
+                    context_manager.is_daemon_connected()
+                    and _should_offer_native_notification(message, is_scheduled=is_scheduled)
+                ):
+                    notification = await native_notification_queue.enqueue(
+                        title=_native_notification_title(message, is_scheduled=is_scheduled),
+                        body=message.content,
+                        intervention_type=intervention_type,
+                        urgency=urgency,
+                    )
+                    logger.info(
+                        "Rerouted proactive message to native notification (type=%s, notification_id=%s)",
+                        message.type,
+                        notification.id,
+                    )
+                    await log_observer_delivery_event(
+                        decision="delivered",
+                        message_type=message.type,
+                        intervention_type=intervention_type,
+                        urgency=urgency,
+                        is_scheduled=is_scheduled,
+                        details={
+                            **event_details,
+                            "transport": "native_notification",
+                            "notification_id": notification.id,
+                            "delivery_decision": policy_decision.delivery_decision.value
+                            if policy_decision.delivery_decision is not None
+                            else None,
+                        },
+                    )
+                    return policy_decision
+
                 logger.warning(
                     "Failed to deliver proactive message over WebSocket transport (attempted=%d failed=%d)",
                     broadcast_result.attempted_connections,
@@ -85,6 +140,7 @@ async def deliver_or_queue(
                     is_scheduled=is_scheduled,
                     details={
                         **event_details,
+                        "transport": "websocket",
                         "delivery_decision": policy_decision.delivery_decision.value
                         if policy_decision.delivery_decision is not None
                         else None,
@@ -105,7 +161,7 @@ async def deliver_or_queue(
                 intervention_type=intervention_type,
                 urgency=urgency,
                 is_scheduled=is_scheduled,
-                details=event_details,
+                details={**event_details, "transport": "websocket"},
             )
 
         elif policy_decision.action.value == "bundle":

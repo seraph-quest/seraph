@@ -234,6 +234,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
+    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
+    assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
@@ -383,8 +385,20 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
         "agent_primary_reason_codes"
     ]
-    assert details_by_name["scheduled_local_runtime_profile"]["job_name"] == "daily_briefing"
-    assert details_by_name["scheduled_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
+    assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
+    assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
+        "daily_briefing": "ollama/llama3.2",
+        "evening_review": "ollama/llama3.2",
+        "activity_digest": "ollama/llama3.2",
+        "weekly_activity_review": "ollama/llama3.2",
+    }
+    assert details_by_name["scheduled_local_runtime_profile"]["routed_api_bases"] == {
+        "daily_briefing": "http://localhost:11434/v1",
+        "evening_review": "http://localhost:11434/v1",
+        "activity_digest": "http://localhost:11434/v1",
+        "weekly_activity_review": "http://localhost:11434/v1",
+    }
+    assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
     assert details_by_name["daily_briefing_delivery_behavior"]["message_type"] == "proactive"
     assert details_by_name["daily_briefing_delivery_behavior"]["intervention_type"] == "advisory"
     assert details_by_name["daily_briefing_delivery_behavior"]["scheduled_delivery"] is True

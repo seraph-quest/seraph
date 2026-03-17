@@ -14,7 +14,7 @@
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] wildcard runtime-path routing rules, with exact-path overrides taking precedence
-- [x] first-class local runtime profile for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
+- [x] first-class local runtime profile for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for guardian, core chat behavior, proactive flow behavior, delegated workflow behavior, observer, storage, and integration seam checks
@@ -23,13 +23,12 @@
 ## Working On Now
 
 - [x] Runtime Reliability remains the repo-wide hardening track
-- [x] `provider-routing-decision-audit` is the active PR from the numbered sequence below
+- [x] `local-routing-gap-closure` is the active PR from the numbered sequence below
 - [ ] close the remaining routing, observability, and eval gaps outside the already-covered seams
 
 ## Still To Do On `develop`
 
 - [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
-- [ ] broaden local-model routing beyond the current helper, scheduler, core agent, delegation, and connected MCP-specialist paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond the proactive delivery transport, MCP management/test, skills state-management, and screen observation repository boundaries
 - [ ] expand eval coverage beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts into broader behavioral coverage
 
@@ -47,8 +46,8 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
    add provider capability metadata and runtime-path policy intents such as `fast`, `cheap`, `reasoning`, and `local_first`
 5. [x] `provider-routing-decision-audit`:
    log structured routing decisions that explain the chosen target, rejected targets, and rejection reasons
-6. [ ] `local-routing-gap-closure`:
-   extend local routing only into the remaining runtime paths that still have clear product value after the eval and policy work lands
+6. [x] `local-routing-gap-closure`:
+   verify the remaining worthwhile local-routing surface across onboarding, strategist, and all scheduled completion jobs so the queue does not stay open on assumed gaps
 7. [ ] `incident-trace-gap-closure`:
    close the last real observability blind spots where a production incident still cannot be explained from one trace
 
@@ -62,6 +61,6 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
 - [x] provider failure with configured fallbacks does not collapse the entire chat path
 - [x] runtime paths can force distinct primary and fallback routing without changing the global baseline
 - [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
-- [x] a local or non-OpenRouter path is demonstrably possible across helper, scheduler, core agent, delegation, and connected MCP-specialist flows
+- [x] a local or non-OpenRouter path is demonstrably possible across helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist flows
 - [ ] key flows are observable and easy to debug
 - [ ] the project has broad repeatable eval coverage for core behavior beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts

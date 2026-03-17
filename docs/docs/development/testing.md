@@ -68,10 +68,11 @@ uv run python -m src.evals.harness --scenario mcp_test_api_audit
 uv run python -m src.evals.harness --scenario skills_api_audit
 uv run python -m src.evals.harness --scenario screen_repository_runtime_audit
 uv run python -m src.evals.harness --scenario daily_briefing_degraded_memories_audit
+uv run python -m src.evals.harness --scenario activity_digest_degraded_summary_audit
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, daily-briefing and evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -98,6 +99,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_consolidation_reliability.py` | 6 | Memory consolidation reliability — edge cases, retry behavior |
 | `test_consolidator.py` | 5 | Memory consolidation — extract facts, soul updates, markdown fences, LLM failure |
 | `test_context_window.py` | 19 | Token-aware context window — budget management, keep first/last, summarization, runtime audit logging |
+| `test_activity_digest.py` | 6 | Activity digest — skip/no data, happy path, runtime path, timeout, degraded summary-input audit visibility |
 | `test_daily_briefing.py` | 8 | Daily briefing — happy path, context/LLM failure, empty data, events in prompt, degraded memory-input audit visibility |
 | `test_delegation.py` | 10 | Delegation architecture — orchestrator, specialist routing, depth limits |
 | `test_delivery.py` | 9 | Delivery coordinator — deliver/queue/drop routing, budget decrement, bundle formatting |

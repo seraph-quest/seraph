@@ -152,3 +152,47 @@ class TestActivityDigest:
 
         # Should NOT deliver on timeout
         mock_deliver.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_logs_degraded_summary_runtime_details(self, async_db):
+        mock_repo = MagicMock()
+        mock_repo.get_daily_summary = AsyncMock(return_value={
+            "date": date.today().isoformat(),
+            "total_observations": 5,
+            "by_activity": {"coding": 3600},
+        })
+
+        with (
+            patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+            patch("src.memory.soul.read_soul", return_value="soul"),
+            patch("litellm.completion", return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Digest text"))])),
+            patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+        ):
+            from src.scheduler.jobs.activity_digest import run_activity_digest
+            await run_activity_digest()
+
+        events = await audit_repository.list_events(limit=20)
+        assert any(
+            event["event_type"] == "background_task_degraded"
+            and event["tool_name"] == "activity_digest_inputs"
+            and event["details"]["source"] == "screen_summary"
+            and event["details"]["missing_fields"] == [
+                "total_tracked_minutes",
+                "switch_count",
+                "by_project",
+                "longest_streaks",
+            ]
+            for event in events
+        )
+        assert any(
+            event["event_type"] == "scheduler_job_succeeded"
+            and event["tool_name"] == "activity_digest"
+            and event["details"]["data_quality"] == "degraded"
+            and event["details"]["degraded_inputs"] == [
+                "total_tracked_minutes",
+                "switch_count",
+                "by_project",
+                "longest_streaks",
+            ]
+            for event in events
+        )

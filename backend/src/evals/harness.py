@@ -42,6 +42,7 @@ from src.memory import soul as soul_mod
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
+from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.evening_review import run_evening_review
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
@@ -1140,6 +1141,47 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_activity_digest_degraded_summary_audit() -> dict[str, Any]:
+    mock_repo = MagicMock()
+    mock_repo.get_daily_summary = AsyncMock(return_value={
+        "date": date.today().isoformat(),
+        "total_observations": 5,
+        "by_activity": {"coding": 3600},
+    })
+    mock_deliver = AsyncMock()
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.screen_repository.screen_observation_repo", mock_repo),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch(
+            "src.scheduler.jobs.activity_digest.completion_with_fallback",
+            AsyncMock(return_value=_make_litellm_response("Digest text")),
+        ),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_activity_digest()
+
+    degraded = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_degraded",
+        tool_name="activity_digest_inputs",
+    )
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="activity_digest",
+    )
+    return {
+        "background_source": degraded["details"]["source"],
+        "missing_fields": degraded["details"]["missing_fields"],
+        "data_quality": succeeded["details"]["data_quality"],
+        "degraded_inputs": succeeded["details"]["degraded_inputs"],
+        "delivered": mock_deliver.await_count == 1,
+    }
+
+
 async def _eval_evening_review_degraded_inputs_audit() -> dict[str, Any]:
     ctx = _make_context(time_of_day="evening", is_working_hours=False)
     mock_context_manager = MagicMock()
@@ -2071,6 +2113,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Daily briefing records degraded memory-input quality when vector recall falls back to an empty baseline.",
         runner=_eval_daily_briefing_degraded_memories_audit,
+    ),
+    EvalScenario(
+        name="activity_digest_degraded_summary_audit",
+        category="observability",
+        description="Activity digest records degraded input quality when the daily screen summary is structurally incomplete.",
+        runner=_eval_activity_digest_degraded_summary_audit,
     ),
     EvalScenario(
         name="evening_review_degraded_inputs_audit",

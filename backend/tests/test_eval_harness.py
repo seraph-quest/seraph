@@ -73,6 +73,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "skills_api_audit" in captured.out
     assert "screen_repository_runtime_audit" in captured.out
     assert "daily_briefing_degraded_memories_audit" in captured.out
+    assert "activity_digest_degraded_summary_audit" in captured.out
     assert "evening_review_degraded_inputs_audit" in captured.out
 
 
@@ -123,6 +124,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "skills_api_audit",
                 "screen_repository_runtime_audit",
                 "daily_briefing_degraded_memories_audit",
+                "activity_digest_degraded_summary_audit",
                 "evening_review_degraded_inputs_audit",
             ]
         )
@@ -267,6 +269,21 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["daily_briefing_degraded_memories_audit"]["data_quality"] == "degraded"
     assert details_by_name["daily_briefing_degraded_memories_audit"]["degraded_inputs"] == ["relevant_memories"]
     assert details_by_name["daily_briefing_degraded_memories_audit"]["delivered"] is True
+    assert details_by_name["activity_digest_degraded_summary_audit"]["background_source"] == "screen_summary"
+    assert details_by_name["activity_digest_degraded_summary_audit"]["missing_fields"] == [
+        "total_tracked_minutes",
+        "switch_count",
+        "by_project",
+        "longest_streaks",
+    ]
+    assert details_by_name["activity_digest_degraded_summary_audit"]["data_quality"] == "degraded"
+    assert details_by_name["activity_digest_degraded_summary_audit"]["degraded_inputs"] == [
+        "total_tracked_minutes",
+        "switch_count",
+        "by_project",
+        "longest_streaks",
+    ]
+    assert details_by_name["activity_digest_degraded_summary_audit"]["delivered"] is True
     assert details_by_name["evening_review_degraded_inputs_audit"]["data_quality"] == "degraded"
     assert details_by_name["evening_review_degraded_inputs_audit"]["degraded_inputs"] == [
         "messages_today",

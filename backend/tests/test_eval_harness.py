@@ -58,6 +58,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "context_window_summary_audit" in captured.out
     assert "agent_local_runtime_profile" in captured.out
     assert "delegation_local_runtime_profile" in captured.out
+    assert "delegated_tool_workflow_behavior" in captured.out
+    assert "delegated_tool_workflow_degraded_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -130,6 +132,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "strategist_tick_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
+                "delegated_tool_workflow_behavior",
+                "delegated_tool_workflow_degraded_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -231,6 +235,28 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
+    assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_web_researcher"] is True
+    assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_file_worker"] is True
+    assert details_by_name["delegated_tool_workflow_behavior"]["tool_steps_present"] == {
+        "browse_webpage": True,
+        "web_search": True,
+        "write_file": True,
+    }
+    assert details_by_name["delegated_tool_workflow_behavior"]["final_mentions_saved_plan"] is True
+    assert details_by_name["delegated_tool_workflow_behavior"]["audit_result_tools"] == [
+        "browse_webpage",
+        "web_search",
+        "write_file",
+    ]
+    assert details_by_name["delegated_tool_workflow_behavior"]["saved_plan_mentions_provider_policy"] is True
+    assert details_by_name["delegated_tool_workflow_behavior"]["tool_call_count"] == 5
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["delegated_to_web_researcher"] is True
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["web_search_failed_audited"] is False
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["browse_failed_audited"] is True
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["write_file_still_succeeded"] is True
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["final_mentions_fallback"] is True
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["saved_plan_mentions_incident_trace"] is True
+    assert details_by_name["delegated_tool_workflow_degraded_behavior"]["tool_call_count"] == 5
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"

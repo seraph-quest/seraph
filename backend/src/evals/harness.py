@@ -1999,6 +1999,63 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_session_bound_llm_trace() -> dict[str, Any]:
+    async with _patched_async_db(
+        "src.db.engine.get_session",
+        "src.agent.session.get_session",
+        "src.audit.repository.get_session",
+    ):
+        await session_manager.get_or_create("trace-session")
+        await session_manager.add_message(
+            "trace-session",
+            "user",
+            "Please title this conversation about building a reliable guardian agent.",
+        )
+        await session_manager.add_message(
+            "trace-session",
+            "assistant",
+            "We should focus on incident traces, routing visibility, and runtime reliability.",
+        )
+
+        title_response = _make_litellm_response("Guardian Reliability")
+        consolidation_response = _make_litellm_response(json.dumps({
+            "facts": ["The user cares about reliability."],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        }))
+
+        with (
+            patch("litellm.completion", side_effect=[title_response, consolidation_response]),
+            patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
+            patch("src.memory.consolidator.add_memory"),
+            patch("src.memory.consolidator.update_soul_section"),
+        ):
+            await session_manager.generate_title("trace-session")
+            await consolidate_session("trace-session")
+
+        events = await audit_repository.list_events(limit=20, session_id="trace-session")
+        title_event = next(
+            event
+            for event in events
+            if event["event_type"] == "llm_primary_success"
+            and event["details"]["runtime_path"] == "session_title_generation"
+        )
+        consolidation_event = next(
+            event
+            for event in events
+            if event["event_type"] == "llm_primary_success"
+            and event["details"]["runtime_path"] == "session_consolidation"
+        )
+        return {
+            "session_id": "trace-session",
+            "title_trace_has_request_id": bool(title_event["details"]["request_id"]),
+            "consolidation_trace_has_request_id": bool(consolidation_event["details"]["request_id"]),
+            "request_ids_differ": title_event["details"]["request_id"] != consolidation_event["details"]["request_id"],
+        }
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -3334,6 +3391,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime routing writes structured decision records that explain selected and deferred targets.",
         runner=_eval_provider_routing_decision_audit,
+    ),
+    EvalScenario(
+        name="session_bound_llm_trace",
+        category="runtime",
+        description="Session-bound helper LLM events carry enough context to explain a session incident from one trace.",
+        runner=_eval_session_bound_llm_trace,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

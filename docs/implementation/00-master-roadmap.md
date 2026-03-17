@@ -32,7 +32,7 @@ Legend for the checklist column:
 |---|---|---|
 | 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret redaction are shipped; deeper isolation and narrower privileged execution paths are still left |
 | 02. Execution Plane | `[ ]` | Real tool execution, MCP, browser, shell, filesystem, goals, vault, and web search are shipped; richer workflow and external execution depth are still left |
-| 03. Runtime Reliability | `[ ]` | Profile preferences, wildcard path rules, fallback chains, runtime-path overrides, local routing across helper, scheduled, agent, delegation, and MCP-specialist paths, broad runtime audit coverage including MCP test, skills API, and screen repository boundaries, plus core chat, proactive, and delegated behavioral eval contracts are shipped; richer routing policy and broader eval depth are still left |
+| 03. Runtime Reliability | `[ ]` | Profile preferences, wildcard path rules, fallback chains, runtime-path overrides, local routing across helper, scheduled, agent, delegation, and MCP-specialist paths, session-bound helper and agent LLM traceability, broad runtime audit coverage including MCP test, skills API, and screen repository boundaries, plus core chat, proactive, and delegated behavioral eval contracts are shipped; richer routing policy and broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, and native daemon foundations are shipped; richer native presence, notifications, and channels are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, and observer-driven state are shipped foundations; stronger learning loops and intervention quality are still left |
 | 06. Embodied UX | `[ ]` | Village UI, avatar casting, quest surfaces, and settings exist; the fuller life-OS shell and stronger ambient UX are still left |
@@ -62,14 +62,29 @@ Legend for the checklist column:
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
-- [x] runtime audit visibility across chat, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
+- [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, proactive flow behavior, delegated workflow behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
 
 ## Working On Now
 
 - [x] Runtime Reliability is the active hardening track.
-- [x] `local-routing-gap-closure` is the current queued PR after the shipped behavioral-eval and routing-policy slices.
+- [x] `incident-trace-gap-closure` is the current queued PR after the shipped behavioral-eval and routing-policy slices.
+- [x] the next most valuable PR sequence after this branch starts with `provider-policy-scoring` and is tracked in `03-runtime-reliability.md`.
 - [ ] richer provider routing policy and broader behavioral eval depth are still ahead.
+
+## Next Most Valuable PR Sequence
+
+After `incident-trace-gap-closure`, the next ordered PR list is:
+
+1. [ ] `provider-policy-scoring`
+2. [ ] `behavioral-evals-guardian-flows`
+3. [ ] `guardian-state-synthesis`
+4. [ ] `intervention-policy-v1`
+5. [ ] `native-presence-notifications`
+6. [ ] `workflow-composition-v1`
+7. [ ] `guardian-feedback-loop`
+
+Use [Workstream 03: Runtime Reliability](./03-runtime-reliability.md) for the detailed rationale and scope for each item.
 
 ## Recommended Reading Order
 

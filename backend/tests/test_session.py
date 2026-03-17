@@ -168,6 +168,14 @@ class TestGenerateTitle:
             and event["details"]["title_length"] == len("AI Discussion")
             for event in events
         )
+        assert any(
+            event["event_type"] == "llm_primary_success"
+            and event["tool_name"] == "llm_runtime"
+            and event["session_id"] == "s1"
+            and event["details"]["runtime_path"] == "session_title_generation"
+            and event["details"]["request_id"]
+            for event in events
+        )
 
     async def test_generates_title_uses_session_title_runtime_path(self, async_db, sm):
         await sm.get_or_create("s1")

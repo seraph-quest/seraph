@@ -72,6 +72,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_path_patterns" in captured.out
     assert "provider_policy_capabilities" in captured.out
     assert "provider_routing_decision_audit" in captured.out
+    assert "session_bound_llm_trace" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
@@ -148,6 +149,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_path_patterns",
                 "provider_policy_capabilities",
                 "provider_routing_decision_audit",
+                "session_bound_llm_trace",
                 "scheduled_local_runtime_profile",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
@@ -385,6 +387,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
         "agent_primary_reason_codes"
     ]
+    assert details_by_name["session_bound_llm_trace"]["session_id"] == "trace-session"
+    assert details_by_name["session_bound_llm_trace"]["title_trace_has_request_id"] is True
+    assert details_by_name["session_bound_llm_trace"]["consolidation_trace_has_request_id"] is True
+    assert details_by_name["session_bound_llm_trace"]["request_ids_differ"] is True
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",

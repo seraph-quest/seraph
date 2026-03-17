@@ -9,6 +9,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from config.settings import settings
 from src.agent.strategist import create_strategist_agent, parse_strategist_response
 from src.audit.runtime import log_scheduler_job_event
+from src.guardian.state import build_guardian_state
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -26,12 +27,11 @@ async def run_strategist_tick() -> None:
     """Review context and decide if proactive intervention is warranted."""
     started_at = perf_counter()
     try:
-        from src.observer.manager import context_manager
-
-        ctx = await context_manager.refresh()
-        context_block = ctx.to_prompt_block()
-
-        agent = create_strategist_agent(context_block)
+        guardian_state = await build_guardian_state(
+            refresh_observer=True,
+            memory_query="current priorities, commitments, and recent intervention patterns",
+        )
+        agent = create_strategist_agent(guardian_state=guardian_state)
         llm_request_id = f"strategist_tick:{started_at}"
         _register_request(llm_request_id)
         runtime_tokens = set_runtime_context(_STRATEGIST_RUNTIME_SESSION_ID, "high_risk")

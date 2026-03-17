@@ -51,6 +51,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
+    assert "guardian_state_synthesis" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
     assert "provider_fallback_chain" in captured.out
@@ -138,6 +139,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_approval_contract",
                 "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
+                "guardian_state_synthesis",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
                 "agent_local_runtime_profile",
@@ -245,6 +247,16 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
+    assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "good"
+    assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["goal_summary"] == "Ship guardian state"
+    assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
+    assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
+    assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
+    assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
     assert details_by_name["observer_refresh_behavior"]["screen_context_preserved"] is True

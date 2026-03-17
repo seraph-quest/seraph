@@ -22,8 +22,9 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] Runtime Reliability is still the active hardening track.
-- [ ] Runtime Reliability is not complete yet.
+- [x] Guardian Intelligence is now the active implementation track.
+- [ ] Guardian Intelligence is not complete yet.
+- [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
 - [x] The next strategic focus after the runtime baseline is guardian-state quality, intervention quality, operator cockpit quality, workflow composition, and native reach.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
@@ -81,6 +82,7 @@ title: Seraph Development Status
 - [x] soul-backed persistent identity
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
+- [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
 - [x] strategist agent and strategist scheduler tick
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
@@ -108,7 +110,6 @@ title: Seraph Development Status
 
 ### Guardian intelligence
 
-- [ ] explicit guardian-state synthesis that unifies observer context, memory, goals, and recent sessions for downstream decision-making
 - [ ] stronger intervention selection and feedback loops so proactive behavior improves over time instead of staying heuristic-only
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality
 - [ ] observer salience and confidence modeling for better strategy and delivery

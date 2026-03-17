@@ -35,7 +35,7 @@ Legend for the checklist column:
 | 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, and web search are shipped; richer workflow execution and stronger execution safety are still left |
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, and native daemon foundations are shipped; native notifications and broader channel reach are still left |
-| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, and observer-driven state are shipped foundations; explicit guardian state, intervention policy, and feedback loops are still left |
+| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, and explicit guardian state are shipped foundations; intervention policy, salience modeling, and feedback loops are still left |
 | 06. Embodied UX | `[ ]` | The current village UI is shipped, but the target interface is now a dense guardian cockpit rather than a village-first shell |
 | 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, catalog/install surfaces, and delegation foundations are shipped; workflow composition and stronger extension ergonomics are still left |
 
@@ -55,7 +55,7 @@ This is the rolling execution queue. It should always show the next 10 most valu
    add weighted capability scoring on top of the current routing stack so target selection reflects value, not only explicit preference order
 2. [x] `behavioral-evals-guardian-flows`:
    extend behavioral evals into observer refresh, consolidation, proactive delivery, and guardrail-sensitive guardian flows
-3. [ ] `guardian-state-synthesis`:
+3. [x] `guardian-state-synthesis`:
    merge observer signals, memory, goals, sessions, and confidence into one structured guardian-state input
 4. [ ] `intervention-policy-v1`:
    make intervene, defer, bundle, request-approval, and stay-silent decisions explicit and state-aware
@@ -103,8 +103,9 @@ This is the rolling execution queue. It should always show the next 10 most valu
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
+- [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, memory recall, session history, recent sessions, and confidence into one structured downstream input
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
-- [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
+- [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, observer refresh and delivery behavior, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
 
 ## Recommended Reading Order
 

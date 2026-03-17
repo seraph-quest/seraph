@@ -53,6 +53,7 @@ from src.memory.consolidator import consolidate_session
 from src.memory import soul as soul_mod
 from src.memory.vector_store import _reset_vector_store_state, add_memory, search
 from src.observer.context import CurrentContext
+from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -385,6 +386,7 @@ def _make_sync_client_with_db():
         "src.goals.repository.get_session",
         "src.vault.repository.get_session",
         "src.api.profile.get_db",
+        "src.api.settings.get_db",
     ]
     patches = [patch(target, _get_session) for target in targets]
     patches.append(patch("src.app.init_db", _test_init_db))
@@ -2877,6 +2879,48 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_session_consolidation_behavior() -> dict[str, Any]:
+    mock_log_event = AsyncMock()
+    llm_response = _make_litellm_response(json.dumps({
+        "facts": ["User is building a guardian cockpit"],
+        "patterns": [],
+        "goals": ["Ship behavioral guardian evals"],
+        "reflections": [],
+        "soul_updates": {"Goals": "- Ship the guardian cockpit pivot"},
+    }))
+
+    with (
+        patch.object(
+            session_manager,
+            "get_history_text",
+            AsyncMock(return_value=(
+                "User: I want Seraph to become a dense guardian cockpit.\n"
+                "Assistant: Then we need behavioral evals, stronger state, and better operator UX."
+            )),
+        ),
+        patch("src.memory.consolidator.read_soul", return_value="# Soul\n\n## Goals\n- Keep the system grounded"),
+        patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
+        patch("src.memory.consolidator.add_memory") as mock_add_memory,
+        patch("src.memory.consolidator.update_soul_section") as mock_update_soul,
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await consolidate_session("guardian-session")
+
+    success = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_succeeded",
+        tool_name="session_consolidation",
+    )
+    return {
+        "stored_memory_count": success["details"]["stored_memory_count"],
+        "soul_update_count": success["details"]["soul_update_count"],
+        "memory_categories": [call.kwargs["category"] for call in mock_add_memory.call_args_list],
+        "stored_texts": [call.kwargs["text"] for call in mock_add_memory.call_args_list],
+        "updated_soul_section": mock_update_soul.call_args.args[0],
+        "updated_soul_mentions_cockpit": "guardian cockpit" in mock_update_soul.call_args.args[1].lower(),
+    }
+
+
 async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
     sm = SessionManager()
     mock_log_event = AsyncMock()
@@ -3022,6 +3066,118 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
         "bundle_delivered_connections": bundle_delivered["details"]["delivered_connections"],
         "bundle_failed_count": failed_bundle_count,
         "bundle_failed_error": bundle_failed["details"]["error"],
+    }
+
+
+async def _eval_observer_refresh_behavior() -> dict[str, Any]:
+    mgr = ContextManager()
+    mgr.update_screen_context("VS Code", "Editing guardian eval contracts")
+    mgr._context.user_state = "deep_work"
+    mock_log_event = AsyncMock()
+
+    with (
+        patch(
+            "src.observer.sources.time_source.gather_time",
+            return_value={
+                "time_of_day": "morning",
+                "day_of_week": "Monday",
+                "is_working_hours": True,
+            },
+        ),
+        patch(
+            "src.observer.sources.calendar_source.gather_calendar",
+            new_callable=AsyncMock,
+            return_value={
+                "upcoming_events": [{"summary": "Design review", "start": "10:00"}],
+                "current_event": None,
+            },
+        ),
+        patch(
+            "src.observer.sources.git_source.gather_git",
+            return_value={"recent_git_activity": [{"msg": "ship guardian evals"}]},
+        ),
+        patch(
+            "src.observer.sources.goal_source.gather_goals",
+            new_callable=AsyncMock,
+            return_value={"active_goals_summary": "Ship guardian behavioral evals"},
+        ),
+        patch("src.observer.manager.user_state_machine.derive_state", return_value="transitioning"),
+        patch.object(mgr, "_deliver_bundle", AsyncMock()) as mock_deliver_bundle,
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        ctx = await mgr.refresh()
+        await asyncio.sleep(0)
+
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="background_task_succeeded",
+        tool_name="observer_context_refresh",
+    )
+    return {
+        "new_user_state": ctx.user_state,
+        "data_quality": ctx.data_quality,
+        "screen_context_preserved": ctx.screen_context == "Editing guardian eval contracts",
+        "active_window_preserved": ctx.active_window == "VS Code",
+        "goal_summary": ctx.active_goals_summary,
+        "upcoming_event_count": len(ctx.upcoming_events),
+        "triggered_bundle_delivery": succeeded["details"]["triggered_bundle_delivery"],
+        "bundle_task_scheduled": mock_deliver_bundle.call_count == 1,
+    }
+
+
+async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
+    available_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+    )
+    blocked_ctx = _make_context(
+        user_state="deep_work",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+    )
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.side_effect = [available_ctx, blocked_ctx]
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
+    mock_insight_queue = MagicMock()
+    mock_insight_queue.enqueue = AsyncMock()
+    mock_log_event = AsyncMock()
+    message = WSResponse(
+        type="proactive",
+        content="Guardian note: wrap the next guardian flow slice.",
+        intervention_type="advisory",
+        urgency=3,
+        reasoning="Guardian flow follow-up",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        delivered = await deliver_or_queue(message)
+        queued = await deliver_or_queue(message)
+
+    delivered_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_delivered",
+        tool_name="observer_delivery_gate",
+    )
+    queued_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_queued",
+        tool_name="observer_delivery_gate",
+    )
+    return {
+        "delivered_decision": delivered.value,
+        "queued_decision": queued.value,
+        "budget_decremented": mock_context_manager.decrement_attention_budget.call_count == 1,
+        "queued_content_matches": mock_insight_queue.enqueue.await_args.kwargs["content"] == message.content,
+        "delivered_connections": delivered_event["details"]["delivered_connections"],
+        "queued_user_state": queued_event["details"]["user_state"],
     }
 
 
@@ -3204,6 +3360,55 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
         "reload_enabled_count": reloaded_event["details"]["enabled_count"],
         "reload_skill_names": reloaded_event["details"]["skill_names"],
     }
+
+
+def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    policy_context_manager = ContextManager()
+    mcp_tool = MagicMock()
+    mcp_tool.name = "mcp_tasks"
+    mcp_tool.description = "Task MCP"
+
+    try:
+        with (
+            patch("src.api.settings.context_manager", policy_context_manager),
+            patch("src.tools.policy.context_manager", policy_context_manager),
+            patch("src.agent.factory.mcp_manager.get_tools", return_value=[mcp_tool]),
+        ):
+            safe_response = client.put("/api/settings/tool-policy-mode", json={"mode": "safe"})
+            safe_tools = {tool["name"]: tool for tool in client.get("/api/tools").json()}
+
+            balanced_response = client.put("/api/settings/tool-policy-mode", json={"mode": "balanced"})
+            balanced_tools = {tool["name"]: tool for tool in client.get("/api/tools").json()}
+
+            full_response = client.put("/api/settings/tool-policy-mode", json={"mode": "full"})
+            full_tools = {tool["name"]: tool for tool in client.get("/api/tools").json()}
+
+            disabled_response = client.put("/api/settings/mcp-policy-mode", json={"mode": "disabled"})
+            disabled_tools = {tool["name"]: tool for tool in client.get("/api/tools").json()}
+
+            approval_response = client.put("/api/settings/mcp-policy-mode", json={"mode": "approval"})
+            approval_tools = {tool["name"]: tool for tool in client.get("/api/tools").json()}
+
+        return {
+            "safe_status": safe_response.status_code,
+            "balanced_status": balanced_response.status_code,
+            "full_status": full_response.status_code,
+            "mcp_disabled_status": disabled_response.status_code,
+            "mcp_approval_status": approval_response.status_code,
+            "safe_hides_write_file": "write_file" not in safe_tools,
+            "safe_hides_shell_execute": "shell_execute" not in safe_tools,
+            "balanced_shows_write_file": "write_file" in balanced_tools,
+            "balanced_hides_shell_execute": "shell_execute" not in balanced_tools,
+            "full_shows_shell_execute": "shell_execute" in full_tools,
+            "mcp_disabled_hides_tool": "mcp_tasks" not in disabled_tools,
+            "mcp_approval_shows_tool": "mcp_tasks" in approval_tools,
+            "mcp_approval_requires_approval": approval_tools["mcp_tasks"]["requires_approval"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
 
 
 async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:
@@ -3509,6 +3714,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_strategist_tick_behavior,
     ),
     EvalScenario(
+        name="observer_refresh_behavior",
+        category="behavior",
+        description="Observer refresh preserves screen context, rebuilds guardian context, and schedules queued-bundle delivery on unblock transitions.",
+        runner=_eval_observer_refresh_behavior,
+    ),
+    EvalScenario(
+        name="observer_delivery_decision_behavior",
+        category="behavior",
+        description="Proactive delivery delivers while available, queues while blocked, and decrements budget only for delivered guardian nudges.",
+        runner=_eval_observer_delivery_decision_behavior,
+    ),
+    EvalScenario(
         name="daily_briefing_fallback",
         category="proactive",
         description="Daily briefing survives a primary provider failure and still delivers via fallback.",
@@ -3623,6 +3840,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_session_consolidation_background_audit,
     ),
     EvalScenario(
+        name="session_consolidation_behavior",
+        category="behavior",
+        description="Session consolidation stores long-term memories and soul updates from the modeled guardian conversation summary.",
+        runner=_eval_session_consolidation_behavior,
+    ),
+    EvalScenario(
         name="session_title_generation_background_audit",
         category="observability",
         description="Session title generation records background-task audit success without live providers.",
@@ -3657,6 +3880,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Skill toggle and reload requests record succeeded and failed runtime audit events.",
         runner=_eval_skills_api_audit,
+    ),
+    EvalScenario(
+        name="tool_policy_guardrails_behavior",
+        category="behavior",
+        description="Tool and MCP policy modes expose a graduated public control surface instead of leaking high-risk capability in safer modes.",
+        runner=_eval_tool_policy_guardrails_behavior,
     ),
     EvalScenario(
         name="screen_repository_runtime_audit",

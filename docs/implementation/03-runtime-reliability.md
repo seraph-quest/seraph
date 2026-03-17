@@ -18,19 +18,19 @@
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
-- [x] repeatable runtime eval harness for guardian, core chat behavior, proactive flow behavior, delegated workflow behavior, observer, storage, and integration seam checks
+- [x] repeatable runtime eval harness for guardian, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, observer, storage, and integration seam checks
 - [x] runtime audit coverage across chat, WebSocket, scheduler jobs including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, strategist helpers, proactive delivery transport, MCP lifecycle and manual test API paths, skills toggle/reload paths, observer lifecycle plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 
 ## Working On Now
 
 - [x] Runtime Reliability remains the repo-wide hardening track
-- [x] this workstream owns the first two items in the repo-wide 10-PR horizon
-- [ ] close the remaining routing and eval gaps outside the already-covered seams
+- [x] this workstream has shipped the first two items in the current repo-wide 10-PR horizon
+- [ ] richer provider policy and broader eval depth still remain after the current guardian-flow branch
 
 ## Still To Do On `develop`
 
-- [ ] add weighted provider policy scoring on top of the current capability-intent routing
-- [ ] expand eval coverage beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts into broader guardian behavioral coverage
+- [ ] deepen provider selection policy beyond weighted capability scoring, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
+- [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool-policy guardrail, and delegated behavioral contracts
 
 ## Completed PR Sequence
 
@@ -57,7 +57,7 @@ This is the next ordered Runtime Reliability slice after the completed incident-
 
 1. [x] `provider-policy-scoring`:
    deepen provider routing with weighted policy scoring, explicit capability preferences, and clearer target ranking so runtime-path selection is stronger than simple preference chains and cooldown skips
-2. [ ] `behavioral-evals-guardian-flows`:
+2. [x] `behavioral-evals-guardian-flows`:
    expand behavioral eval coverage beyond chat and scheduler seams into observer refresh, consolidation, proactive delivery, and policy-mode guardrails so broader guardian behavior is regression-tested
 
 ## Non-Goals
@@ -72,4 +72,4 @@ This is the next ordered Runtime Reliability slice after the completed incident-
 - [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
 - [x] a local or non-OpenRouter path is demonstrably possible across helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist flows
 - [x] key flows are observable and easy to debug
-- [ ] the project has broad repeatable eval coverage for core guardian behavior beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts
+- [ ] the project has broad repeatable eval coverage for core guardian behavior beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool-policy guardrail, and delegated behavioral contracts

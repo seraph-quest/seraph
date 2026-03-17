@@ -43,6 +43,7 @@ class VaultRepository:
         """Upsert an encrypted secret."""
         try:
             encrypted = encrypt(value)
+            action = "created"
             async with get_session() as db:
                 result = await db.execute(select(Secret).where(Secret.key == key))
                 existing = result.scalars().first()
@@ -52,30 +53,26 @@ class VaultRepository:
                         existing.description = description
                     existing.updated_at = datetime.now(timezone.utc)
                     db.add(existing)
+                    action = "updated"
+                    secret = existing
                     logger.info("Vault: updated secret '%s'", key)
-                    await _log_vault_event(
-                        "succeeded",
-                        "store",
-                        action="updated",
-                        description_present=description is not None,
+                else:
+                    secret = Secret(
+                        key=key,
+                        encrypted_value=encrypted,
+                        description=description,
                     )
-                    return existing
+                    db.add(secret)
+                    await db.flush()
+                    logger.info("Vault: stored new secret '%s'", key)
 
-                secret = Secret(
-                    key=key,
-                    encrypted_value=encrypted,
-                    description=description,
-                )
-                db.add(secret)
-                await db.flush()
-                logger.info("Vault: stored new secret '%s'", key)
-                await _log_vault_event(
-                    "succeeded",
-                    "store",
-                    action="created",
-                    description_present=description is not None,
-                )
-                return secret
+            await _log_vault_event(
+                "succeeded",
+                "store",
+                action=action,
+                description_present=description is not None,
+            )
+            return secret
         except Exception as exc:
             await _log_vault_event("failed", "store", error=str(exc))
             raise
@@ -178,8 +175,9 @@ class VaultRepository:
 
                 await db.delete(secret)
                 logger.info("Vault: deleted secret '%s'", key)
-                await _log_vault_event("succeeded", "delete", deleted=True)
-                return True
+
+            await _log_vault_event("succeeded", "delete", deleted=True)
+            return True
         except Exception as exc:
             await _log_vault_event("failed", "delete", error=str(exc))
             raise

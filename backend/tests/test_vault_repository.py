@@ -1,6 +1,7 @@
 """Tests for VaultRepository (src/vault/repository.py)."""
 
-from unittest.mock import patch
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -57,6 +58,35 @@ class TestStore:
         await repo.store("token", "val", description="v2")
         keys = await repo.list_keys()
         assert keys[0]["description"] == "v2"
+
+    async def test_commit_failure_logs_failed_not_success(self, repo):
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(return_value=result)
+        fake_db.flush = AsyncMock()
+        fake_db.add = MagicMock()
+
+        @asynccontextmanager
+        async def _failing_get_session():
+            yield fake_db
+            raise RuntimeError("commit failed")
+
+        with (
+            patch("src.vault.repository.get_session", _failing_get_session),
+            patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event,
+        ):
+            with pytest.raises(RuntimeError, match="commit failed"):
+                await repo.store("token", "value")
+
+        assert not any(
+            call.args == ("succeeded", "store")
+            for call in mock_log_event.await_args_list
+        )
+        assert any(
+            call.args == ("failed", "store") and call.kwargs["error"] == "commit failed"
+            for call in mock_log_event.await_args_list
+        )
 
 
 class TestGet:
@@ -148,6 +178,34 @@ class TestDelete:
 
     async def test_nonexistent(self, async_db, repo):
         assert await repo.delete("nope") is False
+
+    async def test_commit_failure_logs_failed_not_success(self, repo):
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = MagicMock()
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(return_value=result)
+        fake_db.delete = AsyncMock()
+
+        @asynccontextmanager
+        async def _failing_get_session():
+            yield fake_db
+            raise RuntimeError("commit failed")
+
+        with (
+            patch("src.vault.repository.get_session", _failing_get_session),
+            patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event,
+        ):
+            with pytest.raises(RuntimeError, match="commit failed"):
+                await repo.delete("token")
+
+        assert not any(
+            call.args == ("succeeded", "delete")
+            for call in mock_log_event.await_args_list
+        )
+        assert any(
+            call.args == ("failed", "delete") and call.kwargs["error"] == "commit failed"
+            for call in mock_log_event.await_args_list
+        )
 
 
 class TestExists:

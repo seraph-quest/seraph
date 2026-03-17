@@ -1,11 +1,12 @@
 """Tests for screen observation repository and model."""
 
 from datetime import date, datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
+from src.audit.repository import audit_repository
 from src.db.models import ScreenObservation
 from src.observer.screen_repository import ScreenObservationRepository
 
@@ -119,6 +120,45 @@ class TestScreenObservationRepository:
         assert summary["total_observations"] == 1
 
     @pytest.mark.asyncio
+    async def test_daily_summary_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        await repo.create(
+            app_name="VS Code",
+            activity_type="coding",
+            project="seraph",
+            timestamp=now,
+        )
+
+        summary = await repo.get_daily_summary(today)
+        assert summary["total_observations"] == 1
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "screen_repository:daily_summary"
+            and event["details"]["total_observations"] == 1
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_daily_summary_empty_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+
+        summary = await repo.get_daily_summary(date.today())
+        assert summary["total_observations"] == 0
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_empty_result"
+            and event["tool_name"] == "screen_repository:daily_summary"
+            and event["details"]["reason"] == "no_observations"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
     async def test_weekly_summary(self, async_db):
         repo = ScreenObservationRepository()
         today = date.today()
@@ -142,6 +182,50 @@ class TestScreenObservationRepository:
         assert len(summary["daily_breakdown"]) == 7
 
     @pytest.mark.asyncio
+    async def test_weekly_summary_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
+        start = datetime(
+            week_start.year, week_start.month, week_start.day, 9, 0, tzinfo=timezone.utc
+        )
+
+        await repo.create(
+            app_name="VS Code",
+            activity_type="coding",
+            project="seraph",
+            timestamp=start,
+        )
+
+        summary = await repo.get_weekly_summary(week_start)
+        assert summary["total_observations"] == 1
+
+        events = await audit_repository.list_events(limit=20)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "screen_repository:weekly_summary"
+            and event["details"]["total_observations"] == 1
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_weekly_summary_failure_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+        week_start = date.today() - timedelta(days=date.today().weekday())
+
+        with patch.object(repo, "get_daily_summary", AsyncMock(side_effect=RuntimeError("db down"))):
+            with pytest.raises(RuntimeError, match="db down"):
+                await repo.get_weekly_summary(week_start)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_failed"
+            and event["tool_name"] == "screen_repository:weekly_summary"
+            and event["details"]["error"] == "db down"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
     async def test_cleanup_old(self, async_db):
         repo = ScreenObservationRepository()
         now = datetime.now(timezone.utc)
@@ -163,6 +247,42 @@ class TestScreenObservationRepository:
         # Verify only the recent one remains
         summary = await repo.get_daily_summary(now.date())
         assert summary["total_observations"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cleanup_old_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+        now = datetime.now(timezone.utc)
+
+        await repo.create(
+            app_name="Old App",
+            timestamp=now - timedelta(days=100),
+        )
+
+        deleted = await repo.cleanup_old(retention_days=90)
+        assert deleted == 1
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "screen_repository:cleanup"
+            and event["details"]["deleted_count"] == 1
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_cleanup_old_skip_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+
+        deleted = await repo.cleanup_old(retention_days=90)
+        assert deleted == 0
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_skipped"
+            and event["tool_name"] == "screen_repository:cleanup"
+            and event["details"]["deleted_count"] == 0
+            for event in events
+        )
 
     @pytest.mark.asyncio
     async def test_details_json_round_trip(self, async_db):

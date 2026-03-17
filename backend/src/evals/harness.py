@@ -11,7 +11,7 @@ import time
 import tempfile
 import types
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,6 +35,7 @@ from src.memory.embedder import _reset_embedder_state, embed
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
 from src.observer.sources.git_source import gather_git
+from src.observer.screen_repository import ScreenObservationRepository
 from src.observer.sources.time_source import gather_time
 from src.memory.consolidator import consolidate_session
 from src.memory import soul as soul_mod
@@ -184,6 +185,42 @@ class _FakeDbSessionContext:
 
     async def __aenter__(self) -> _FakeDbSession:
         return _FakeDbSession(self._messages)
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _FakeExecuteResult:
+    def __init__(self, rows: list[Any]):
+        self._rows = rows
+
+    def scalars(self) -> "_FakeExecuteResult":
+        return self
+
+    def all(self) -> list[Any]:
+        return self._rows
+
+
+class _FakeScreenRepoSession:
+    def __init__(self, execute_results: list[list[Any]]):
+        self._execute_results = execute_results
+        self.deleted: list[Any] = []
+
+    async def execute(self, _query: Any) -> _FakeExecuteResult:
+        if not self._execute_results:
+            raise AssertionError("Unexpected screen repository execute call")
+        return _FakeExecuteResult(self._execute_results.pop(0))
+
+    async def delete(self, obj: Any) -> None:
+        self.deleted.append(obj)
+
+
+class _FakeScreenRepoContext:
+    def __init__(self, session: _FakeScreenRepoSession):
+        self._session = session
+
+    async def __aenter__(self) -> _FakeScreenRepoSession:
+        return self._session
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
@@ -1730,6 +1767,109 @@ async def _eval_skills_api_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:
+    repo = ScreenObservationRepository()
+    target_date = date(2026, 3, 16)
+    week_start = date(2026, 3, 16)
+    observation = MagicMock()
+    observation.activity_type = "coding"
+    observation.project = "seraph"
+    observation.app_name = "VS Code"
+    observation.duration_s = 1800
+    observation.timestamp = datetime(2026, 3, 16, 9, 0, tzinfo=timezone.utc)
+    old_observation = MagicMock()
+    old_observation.timestamp = datetime(2025, 12, 1, 9, 0, tzinfo=timezone.utc)
+    mock_log_event = AsyncMock()
+
+    empty_daily_session = _FakeScreenRepoSession([[]])
+    success_daily_session = _FakeScreenRepoSession([[observation]])
+    cleanup_success_session = _FakeScreenRepoSession([[old_observation]])
+    cleanup_skip_session = _FakeScreenRepoSession([[]])
+
+    with patch.object(audit_repository, "log_event", mock_log_event):
+        with patch("src.observer.screen_repository.get_session", return_value=_FakeScreenRepoContext(empty_daily_session)):
+            empty_daily = await repo.get_daily_summary(target_date)
+
+        with patch("src.observer.screen_repository.get_session", return_value=_FakeScreenRepoContext(success_daily_session)):
+            success_daily = await repo.get_daily_summary(target_date)
+
+        with patch.object(
+            repo,
+            "get_daily_summary",
+            AsyncMock(
+                side_effect=[
+                    {
+                        "date": "2026-03-16",
+                        "total_observations": 1,
+                        "total_tracked_minutes": 30,
+                        "by_activity": {"coding": 1800},
+                        "by_project": {"seraph": 1800},
+                    },
+                    {"date": "2026-03-17", "total_observations": 0, "total_tracked_minutes": 0},
+                    {"date": "2026-03-18", "total_observations": 0, "total_tracked_minutes": 0},
+                    {"date": "2026-03-19", "total_observations": 0, "total_tracked_minutes": 0},
+                    {"date": "2026-03-20", "total_observations": 0, "total_tracked_minutes": 0},
+                    {"date": "2026-03-21", "total_observations": 0, "total_tracked_minutes": 0},
+                    {"date": "2026-03-22", "total_observations": 0, "total_tracked_minutes": 0},
+                ]
+            ),
+        ):
+            weekly = await repo.get_weekly_summary(week_start)
+
+        with patch("src.observer.screen_repository.get_session", return_value=_FakeScreenRepoContext(cleanup_success_session)):
+            deleted_count = await repo.cleanup_old(retention_days=90)
+
+        with patch("src.observer.screen_repository.get_session", return_value=_FakeScreenRepoContext(cleanup_skip_session)):
+            skipped_count = await repo.cleanup_old(retention_days=90)
+
+        with patch.object(repo, "get_daily_summary", AsyncMock(side_effect=RuntimeError("db down"))):
+            try:
+                await repo.get_weekly_summary(week_start)
+            except RuntimeError:
+                pass
+
+    empty_daily_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_empty_result",
+        tool_name="screen_repository:daily_summary",
+    )
+    weekly_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="screen_repository:weekly_summary",
+    )
+    weekly_failed_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_failed",
+        tool_name="screen_repository:weekly_summary",
+    )
+    cleanup_success_event = None
+    cleanup_skipped_event = None
+    for call in mock_log_event.call_args_list:
+        kwargs = call.kwargs
+        if kwargs.get("tool_name") != "screen_repository:cleanup":
+            continue
+        if kwargs.get("event_type") == "integration_succeeded":
+            cleanup_success_event = kwargs
+        if kwargs.get("event_type") == "integration_skipped":
+            cleanup_skipped_event = kwargs
+    assert cleanup_success_event is not None
+    assert cleanup_skipped_event is not None
+
+    return {
+        "empty_daily_reason": empty_daily_event["details"]["reason"],
+        "empty_daily_total_observations": empty_daily["total_observations"],
+        "success_daily_total_observations": success_daily["total_observations"],
+        "weekly_total_observations": weekly["total_observations"],
+        "weekly_active_days": weekly_event["details"]["active_days"],
+        "weekly_failure_error": weekly_failed_event["details"]["error"],
+        "cleanup_deleted_count": deleted_count,
+        "cleanup_logged_deleted_count": cleanup_success_event["details"]["deleted_count"],
+        "cleanup_skipped_count": skipped_count,
+        "cleanup_skipped_logged_deleted_count": cleanup_skipped_event["details"]["deleted_count"],
+    }
+
+
 _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="chat_model_wrapper",
@@ -1958,6 +2098,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Skill toggle and reload requests record succeeded and failed runtime audit events.",
         runner=_eval_skills_api_audit,
+    ),
+    EvalScenario(
+        name="screen_repository_runtime_audit",
+        category="observability",
+        description="Screen observation summaries and cleanup record boundary-level runtime audit outcomes for empty, success, and skipped paths.",
+        runner=_eval_screen_repository_runtime_audit,
     ),
 )
 

@@ -8,6 +8,11 @@ title: 11. Superiority Program
 
 Make Seraph superior for a power-user guardian use case, not merely “more capable” in the abstract.
 
+Implementation mirror:
+
+- `docs/implementation/10-superiority-delivery.md` owns the shipped-on-`develop` translation of this program
+- `docs/implementation/00-master-roadmap.md` owns the live 10-PR queue
+
 That means winning on:
 
 - durable human modeling
@@ -21,11 +26,11 @@ That means winning on:
 
 ### 1. Guardian state, not just session state
 
-Seraph already has the right foundations: soul, goals, vector memory, observer inputs, strategist, and proactive delivery. The next step is to turn those into one explicit guardian state instead of spreading the logic across isolated call sites.
+Seraph already has the right foundations: soul, goals, vector memory, observer inputs, strategist, proactive delivery, and a first explicit guardian-state layer. The next step is to deepen its quality, confidence, and reuse so the guardian state becomes the default backbone rather than a thin synthesis pass.
 
 ### 2. Intervention quality, not just proactive activity
 
-The product should win by deciding better when to act, defer, bundle, or stay silent. That means explicit policy, confidence, interruption cost, and a real feedback loop.
+Seraph already ships an explicit intervention-policy baseline. The product should win by deciding better when to act, defer, bundle, or stay silent through stronger confidence, interruption cost, outcome learning, and a real feedback loop.
 
 ### 3. Reliability that is visible and testable
 
@@ -59,8 +64,8 @@ Seraph has a browser surface, WebSocket path, and native daemon foundation, but 
 
 ### Guardian intelligence
 
-- build explicit guardian-state synthesis
-- build intervention policy as a first-class decision layer
+- deepen guardian-state synthesis into a richer salience- and confidence-aware backbone
+- evolve intervention policy from a first shipped baseline into a stronger adaptive decision layer
 - capture intervention outcomes and user feedback
 - add observer salience and confidence modeling
 
@@ -71,7 +76,7 @@ Seraph has a browser surface, WebSocket path, and native daemon foundation, but 
 
 ### Presence and leverage
 
-- add native notifications and non-browser reach
+- extend the first native-notification baseline into broader non-browser reach
 - add first-class workflow composition on top of tools, skills, MCP, and specialists
 
 ## Proof Of Superiority
@@ -84,15 +89,9 @@ Seraph should only claim superiority on an axis when all three are true:
 
 ## Translation To Delivery
 
-This research program maps directly to the implementation queue:
+This research program maps directly to the implementation tree, but the live queue should not be duplicated here.
 
-1. provider policy scoring
-2. guardian behavioral evals
-3. guardian-state synthesis
-4. intervention policy
-5. native presence and notifications
-6. workflow composition
-7. guardian feedback loop
-8. operator cockpit
-9. observer salience and confidence
-10. execution safety hardening
+Use:
+
+- `docs/implementation/10-superiority-delivery.md` for the current implementation translation
+- `docs/implementation/00-master-roadmap.md` for the live rolling 10-PR sequence

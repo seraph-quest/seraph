@@ -4,6 +4,10 @@
 
 - [ ] Workstream 04 is only partially shipped on `develop`.
 
+## Paired Research
+
+- primary design doc: [06. Presence And Reach](/research/presence-and-reach)
+
 ## Shipped On `develop`
 
 - [x] browser-based village and chat surface
@@ -15,7 +19,7 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
+- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
 - [x] this workstream lands `native-presence-notifications` in the master 10-PR queue on this branch
 
 ## Still To Do On `develop`

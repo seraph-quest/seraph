@@ -144,6 +144,9 @@ Start with:
 
 - [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
 - [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/implementation/08-docs-contract.md](docs/implementation/08-docs-contract.md)
+- [docs/implementation/09-benchmark-status.md](docs/implementation/09-benchmark-status.md)
+- [docs/implementation/10-superiority-delivery.md](docs/implementation/10-superiority-delivery.md)
 - [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 - [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
 - [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)

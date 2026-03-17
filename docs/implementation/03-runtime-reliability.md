@@ -4,6 +4,10 @@
 
 - [ ] Workstream 03 is only partially shipped on `develop`.
 
+## Paired Research
+
+- primary design doc: [03. Runtime And Reliability](/research/runtime-and-reliability)
+
 ## Shipped On `develop`
 
 - [x] degraded-mode fallback in the context window when `tiktoken` cannot load offline

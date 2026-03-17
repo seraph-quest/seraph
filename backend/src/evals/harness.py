@@ -1821,6 +1821,78 @@ def _eval_runtime_path_patterns() -> dict[str, Any]:
     }
 
 
+def _eval_provider_policy_capabilities() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Policy matched the fast fallback.")
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(
+                settings,
+                "fallback_models",
+                "openai/gpt-4.1-nano,openai/gpt-4o-mini,openai/gpt-4.1-mini",
+            ),
+            patch.object(
+                settings,
+                "provider_capability_overrides",
+                (
+                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                    "openai/gpt-4.1-nano=cheap;"
+                    "openai/gpt-4.1-mini=reasoning|tool_use;"
+                    "openai/gpt-4o-mini=fast|cheap"
+                ),
+            ),
+            patch.object(
+                settings,
+                "runtime_policy_intents",
+                (
+                    "chat_agent=local_first|reasoning|tool_use;"
+                    "session_title_generation=fast|cheap"
+                ),
+            ),
+            patch(
+                "litellm.completion",
+                side_effect=[RuntimeError("primary down"), completion_response],
+            ) as mock_completion,
+        ):
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "pick the best fast fallback"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_title_generation",
+            )
+            chat_model = get_model(runtime_path="chat_agent")
+    finally:
+        _reset_target_health()
+
+    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+    ]
+    assert chat_model._runtime_profile == "local"
+    assert [fallback.model_id for fallback in chat_model._fallback_models] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4o-mini",
+    ]
+    return {
+        "chat_runtime_profile": chat_model._runtime_profile,
+        "chat_fallback_models": [fallback.model_id for fallback in chat_model._fallback_models],
+        "completion_attempted_models": attempted_models,
+        "completion_final_model": attempted_models[-1],
+        "response_excerpt": response.choices[0].message.content,
+    }
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -3103,6 +3175,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime-path routing rules can use wildcard patterns, while exact path rules still override the wildcard baseline.",
         runner=_eval_runtime_path_patterns,
+    ),
+    EvalScenario(
+        name="provider_policy_capabilities",
+        category="runtime",
+        description="Runtime-path policy intents can prefer local-first primary routing and capability-matched fallback targets.",
+        runner=_eval_provider_policy_capabilities,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

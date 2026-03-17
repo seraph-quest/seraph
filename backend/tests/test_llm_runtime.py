@@ -10,6 +10,7 @@ from config.settings import settings
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    _fallback_targets,
     _reset_target_health,
     build_completion_kwargs,
     build_model_kwargs,
@@ -142,6 +143,28 @@ def test_build_model_kwargs_uses_runtime_profile_preference_glob():
     assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+def test_build_model_kwargs_uses_local_first_policy_intent():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_policy_intents", "chat_agent=local_first|reasoning"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "ollama/llama3.2"
+    assert kwargs["runtime_profile"] == "local"
+    assert kwargs["api_key"] == "primary-key"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
 def test_build_model_kwargs_honors_unscoped_runtime_override_for_local_first_path():
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -259,6 +282,116 @@ def test_build_model_kwargs_explicit_profile_wins_over_runtime_override():
     assert kwargs["runtime_profile"] == "local"
     assert kwargs["api_key"] == "local-key"
     assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+def test_completion_with_fallback_sync_prefers_capability_matched_fallback():
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="fast path won"))]
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "fallback_model", ""),
+            patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
+            patch.object(
+                settings,
+                "provider_capability_overrides",
+                (
+                    "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                    "openai/gpt-4.1-nano=cheap;"
+                    "openai/gpt-4o-mini=fast|cheap"
+                ),
+            ),
+            patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
+            patch(
+                "litellm.completion",
+                side_effect=[RuntimeError("primary down"), completion_response],
+            ) as mock_completion,
+        ):
+            response = completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "pick the fastest fallback"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_title_generation",
+            )
+    finally:
+        _reset_target_health()
+
+    attempted_models = [call.kwargs["model"] for call in mock_completion.call_args_list]
+    assert attempted_models == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+    ]
+    assert response.choices[0].message.content == "fast path won"
+
+
+def test_fallback_litellm_model_orders_targets_by_capability_policy():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                "openai/gpt-4.1-mini=reasoning|tool_use;"
+                "openai/gpt-4o-mini=fast|cheap"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "chat_agent=local_first|reasoning|tool_use"),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="ollama/llama3.2",
+            api_key="primary-key",
+            api_base="http://localhost:11434/v1",
+            runtime_profile="local",
+            runtime_path="chat_agent",
+        )
+
+    assert [fallback.model_id for fallback in model._fallback_models] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini",
+    ]
+
+
+def test_fallback_policy_respects_intent_priority_before_config_order():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openai/gpt-4.1-nano=cheap;"
+                "openai/gpt-4o-mini=fast|cheap"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
+    ):
+        targets = _fallback_targets(
+            runtime_path="session_title_generation",
+            primary_model_id="openrouter/anthropic/claude-sonnet-4",
+            primary_api_key="primary-key",
+            primary_api_base="https://openrouter.ai/api/v1",
+        )
+
+    assert [target["model_id"] for target in targets] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
+    ]
 
 
 def test_build_completion_kwargs_uses_fallback_settings():

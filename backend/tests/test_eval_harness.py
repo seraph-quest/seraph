@@ -70,6 +70,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_fallback_overrides" in captured.out
     assert "runtime_profile_preferences" in captured.out
     assert "runtime_path_patterns" in captured.out
+    assert "provider_policy_capabilities" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
@@ -144,6 +145,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_fallback_overrides",
                 "runtime_profile_preferences",
                 "runtime_path_patterns",
+                "provider_policy_capabilities",
                 "scheduled_local_runtime_profile",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
@@ -343,6 +345,18 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4o-mini",
         "openai/gpt-4.1-mini",
     ]
+    assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "local"
+    assert details_by_name["provider_policy_capabilities"]["chat_fallback_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4o-mini",
+    ]
+    assert details_by_name["provider_policy_capabilities"]["completion_attempted_models"] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+    ]
+    assert details_by_name["provider_policy_capabilities"]["completion_final_model"] == "openai/gpt-4o-mini"
     assert details_by_name["scheduled_local_runtime_profile"]["job_name"] == "daily_briefing"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["daily_briefing_delivery_behavior"]["message_type"] == "proactive"

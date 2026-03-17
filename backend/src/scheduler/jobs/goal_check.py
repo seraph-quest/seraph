@@ -7,6 +7,20 @@ from src.models.schemas import WSResponse
 logger = logging.getLogger(__name__)
 
 
+def _delivery_value(result) -> str | None:
+    delivery_decision = getattr(result, "delivery_decision", None)
+    if delivery_decision is not None:
+        return delivery_decision.value
+    return getattr(result, "value", None)
+
+
+def _policy_action_value(result) -> str | None:
+    action = getattr(result, "action", None)
+    if action is not None:
+        return action.value
+    return None
+
+
 async def run_goal_check() -> None:
     """Check goal progress and broadcast ambient state."""
     logger.info("goal_check started")
@@ -59,7 +73,8 @@ async def run_goal_check() -> None:
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "state": state,
                 "completion_rate": completion_rate,
-                "delivery": result.value,
+                "delivery": _delivery_value(result),
+                "policy_action": _policy_action_value(result),
             },
         )
         logger.info("goal_check: broadcast state=%s (%.0f%% complete)", state, completion_rate * 100)

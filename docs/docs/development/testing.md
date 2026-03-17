@@ -45,6 +45,7 @@ uv run python -m src.evals.harness --scenario strategist_tick_behavior
 uv run python -m src.evals.harness --scenario guardian_state_synthesis
 uv run python -m src.evals.harness --scenario observer_refresh_behavior
 uv run python -m src.evals.harness --scenario observer_delivery_decision_behavior
+uv run python -m src.evals.harness --scenario intervention_policy_behavior
 uv run python -m src.evals.harness --scenario provider_fallback_chain
 uv run python -m src.evals.harness --scenario provider_health_reroute
 uv run python -m src.evals.harness --scenario local_runtime_profile
@@ -94,7 +95,7 @@ uv run python -m src.evals.harness --scenario evening_review_degraded_delivery_b
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, observer refresh and delivery behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, intervention policy behavior, observer refresh and delivery behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -132,6 +133,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_goals_api.py` | 10 | Goals HTTP endpoints — create, list, filter, tree, dashboard, update, delete |
 | `test_goals_repository.py` | 21 | GoalRepository — CRUD, tree building, dashboard stats, cascading deletes |
 | `test_guardian_state.py` | 4 | Guardian-state synthesis — state assembly, confidence labels, agent injection, strategist context |
+| `test_intervention_policy.py` | 5 | Intervention policy — explicit act, bundle, defer, request-approval, and stay-silent decisions |
 | `test_http_mcp_server.py` | 16 | HTTP MCP server — request handling, internal URL blocking, timeout, truncation |
 | `test_insight_queue.py` | 12 | Insight queue — enqueue, drain, peek, ordering, expiry |
 | `test_insight_queue_expiry.py` | 8 | Insight queue expiry — TTL, cleanup, edge cases |

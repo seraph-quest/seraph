@@ -4,7 +4,7 @@ import logging
 
 from src.audit.runtime import log_observer_delivery_event
 from src.models.schemas import WSResponse
-from src.observer.user_state import DeliveryDecision, user_state_machine
+from src.observer.intervention_policy import InterventionDecision, decide_intervention
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +20,13 @@ def _transport_failure_reason(*, attempted_connections: int, failed_connections:
 async def deliver_or_queue(
     message: WSResponse,
     is_scheduled: bool = False,
-) -> DeliveryDecision:
+    *,
+    guardian_confidence: str | None = None,
+) -> InterventionDecision:
     """Route a proactive message through the delivery gate.
 
-    Reads current context, decides deliver/queue/drop, and acts accordingly.
-    Returns the decision for callers that need to know.
+    Reads current context, makes an explicit intervention-policy decision,
+    and executes the resulting delivery/bundle/silence path.
     """
     from src.observer.manager import context_manager
     from src.observer.insight_queue import insight_queue
@@ -33,25 +35,34 @@ async def deliver_or_queue(
     ctx = context_manager.get_context()
     intervention_type = message.intervention_type or message.type
     urgency = message.urgency or 0
-    decision: DeliveryDecision | None = None
+    policy_decision: InterventionDecision | None = None
 
     try:
-        decision = user_state_machine.should_deliver(
+        policy_decision = decide_intervention(
+            message_type=message.type,
+            intervention_type=intervention_type,
+            content=message.content,
+            urgency=urgency,
             user_state=ctx.user_state,
             interruption_mode=ctx.interruption_mode,
             attention_budget_remaining=ctx.attention_budget_remaining,
-            urgency=urgency,
-            intervention_type=intervention_type,
             is_scheduled=is_scheduled,
+            data_quality=ctx.data_quality,
+            guardian_confidence=guardian_confidence,
+            requires_approval=bool(message.requires_approval),
         )
 
         event_details = {
             "user_state": ctx.user_state,
             "interruption_mode": ctx.interruption_mode,
             "attention_budget_remaining": ctx.attention_budget_remaining,
+            "data_quality": ctx.data_quality,
+            "guardian_confidence": guardian_confidence,
+            "policy_action": policy_decision.action.value,
+            "policy_reason": policy_decision.reason,
         }
 
-        if decision == DeliveryDecision.deliver:
+        if policy_decision.action.value == "act":
             broadcast_result = await ws_manager.broadcast(message)
             event_details.update(
                 {
@@ -74,20 +85,18 @@ async def deliver_or_queue(
                     is_scheduled=is_scheduled,
                     details={
                         **event_details,
-                        "delivery_decision": decision.value,
+                        "delivery_decision": policy_decision.delivery_decision.value
+                        if policy_decision.delivery_decision is not None
+                        else None,
                         "error": _transport_failure_reason(
                             attempted_connections=broadcast_result.attempted_connections,
                             failed_connections=broadcast_result.failed_connections,
                         ),
                     },
                 )
-                return decision
+                return policy_decision
             # Decrement budget if this delivery costs budget
-            if user_state_machine.should_cost_budget(
-                intervention_type=intervention_type,
-                is_scheduled=is_scheduled,
-                urgency=urgency,
-            ):
+            if policy_decision.should_cost_budget:
                 context_manager.decrement_attention_budget()
             logger.info("Delivered proactive message (type=%s)", message.type)
             await log_observer_delivery_event(
@@ -99,7 +108,7 @@ async def deliver_or_queue(
                 details=event_details,
             )
 
-        elif decision == DeliveryDecision.queue:
+        elif policy_decision.action.value == "bundle":
             await insight_queue.enqueue(
                 content=message.content,
                 intervention_type=intervention_type,
@@ -117,9 +126,14 @@ async def deliver_or_queue(
             )
 
         else:
-            logger.info("Dropped proactive message (type=%s)", message.type)
+            logger.info(
+                "Suppressed proactive message (type=%s, action=%s, reason=%s)",
+                message.type,
+                policy_decision.action.value,
+                policy_decision.reason,
+            )
             await log_observer_delivery_event(
-                decision="dropped",
+                decision=policy_decision.audit_decision,
                 message_type=message.type,
                 intervention_type=intervention_type,
                 urgency=urgency,
@@ -127,7 +141,7 @@ async def deliver_or_queue(
                 details=event_details,
             )
 
-        return decision
+        return policy_decision
     except Exception as exc:
         await log_observer_delivery_event(
             decision="failed",
@@ -139,7 +153,15 @@ async def deliver_or_queue(
                 "user_state": ctx.user_state,
                 "interruption_mode": ctx.interruption_mode,
                 "attention_budget_remaining": ctx.attention_budget_remaining,
-                "delivery_decision": decision.value if decision is not None else None,
+                "data_quality": ctx.data_quality,
+                "guardian_confidence": guardian_confidence,
+                "policy_action": policy_decision.action.value if policy_decision is not None else None,
+                "policy_reason": policy_decision.reason if policy_decision is not None else None,
+                "delivery_decision": (
+                    policy_decision.delivery_decision.value
+                    if policy_decision is not None and policy_decision.delivery_decision is not None
+                    else None
+                ),
                 "error": str(exc),
             },
         )

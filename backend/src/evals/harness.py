@@ -56,6 +56,7 @@ from src.memory.vector_store import _reset_vector_store_state, add_memory, searc
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
+from src.observer.intervention_policy import decide_intervention
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
@@ -3217,12 +3218,76 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
         tool_name="observer_delivery_gate",
     )
     return {
-        "delivered_decision": delivered.value,
-        "queued_decision": queued.value,
+        "delivered_decision": delivered.delivery_decision.value if delivered.delivery_decision else None,
+        "delivered_action": delivered.action.value,
+        "queued_decision": queued.delivery_decision.value if queued.delivery_decision else None,
+        "queued_action": queued.action.value,
         "budget_decremented": mock_context_manager.decrement_attention_budget.call_count == 1,
         "queued_content_matches": mock_insight_queue.enqueue.await_args.kwargs["content"] == message.content,
         "delivered_connections": delivered_event["details"]["delivered_connections"],
         "queued_user_state": queued_event["details"]["user_state"],
+    }
+
+
+def _eval_intervention_policy_behavior() -> dict[str, Any]:
+    act = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Act now",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+    )
+    bundle = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Bundle later",
+        urgency=3,
+        user_state="deep_work",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+    )
+    defer = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Too uncertain",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        guardian_confidence="partial",
+    )
+    request_approval = decide_intervention(
+        message_type="proactive",
+        intervention_type="alert",
+        content="Need confirmation",
+        urgency=4,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        requires_approval=True,
+    )
+    stay_silent = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+    )
+    return {
+        "act_action": act.action.value,
+        "act_reason": act.reason,
+        "bundle_action": bundle.action.value,
+        "bundle_reason": bundle.reason,
+        "defer_action": defer.action.value,
+        "defer_reason": defer.reason,
+        "approval_action": request_approval.action.value,
+        "approval_reason": request_approval.reason,
+        "silent_action": stay_silent.action.value,
+        "silent_reason": stay_silent.reason,
     }
 
 
@@ -3775,6 +3840,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Proactive delivery delivers while available, queues while blocked, and decrements budget only for delivered guardian nudges.",
         runner=_eval_observer_delivery_decision_behavior,
+    ),
+    EvalScenario(
+        name="intervention_policy_behavior",
+        category="guardian",
+        description="Intervention policy explicitly distinguishes act, bundle, defer, request_approval, and stay_silent outcomes.",
+        runner=_eval_intervention_policy_behavior,
     ),
     EvalScenario(
         name="daily_briefing_fallback",

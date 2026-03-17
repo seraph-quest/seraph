@@ -83,6 +83,7 @@ title: Seraph Development Status
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
+- [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] strategist agent and strategist scheduler tick
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
@@ -110,7 +111,7 @@ title: Seraph Development Status
 
 ### Guardian intelligence
 
-- [ ] stronger intervention selection and feedback loops so proactive behavior improves over time instead of staying heuristic-only
+- [ ] stronger learning and feedback loops so proactive behavior improves over time instead of staying policy-only
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality
 - [ ] observer salience and confidence modeling for better strategy and delivery
 

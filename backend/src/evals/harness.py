@@ -1082,7 +1082,7 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [memory] Prioritize reliability"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prioritize reliability"}], False)),
         patch("src.llm_runtime.logger.warning"),
         patch("litellm.completion", side_effect=[primary_error, fallback_response]) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
@@ -1111,7 +1111,7 @@ async def _eval_daily_briefing_degraded_memories_audit() -> dict[str, Any]:
     with (
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", side_effect=Exception("vector store down")),
+        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
         patch(
             "src.scheduler.jobs.daily_briefing.completion_with_fallback",
             AsyncMock(return_value=_make_litellm_response("Good morning. Here is the plan.")),
@@ -1194,7 +1194,7 @@ async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
         patch.object(settings, "fallback_models", ""),
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [memory] Prefer local summaries"),
+        patch("src.memory.vector_store.search_with_status", return_value=([{"category": "memory", "text": "Prefer local summaries"}], False)),
         patch("litellm.completion", return_value=local_response) as mock_completion,
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):

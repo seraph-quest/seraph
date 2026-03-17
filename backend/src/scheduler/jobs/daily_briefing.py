@@ -42,27 +42,29 @@ Be concise. No preamble. Just the briefing text."""
 
 async def _get_relevant_memories() -> tuple[str, bool]:
     """Fetch memory context for the briefing while preserving fail-open behavior."""
-    from src.memory.vector_store import search_formatted
+    from src.memory.vector_store import search_with_status
 
-    try:
-        memories = await asyncio.to_thread(
-            search_formatted,
-            "daily priorities and routines",
-            top_k=3,
-        )
-        return memories or "No relevant memories yet.", False
-    except Exception as exc:
-        logger.exception("Failed to load relevant memories for daily briefing")
-        await log_background_task_event(
-            task_name="daily_briefing_inputs",
-            outcome="degraded",
-            details={
-                "source": "relevant_memories",
-                "fallback_value": "No relevant memories yet.",
-                "error": str(exc),
-            },
-        )
-        return "No relevant memories yet.", True
+    results, degraded = await asyncio.to_thread(
+        search_with_status,
+        "daily priorities and routines",
+        top_k=3,
+    )
+    if not results:
+        if degraded:
+            await log_background_task_event(
+                task_name="daily_briefing_inputs",
+                outcome="degraded",
+                details={
+                    "source": "relevant_memories",
+                    "fallback_value": "No relevant memories yet.",
+                    "error": "vector_store_search_failed",
+                },
+            )
+            return "No relevant memories yet.", True
+        return "No relevant memories yet.", False
+
+    lines = [f"- [{result['category']}] {result['text']}" for result in results]
+    return "\n".join(lines), False
 
 
 async def run_daily_briefing() -> None:

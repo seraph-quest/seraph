@@ -263,7 +263,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["mcp_test_api_audit"]["success_status"] == "ok"
     assert details_by_name["mcp_test_api_audit"]["tool_count"] == 1
     assert details_by_name["daily_briefing_degraded_memories_audit"]["background_source"] == "relevant_memories"
-    assert details_by_name["daily_briefing_degraded_memories_audit"]["background_error"] == "vector store down"
+    assert details_by_name["daily_briefing_degraded_memories_audit"]["background_error"] == "vector_store_search_failed"
     assert details_by_name["daily_briefing_degraded_memories_audit"]["data_quality"] == "degraded"
     assert details_by_name["daily_briefing_degraded_memories_audit"]["degraded_inputs"] == ["relevant_memories"]
     assert details_by_name["daily_briefing_degraded_memories_audit"]["delivered"] is True

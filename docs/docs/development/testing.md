@@ -67,9 +67,10 @@ uv run python -m src.evals.harness --scenario observer_daemon_ingest_audit
 uv run python -m src.evals.harness --scenario mcp_test_api_audit
 uv run python -m src.evals.harness --scenario skills_api_audit
 uv run python -m src.evals.harness --scenario screen_repository_runtime_audit
+uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -101,7 +102,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_delivery.py` | 9 | Delivery coordinator — deliver/queue/drop routing, budget decrement, bundle formatting |
 | `test_embedder.py` | 3 | Embedding model boundary — load success, load failure, encode failure runtime audit logging |
 | `test_e2e_conversation.py` | 3 | End-to-end conversation flow — full agent interaction paths |
-| `test_evening_review.py` | 8 | Evening review — happy path, no goals/messages, DB/LLM failure, date filtering |
+| `test_evening_review.py` | 10 | Evening review — happy path, no goals/messages, DB/LLM failure, date filtering, degraded-input audit visibility |
 | `test_goal_tree_integrity.py` | 12 | Goal tree integrity — parent-child relationships, path consistency, cascading |
 | `test_goals_api.py` | 10 | Goals HTTP endpoints — create, list, filter, tree, dashboard, update, delete |
 | `test_goals_repository.py` | 21 | GoalRepository — CRUD, tree building, dashboard stats, cascading deletes |

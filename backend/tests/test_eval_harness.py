@@ -72,6 +72,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "mcp_test_api_audit" in captured.out
     assert "skills_api_audit" in captured.out
     assert "screen_repository_runtime_audit" in captured.out
+    assert "evening_review_degraded_inputs_audit" in captured.out
 
 
 def test_main_emits_json_summary(capsys):
@@ -120,6 +121,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "mcp_test_api_audit",
                 "skills_api_audit",
                 "screen_repository_runtime_audit",
+                "evening_review_degraded_inputs_audit",
             ]
         )
     )
@@ -258,6 +260,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["mcp_test_api_audit"]["missing_env_vars"] == ["GITHUB_TOKEN"]
     assert details_by_name["mcp_test_api_audit"]["success_status"] == "ok"
     assert details_by_name["mcp_test_api_audit"]["tool_count"] == 1
+    assert details_by_name["evening_review_degraded_inputs_audit"]["data_quality"] == "degraded"
+    assert details_by_name["evening_review_degraded_inputs_audit"]["degraded_inputs"] == [
+        "messages_today",
+        "completed_goals_today",
+    ]
+    assert details_by_name["evening_review_degraded_inputs_audit"]["message_count"] == 0
+    assert details_by_name["evening_review_degraded_inputs_audit"]["completed_goal_count"] == 0
+    assert details_by_name["evening_review_degraded_inputs_audit"]["delivered"] is True
     assert details_by_name["mcp_test_api_audit"]["tool_names"] == ["list_prs"]
     assert details_by_name["mcp_test_api_audit"]["used_headers"] is True
     assert details_by_name["mcp_test_api_audit"]["failure_status_code"] == 502

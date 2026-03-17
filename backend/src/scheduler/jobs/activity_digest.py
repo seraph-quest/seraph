@@ -71,17 +71,6 @@ async def run_activity_digest() -> None:
         from src.memory.soul import read_soul
 
         summary = await screen_observation_repo.get_daily_summary(date.today())
-        summary, degraded_inputs = _normalize_summary(summary)
-        if degraded_inputs:
-            await log_background_task_event(
-                task_name="activity_digest_inputs",
-                outcome="degraded",
-                details={
-                    "source": "screen_summary",
-                    "missing_fields": degraded_inputs,
-                },
-            )
-        data_quality = "degraded" if degraded_inputs else "good"
 
         if summary.get("total_observations", 0) == 0:
             await log_scheduler_job_event(
@@ -94,6 +83,18 @@ async def run_activity_digest() -> None:
             )
             logger.info("activity_digest: no observations today — skipping")
             return
+
+        summary, degraded_inputs = _normalize_summary(summary)
+        if degraded_inputs:
+            await log_background_task_event(
+                task_name="activity_digest_inputs",
+                outcome="degraded",
+                details={
+                    "source": "screen_summary",
+                    "missing_fields": degraded_inputs,
+                },
+            )
+        data_quality = "degraded" if degraded_inputs else "good"
 
         soul = read_soul()
 

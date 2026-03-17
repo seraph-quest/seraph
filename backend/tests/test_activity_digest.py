@@ -53,6 +53,34 @@ class TestActivityDigest:
         )
 
     @pytest.mark.asyncio
+    async def test_skip_does_not_log_degraded_summary_event(self, async_db):
+        mock_repo = MagicMock()
+        mock_repo.get_daily_summary = AsyncMock(return_value={
+            "date": date.today().isoformat(),
+            "total_observations": 0,
+        })
+
+        with patch(
+            "src.observer.screen_repository.screen_observation_repo",
+            mock_repo,
+        ):
+            from src.scheduler.jobs.activity_digest import run_activity_digest
+            await run_activity_digest()
+
+        events = await audit_repository.list_events(limit=20)
+        assert any(
+            event["event_type"] == "scheduler_job_skipped"
+            and event["tool_name"] == "activity_digest"
+            and event["details"]["reason"] == "no_observations"
+            for event in events
+        )
+        assert not any(
+            event["event_type"] == "background_task_degraded"
+            and event["tool_name"] == "activity_digest_inputs"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
     async def test_happy_path(self):
         """Digest should generate and deliver when observations exist."""
         mock_repo = MagicMock()

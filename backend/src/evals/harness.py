@@ -1893,6 +1893,111 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
     }
 
 
+async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Policy matched the fast fallback.")
+    first_agent_response = MagicMock()
+    rerouted_agent_response = MagicMock()
+
+    _reset_target_health()
+    try:
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "fallback_model", "ollama/llama3.2"),
+            patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
+            patch.object(settings, "fallback_llm_api_key", ""),
+            patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(
+                settings,
+                "runtime_fallback_overrides",
+                "session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-nano|openai/gpt-4.1-mini",
+            ),
+            patch.object(
+                settings,
+                "provider_capability_overrides",
+                "openai/gpt-4.1-nano=cheap;openai/gpt-4o-mini=fast|cheap",
+            ),
+            patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
+            patch.object(settings, "llm_target_cooldown_seconds", 300),
+            patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+            patch(
+                "litellm.completion",
+                side_effect=[RuntimeError("primary down"), completion_response],
+            ),
+            patch(
+                "src.llm_runtime.BaseLiteLLMModel.generate",
+                autospec=True,
+                side_effect=[
+                    RuntimeError("primary down"),
+                    first_agent_response,
+                    rerouted_agent_response,
+                ],
+            ),
+        ):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "pick the fastest fallback"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="session_title_generation",
+            )
+
+            first_model = FallbackLiteLLMModel(
+                model_id="openrouter/anthropic/claude-sonnet-4",
+                api_key="primary-key",
+                api_base="https://openrouter.ai/api/v1",
+                temperature=0.3,
+                max_tokens=256,
+            )
+            first_model.generate([{"role": "user", "content": "hello"}])
+
+            rerouted_model = FallbackLiteLLMModel(
+                model_id="openrouter/anthropic/claude-sonnet-4",
+                api_key="primary-key",
+                api_base="https://openrouter.ai/api/v1",
+                temperature=0.3,
+                max_tokens=256,
+            )
+            rerouted_model.generate([{"role": "user", "content": "hello again"}])
+            await asyncio.sleep(0)
+    finally:
+        _reset_target_health()
+
+    routing_calls = [
+        call.kwargs
+        for call in mock_log_event.call_args_list
+        if call.kwargs.get("event_type") == "llm_routing_decision"
+    ]
+    completion_decision = next(
+        call
+        for call in routing_calls
+        if call["details"]["runtime_path"] == "session_title_generation"
+    )
+    rerouted_agent_decision = next(
+        call
+        for call in routing_calls
+        if call["details"]["runtime_path"] == "agent_generate"
+        and call["details"]["rerouted_from_unhealthy_primary"] is True
+    )
+    primary_candidate = next(
+        candidate
+        for candidate in rerouted_agent_decision["details"]["candidate_targets"]
+        if candidate["source"] == "primary"
+    )
+    return {
+        "completion_selected_model": completion_decision["details"]["selected_model"],
+        "completion_attempt_order": completion_decision["details"]["attempt_order"],
+        "completion_rejected_models": [
+            candidate["model_id"]
+            for candidate in completion_decision["details"]["rejected_targets"]
+        ],
+        "agent_selected_model": rerouted_agent_decision["details"]["selected_model"],
+        "agent_attempt_order": rerouted_agent_decision["details"]["attempt_order"],
+        "agent_primary_decision": primary_candidate["decision"],
+        "agent_primary_reason_codes": primary_candidate["reason_codes"],
+    }
+
+
 def _eval_onboarding_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -3181,6 +3286,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime-path policy intents can prefer local-first primary routing and capability-matched fallback targets.",
         runner=_eval_provider_policy_capabilities,
+    ),
+    EvalScenario(
+        name="provider_routing_decision_audit",
+        category="runtime",
+        description="Runtime routing writes structured decision records that explain selected and deferred targets.",
+        runner=_eval_provider_routing_decision_audit,
     ),
     EvalScenario(
         name="onboarding_model_wrapper",

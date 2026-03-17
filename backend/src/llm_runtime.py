@@ -60,6 +60,21 @@ def _runtime_path_match_kind(pattern: str, runtime_path: str | None) -> str | No
     return None
 
 
+def _normalize_policy_tag(raw_tag: str) -> str:
+    return raw_tag.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _parse_policy_tags(raw_value: str | None) -> list[str]:
+    if not raw_value:
+        return []
+    tags: list[str] = []
+    for raw_tag in raw_value.split("|"):
+        normalized = _normalize_policy_tag(raw_tag)
+        if normalized and normalized not in tags:
+            tags.append(normalized)
+    return tags
+
+
 def _select_runtime_entry(raw_entries: str, *, runtime_path: str | None, separator: str) -> str | None:
     """Return the best matching config value for a runtime path.
 
@@ -132,6 +147,34 @@ def runtime_profile_preferences(runtime_path: str | None) -> list[str]:
     return preferences
 
 
+def runtime_policy_intents(runtime_path: str | None) -> list[str]:
+    """Return the configured ordered policy intents for a runtime path."""
+    value = _select_runtime_entry(
+        settings.runtime_policy_intents,
+        runtime_path=runtime_path,
+        separator=";",
+    )
+    return _parse_policy_tags(value)
+
+
+def provider_capabilities(
+    model_id: str | None,
+    *,
+    profile: str | None = None,
+) -> list[str]:
+    """Return the declared capability tags for a provider target."""
+    capabilities = _parse_policy_tags(
+        _select_runtime_entry(
+            settings.provider_capability_overrides,
+            runtime_path=model_id,
+            separator=";",
+        )
+    )
+    if profile == "local" and "local" not in capabilities:
+        capabilities.append("local")
+    return capabilities
+
+
 def runtime_profile_candidates(
     *,
     runtime_path: str | None = None,
@@ -146,6 +189,7 @@ def runtime_profile_candidates(
     override_profile = override[0] if override else None
     configured_preferences = runtime_profile_preferences(runtime_path)
     ordered_preferences = configured_preferences
+    policy_intents = runtime_policy_intents(runtime_path)
 
     if override_profile:
         if override_profile in configured_preferences:
@@ -164,7 +208,14 @@ def runtime_profile_candidates(
             candidates.append(normalized)
 
     if not candidates:
-        if prefers_local_runtime_path(runtime_path) and has_local_model_profile():
+        if (
+            not override_profile
+            and not configured_preferences
+            and "local_first" in policy_intents
+            and has_local_model_profile()
+        ):
+            candidates.extend(["local", "default"])
+        elif prefers_local_runtime_path(runtime_path) and has_local_model_profile():
             candidates.append("local")
         else:
             candidates.append("default")
@@ -416,7 +467,7 @@ def _fallback_targets(
                 "profile": None,
             }
         )
-    return targets
+    return _order_targets_by_policy(targets, runtime_path=runtime_path)
 
 
 def _target_cooldown_seconds() -> int:
@@ -488,6 +539,36 @@ def _partition_targets_by_health(
         else:
             unhealthy_targets.append(target)
     return healthy_targets, unhealthy_targets
+
+
+def _order_targets_by_policy(
+    targets: list[dict[str, Any]],
+    *,
+    runtime_path: str | None,
+) -> list[dict[str, Any]]:
+    intents = runtime_policy_intents(runtime_path)
+    if not intents:
+        return targets
+
+    desired_capabilities = [intent for intent in intents if intent != "local_first"]
+    prefer_local = "local_first" in intents
+
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+        index, target = item
+        capabilities = set(
+            provider_capabilities(
+                str(target["model_id"]),
+                profile=target.get("profile"),
+            )
+        )
+        local_score = 1 if prefer_local and target.get("profile") == "local" else 0
+        capability_score = sum(1 for capability in desired_capabilities if capability in capabilities)
+        return (-local_score, -capability_score, index)
+
+    return [
+        target
+        for _, target in sorted(enumerate(targets), key=_sort_key)
+    ]
 
 
 def _register_request(request_id: str) -> None:

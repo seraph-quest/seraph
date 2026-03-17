@@ -88,12 +88,14 @@ title: Seraph Development Status
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
+- [x] native-notification fallback delivery when browser sockets are unavailable but the daemon is connected
 
 ### Current interface surface
 
 - [x] browser-based village UI with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
+- [x] macOS daemon notification fallback for non-browser proactive reach
 
 ### Ecosystem foundations
 
@@ -118,7 +120,7 @@ title: Seraph Development Status
 ### Interface and presence
 
 - [ ] primary dense guardian cockpit instead of the current village as the default workflow surface
-- [ ] native desktop shell, notifications, and non-browser presence
+- [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
 - [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
 
 ### Workflow and leverage

@@ -54,6 +54,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "guardian_state_synthesis" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
+    assert "native_presence_notification_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
@@ -143,6 +144,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "guardian_state_synthesis",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
+                "native_presence_notification_behavior",
                 "intervention_policy_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
@@ -258,6 +260,13 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
     assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
+    assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
+    assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
+    assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"
+    assert details_by_name["native_presence_notification_behavior"]["notification_title"] == "Seraph alert"
+    assert details_by_name["native_presence_notification_behavior"]["notification_body_matches"] is True
+    assert details_by_name["native_presence_notification_behavior"]["acked"] is True
+    assert details_by_name["native_presence_notification_behavior"]["remaining_notifications"] == 0
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"

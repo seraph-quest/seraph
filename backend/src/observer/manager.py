@@ -26,6 +26,13 @@ class ContextManager:
         """Return current snapshot (sync, non-blocking)."""
         return self._context
 
+    def is_daemon_connected(self, max_age_seconds: float = 30) -> bool:
+        """Return whether the native daemon has posted recently."""
+        last_post = self._context.last_daemon_post
+        if last_post is None:
+            return False
+        return (time.time() - last_post) < max_age_seconds
+
     async def refresh(self) -> CurrentContext:
         """Gather all sources and merge into a new context snapshot.
 

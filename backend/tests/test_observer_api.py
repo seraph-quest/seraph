@@ -7,6 +7,7 @@ import pytest_asyncio
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
+from src.observer.native_notification_queue import native_notification_queue
 from src.observer.screen_repository import ScreenObservationRepository
 
 
@@ -237,6 +238,74 @@ class TestObserverAPI:
         assert resp.status_code == 200
         assert mgr.get_context().active_window == "Terminal"
         assert mgr.get_context().screen_context == "Running tests"
+
+    @pytest.mark.asyncio
+    async def test_get_next_native_notification(self, async_db, client):
+        await native_notification_queue.clear()
+        notification = await native_notification_queue.enqueue(
+            title="Seraph alert",
+            body="Browser is closed; use the daemon path.",
+            intervention_type="alert",
+            urgency=5,
+        )
+
+        resp = await client.get("/api/observer/notifications/next")
+
+        assert resp.status_code == 200
+        payload = resp.json()["notification"]
+        assert payload["id"] == notification.id
+        assert payload["title"] == "Seraph alert"
+        assert await native_notification_queue.count() == 1
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["notification_id"] == notification.id
+            for event in events
+        )
+
+        await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
+    async def test_get_next_native_notification_empty(self, async_db, client):
+        await native_notification_queue.clear()
+
+        resp = await client.get("/api/observer/notifications/next")
+
+        assert resp.status_code == 200
+        assert resp.json()["notification"] is None
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_empty_result"
+            and event["tool_name"] == "observer_daemon:notifications"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_ack_native_notification(self, async_db, client):
+        await native_notification_queue.clear()
+        notification = await native_notification_queue.enqueue(
+            title="Seraph",
+            body="Ack me",
+            intervention_type="advisory",
+            urgency=3,
+        )
+
+        resp = await client.post(f"/api/observer/notifications/{notification.id}/ack")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"acked": True}
+        assert await native_notification_queue.count() == 0
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_acked"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["notification_id"] == notification.id
+            for event in events
+        )
 
     @pytest.mark.asyncio
     async def test_get_activity_today(self, async_db, client):

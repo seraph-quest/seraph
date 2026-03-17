@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+from unittest.mock import patch
 
 import pytest
 
+from config.settings import settings
+from src.evals import harness
 from src.evals.harness import available_scenarios, main, run_runtime_evals
 
 
@@ -93,6 +96,16 @@ def test_main_emits_json_summary(capsys):
     assert exit_code == 0
     assert payload["failed"] == 0
     assert payload["results"][0]["name"] == "shell_tool_timeout_contract"
+
+
+def test_make_sync_client_with_db_unwinds_patches_when_client_startup_fails():
+    original_workspace_dir = settings.workspace_dir
+
+    with patch("src.evals.harness.TestClient", side_effect=RuntimeError("startup failed")):
+        with pytest.raises(RuntimeError, match="startup failed"):
+            harness._make_sync_client_with_db()
+
+    assert settings.workspace_dir == original_workspace_dir
 
 
 def test_runtime_eval_scenarios_expose_expected_details():

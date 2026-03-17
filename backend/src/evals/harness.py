@@ -6,10 +6,12 @@ import argparse
 import asyncio
 import json
 import os
+import queue
 import shutil
 import sys
 import time
 import tempfile
+import threading
 import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
@@ -317,13 +319,41 @@ def _make_sync_client_with_db():
     patches.append(patch.object(soul_mod, "_soul_path", os.path.join(tmpdir, settings.soul_file)))
     patches.append(patch("src.vault.crypto._fernet", None))
 
-    for item in patches:
-        item.start()
-
     stack = ExitStack()
     stack.callback(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
-    client = stack.enter_context(TestClient(create_app()))
-    return client, patches, stack
+    try:
+        for item in patches:
+            item.start()
+        client = stack.enter_context(TestClient(create_app()))
+        return client, patches, stack
+    except Exception:
+        stack.close()
+        for item in reversed(patches):
+            with suppress(Exception):
+                item.stop()
+        raise
+
+
+def _receive_ws_json(ws: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _reader() -> None:
+        try:
+            result_queue.put(("text", ws.receive_text()))
+        except Exception as exc:  # pragma: no cover - exercised via timeout/failure handling
+            result_queue.put(("error", exc))
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
+    try:
+        kind, payload = result_queue.get(timeout=timeout_seconds)
+    except queue.Empty as exc:
+        raise AssertionError(f"Timed out waiting for WebSocket message after {timeout_seconds}s") from exc
+
+    if kind == "error":
+        raise payload
+    return json.loads(payload)
 
 
 def _make_agent_steps(final_output: str = "It's sunny and 72°F today!") -> list[Any]:
@@ -496,9 +526,9 @@ def _eval_websocket_chat_behavior() -> dict[str, Any]:
             patch("src.memory.consolidator.consolidate_session"),
         ):
             with client.websocket_connect("/ws/chat") as ws:
-                welcome = json.loads(ws.receive_text())
+                welcome = _receive_ws_json(ws)
                 ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                skipped = json.loads(ws.receive_text())
+                skipped = _receive_ws_json(ws)
 
                 ws.send_text(json.dumps({
                     "type": "message",
@@ -508,7 +538,7 @@ def _eval_websocket_chat_behavior() -> dict[str, Any]:
 
                 messages: list[dict[str, Any]] = []
                 for _ in range(10):
-                    msg = json.loads(ws.receive_text())
+                    msg = _receive_ws_json(ws)
                     messages.append(msg)
                     if msg["type"] == "final":
                         break
@@ -554,9 +584,9 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
             patch("src.memory.consolidator.consolidate_session"),
         ):
             with client.websocket_connect("/ws/chat") as ws:
-                _ = ws.receive_text()
+                _ = _receive_ws_json(ws)
                 ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                _ = ws.receive_text()
+                _ = _receive_ws_json(ws)
                 ws.send_text(json.dumps({
                     "type": "message",
                     "message": "Run this snippet",
@@ -565,7 +595,7 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
 
                 approval_msg = None
                 for _ in range(10):
-                    msg = json.loads(ws.receive_text())
+                    msg = _receive_ws_json(ws)
                     if msg["type"] == "approval_required":
                         approval_msg = msg
                         break
@@ -612,9 +642,9 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
             patch("src.memory.consolidator.consolidate_session"),
         ):
             with client.websocket_connect("/ws/chat") as ws:
-                _ = ws.receive_text()
+                _ = _receive_ws_json(ws)
                 ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                _ = ws.receive_text()
+                _ = _receive_ws_json(ws)
                 ws.send_text(json.dumps({
                     "type": "message",
                     "message": "Long request",
@@ -623,7 +653,7 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
 
                 final_msg = None
                 for _ in range(10):
-                    msg = json.loads(ws.receive_text())
+                    msg = _receive_ws_json(ws)
                     if msg["type"] == "final":
                         final_msg = msg
                         break

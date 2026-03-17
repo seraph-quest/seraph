@@ -10,6 +10,7 @@ from config.settings import settings
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    _fallback_targets,
     _reset_target_health,
     build_completion_kwargs,
     build_model_kwargs,
@@ -294,13 +295,13 @@ def test_completion_with_fallback_sync_prefers_capability_matched_fallback():
             patch.object(settings, "llm_api_key", "primary-key"),
             patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
             patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", "openai/gpt-4.1-mini,openai/gpt-4o-mini"),
+            patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
             patch.object(
                 settings,
                 "provider_capability_overrides",
                 (
                     "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
-                    "openai/gpt-4.1-mini=reasoning|tool_use;"
+                    "openai/gpt-4.1-nano=cheap;"
                     "openai/gpt-4o-mini=fast|cheap"
                 ),
             ),
@@ -360,6 +361,36 @@ def test_fallback_litellm_model_orders_targets_by_capability_policy():
         "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-mini",
         "openai/gpt-4o-mini",
+    ]
+
+
+def test_fallback_policy_respects_intent_priority_before_config_order():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openai/gpt-4.1-nano=cheap;"
+                "openai/gpt-4o-mini=fast|cheap"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast|cheap"),
+    ):
+        targets = _fallback_targets(
+            runtime_path="session_title_generation",
+            primary_model_id="openrouter/anthropic/claude-sonnet-4",
+            primary_api_key="primary-key",
+            primary_api_base="https://openrouter.ai/api/v1",
+        )
+
+    assert [target["model_id"] for target in targets] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
     ]
 
 

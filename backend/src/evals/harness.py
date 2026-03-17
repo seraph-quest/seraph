@@ -1834,12 +1834,17 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
             patch.object(settings, "local_llm_api_key", ""),
             patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
             patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-mini"),
+            patch.object(
+                settings,
+                "fallback_models",
+                "openai/gpt-4.1-nano,openai/gpt-4o-mini,openai/gpt-4.1-mini",
+            ),
             patch.object(
                 settings,
                 "provider_capability_overrides",
                 (
                     "openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;"
+                    "openai/gpt-4.1-nano=cheap;"
                     "openai/gpt-4.1-mini=reasoning|tool_use;"
                     "openai/gpt-4o-mini=fast|cheap"
                 ),
@@ -1876,6 +1881,7 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
     assert [fallback.model_id for fallback in chat_model._fallback_models] == [
         "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano",
         "openai/gpt-4o-mini",
     ]
     return {

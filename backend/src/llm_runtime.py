@@ -553,7 +553,7 @@ def _order_targets_by_policy(
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, tuple[int, ...], int]:
         index, target = item
         capabilities = set(
             provider_capabilities(
@@ -562,8 +562,11 @@ def _order_targets_by_policy(
             )
         )
         local_score = 1 if prefer_local and target.get("profile") == "local" else 0
-        capability_score = sum(1 for capability in desired_capabilities if capability in capabilities)
-        return (-local_score, -capability_score, index)
+        capability_priority = tuple(
+            0 if capability in capabilities else 1
+            for capability in desired_capabilities
+        )
+        return (-local_score, capability_priority, index)
 
     return [
         target

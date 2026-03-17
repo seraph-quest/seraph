@@ -43,6 +43,7 @@ from src.memory.vector_store import _reset_vector_store_state, add_memory, searc
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
+from src.scheduler.jobs.evening_review import run_evening_review
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
 from src.scheduler.connection_manager import BroadcastResult
 from src.tools.audit import wrap_tools_for_audit
@@ -1100,6 +1101,41 @@ async def _eval_daily_briefing_fallback() -> dict[str, Any]:
     }
 
 
+async def _eval_evening_review_degraded_inputs_audit() -> dict[str, Any]:
+    ctx = _make_context(time_of_day="evening", is_working_hours=False)
+    mock_context_manager = MagicMock()
+    mock_context_manager.refresh = AsyncMock(return_value=ctx)
+    mock_deliver = AsyncMock()
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(0, True))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=([], True))),
+        patch(
+            "src.scheduler.jobs.evening_review.completion_with_fallback",
+            AsyncMock(return_value=_make_litellm_response("Quiet day. Rest well.")),
+        ),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        await run_evening_review()
+
+    succeeded = _find_audit_call(
+        mock_log_event,
+        event_type="scheduler_job_succeeded",
+        tool_name="evening_review",
+    )
+    return {
+        "data_quality": succeeded["details"]["data_quality"],
+        "degraded_inputs": succeeded["details"]["degraded_inputs"],
+        "message_count": succeeded["details"]["message_count"],
+        "completed_goal_count": succeeded["details"]["completed_goal_count"],
+        "delivered": mock_deliver.await_count == 1,
+    }
+
+
 async def _eval_scheduled_local_runtime_profile() -> dict[str, Any]:
     ctx = _make_context(upcoming_events=[{"summary": "Ship local routing", "start": "09:30"}])
     mock_context_manager = MagicMock()
@@ -1990,6 +2026,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="proactive",
         description="Daily briefing survives a primary provider failure and still delivers via fallback.",
         runner=_eval_daily_briefing_fallback,
+    ),
+    EvalScenario(
+        name="evening_review_degraded_inputs_audit",
+        category="observability",
+        description="Evening review records degraded input quality when helper fallbacks mask partial data-source failures.",
+        runner=_eval_evening_review_degraded_inputs_audit,
     ),
     EvalScenario(
         name="scheduled_local_runtime_profile",

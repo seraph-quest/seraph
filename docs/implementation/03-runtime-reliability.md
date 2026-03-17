@@ -17,13 +17,13 @@
 - [x] first-class local runtime profile for helper, scheduler, core agent, delegation, and connected MCP-specialist paths
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
-- [x] repeatable runtime eval harness for guardian, core chat behavior, observer, storage, and integration seam checks
+- [x] repeatable runtime eval harness for guardian, core chat behavior, proactive flow behavior, observer, storage, and integration seam checks
 - [x] runtime audit coverage across chat, WebSocket, scheduler jobs including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, strategist helpers, proactive delivery transport, MCP lifecycle and manual test API paths, skills toggle/reload paths, observer lifecycle plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 
 ## Working On Now
 
 - [x] Runtime Reliability remains the repo-wide hardening track
-- [x] `behavioral-evals-core-chat` is the active PR from the numbered sequence below
+- [x] `behavioral-evals-proactive-flows` is the active PR from the numbered sequence below
 - [ ] close the remaining routing, observability, and eval gaps outside the already-covered seams
 
 ## Still To Do On `develop`
@@ -31,7 +31,7 @@
 - [ ] deepen provider routing beyond profile preferences, path patterns, model overrides, ordered fallback chains, and cooldown rerouting with richer policy-aware selection
 - [ ] broaden local-model routing beyond the current helper, scheduler, core agent, delegation, and connected MCP-specialist paths into any remaining runtime paths where it makes sense
 - [ ] add observability coverage across any remaining edge helpers and external integration paths beyond the proactive delivery transport, MCP management/test, skills state-management, and screen observation repository boundaries
-- [ ] expand eval coverage beyond the shipped REST and WebSocket chat behavioral contracts into broader behavioral coverage, even with daily-briefing, activity-digest, and evening-review degraded-input auditing already covered
+- [ ] expand eval coverage beyond the shipped REST, WebSocket, and proactive behavioral contracts into broader behavioral coverage
 
 ## Planned PR Sequence
 
@@ -39,7 +39,7 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
 
 1. [x] `behavioral-evals-core-chat`:
    add behavioral eval contracts for REST chat and WebSocket chat, including fallback, timeout, approval, and audit expectations
-2. [ ] `behavioral-evals-proactive-flows`:
+2. [x] `behavioral-evals-proactive-flows`:
    add behavioral evals for strategist tick, daily briefing, evening review, and activity digest with expected degraded behavior and delivery outcomes
 3. [ ] `behavioral-evals-tool-heavy-flow`:
    add one delegated tool-heavy workflow contract covering routing, tool execution, audit, and degraded or failure handling
@@ -64,4 +64,4 @@ This sequence is execution order for upcoming PRs. A checked item can be in an o
 - [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
 - [x] a local or non-OpenRouter path is demonstrably possible across helper, scheduler, core agent, delegation, and connected MCP-specialist flows
 - [ ] key flows are observable and easy to debug
-- [ ] the project has broad repeatable eval coverage for core behavior beyond the shipped REST and WebSocket chat contracts
+- [ ] the project has broad repeatable eval coverage for core behavior beyond the shipped REST, WebSocket, and proactive behavioral contracts

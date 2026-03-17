@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.vault.repository import VaultRepository
 
 
@@ -35,6 +36,16 @@ class TestStore:
         assert secret.encrypted_value == "ENC:sk-123"
         assert secret.description == "Test key"
 
+        events = await audit_repository.list_events(limit=5)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "store"
+            and event["details"]["action"] == "created"
+            and event["details"]["description_present"] is True
+            for event in events
+        )
+
     async def test_upsert_overwrites(self, async_db, repo):
         await repo.store("token", "old-value")
         await repo.store("token", "new-value")
@@ -57,6 +68,31 @@ class TestGet:
     async def test_nonexistent(self, async_db, repo):
         result = await repo.get("nope")
         assert result is None
+
+        events = await audit_repository.list_events(limit=5)
+        assert any(
+            event["event_type"] == "integration_empty_result"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "get"
+            and event["details"]["reason"] == "missing_secret"
+            for event in events
+        )
+
+    async def test_decrypt_failure_logs_runtime_audit(self, async_db, repo):
+        await repo.store("broken", "value")
+
+        with patch("src.vault.repository.decrypt", side_effect=ValueError("bad decrypt")):
+            with pytest.raises(ValueError, match="bad decrypt"):
+                await repo.get("broken")
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_failed"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "get"
+            and event["details"]["error"] == "bad decrypt"
+            for event in events
+        )
 
 
 class TestListKeys:
@@ -92,6 +128,16 @@ class TestListSecretValues:
             values = await repo.list_secret_values()
 
         assert values == [("good", "value-a")]
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "list_secret_values"
+            and event["details"]["decryptable_count"] == 1
+            and event["details"]["undecryptable_count"] == 1
+            for event in events
+        )
 
 
 class TestDelete:

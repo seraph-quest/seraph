@@ -46,6 +46,7 @@ uv run python -m src.evals.harness --scenario mcp_specialist_local_runtime_profi
 uv run python -m src.evals.harness --scenario embedding_runtime_audit
 uv run python -m src.evals.harness --scenario vector_store_runtime_audit
 uv run python -m src.evals.harness --scenario soul_runtime_audit
+uv run python -m src.evals.harness --scenario vault_runtime_audit
 uv run python -m src.evals.harness --scenario filesystem_runtime_audit
 uv run python -m src.evals.harness --scenario runtime_model_overrides
 uv run python -m src.evals.harness --scenario runtime_fallback_overrides
@@ -72,7 +73,7 @@ uv run python -m src.evals.harness --scenario activity_digest_degraded_summary_a
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -140,7 +141,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_user_state.py` | 57 | User state machine — derive_state, IDE deep work, should_deliver, budget, interruption modes |
 | `test_vault_api.py` | 4 | Vault API — list keys, delete keys |
 | `test_vault_crypto.py` | 4 | Vault crypto — Fernet encrypt/decrypt, key generation |
-| `test_vault_repository.py` | 11 | Vault repository — store, get, list, delete, upsert |
+| `test_vault_repository.py` | 14 | Vault repository — store, get, list, delete, upsert, and runtime audit logging for success/missing/failure paths |
 | `test_vault_tools.py` | 7 | Vault agent tools — store_secret, get_secret, list_secrets, delete_secret |
 | `test_vector_store.py` | 3 | Vector store boundary — add success, search empty-result, add failure runtime audit logging |
 | `test_websocket.py` | 3 | WebSocket — ping/pong, invalid JSON, skip onboarding |

@@ -53,6 +53,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "vector_store_runtime_audit" in captured.out
     assert "soul_runtime_audit" in captured.out
     assert "filesystem_runtime_audit" in captured.out
+    assert "vault_runtime_audit" in captured.out
     assert "runtime_model_overrides" in captured.out
     assert "runtime_fallback_overrides" in captured.out
     assert "runtime_profile_preferences" in captured.out
@@ -104,6 +105,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "vector_store_runtime_audit",
                 "soul_runtime_audit",
                 "filesystem_runtime_audit",
+                "vault_runtime_audit",
                 "runtime_model_overrides",
                 "runtime_fallback_overrides",
                 "runtime_profile_preferences",
@@ -196,6 +198,19 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["filesystem_runtime_audit"]["read_result_matches"] is True
     assert details_by_name["filesystem_runtime_audit"]["not_a_file_result_contains_error"] is True
     assert details_by_name["filesystem_runtime_audit"]["write_failure_contains_error"] is True
+    assert details_by_name["vault_runtime_audit"]["stored_value_matches"] is True
+    assert details_by_name["vault_runtime_audit"]["missing_get_is_none"] is True
+    assert details_by_name["vault_runtime_audit"]["store_action"] == "created"
+    assert details_by_name["vault_runtime_audit"]["list_key_count"] == 1
+    assert details_by_name["vault_runtime_audit"]["redaction_value_count"] == 1
+    assert details_by_name["vault_runtime_audit"]["decryptable_count"] == 1
+    assert details_by_name["vault_runtime_audit"]["undecryptable_count"] == 0
+    assert details_by_name["vault_runtime_audit"]["delete_success"] is True
+    assert details_by_name["vault_runtime_audit"]["delete_missing"] is False
+    assert details_by_name["vault_runtime_audit"]["missing_get_reason"] == "missing_secret"
+    assert details_by_name["vault_runtime_audit"]["missing_delete_reason"] == "missing_secret"
+    assert details_by_name["vault_runtime_audit"]["failed_operation"] == "get"
+    assert details_by_name["vault_runtime_audit"]["failed_error"] == "bad decrypt"
     assert details_by_name["runtime_model_overrides"]["completion_runtime_profile"] == "default"
     assert details_by_name["runtime_model_overrides"]["completion_model"] == "openai/gpt-4o-mini"
     assert details_by_name["runtime_model_overrides"]["agent_runtime_profile"] == "default"

@@ -18,7 +18,7 @@
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for guardian, observer, storage, and integration seam checks
-- [x] runtime audit coverage across chat, WebSocket, scheduler jobs including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, strategist helpers, proactive delivery transport, MCP lifecycle and manual test API paths, skills toggle/reload paths, observer lifecycle plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, filesystem, browser, sandbox, and web search paths
+- [x] runtime audit coverage across chat, WebSocket, scheduler jobs including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, strategist helpers, proactive delivery transport, MCP lifecycle and manual test API paths, skills toggle/reload paths, observer lifecycle plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 
 ## Working On Now
 

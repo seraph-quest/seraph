@@ -1822,6 +1822,12 @@ async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:
         with patch("src.observer.screen_repository.get_session", return_value=_FakeScreenRepoContext(cleanup_skip_session)):
             skipped_count = await repo.cleanup_old(retention_days=90)
 
+        with patch.object(repo, "get_daily_summary", AsyncMock(side_effect=RuntimeError("db down"))):
+            try:
+                await repo.get_weekly_summary(week_start)
+            except RuntimeError:
+                pass
+
     empty_daily_event = _find_audit_call(
         mock_log_event,
         event_type="integration_empty_result",
@@ -1830,6 +1836,11 @@ async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:
     weekly_event = _find_audit_call(
         mock_log_event,
         event_type="integration_succeeded",
+        tool_name="screen_repository:weekly_summary",
+    )
+    weekly_failed_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_failed",
         tool_name="screen_repository:weekly_summary",
     )
     cleanup_success_event = None
@@ -1851,6 +1862,7 @@ async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:
         "success_daily_total_observations": success_daily["total_observations"],
         "weekly_total_observations": weekly["total_observations"],
         "weekly_active_days": weekly_event["details"]["active_days"],
+        "weekly_failure_error": weekly_failed_event["details"]["error"],
         "cleanup_deleted_count": deleted_count,
         "cleanup_logged_deleted_count": cleanup_success_event["details"]["deleted_count"],
         "cleanup_skipped_count": skipped_count,

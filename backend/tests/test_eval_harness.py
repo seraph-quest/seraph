@@ -275,6 +275,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1
     assert details_by_name["screen_repository_runtime_audit"]["weekly_total_observations"] == 1
     assert details_by_name["screen_repository_runtime_audit"]["weekly_active_days"] == 1
+    assert details_by_name["screen_repository_runtime_audit"]["weekly_failure_error"] == "db down"
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_deleted_count"] == 1
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_logged_deleted_count"] == 1
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_count"] == 0

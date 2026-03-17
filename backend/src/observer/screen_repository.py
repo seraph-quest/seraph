@@ -156,17 +156,29 @@ class ScreenObservationRepository:
         total_observations = 0
         total_minutes = 0
 
-        for i in range(7):
-            day = week_start + timedelta(days=i)
-            daily = await self.get_daily_summary(day)
-            daily_summaries.append(daily)
-            total_observations += daily.get("total_observations", 0)
-            total_minutes += daily.get("total_tracked_minutes", 0)
+        try:
+            for i in range(7):
+                day = week_start + timedelta(days=i)
+                daily = await self.get_daily_summary(day)
+                daily_summaries.append(daily)
+                total_observations += daily.get("total_observations", 0)
+                total_minutes += daily.get("total_tracked_minutes", 0)
 
-            for act, secs in daily.get("by_activity", {}).items():
-                combined_activity[act] = combined_activity.get(act, 0) + secs
-            for proj, secs in daily.get("by_project", {}).items():
-                combined_project[proj] = combined_project.get(proj, 0) + secs
+                for act, secs in daily.get("by_activity", {}).items():
+                    combined_activity[act] = combined_activity.get(act, 0) + secs
+                for proj, secs in daily.get("by_project", {}).items():
+                    combined_project[proj] = combined_project.get(proj, 0) + secs
+        except Exception as e:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="weekly_summary",
+                outcome="failed",
+                details={
+                    "week_start": week_start.isoformat(),
+                    "error": str(e),
+                },
+            )
+            raise
 
         if total_observations == 0:
             await log_integration_event(

@@ -1,7 +1,7 @@
 """Tests for screen observation repository and model."""
 
 from datetime import date, datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -205,6 +205,23 @@ class TestScreenObservationRepository:
             event["event_type"] == "integration_succeeded"
             and event["tool_name"] == "screen_repository:weekly_summary"
             and event["details"]["total_observations"] == 1
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_weekly_summary_failure_logs_runtime_audit(self, async_db):
+        repo = ScreenObservationRepository()
+        week_start = date.today() - timedelta(days=date.today().weekday())
+
+        with patch.object(repo, "get_daily_summary", AsyncMock(side_effect=RuntimeError("db down"))):
+            with pytest.raises(RuntimeError, match="db down"):
+                await repo.get_weekly_summary(week_start)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_failed"
+            and event["tool_name"] == "screen_repository:weekly_summary"
+            and event["details"]["error"] == "db down"
             for event in events
         )
 

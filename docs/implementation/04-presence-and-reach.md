@@ -15,6 +15,7 @@
 ## Working On Now
 
 - [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
+- [x] this workstream owns `native-presence-notifications` in the master 10-PR queue
 
 ## Still To Do On `develop`
 

@@ -16,6 +16,7 @@ title: Seraph Development Status
 - [x] Seraph is usable today as a local guardian prototype with a real UI, memory, observer loop, and action layer.
 - [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
+- [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -23,9 +24,17 @@ title: Seraph Development Status
 
 - [x] Runtime Reliability is still the active hardening track.
 - [ ] Runtime Reliability is not complete yet.
-- [x] The numbered next-PR sequence is tracked in `docs/implementation/03-runtime-reliability.md`.
-- [x] The active in-flight Runtime Reliability slice is `incident-trace-gap-closure`.
-- [x] The next most valuable PR sequence after `incident-trace-gap-closure` is also tracked in `docs/implementation/03-runtime-reliability.md`.
+- [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
+- [x] The next strategic focus after the runtime baseline is guardian-state quality, intervention quality, operator cockpit quality, workflow composition, and native reach.
+- [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
+
+## Current Target Shape
+
+- [x] dense guardian cockpit as the primary operator surface
+- [x] typed longitudinal memory and explicit guardian state
+- [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
+- [x] non-browser presence through notifications and native reach
+- [x] stronger workflow composition and feedback-driven improvement
 
 ## Shipped On `develop`
 
@@ -77,6 +86,12 @@ title: Seraph Development Status
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
 
+### Current interface surface
+
+- [x] browser-based village UI with chat, quest, and settings overlays
+- [x] visible tool use and agent activity in the current world surface
+- [x] settings and management surfaces for tools, MCP, and system state
+
 ### Ecosystem foundations
 
 - [x] `SKILL.md` support and runtime skill loading
@@ -85,19 +100,36 @@ title: Seraph Development Status
 
 ## Still To Do On `develop`
 
-### Runtime Reliability
+### Runtime and execution
 
 - [ ] richer provider selection policy beyond path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
 - [ ] broader eval coverage beyond the shipped REST, WebSocket, proactive, and delegated behavioral contracts
+- [ ] stronger execution isolation and privileged-path hardening
 
-### Product expansion
+### Guardian intelligence
 
 - [ ] explicit guardian-state synthesis that unifies observer context, memory, goals, and recent sessions for downstream decision-making
 - [ ] stronger intervention selection and feedback loops so proactive behavior improves over time instead of staying heuristic-only
-- [ ] native desktop shell, notifications, and non-browser presence
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality
-- [ ] fuller life-OS UX beyond the current village and quest surfaces
+- [ ] observer salience and confidence modeling for better strategy and delivery
+
+### Interface and presence
+
+- [ ] primary dense guardian cockpit instead of the current village as the default workflow surface
+- [ ] native desktop shell, notifications, and non-browser presence
+- [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
+
+### Workflow and leverage
+
 - [ ] stronger workflow composition and extension ergonomics
+- [ ] clearer operator-facing workflow control and artifact round-tripping
+
+## Practical Summary
+
+- [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
+- [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
+- [ ] The biggest gaps against the reference systems are operator cockpit density, workflow composition, native reach, and execution hardening.
+- [ ] The next major step is to turn the current prototype into a denser, more legible, more stateful guardian cockpit without losing the existing trust and memory foundations.
 
 ## Workstream View
 

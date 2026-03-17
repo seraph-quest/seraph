@@ -6,11 +6,12 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 import tempfile
 import types
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable, Sequence
@@ -21,10 +22,13 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from smolagents import Tool
+from smolagents import ActionStep, FinalAnswerStep, Tool, ToolCall
+from smolagents.monitoring import Timing
 from sqlmodel import SQLModel
+from starlette.testclient import TestClient
 
 from config.settings import settings
+from src.approval.exceptions import ApprovalRequired
 from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_orchestrator, get_model
@@ -35,6 +39,7 @@ from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
+from src.app import create_app
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.memory.embedder import _reset_embedder_state, embed
 from src.observer.sources.calendar_source import gather_calendar
@@ -62,6 +67,8 @@ from src.vault.repository import VaultRepository
 
 
 Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
+
+_TIMING = Timing(start_time=0.0, end_time=1.0)
 
 
 @dataclass(frozen=True)
@@ -265,6 +272,73 @@ async def _patched_async_db(*patch_targets: str):
         await engine.dispose()
 
 
+def _make_sync_client_with_db():
+    tmpdir = tempfile.mkdtemp(prefix="seraph-eval-")
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def _get_session():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def _test_init_db():
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+    async def _test_close_db():
+        await engine.dispose()
+
+    targets = [
+        "src.db.engine.get_session",
+        "src.agent.session.get_session",
+        "src.approval.repository.get_session",
+        "src.audit.repository.get_session",
+        "src.goals.repository.get_session",
+        "src.vault.repository.get_session",
+        "src.api.profile.get_db",
+    ]
+    patches = [patch(target, _get_session) for target in targets]
+    patches.append(patch("src.app.init_db", _test_init_db))
+    patches.append(patch("src.app.close_db", _test_close_db))
+    patches.append(patch("src.app.init_scheduler", return_value=None))
+    patches.append(patch("src.app.shutdown_scheduler"))
+    patches.append(patch.object(settings, "workspace_dir", tmpdir))
+    patches.append(patch.object(settings, "llm_log_dir", os.path.join(tmpdir, "logs")))
+    patches.append(patch.object(soul_mod, "_soul_path", os.path.join(tmpdir, settings.soul_file)))
+    patches.append(patch("src.vault.crypto._fernet", None))
+
+    for item in patches:
+        item.start()
+
+    stack = ExitStack()
+    stack.callback(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
+    client = stack.enter_context(TestClient(create_app()))
+    return client, patches, stack
+
+
+def _make_agent_steps(final_output: str = "It's sunny and 72°F today!") -> list[Any]:
+    return [
+        ToolCall(name="web_search", arguments={"query": "weather today"}, id="tc1"),
+        ActionStep(
+            step_number=1,
+            timing=_TIMING,
+            observations="Search returned 3 results about today's weather.",
+            is_final_answer=False,
+        ),
+        FinalAnswerStep(output=final_output),
+    ]
+
+
 def _eval_chat_model_wrapper() -> dict[str, Any]:
     with (
         patch.object(settings, "default_model", "openai/gpt-4o-mini"),
@@ -284,6 +358,301 @@ def _eval_chat_model_wrapper() -> dict[str, Any]:
         "primary_model": model.model_id,
         "fallback_model": model._fallback_model.model_id,
     }
+
+
+def _eval_rest_chat_behavior() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = [
+            "Hello from Seraph.",
+            "Follow-up response",
+        ]
+
+        with (
+            patch("src.api.chat.create_onboarding_agent", return_value=mock_agent),
+            patch("src.api.chat.build_agent"),
+            patch("src.memory.vector_store.search_formatted", return_value=""),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            first = client.post("/api/chat", json={"message": "Hello"})
+            first_payload = first.json()
+            second = client.post(
+                "/api/chat",
+                json={"message": "Follow up", "session_id": first_payload["session_id"]},
+            )
+            second_payload = second.json()
+            events = client.get("/api/audit/events").json()
+
+        success_event = next(
+            event for event in events
+            if event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["transport"] == "rest"
+        )
+        return {
+            "first_status": first.status_code,
+            "second_status": second.status_code,
+            "session_reused": first_payload["session_id"] == second_payload["session_id"],
+            "first_response": first_payload["response"],
+            "follow_up_response": second_payload["response"],
+            "audit_transport": success_event["details"]["transport"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_rest_chat_approval_contract() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = ApprovalRequired(
+            approval_id="approval-123",
+            session_id="s1",
+            tool_name="shell_execute",
+            risk_level="high",
+            summary='Calling tool: shell_execute({"code": "[redacted]"})',
+        )
+
+        with (
+            patch("src.api.chat.create_onboarding_agent", return_value=mock_agent),
+            patch("src.api.chat.build_agent"),
+            patch("src.memory.vector_store.search_formatted", return_value=""),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            response = client.post("/api/chat", json={"message": "Run this"})
+            payload = response.json()
+            events = client.get("/api/audit/events").json()
+
+        approval_event = next(
+            event for event in events
+            if event["event_type"] == "approval_requested"
+            and event["tool_name"] == "shell_execute"
+        )
+        detail = payload["detail"]
+        return {
+            "status_code": response.status_code,
+            "detail_type": detail["type"],
+            "approval_id": detail["approval_id"],
+            "tool_name": detail["tool_name"],
+            "audit_summary_contains_shell": "shell_execute" in approval_event["summary"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_rest_chat_timeout_contract() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = "Should not be returned"
+
+        async def _timeout_wait_for(coro: Any, timeout: float):
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise asyncio.TimeoutError
+
+        with (
+            patch("src.api.chat.create_onboarding_agent", return_value=mock_agent),
+            patch("src.api.chat.build_agent"),
+            patch("src.memory.vector_store.search_formatted", return_value=""),
+            patch("src.api.chat.asyncio.wait_for", new=_timeout_wait_for),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            response = client.post("/api/chat", json={"message": "Long request"})
+            payload = response.json()
+            events = client.get("/api/audit/events").json()
+
+        timeout_event = next(
+            event for event in events
+            if event["event_type"] == "agent_run_timed_out"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["transport"] == "rest"
+        )
+        return {
+            "status_code": response.status_code,
+            "detail": payload["detail"],
+            "timeout_seconds": timeout_event["details"]["timeout_seconds"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_websocket_chat_behavior() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = iter(_make_agent_steps())
+
+        with (
+            patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            with client.websocket_connect("/ws/chat") as ws:
+                welcome = json.loads(ws.receive_text())
+                ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                skipped = json.loads(ws.receive_text())
+
+                ws.send_text(json.dumps({
+                    "type": "message",
+                    "message": "What's the weather?",
+                    "session_id": None,
+                }))
+
+                messages: list[dict[str, Any]] = []
+                for _ in range(10):
+                    msg = json.loads(ws.receive_text())
+                    messages.append(msg)
+                    if msg["type"] == "final":
+                        break
+
+            events = client.get("/api/audit/events").json()
+
+        final = next(msg for msg in messages if msg["type"] == "final")
+        seqs = [msg["seq"] for msg in messages if msg.get("seq") is not None]
+        success_event = next(
+            event for event in events
+            if event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "chat_agent"
+            and event["details"]["transport"] == "websocket"
+        )
+        return {
+            "welcome_type": welcome["type"],
+            "skip_type": skipped["type"],
+            "step_count": sum(1 for msg in messages if msg["type"] == "step"),
+            "final_content": final["content"],
+            "seq_monotonic": all(seqs[i] > seqs[i - 1] for i in range(1, len(seqs))),
+            "audit_tool_call_count": success_event["details"]["tool_call_count"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = ApprovalRequired(
+            approval_id="approval-1",
+            session_id="s1",
+            tool_name="shell_execute",
+            risk_level="high",
+            summary='Calling tool: shell_execute({"code": "[redacted]"})',
+        )
+
+        with (
+            patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            with client.websocket_connect("/ws/chat") as ws:
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({
+                    "type": "message",
+                    "message": "Run this snippet",
+                    "session_id": None,
+                }))
+
+                approval_msg = None
+                for _ in range(10):
+                    msg = json.loads(ws.receive_text())
+                    if msg["type"] == "approval_required":
+                        approval_msg = msg
+                        break
+
+            events = client.get("/api/audit/events").json()
+
+        if approval_msg is None:
+            raise AssertionError("Expected approval_required WebSocket message")
+        approval_event = next(
+            event for event in events
+            if event["event_type"] == "approval_requested"
+            and event["tool_name"] == "shell_execute"
+        )
+        return {
+            "message_type": approval_msg["type"],
+            "approval_id": approval_msg["approval_id"],
+            "tool_name": approval_msg["tool_name"],
+            "risk_level": approval_msg["risk_level"],
+            "audit_summary_contains_shell": "shell_execute" in approval_event["summary"],
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
+
+
+def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = iter(_make_agent_steps())
+
+        async def _timeout_wait_for(coro: Any, timeout: float):
+            task = asyncio.create_task(coro)
+            await asyncio.sleep(0)
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise asyncio.TimeoutError
+
+        with (
+            patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())),
+            patch("src.api.ws.asyncio.wait_for", new=_timeout_wait_for),
+            patch("src.memory.consolidator.consolidate_session"),
+        ):
+            with client.websocket_connect("/ws/chat") as ws:
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({
+                    "type": "message",
+                    "message": "Long request",
+                    "session_id": None,
+                }))
+
+                final_msg = None
+                for _ in range(10):
+                    msg = json.loads(ws.receive_text())
+                    if msg["type"] == "final":
+                        final_msg = msg
+                        break
+
+            events = client.get("/api/audit/events").json()
+
+        if final_msg is None:
+            raise AssertionError("Expected timeout final WebSocket message")
+        timeout_event = next(
+            event for event in events
+            if event["event_type"] == "agent_run_timed_out"
+            and event["tool_name"] == "chat_agent"
+            and event["details"]["transport"] == "websocket"
+        )
+        return {
+            "final_type": final_msg["type"],
+            "final_contains_timeout_copy": "taking too long" in final_msg["content"],
+            "timeout_seconds": timeout_event["details"]["timeout_seconds"],
+            "succeeded_event_present": any(
+                event["event_type"] == "agent_run_succeeded"
+                and event["tool_name"] == "chat_agent"
+                and event["details"]["transport"] == "websocket"
+                for event in events
+            ),
+        }
+    finally:
+        stack.close()
+        for item in patches:
+            item.stop()
 
 
 def _eval_provider_fallback_chain() -> dict[str, Any]:
@@ -2108,6 +2477,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Main agent model wiring exposes the shared fallback wrapper.",
         runner=_eval_chat_model_wrapper,
+    ),
+    EvalScenario(
+        name="rest_chat_behavior",
+        category="behavior",
+        description="REST chat preserves session continuity, redacts secrets, and records a successful agent run.",
+        runner=_eval_rest_chat_behavior,
+    ),
+    EvalScenario(
+        name="rest_chat_approval_contract",
+        category="behavior",
+        description="REST chat returns the approval-required contract and audit event for high-risk tool requests.",
+        runner=_eval_rest_chat_approval_contract,
+    ),
+    EvalScenario(
+        name="rest_chat_timeout_contract",
+        category="behavior",
+        description="REST chat returns a timeout contract and timed-out audit event instead of hanging indefinitely.",
+        runner=_eval_rest_chat_timeout_contract,
+    ),
+    EvalScenario(
+        name="websocket_chat_behavior",
+        category="behavior",
+        description="WebSocket chat streams step and final messages with monotonic sequencing and a success audit event.",
+        runner=_eval_websocket_chat_behavior,
+    ),
+    EvalScenario(
+        name="websocket_chat_approval_contract",
+        category="behavior",
+        description="WebSocket chat emits the approval-required message contract and matching audit event for high-risk tool requests.",
+        runner=_eval_websocket_chat_approval_contract,
+    ),
+    EvalScenario(
+        name="websocket_chat_timeout_contract",
+        category="behavior",
+        description="WebSocket chat returns a timeout final message and timed-out audit event without a false success record.",
+        runner=_eval_websocket_chat_timeout_contract,
     ),
     EvalScenario(
         name="provider_fallback_chain",

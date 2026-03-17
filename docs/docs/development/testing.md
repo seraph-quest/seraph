@@ -35,6 +35,12 @@ For `S1-B3` reliability work, there is also a deterministic eval harness for cor
 cd backend
 uv run python -m src.evals.harness --list
 uv run python -m src.evals.harness
+uv run python -m src.evals.harness --scenario rest_chat_behavior
+uv run python -m src.evals.harness --scenario rest_chat_approval_contract
+uv run python -m src.evals.harness --scenario rest_chat_timeout_contract
+uv run python -m src.evals.harness --scenario websocket_chat_behavior
+uv run python -m src.evals.harness --scenario websocket_chat_approval_contract
+uv run python -m src.evals.harness --scenario websocket_chat_timeout_contract
 uv run python -m src.evals.harness --scenario provider_fallback_chain
 uv run python -m src.evals.harness --scenario provider_health_reroute
 uv run python -m src.evals.harness --scenario local_runtime_profile
@@ -73,7 +79,7 @@ uv run python -m src.evals.harness --scenario activity_digest_degraded_summary_a
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, runtime-path primary and fallback overrides, local helper/agent/scheduler/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 

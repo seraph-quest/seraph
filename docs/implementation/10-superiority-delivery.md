@@ -45,7 +45,7 @@ This file explains:
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first multi-signal outcome-learning layer that can now quiet, accelerate, and reroute interventions, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first multi-signal outcome-learning layer that can now quiet, accelerate, and reroute interventions, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate plus strategist-learning native-reroute continuity behavior
 - [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment beyond the first delivery/channel adaptation layer
 - owners: Workstream 05, Workstream 04
 
@@ -93,7 +93,9 @@ This file explains:
 - [x] `human-world-model-v2` is now the seventh shipped item from the refreshed queue on this branch.
 - [x] `native-desktop-shell-v2` is now the eighth shipped item from the refreshed queue on this branch.
 - [x] `extension-operator-surface-v1` is now the ninth shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `guardian-behavioral-evals-v3` because the operator/runtime surface is now materially more legible and the next leverage gap shifts to proving the deeper learned guardian flow end to end.
+- [x] `guardian-behavioral-evals-v3` is now the tenth shipped item from the refreshed queue on this branch.
+- [x] That queue is now fully shipped on this branch, so the roadmap refreshes back to `execution-safety-hardening-v3` as the next active item.
+- [x] The new queue starts with execution hardening, workflow history, and extension recovery because the latest batch made Seraph more operable, which raises the value of making that leverage safer and easier to inspect over time.
 - [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

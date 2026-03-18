@@ -51,6 +51,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
+    assert "strategist_tick_learning_continuity_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
@@ -150,6 +151,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_approval_contract",
                 "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
+                "strategist_tick_learning_continuity_behavior",
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
                 "observer_refresh_behavior",
@@ -270,6 +272,57 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "deliver"
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
+        == "act"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
+        == "learned_direct_delivery"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
+        == "prefer_direct_delivery"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_channel_bias"]
+        == "prefer_native_notification"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
+        == "native_notification"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["broadcast_delivered_connections"]
+        == 0
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
+        == 1
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
+        == 0
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
+        == "native_notification"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
+        is True
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
+        is True
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
+        == 1
+    )
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["world_model_confidence"] == "grounded"

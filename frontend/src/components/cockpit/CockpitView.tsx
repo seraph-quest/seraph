@@ -97,6 +97,8 @@ interface SkillInfo {
   name: string;
   enabled: boolean;
   description?: string;
+  requires_tools?: string[];
+  user_invocable?: boolean;
 }
 
 interface McpServerInfo {
@@ -104,6 +106,12 @@ interface McpServerInfo {
   enabled: boolean;
   url?: string;
   description?: string;
+  connected?: boolean;
+  tool_count?: number;
+  status?: "disconnected" | "connected" | "auth_required" | "error";
+  status_message?: string | null;
+  has_headers?: boolean;
+  auth_hint?: string;
 }
 
 interface ToolInfo {
@@ -111,6 +119,10 @@ interface ToolInfo {
   risk_level?: string;
   execution_boundaries?: string[];
 }
+
+type ToolPolicyMode = "safe" | "balanced" | "full";
+type McpPolicyMode = "disabled" | "approval" | "full";
+type ApprovalMode = "off" | "high_risk";
 
 type InspectorSelection =
   | { kind: "approval"; approval: PendingApproval }
@@ -139,6 +151,10 @@ function labelForRole(message: ChatMessage): string {
 
 function formatContinuityLabel(value: string | null | undefined): string {
   return (value || "unknown").replace(/_/g, " ");
+}
+
+function formatOperatorMode(value: string): string {
+  return value.replace(/_/g, " ");
 }
 
 function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
@@ -187,9 +203,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
-  const [toolPolicyMode, setToolPolicyMode] = useState("unknown");
-  const [mcpPolicyMode, setMcpPolicyMode] = useState("unknown");
-  const [approvalMode, setApprovalMode] = useState("unknown");
+  const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
+  const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
   const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
@@ -395,6 +411,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => tools.filter((tool) => tool.risk_level === "high"),
     [tools],
   );
+  const invocableWorkflows = useMemo(
+    () => workflows.filter((workflow) => workflow.user_invocable),
+    [workflows],
+  );
+  const approvalWorkflows = useMemo(
+    () => availableWorkflows.filter((workflow) => workflow.user_invocable && workflow.requires_approval),
+    [availableWorkflows],
+  );
   const recentTrace = messages
     .filter((message) => message.role === "step" || message.role === "error")
     .slice(-8)
@@ -513,6 +537,124 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setOperatorStatus(`${path} reloaded`);
     } catch {
       setOperatorStatus(`Failed to reload ${path}`);
+    }
+  }
+
+  async function updateToolPolicy(mode: ToolPolicyMode) {
+    if (toolPolicyMode === mode) return;
+    setOperatorStatus(`Setting tool policy to ${formatOperatorMode(mode)}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/settings/tool-policy-mode`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!response.ok) {
+        setOperatorStatus("Failed to update tool policy");
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`Tool policy set to ${formatOperatorMode(mode)}`);
+    } catch {
+      setOperatorStatus("Failed to update tool policy");
+    }
+  }
+
+  async function updateMcpPolicy(mode: McpPolicyMode) {
+    if (mcpPolicyMode === mode) return;
+    setOperatorStatus(`Setting MCP policy to ${formatOperatorMode(mode)}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/settings/mcp-policy-mode`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!response.ok) {
+        setOperatorStatus("Failed to update MCP policy");
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`MCP policy set to ${formatOperatorMode(mode)}`);
+    } catch {
+      setOperatorStatus("Failed to update MCP policy");
+    }
+  }
+
+  async function updateApprovalPolicy(mode: ApprovalMode) {
+    if (approvalMode === mode) return;
+    setOperatorStatus(`Setting approval mode to ${formatOperatorMode(mode)}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/settings/approval-mode`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!response.ok) {
+        setOperatorStatus("Failed to update approval mode");
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`Approval mode set to ${formatOperatorMode(mode)}`);
+    } catch {
+      setOperatorStatus("Failed to update approval mode");
+    }
+  }
+
+  async function toggleSkill(skill: SkillInfo) {
+    setOperatorStatus(`${skill.enabled ? "Disabling" : "Enabling"} ${skill.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/skills/${skill.name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !skill.enabled }),
+      });
+      if (!response.ok) {
+        setOperatorStatus(`Failed to update ${skill.name}`);
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${skill.name} ${skill.enabled ? "disabled" : "enabled"}`);
+    } catch {
+      setOperatorStatus(`Failed to update ${skill.name}`);
+    }
+  }
+
+  async function toggleMcpServer(server: McpServerInfo) {
+    setOperatorStatus(`${server.enabled ? "Disabling" : "Enabling"} ${server.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !server.enabled }),
+      });
+      if (!response.ok) {
+        setOperatorStatus(`Failed to update ${server.name}`);
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${server.name} ${server.enabled ? "disabled" : "enabled"}`);
+    } catch {
+      setOperatorStatus(`Failed to update ${server.name}`);
+    }
+  }
+
+  async function testMcpServer(server: McpServerInfo) {
+    setOperatorStatus(`Testing ${server.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        setOperatorStatus(payload.detail || `${server.name} test failed`);
+        return;
+      }
+      if (payload.status === "ok") {
+        setOperatorStatus(`${server.name}: OK — ${payload.tool_count} tools`);
+      } else {
+        setOperatorStatus(payload.message || `${server.name}: ${payload.status}`);
+      }
+      await refreshCockpit();
+    } catch {
+      setOperatorStatus(`${server.name}: connection failed`);
     }
   }
 
@@ -1285,52 +1427,214 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   {enabledMcpServers.length}/{mcpServers.length} servers · {mcpTools.length} tools
                 </div>
               </div>
-            </div>
-            <div className="cockpit-feedback-row">
-              <button
-                className="cockpit-feedback-button"
-                onClick={() => setSettingsPanelOpen(true)}
-              >
-                Open Settings
-              </button>
-              <button
-                className="cockpit-feedback-button"
-                onClick={() => void reloadOperatorSurface("skills")}
-              >
-                Reload Skills
-              </button>
-              <button
-                className="cockpit-feedback-button"
-                onClick={() => void reloadOperatorSurface("workflows")}
-              >
-                Reload Workflows
-              </button>
+              <div>
+                <div className="cockpit-key">workflows</div>
+                <div className="cockpit-value">
+                  {availableWorkflows.length}/{workflows.length} available
+                </div>
+              </div>
             </div>
             <div className="cockpit-sublist">
-              <div className="cockpit-sublist-item">
-                workflows {availableWorkflows.length}/{workflows.length} available
+              <div className="cockpit-operator-section">
+                <div className="cockpit-key">policy state</div>
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-operator-label">tools</span>
+                  <div className="cockpit-operator-actions">
+                    {(["safe", "balanced", "full"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        aria-label={`Set tool policy to ${mode}`}
+                        aria-pressed={toolPolicyMode === mode}
+                        className={`cockpit-operator-button ${toolPolicyMode === mode ? "cockpit-operator-button--active" : ""}`}
+                        onClick={() => void updateToolPolicy(mode)}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-operator-label">mcp</span>
+                  <div className="cockpit-operator-actions">
+                    {([
+                      { value: "disabled", label: "off" },
+                      { value: "approval", label: "ask" },
+                      { value: "full", label: "full" },
+                    ] as const).map((mode) => (
+                      <button
+                        key={mode.value}
+                        type="button"
+                        aria-label={`Set MCP policy to ${mode.value}`}
+                        aria-pressed={mcpPolicyMode === mode.value}
+                        className={`cockpit-operator-button ${mcpPolicyMode === mode.value ? "cockpit-operator-button--active" : ""}`}
+                        onClick={() => void updateMcpPolicy(mode.value)}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-operator-label">approval</span>
+                  <div className="cockpit-operator-actions">
+                    {([
+                      { value: "high_risk", label: "high risk" },
+                      { value: "off", label: "off" },
+                    ] as const).map((mode) => (
+                      <button
+                        key={mode.value}
+                        type="button"
+                        aria-label={`Set approval mode to ${mode.value}`}
+                        aria-pressed={approvalMode === mode.value}
+                        className={`cockpit-operator-button ${approvalMode === mode.value ? "cockpit-operator-button--active" : ""}`}
+                        onClick={() => void updateApprovalPolicy(mode.value)}
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
-              {blockedWorkflows.slice(0, 2).map((workflow) => (
-                <div key={workflow.name} className="cockpit-sublist-item">
-                  blocked {workflow.name}
-                  {workflow.missing_tools?.length ? ` · tools ${workflow.missing_tools.join(", ")}` : ""}
-                  {workflow.missing_skills?.length ? ` · skills ${workflow.missing_skills.join(", ")}` : ""}
+
+              <div className="cockpit-operator-section">
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-key">mcp servers</span>
+                  <button
+                    type="button"
+                    className="cockpit-operator-link"
+                    onClick={() => setSettingsPanelOpen(true)}
+                  >
+                    full settings
+                  </button>
                 </div>
-              ))}
-              {enabledSkills.slice(0, 2).map((skill) => (
-                <div key={skill.name} className="cockpit-sublist-item">
-                  skill {skill.name}
+                {mcpServers.slice(0, 3).map((server) => (
+                  <div key={server.name} className="cockpit-operator-row">
+                    <div className="cockpit-operator-details">
+                      <div className="cockpit-value">{server.name}</div>
+                      <div className="cockpit-operator-note">
+                        {server.status === "connected"
+                          ? `${server.tool_count ?? 0} tools live`
+                          : server.status === "auth_required"
+                            ? "auth required"
+                            : server.status === "error"
+                              ? server.status_message || "error"
+                              : server.enabled
+                                ? "disconnected"
+                                : "disabled"}
+                      </div>
+                    </div>
+                    <div className="cockpit-operator-actions">
+                      <button
+                        type="button"
+                        aria-label={`Test ${server.name}`}
+                        className="cockpit-operator-button"
+                        onClick={() => void testMcpServer(server)}
+                      >
+                        test
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`${server.enabled ? "Turn off" : "Turn on"} ${server.name}`}
+                        className={`cockpit-operator-button ${server.enabled ? "cockpit-operator-button--active" : ""}`}
+                        onClick={() => void toggleMcpServer(server)}
+                      >
+                        {server.enabled ? "on" : "off"}
+                      </button>
+                      {(server.status === "auth_required" || server.has_headers) && (
+                        <button
+                          type="button"
+                          aria-label={`Open settings for ${server.name}`}
+                          className="cockpit-operator-button"
+                          onClick={() => setSettingsPanelOpen(true)}
+                        >
+                          setup
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {mcpServers.length === 0 && (
+                  <div className="cockpit-empty">No MCP servers configured.</div>
+                )}
+              </div>
+
+              <div className="cockpit-operator-section">
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-key">skills</span>
+                  <button
+                    type="button"
+                    className="cockpit-operator-link"
+                    onClick={() => void reloadOperatorSurface("skills")}
+                  >
+                    reload
+                  </button>
                 </div>
-              ))}
-              {enabledMcpServers.slice(0, 2).map((server) => (
-                <div key={server.name} className="cockpit-sublist-item">
-                  mcp {server.name}
+                {skills.slice(0, 4).map((skill) => (
+                  <div key={skill.name} className="cockpit-operator-row">
+                    <div className="cockpit-operator-details">
+                      <div className="cockpit-value">{skill.name}</div>
+                      <div className="cockpit-operator-note">
+                        {skill.user_invocable ? "invocable" : "runtime"}{skill.requires_tools?.length ? ` · ${skill.requires_tools.join(", ")}` : ""}
+                      </div>
+                    </div>
+                    <div className="cockpit-operator-actions">
+                      <button
+                        type="button"
+                        aria-label={`${skill.enabled ? "Turn off" : "Turn on"} ${skill.name}`}
+                        className={`cockpit-operator-button ${skill.enabled ? "cockpit-operator-button--active" : ""}`}
+                        onClick={() => void toggleSkill(skill)}
+                      >
+                        {skill.enabled ? "on" : "off"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {skills.length === 0 && (
+                  <div className="cockpit-empty">No skills loaded.</div>
+                )}
+              </div>
+
+              <div className="cockpit-operator-section">
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-key">workflow availability</span>
+                  <button
+                    type="button"
+                    className="cockpit-operator-link"
+                    onClick={() => void reloadOperatorSurface("workflows")}
+                  >
+                    reload
+                  </button>
                 </div>
-              ))}
+                <div className="cockpit-sublist-item">
+                  invocable {availableWorkflows.filter((workflow) => workflow.user_invocable).length}/{invocableWorkflows.length} available
+                </div>
+                <div className="cockpit-sublist-item">
+                  approval {approvalWorkflows.length} · blocked {blockedWorkflows.length}
+                </div>
+                {blockedWorkflows.slice(0, 2).map((workflow) => (
+                  <div key={workflow.name} className="cockpit-sublist-item">
+                    blocked {workflow.name}
+                    {workflow.missing_tools?.length ? ` · tools ${workflow.missing_tools.join(", ")}` : ""}
+                    {workflow.missing_skills?.length ? ` · skills ${workflow.missing_skills.join(", ")}` : ""}
+                  </div>
+                ))}
+                {workflows.length === 0 && (
+                  <div className="cockpit-empty">No workflows available.</div>
+                )}
+              </div>
               {operatorStatus && (
                 <div className="cockpit-sublist-item">{operatorStatus}</div>
               )}
-              {workflows.length === 0 && skills.length === 0 && mcpServers.length === 0 && (
+              <div className="cockpit-feedback-row">
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => setSettingsPanelOpen(true)}
+                >
+                  Open Settings
+                </button>
+              </div>
+              {workflows.length === 0 && skills.length === 0 && mcpServers.length === 0 && tools.length === 0 && (
                 <div className="cockpit-empty">Operator surface unavailable.</div>
               )}
             </div>

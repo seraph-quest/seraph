@@ -268,7 +268,7 @@ describe("CockpitView", () => {
         expect.objectContaining({ method: "POST" }),
       ),
     );
-    fireEvent.click(screen.getByText("Reload Skills"));
+    fireEvent.click(screen.getAllByRole("button", { name: /reload/i })[0]);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/skills/reload"),

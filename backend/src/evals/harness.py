@@ -3069,6 +3069,119 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    await native_notification_queue.clear()
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        for feedback_type, content in (
+            ("helpful", "That workflow reminder landed at the right moment."),
+            ("helpful", "Another workflow nudge was useful."),
+            ("acknowledged", "Acknowledged the workflow reminder from desktop."),
+            ("acknowledged", "Acted on the workflow reminder from the notification center."),
+        ):
+            intervention = await guardian_feedback_repository.create_intervention(
+                session_id="strategist-learning",
+                message_type="proactive",
+                intervention_type="advisory",
+                urgency=2,
+                content=content,
+                reasoning="aligned_work_activity",
+                is_scheduled=False,
+                guardian_confidence="grounded",
+                data_quality="good",
+                user_state="available",
+                interruption_mode="balanced",
+                policy_action="act",
+                policy_reason="available_capacity",
+                delivery_decision="deliver",
+                latest_outcome="delivered",
+            )
+            await guardian_feedback_repository.record_feedback(
+                intervention.id,
+                feedback_type=feedback_type,
+            )
+
+        strategist_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=2,
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="high",
+            last_daemon_post=time.time(),
+        )
+        mock_context_manager = MagicMock()
+        mock_context_manager.get_context.return_value = strategist_ctx
+        mock_context_manager.is_daemon_connected.return_value = True
+        mock_context_manager.decrement_attention_budget = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = (
+            '{"should_intervene": true, '
+            '"content": "Stay on the workflow review while the current context is still loaded.", '
+            '"intervention_type": "advisory", "urgency": 2, "reasoning": "Aligned work"}'
+        )
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+        mock_log_event = AsyncMock()
+        guardian_state = types.SimpleNamespace(
+            confidence=types.SimpleNamespace(overall="grounded")
+        )
+
+        with (
+            patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=guardian_state)),
+            patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+            patch("src.observer.manager.context_manager", mock_context_manager),
+            patch("src.api.observer.context_manager", mock_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            await run_strategist_tick()
+            continuity = await get_observer_continuity()
+
+        scheduler_event = _find_audit_call(
+            mock_log_event,
+            event_type="scheduler_job_succeeded",
+            tool_name="strategist_tick",
+        )
+        delivered_event = _find_audit_call(
+            mock_log_event,
+            event_type="observer_delivery_delivered",
+            tool_name="observer_delivery_gate",
+        )
+        notification = continuity["notifications"][0]
+        intervention = continuity["recent_interventions"][0]
+        queued_ids = [item.id for item in await insight_queue.peek_all()]
+        if queued_ids:
+            await insight_queue.delete_many(queued_ids)
+
+    remaining_notifications = await native_notification_queue.count()
+    await native_notification_queue.clear()
+
+    return {
+        "message_type": "proactive",
+        "urgency": 2,
+        "scheduler_delivery": scheduler_event["details"]["delivery"],
+        "scheduler_policy_action": scheduler_event["details"]["policy_action"],
+        "policy_reason": delivered_event["details"]["policy_reason"],
+        "learning_bias": delivered_event["details"]["learning_bias"],
+        "learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
+        "transport": delivered_event["details"]["transport"],
+        "broadcast_delivered_connections": delivered_event["details"]["delivered_connections"],
+        "continuity_notification_count": len(continuity["notifications"]),
+        "continuity_queued_insight_count": continuity["queued_insight_count"],
+        "continuity_surface": intervention["continuity_surface"],
+        "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
+        "notification_intervention_matches": notification["intervention_id"] == intervention["id"],
+        "remaining_notifications_before_cleanup": remaining_notifications,
+    }
+
+
 async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response(json.dumps({
@@ -4962,6 +5075,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Strategist tick delivers the modeled intervention and records the resulting delivery outcome.",
         runner=_eval_strategist_tick_behavior,
+    ),
+    EvalScenario(
+        name="strategist_tick_learning_continuity_behavior",
+        category="guardian",
+        description="Strategist tick can use learned delivery bias to reroute a high-salience reminder through native notifications, and that intervention shows up in the continuity snapshot.",
+        runner=_eval_strategist_tick_learning_continuity_behavior,
     ),
     EvalScenario(
         name="guardian_state_synthesis",

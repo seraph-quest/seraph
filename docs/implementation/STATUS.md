@@ -33,12 +33,12 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The repo-wide active delivery batch is now led by stronger native/operator continuity, deeper guardian-quality work, and the remaining post-cockpit-baseline items after the first saved-layout pass shipped.
-- [ ] That batch is not complete yet.
+- [x] The repo-wide active delivery batch now returns to safer leverage, deeper workflow control, stronger world modeling, and broader cross-surface continuity after the last operator/guardian batch completed.
+- [ ] That refreshed batch is not complete yet.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now deeper guardian behavioral proof on top of the newly shipped continuity, world-model, workflow-run, artifact-roundtrip, provider-safeguard, desktop-shell, and operator-surface foundations.
+- [x] The next strategic focus is now `execution-safety-hardening-v3` on top of the newly shipped continuity, world-model, workflow-run, artifact-roundtrip, provider-safeguard, desktop-shell, and operator-surface foundations.
 - [x] The first three items in that refreshed batch, `execution-safety-hardening-v2`, `cockpit-workflow-views-v1`, and `guardian-learning-loop-v2`, are now shipped on this branch.
 - [x] `cross-surface-continuity-v2` is now shipped on this branch.
 - [x] `provider-policy-safeguards-v2` is now shipped on this branch.
@@ -46,6 +46,7 @@ title: Seraph Development Status
 - [x] `human-world-model-v2` is now shipped on this branch.
 - [x] `native-desktop-shell-v2` is now shipped on this branch.
 - [x] `extension-operator-surface-v1` is now shipped on this branch.
+- [x] `guardian-behavioral-evals-v3` is now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -117,6 +118,7 @@ title: Seraph Development Status
 - [x] first multi-signal guardian learning loop that can reduce interruption eagerness after negative outcomes and also prefer direct delivery or native reroute after repeated positive/acknowledged outcomes
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
 - [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
+- [x] deterministic guardian behavioral proof that strategist tick can use learned direct/native-delivery bias and still surface the resulting intervention through continuity state
 - [x] strategist agent and strategist scheduler tick
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
@@ -146,7 +148,7 @@ title: Seraph Development Status
 ### Runtime and execution
 
 - [ ] richer provider selection policy beyond the shipped weighted scoring, required capability safeguards, tier guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
+- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, strategist-learning continuity, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
 - [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
 
 ### Guardian intelligence

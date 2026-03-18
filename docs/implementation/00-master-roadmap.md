@@ -90,6 +90,29 @@ Completed batches stay visible instead of being deleted on queue refresh.
 
 ### Previous Completed 10-PR Batch
 
+1. [x] `execution-safety-hardening-v4`:
+   harden replay, native action-card resume paths, approval recovery, secret-bearing workflow surfaces, and operator-triggered follow-on execution before the new cockpit leverage compounds further
+2. [x] `workflow-timeline-and-approval-replay-v2`:
+   turn workflow history into a real operating timeline with approval recovery, artifact lineage, and deeper rerun context instead of only recent run cards
+3. [x] `capability-command-palette-v1`:
+   add a Hermes-style searchable command palette for tools, skills, workflows, starter packs, MCP actions, and repair actions so capability activation becomes keyboard-first instead of pane-bound
+4. [x] `capability-pack-install-and-recommendations-v1`:
+   go beyond visibility by adding recommended packs, install guidance, and clearer enable-or-fix-next actions for tools, skills, workflows, and MCP capability bundles
+5. [x] `capability-repair-and-install-flows-v1`:
+   turn blocked capabilities into guided repair flows with direct install, enable, reconnect, or dependency-fix actions instead of only showing blocked reasons
+6. [x] `extension-debugging-and-recovery-v2`:
+   add health diagnostics, blocked-step repair, and dependency recovery for skills, workflows, and MCP servers beyond the first inspector-facing recovery surface
+7. [x] `operator-terminal-and-runbooks-v1`:
+   add a dense Hermes-like operator terminal for recent runs, failures, quick commands, and reusable runbooks instead of forcing operators through scattered panes and settings
+8. [x] `session-threading-across-surfaces-v2`:
+   unify browser sessions, native notifications, workflow resumes, and audit traces into one explicit thread model instead of only restoring the last browser session
+9. [x] `world-model-memory-fusion-v4`:
+   deepen the structured world model into durable projects, routines, constraints, and longer-lived execution context rather than the current first fusion layer
+10. [x] `guardian-learning-policy-v4`:
+   make learning change phrasing, cadence, escalation, and bundle-versus-interrupt decisions beyond the new delivery and channel bias layer
+
+### Earlier Completed 10-PR Batch
+
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
 2. [x] `cockpit-workflow-views-v1`:
@@ -111,7 +134,7 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `guardian-behavioral-evals-v3`:
    prove the next learning, workflow-density, and cross-surface behaviors with deeper end-to-end guardian contracts
 
-### Earlier Completed 10-PR Batch
+### Older Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v1`:
    deepen privileged execution isolation, policy visibility, and hardening boundaries before Seraph expands more leverage on top of the current action layer
@@ -140,28 +163,28 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#1 execution-safety-hardening-v4`
+- the current active item is `#1 execution-safety-hardening-v5`
 
-1. [ ] `execution-safety-hardening-v4`:
-   harden replay, native action-card resume paths, approval recovery, secret-bearing workflow surfaces, and operator-triggered follow-on execution before the new cockpit leverage compounds further
-2. [ ] `workflow-timeline-and-approval-replay-v2`:
-   turn workflow history into a real operating timeline with approval recovery, artifact lineage, and deeper rerun context instead of only recent run cards
-3. [ ] `capability-pack-install-and-recommendations-v1`:
-   go beyond visibility by adding recommended packs, install guidance, and clearer enable-or-fix-next actions for tools, skills, workflows, and MCP capability bundles
-4. [ ] `extension-debugging-and-recovery-v2`:
-   add health diagnostics, blocked-step repair, and dependency recovery for skills, workflows, and MCP servers beyond the first inspector-facing recovery surface
-5. [ ] `session-threading-across-surfaces-v2`:
-   unify browser sessions, native notifications, workflow resumes, and audit traces into one explicit thread model instead of only restoring the last browser session
-6. [ ] `world-model-memory-fusion-v4`:
-   deepen the structured world model into durable projects, routines, constraints, and longer-lived execution context rather than the current first fusion layer
-7. [ ] `guardian-learning-policy-v4`:
-   make learning change phrasing, cadence, escalation, and bundle-versus-interrupt decisions beyond the new delivery and channel bias layer
-8. [ ] `native-channel-expansion-v2`:
-   extend the first action-card/native continuation model into broader yet still policy-controlled native channels
-9. [ ] `cockpit-layout-composition-v3`:
-   add richer pane composition, saved named workspaces, and denser multi-pane operating patterns beyond the first per-layout save and reset model
-10. [ ] `guardian-behavioral-evals-v4`:
-   prove capability activation, workflow replay, cross-surface thread continuity, and learned intervention policy with deeper behavioral contracts
+1. [ ] `execution-safety-hardening-v5`:
+   lock down workflow replay execution, starter-pack activation side effects, and operator-triggered repairs with narrower privilege boundaries, clearer approval recovery, and better secret-bearing path isolation
+2. [ ] `workflow-timeline-and-approval-replay-v3`:
+   deepen the timeline into a real operator-grade run ledger with step-by-step approvals, richer artifact lineage, replay diffs, and explicit resume checkpoints
+3. [ ] `session-threading-across-surfaces-v3`:
+   turn the new thread metadata into a first-class cross-surface thread model that unifies browser chat, desktop notifications, workflow resumes, approvals, and audit traces
+4. [ ] `capability-pack-autoinstall-and-policy-repair-v2`:
+   move beyond recommendations by adding bundled pack install flows, policy repair automation, and tighter “fix what blocks me now” actions for skills, workflows, tools, and MCP servers
+5. [ ] `operator-terminal-live-logs-and-runbooks-v2`:
+   turn the first operator terminal into a denser Hermes-like console with live failure streams, recent run logs, quick commands, and reusable runbooks/macros
+6. [ ] `extension-debugging-and-recovery-v3`:
+   add deeper MCP and skill diagnostics, dependency repair guidance, and blocked-step debugging beyond the first repair surface
+7. [ ] `native-channel-expansion-v2`:
+   deepen non-browser presence with richer native action surfaces, better notification routing, and stronger continuation across desktop paths
+8. [ ] `world-model-memory-fusion-v5`:
+   grow the world model from active projects, routines, and constraints into longer-lived plans, durable projects, and richer personal context fusion
+9. [ ] `guardian-learning-policy-v5`:
+   make learning update intervention strategy more deeply through tone, cadence, escalation, timing, and channel policy rather than only first-pass phrasing/cadence bias
+10. [ ] `guardian-behavioral-evals-v5`:
+   prove the new operator-terminal, thread-continuity, repair-flow, and deeper guardian-learning behavior with broader deterministic behavioral contracts
 
 ## Queue Maintenance Rule
 
@@ -199,7 +222,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and a first actionable desktop control shell inside the cockpit
 - [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, cockpit-to-settings linkage for queued desktop state, and desktop-shell draft/continue actions over pending notifications, queued bundle items, and recent interventions
 - [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces
-- [x] first capability-overview and starter-pack APIs now expose tools, skills, workflows, MCP servers, blocked-state reasons, and recommended starter bundles in one operator-readable shape
+- [x] first capability-overview and starter-pack APIs now expose tools, skills, workflows, MCP servers, blocked-state reasons, recommended starter bundles, installable catalog items, repair actions, and runbook metadata in one operator-readable shape
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
 - [x] the cockpit now supports a pane workspace with drag/resize, grid snap, packed `default` / `focus` / `review` layout presets, inspector visibility persistence, layout switching from both the header and keyboard shortcuts, plus per-layout save and reset behavior
@@ -214,10 +237,14 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] cockpit artifacts and workflow outputs can now draft compatible follow-on workflows directly from the inspector instead of only seeding generic command-bar context
 - [x] the cockpit now exposes a compact operator surface for workflow availability, starter packs, tools, skills, MCP server state, and live policy modes with direct reload and activation actions
 - [x] the cockpit now restores the last active browser session on reload, tracks fresh-thread semantics explicitly, and marks background session activity instead of silently mixing threads
+- [x] the cockpit now exposes a searchable Hermes-style capability palette plus a denser operator terminal with recommendations, repair actions, installable catalog items, and reusable runbooks
+- [x] workflow history now behaves like a true operator timeline with timeline events, approval-recovery copy, replay guardrails, and explicit thread metadata for opening or continuing the relevant thread
+- [x] browser sessions, desktop notifications, queued interventions, recent interventions, and workflow runs now share explicit thread metadata instead of leaving continuity implicit
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
 - [x] first strict provider-policy safeguard layer for runtime paths, including required capability intents plus cost/latency guardrails that reroute only when compliant targets exist and otherwise fail open with explicit audit visibility
 - [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, salience/confidence signals, memory recall, session history, recent sessions, recent intervention feedback, and confidence into one structured downstream input
+- [x] guardian-state synthesis now also carries learned communication guidance, and the world model now includes active routines alongside projects, constraints, and execution pressure
 - [x] explicit guardian world model now also carries recent active projects, active constraints, recurring patterns, and recent execution pressure from workflow/tool outcomes, not only focus, commitments, and receptivity
 - [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus salience-aware policy reasons
 - [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state

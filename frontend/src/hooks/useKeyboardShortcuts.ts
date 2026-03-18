@@ -13,6 +13,11 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
   const cockpitLayout = useCockpitLayoutStore.getState();
 
   if (s.interfaceMode === "cockpit") {
+    if ((event.metaKey || event.ctrlKey) && code === "KeyK") {
+      event.preventDefault();
+      window.dispatchEvent(new CustomEvent("seraph-cockpit-open-palette"));
+      return;
+    }
     if (event.shiftKey && code === "Digit1") {
       cockpitLayout.setLayout("default");
       applyCockpitLayout("default", cockpitLayout.inspectorVisible);
@@ -30,6 +35,10 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
     }
     if (event.shiftKey && code === "KeyI") {
       cockpitLayout.toggleInspector();
+      return;
+    }
+    if (event.shiftKey && code === "KeyK") {
+      window.dispatchEvent(new CustomEvent("seraph-cockpit-open-palette"));
       return;
     }
 

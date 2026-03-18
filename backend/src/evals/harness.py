@@ -3072,11 +3072,12 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
 async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
-    await native_notification_queue.clear()
     async with _patched_async_db(
+        "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
     ):
+        await native_notification_queue.clear()
         for feedback_type, content in (
             ("helpful", "That workflow reminder landed at the right moment."),
             ("helpful", "Another workflow nudge was useful."),
@@ -3159,27 +3160,26 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         queued_ids = [item.id for item in await insight_queue.peek_all()]
         if queued_ids:
             await insight_queue.delete_many(queued_ids)
+        remaining_notifications = await native_notification_queue.count()
+        await native_notification_queue.clear()
 
-    remaining_notifications = await native_notification_queue.count()
-    await native_notification_queue.clear()
-
-    return {
-        "message_type": "proactive",
-        "urgency": 2,
-        "scheduler_delivery": scheduler_event["details"]["delivery"],
-        "scheduler_policy_action": scheduler_event["details"]["policy_action"],
-        "policy_reason": delivered_event["details"]["policy_reason"],
-        "learning_bias": delivered_event["details"]["learning_bias"],
-        "learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
-        "transport": delivered_event["details"]["transport"],
-        "broadcast_delivered_connections": delivered_event["details"]["delivered_connections"],
-        "continuity_notification_count": len(continuity["notifications"]),
-        "continuity_queued_insight_count": continuity["queued_insight_count"],
-        "continuity_surface": intervention["continuity_surface"],
-        "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
-        "notification_intervention_matches": notification["intervention_id"] == intervention["id"],
-        "remaining_notifications_before_cleanup": remaining_notifications,
-    }
+        return {
+            "message_type": "proactive",
+            "urgency": 2,
+            "scheduler_delivery": scheduler_event["details"]["delivery"],
+            "scheduler_policy_action": scheduler_event["details"]["policy_action"],
+            "policy_reason": delivered_event["details"]["policy_reason"],
+            "learning_bias": delivered_event["details"]["learning_bias"],
+            "learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
+            "transport": delivered_event["details"]["transport"],
+            "broadcast_delivered_connections": delivered_event["details"]["delivered_connections"],
+            "continuity_notification_count": len(continuity["notifications"]),
+            "continuity_queued_insight_count": continuity["queued_insight_count"],
+            "continuity_surface": intervention["continuity_surface"],
+            "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
+            "notification_intervention_matches": notification["intervention_id"] == intervention["id"],
+            "remaining_notifications_before_cleanup": remaining_notifications,
+        }
 
 
 async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
@@ -3287,7 +3287,10 @@ async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
 
 
 async def _eval_guardian_state_synthesis() -> dict[str, Any]:
-    async with _patched_async_db("src.agent.session.get_session"):
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
         await session_manager.get_or_create("current")
         await session_manager.add_message("current", "user", "What should Seraph improve next?")
         await session_manager.add_message("current", "assistant", "Build explicit guardian state.")
@@ -3344,7 +3347,10 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
 
 
 async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
-    async with _patched_async_db("src.agent.session.get_session"):
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
         await session_manager.get_or_create("current")
         await session_manager.add_message("current", "user", "What needs attention today?")
         await session_manager.add_message("current", "assistant", "Protect meeting prep and ship the brief.")
@@ -3834,11 +3840,12 @@ async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]
 async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
-    await native_notification_queue.clear()
     async with _patched_async_db(
+        "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
     ):
+        await native_notification_queue.clear()
         mgr = ContextManager()
         mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing continuity across browser and desktop.")
         mgr.update_capture_mode("balanced")

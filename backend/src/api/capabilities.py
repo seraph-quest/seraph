@@ -29,6 +29,7 @@ router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
 _STARTER_PACKS_PATH = os.path.join(_DEFAULTS_DIR, "starter-packs.json")
+_CATALOG_PATH = os.path.join(_DEFAULTS_DIR, "skill-catalog.json")
 _BUNDLED_SKILLS_DIR = os.path.join(_DEFAULTS_DIR, "skills")
 _BUNDLED_WORKFLOWS_DIR = os.path.join(_DEFAULTS_DIR, "workflows")
 
@@ -41,6 +42,22 @@ def _load_starter_packs() -> list[dict[str, Any]]:
         payload = json.load(handle)
     packs = payload.get("packs", [])
     return packs if isinstance(packs, list) else []
+
+
+def _load_catalog_items() -> dict[str, list[dict[str, Any]]]:
+    path = os.path.normpath(_CATALOG_PATH)
+    if not os.path.isfile(path):
+        return {"skills": [], "mcp_servers": []}
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    return {
+        "skills": payload.get("skills", []) if isinstance(payload.get("skills"), list) else [],
+        "mcp_servers": (
+            payload.get("mcp_servers", [])
+            if isinstance(payload.get("mcp_servers"), list)
+            else []
+        ),
+    }
 
 
 def _seed_bundled_skill(name: str) -> bool:
@@ -88,6 +105,350 @@ def _skill_status_map(available_tool_names: list[str]) -> tuple[list[dict[str, A
         skills.append(enriched)
         by_name[str(skill["name"])] = enriched
     return skills, by_name
+
+
+def _workflow_draft(workflow: dict[str, Any]) -> str:
+    inputs = []
+    for input_name, spec in (workflow.get("inputs") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        default = spec.get("default")
+        if input_name == "file_path" and not default:
+            default = "notes/output.md"
+        if default is None or default == "":
+            default = f"<{input_name}>"
+        inputs.append(f'{input_name}={json.dumps(default)}')
+    if inputs:
+        return f'Run workflow "{workflow["name"]}" with {", ".join(inputs)}.'
+    return f'Run workflow "{workflow["name"]}".'
+
+
+def _suggested_tool_policy_mode(blocked_reason: str | None) -> str | None:
+    if blocked_reason == "tool_policy_safe":
+        return "balanced"
+    if blocked_reason == "tool_policy_balanced":
+        return "full"
+    return None
+
+
+def _next_tool_policy_mode(current_mode: str) -> str | None:
+    if current_mode == "safe":
+        return "balanced"
+    if current_mode == "balanced":
+        return "full"
+    return None
+
+
+def _recommended_tool_policy_mode(*, current_mode: str, blocked_reason: str | None) -> str | None:
+    return _suggested_tool_policy_mode(blocked_reason) or _next_tool_policy_mode(current_mode)
+
+
+def _starter_pack_index() -> dict[str, dict[str, Any]]:
+    return {
+        str(pack["name"]): pack
+        for pack in _load_starter_packs()
+        if isinstance(pack, dict) and isinstance(pack.get("name"), str)
+    }
+
+
+def _starter_pack_activation_would_change_state(
+    pack: dict[str, Any],
+    *,
+    skills_by_name: dict[str, dict[str, Any]],
+    workflows_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    for skill_name in pack.get("skills", []):
+        skill = skills_by_name.get(str(skill_name))
+        if skill is None or not bool(skill.get("enabled", False)):
+            return True
+    for workflow_name in pack.get("workflows", []):
+        workflow = workflows_by_name.get(str(workflow_name))
+        if workflow is None or not bool(workflow.get("enabled", False)):
+            return True
+    return False
+
+
+def _recommended_actions(
+    *,
+    skills_by_name: dict[str, dict[str, Any]],
+    workflows_by_name: dict[str, dict[str, Any]],
+    native_tools: list[dict[str, Any]],
+    mcp_servers: list[dict[str, Any]],
+    tool_mode: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    tool_status = {str(tool["name"]): tool for tool in native_tools}
+    starter_pack_index = _starter_pack_index()
+    catalog = _load_catalog_items()
+    catalog_items: list[dict[str, Any]] = []
+    recommendations: list[dict[str, Any]] = []
+    seen_recommendations: set[str] = set()
+
+    def add_recommendation(item: dict[str, Any]) -> None:
+        key = str(item.get("id") or item.get("label") or len(recommendations))
+        if key in seen_recommendations:
+            return
+        seen_recommendations.add(key)
+        recommendations.append(item)
+
+    for skill in catalog.get("skills", []):
+        if not isinstance(skill, dict) or not isinstance(skill.get("name"), str):
+            continue
+        name = str(skill["name"])
+        installed = name in skills_by_name
+        missing_tools = [
+            tool_name
+            for tool_name in skill.get("requires_tools", [])
+            if tool_name not in tool_status
+        ]
+        catalog_items.append({
+            "name": name,
+            "type": "skill",
+            "description": skill.get("description", ""),
+            "category": skill.get("category", ""),
+            "bundled": bool(skill.get("bundled", False)),
+            "installed": installed,
+            "missing_tools": missing_tools,
+            "recommended_actions": (
+                []
+                if installed
+                else [{"type": "install_catalog_item", "label": "Install skill", "name": name}]
+            ),
+        })
+        if not installed and bool(skill.get("bundled", False)):
+            add_recommendation({
+                "id": f"catalog-skill:{name}",
+                "label": f"Install skill {name}",
+                "description": skill.get("description", ""),
+                "action": {"type": "install_catalog_item", "label": "Install skill", "name": name},
+            })
+
+    mcp_status = {str(server["name"]): server for server in mcp_servers}
+    for server in catalog.get("mcp_servers", []):
+        if not isinstance(server, dict) or not isinstance(server.get("name"), str):
+            continue
+        name = str(server["name"])
+        installed = name in mcp_status
+        catalog_items.append({
+            "name": name,
+            "type": "mcp_server",
+            "description": server.get("description", ""),
+            "category": server.get("category", ""),
+            "bundled": bool(server.get("bundled", False)),
+            "installed": installed,
+            "missing_tools": [],
+            "recommended_actions": (
+                []
+                if installed
+                else [{"type": "install_catalog_item", "label": "Install MCP server", "name": name}]
+            ),
+        })
+        if not installed:
+            add_recommendation({
+                "id": f"catalog-mcp:{name}",
+                "label": f"Install MCP server {name}",
+                "description": server.get("description", ""),
+                "action": {"type": "install_catalog_item", "label": "Install MCP server", "name": name},
+            })
+
+    for workflow_name, workflow in workflows_by_name.items():
+        pack = next(
+            (
+                item
+                for item in starter_pack_index.values()
+                if workflow_name in [str(value) for value in item.get("workflows", [])]
+            ),
+            None,
+        )
+        if (
+            workflow.get("availability") == "blocked"
+            and pack is not None
+            and _starter_pack_activation_would_change_state(
+                pack,
+                skills_by_name=skills_by_name,
+                workflows_by_name=workflows_by_name,
+            )
+        ):
+            add_recommendation({
+                "id": f"starter-pack:{pack['name']}",
+                "label": f"Activate {pack.get('label', pack['name'])}",
+                "description": pack.get("description", ""),
+                "action": {
+                    "type": "activate_starter_pack",
+                    "label": "Activate pack",
+                    "name": pack["name"],
+                },
+            })
+        for missing_tool in workflow.get("missing_tools", []):
+            blocked_tool = tool_status.get(str(missing_tool))
+            suggested_mode = _recommended_tool_policy_mode(
+                current_mode=tool_mode,
+                blocked_reason=None if blocked_tool is None else blocked_tool.get("blocked_reason"),
+            )
+            if suggested_mode is not None:
+                add_recommendation({
+                    "id": f"tool-policy:{missing_tool}:{suggested_mode}",
+                    "label": f"Allow {missing_tool}",
+                    "description": f"Change tool policy to {suggested_mode} so {workflow_name} can run.",
+                    "action": {
+                        "type": "set_tool_policy",
+                        "label": f"Set tool policy to {suggested_mode}",
+                        "mode": suggested_mode,
+                    },
+                })
+
+    runbooks: list[dict[str, Any]] = []
+    for pack in _load_starter_packs():
+        if not isinstance(pack, dict) or not isinstance(pack.get("name"), str):
+            continue
+        sample_prompt = str(pack.get("sample_prompt") or "").strip()
+        if not sample_prompt:
+            continue
+        runbooks.append({
+            "id": f"starter-pack:{pack['name']}",
+            "label": str(pack.get("label") or pack["name"]),
+            "description": pack.get("description", ""),
+            "source": "starter_pack",
+            "command": sample_prompt,
+            "action": {"type": "activate_starter_pack", "label": "Activate pack", "name": pack["name"]},
+        })
+
+    for workflow in workflows_by_name.values():
+        if not bool(workflow.get("user_invocable", False)):
+            continue
+        if workflow.get("availability") != "ready":
+            continue
+        runbooks.append({
+            "id": f"workflow:{workflow['name']}",
+            "label": f"Run {workflow['name']}",
+            "description": workflow.get("description", ""),
+            "source": "workflow",
+            "command": _workflow_draft(workflow),
+            "action": {"type": "draft_workflow", "label": "Draft workflow", "name": workflow["name"]},
+        })
+
+    return catalog_items, recommendations[:8], runbooks[:10]
+
+
+def _attach_skill_actions(
+    skills: list[dict[str, Any]],
+    *,
+    native_tools: list[dict[str, Any]],
+    tool_mode: str,
+) -> None:
+    tool_status = {str(tool["name"]): tool for tool in native_tools}
+    for skill in skills:
+        actions: list[dict[str, Any]] = []
+        if not skill.get("enabled", False):
+            actions.append({
+                "type": "toggle_skill",
+                "label": "Enable skill",
+                "name": skill["name"],
+                "enabled": True,
+            })
+        for missing_tool in skill.get("missing_tools", []):
+            blocked_tool = tool_status.get(str(missing_tool))
+            suggested_mode = _recommended_tool_policy_mode(
+                current_mode=tool_mode,
+                blocked_reason=None if blocked_tool is None else blocked_tool.get("blocked_reason"),
+            )
+            if suggested_mode is not None:
+                actions.append({
+                    "type": "set_tool_policy",
+                    "label": f"Allow {missing_tool}",
+                    "mode": suggested_mode,
+                })
+        skill["recommended_actions"] = actions
+
+
+def _attach_workflow_actions(
+    workflows: list[dict[str, Any]],
+    *,
+    native_tools: list[dict[str, Any]],
+    skills_by_name: dict[str, dict[str, Any]],
+    tool_mode: str,
+) -> None:
+    tool_status = {str(tool["name"]): tool for tool in native_tools}
+    for workflow in workflows:
+        actions: list[dict[str, Any]] = []
+        if not workflow.get("enabled", False):
+            actions.append({
+                "type": "toggle_workflow",
+                "label": "Enable workflow",
+                "name": workflow["name"],
+                "enabled": True,
+            })
+        for missing_skill in workflow.get("missing_skills", []):
+            skill = skills_by_name.get(str(missing_skill))
+            if skill is not None and not skill.get("enabled", False):
+                actions.append({
+                    "type": "toggle_skill",
+                    "label": f"Enable {missing_skill}",
+                    "name": missing_skill,
+                    "enabled": True,
+                })
+        for missing_tool in workflow.get("missing_tools", []):
+            blocked_tool = tool_status.get(str(missing_tool))
+            suggested_mode = _recommended_tool_policy_mode(
+                current_mode=tool_mode,
+                blocked_reason=None if blocked_tool is None else blocked_tool.get("blocked_reason"),
+            )
+            if suggested_mode is not None:
+                actions.append({
+                    "type": "set_tool_policy",
+                    "label": f"Allow {missing_tool}",
+                    "mode": suggested_mode,
+                })
+        if workflow.get("availability") == "ready" and bool(workflow.get("user_invocable", False)):
+            actions.append({
+                "type": "draft_workflow",
+                "label": "Draft workflow",
+                "name": workflow["name"],
+            })
+        workflow["recommended_actions"] = actions
+
+
+def _attach_tool_actions(native_tools: list[dict[str, Any]]) -> None:
+    for tool in native_tools:
+        actions: list[dict[str, Any]] = []
+        suggested_mode = _suggested_tool_policy_mode(tool.get("blocked_reason"))
+        if suggested_mode is not None:
+            actions.append({
+                "type": "set_tool_policy",
+                "label": f"Set tool policy to {suggested_mode}",
+                "mode": suggested_mode,
+            })
+        tool["recommended_actions"] = actions
+
+
+def _attach_mcp_actions(mcp_servers: list[dict[str, Any]], *, mcp_mode: str) -> None:
+    for server in mcp_servers:
+        actions: list[dict[str, Any]] = []
+        if not server.get("enabled", False):
+            actions.append({
+                "type": "toggle_mcp_server",
+                "label": "Enable server",
+                "name": server["name"],
+                "enabled": True,
+            })
+        if server.get("availability") == "blocked":
+            if server.get("blocked_reason") == "mcp_policy_disabled":
+                actions.append({
+                    "type": "set_mcp_policy",
+                    "label": "Allow MCP with approval",
+                    "mode": "approval" if mcp_mode == "disabled" else "full",
+                })
+            elif server.get("blocked_reason") in {"auth_required", "connection_error", "disconnected"}:
+                actions.append({
+                    "type": "test_mcp_server",
+                    "label": "Test connection",
+                    "name": server["name"],
+                })
+                actions.append({
+                    "type": "open_settings",
+                    "label": "Open settings",
+                    "target": "mcp",
+                })
+        server["recommended_actions"] = actions
 
 
 def _workflow_status_map(
@@ -236,6 +597,22 @@ def _build_capability_overview() -> dict[str, Any]:
         skills_by_name=skills_by_name,
         workflows_by_name=workflows_by_name,
     )
+    _attach_tool_actions(native_tools)
+    _attach_skill_actions(skills, native_tools=native_tools, tool_mode=tool_mode)
+    _attach_workflow_actions(
+        workflows,
+        native_tools=native_tools,
+        skills_by_name=skills_by_name,
+        tool_mode=tool_mode,
+    )
+    _attach_mcp_actions(mcp_servers, mcp_mode=mcp_mode)
+    catalog_items, recommendations, runbooks = _recommended_actions(
+        skills_by_name=skills_by_name,
+        workflows_by_name=workflows_by_name,
+        native_tools=native_tools,
+        mcp_servers=mcp_servers,
+        tool_mode=tool_mode,
+    )
     ready_tools = sum(1 for tool in native_tools if tool["availability"] == "ready")
     ready_skills = sum(1 for skill in skills if skill["availability"] == "ready")
     ready_workflows = sum(1 for workflow in workflows if workflow["availability"] == "ready")
@@ -261,6 +638,9 @@ def _build_capability_overview() -> dict[str, Any]:
         "workflows": workflows,
         "mcp_servers": mcp_servers,
         "starter_packs": starter_packs,
+        "catalog_items": catalog_items,
+        "recommendations": recommendations,
+        "runbooks": runbooks,
     }
 
 

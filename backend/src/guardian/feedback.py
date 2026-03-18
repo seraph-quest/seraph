@@ -30,6 +30,8 @@ class GuardianLearningSignal:
     acknowledged_count: int
     failed_count: int
     bias: str
+    phrasing_bias: str
+    cadence_bias: str
     channel_bias: str
     escalation_bias: str
 
@@ -42,6 +44,8 @@ class GuardianLearningSignal:
             acknowledged_count=0,
             failed_count=0,
             bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
             channel_bias="neutral",
             escalation_bias="neutral",
         )
@@ -208,6 +212,18 @@ class GuardianFeedbackRepository:
         elif helpful_count >= 2 and not_helpful_count == 0:
             bias = "prefer_direct_delivery"
 
+        phrasing_bias = "neutral"
+        if not_helpful_count >= 2 and helpful_count == 0:
+            phrasing_bias = "be_brief_and_literal"
+        elif helpful_count >= 2 and not_helpful_count == 0:
+            phrasing_bias = "be_more_direct"
+
+        cadence_bias = "neutral"
+        if not_helpful_count >= 2 or failed_count >= 2:
+            cadence_bias = "bundle_more"
+        elif helpful_count >= 2 and acknowledged_count >= 1 and not_helpful_count == 0:
+            cadence_bias = "check_in_sooner"
+
         channel_bias = "neutral"
         if acknowledged_count >= 2 and not_helpful_count == 0:
             channel_bias = "prefer_native_notification"
@@ -223,6 +239,8 @@ class GuardianFeedbackRepository:
             acknowledged_count=acknowledged_count,
             failed_count=failed_count,
             bias=bias,
+            phrasing_bias=phrasing_bias,
+            cadence_bias=cadence_bias,
             channel_bias=channel_bias,
             escalation_bias=escalation_bias,
         )

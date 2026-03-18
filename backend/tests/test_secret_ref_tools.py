@@ -3,12 +3,14 @@
 import time
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.secret_ref_tools import SecretRefResolvingTool, get_secret_ref
 
 
 class DummyHeaderTool:
-    name = "http_request"
+    name = "mcp_http_request"
     description = "Dummy request tool"
     inputs = {
         "headers": {"type": "object", "description": "Request headers"},
@@ -18,6 +20,10 @@ class DummyHeaderTool:
 
     def __call__(self, *args, **kwargs):
         return {"args": args, "kwargs": kwargs}
+
+
+class DummyWriteTool(DummyHeaderTool):
+    name = "write_file"
 
 
 def _issue_ref_for_session(session_id: str) -> str:
@@ -51,6 +57,17 @@ def test_secret_ref_wrapper_resolves_nested_values_for_current_session():
 
     assert result["kwargs"]["headers"]["Authorization"] == "Bearer super-secret-value"
     assert result["kwargs"]["body"] == "token=super-secret-value"
+
+
+def test_secret_ref_wrapper_blocks_disallowed_tools():
+    wrapped = SecretRefResolvingTool(DummyWriteTool())
+    secret_ref = _issue_ref_for_session("s1")
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with pytest.raises(ValueError, match="cannot receive secret references"):
+            wrapped(body=f"token={secret_ref}")
+    finally:
+        reset_runtime_context(tokens)
 
 
 def test_secret_ref_wrapper_does_not_resolve_other_session_refs():

@@ -75,7 +75,7 @@ This file explains:
 
 ### 7. Execution hardening
 
-- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, and forced approval wrapping for high-risk/approval-mode workflow paths
+- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, forced approval wrapping for high-risk/approval-mode workflow paths, explicit secret-ref containment to injection-safe surfaces, and rejection of underdeclared workflow runtimes
 - [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that first hardening pass
 - owners: Workstream 01, Workstream 02
 
@@ -85,8 +85,8 @@ This file explains:
 - [x] This file should explain why the queue exists in its current order.
 - [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
 - [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
-- [x] The new queue starts with `execution-safety-hardening-v2` because privileged execution risk is still the highest-cost failure mode once leverage grows further.
-- [x] The next queue pressure then moves into cockpit workflow density and richer learning because Seraph now has enough foundations that usability and adaptive intervention quality matter more than missing primitives.
+- [x] `execution-safety-hardening-v2` is now the first shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `cockpit-workflow-views-v1` because privileged-path secret containment and workflow declaration safety have been tightened enough for the next bottleneck to be operator workflow density.
 - [x] The refreshed queue still keeps cross-surface continuity, provider safeguards, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

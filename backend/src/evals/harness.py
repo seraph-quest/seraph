@@ -1128,25 +1128,23 @@ def _eval_workflow_composition_behavior() -> dict[str, Any]:
 def _eval_provider_fallback_chain() -> dict[str, Any]:
     completion_response = _make_litellm_response("Resolved after ordered fallback chain.")
 
-    with (
-        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-        patch.object(settings, "fallback_model", ""),
-        patch.object(
-            settings,
-            "fallback_models",
-            "openai/gpt-4o-mini,openai/gpt-4.1-mini",
-        ),
-        patch.object(settings, "llm_api_key", "primary-key"),
-        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-        patch(
-            "litellm.completion",
-            side_effect=[
-                RuntimeError("primary down"),
-                RuntimeError("first fallback down"),
-                completion_response,
-            ],
-        ) as mock_completion,
-    ):
+    with patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"), \
+         patch.object(settings, "fallback_model", ""), \
+         patch.object(
+             settings,
+             "fallback_models",
+             "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+         ), \
+         patch.object(settings, "llm_api_key", "primary-key"), \
+         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"), \
+         patch(
+             "litellm.completion",
+             side_effect=[
+                 RuntimeError("primary down"),
+                 RuntimeError("first fallback down"),
+                 completion_response,
+             ],
+         ) as mock_completion:
         response = completion_with_fallback_sync(
             messages=[{"role": "user", "content": "route around provider issues"}],
             temperature=0.2,
@@ -4373,9 +4371,11 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "balanced_shows_write_file": "write_file" in balanced_tools,
             "balanced_hides_shell_execute": "shell_execute" not in balanced_tools,
             "full_shows_shell_execute": "shell_execute" in full_tools,
+            "write_file_accepts_secret_refs": full_tools["write_file"]["accepts_secret_refs"],
             "mcp_disabled_hides_tool": "mcp_tasks" not in disabled_tools,
             "mcp_approval_shows_tool": "mcp_tasks" in approval_tools,
             "mcp_approval_requires_approval": approval_tools["mcp_tasks"]["requires_approval"],
+            "mcp_approval_accepts_secret_refs": approval_tools["mcp_tasks"]["accepts_secret_refs"],
         }
     finally:
         stack.close()

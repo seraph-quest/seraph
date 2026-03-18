@@ -5,7 +5,9 @@ from __future__ import annotations
 from smolagents import Tool, tool
 
 from src.approval.runtime import get_current_session_id
+from src.tools.policy import tool_accepts_secret_refs
 from src.tools.vault_tools import _log_secret_event, _run
+from src.vault.refs import _REF_PREFIX
 from src.vault.refs import issue_secret_ref, resolve_secret_refs
 from src.vault.repository import vault_repository
 
@@ -34,6 +36,14 @@ class SecretRefResolvingTool(Tool):
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         session_id = get_current_session_id()
+        if not tool_accepts_secret_refs(self.name, is_mcp=self.name.startswith("mcp_")):
+            if any(_contains_secret_ref(arg) for arg in args) or any(
+                _contains_secret_ref(value) for value in kwargs.values()
+            ):
+                raise ValueError(
+                    f"Tool '{self.name}' cannot receive secret references; "
+                    "use an explicit secret-injection path instead."
+                )
         resolved_args = tuple(resolve_secret_refs(arg, session_id) for arg in args)
         resolved_kwargs = {
             key: resolve_secret_refs(value, session_id)
@@ -49,6 +59,16 @@ class SecretRefResolvingTool(Tool):
 def wrap_tools_for_secret_refs(tools: list[Tool]) -> list[Tool]:
     """Wrap tools so secret refs are resolved just before invocation."""
     return [SecretRefResolvingTool(tool) for tool in tools]
+
+
+def _contains_secret_ref(value) -> bool:
+    if isinstance(value, str):
+        return _REF_PREFIX in value
+    if isinstance(value, (list, tuple)):
+        return any(_contains_secret_ref(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_secret_ref(item) for item in value.values())
+    return False
 
 
 @tool

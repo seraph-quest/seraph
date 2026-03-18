@@ -22,8 +22,8 @@
 
 ## Working On Now
 
-- [x] this workstream shipped the first refreshed queue item through `execution-safety-hardening-v1`
-- [x] this workstream now hands the queue lead to workflow control and guardian-learning work
+- [x] this workstream has now shipped both `execution-safety-hardening-v1` and `execution-safety-hardening-v2`
+- [x] explicit secret-reference containment now blocks raw secret injection into non-injection-safe tools while leaving MCP and future explicit injection surfaces available
 - [ ] reduce reliance on raw secret retrieval in favor of narrower secret-injection paths
 
 ## Still To Do On `develop`
@@ -41,4 +41,5 @@
 
 - [x] privileged reusable workflows now expose an explicit policy path through approval behavior and execution-boundary metadata
 - [x] high-risk actions are pauseable and resumable with audit visibility
-- [ ] secret use is scoped and auditable end to end
+- [x] secret references are now scoped to explicit injection-safe execution surfaces instead of resolving across the whole tool surface
+- [ ] secret use is fully scoped and auditable end to end

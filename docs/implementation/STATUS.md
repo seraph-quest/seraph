@@ -39,6 +39,7 @@ title: Seraph Development Status
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
 - [x] The next strategic focus is deeper execution hardening, cockpit workflow density, and stronger adaptive guardian quality on top of the newly shipped world-model and behavioral-proof foundations.
+- [x] The first item in that refreshed batch, `execution-safety-hardening-v2`, is now shipped on this branch and narrows both secret-injection scope and workflow declaration safety.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -66,6 +67,7 @@ title: Seraph Development Status
 - [x] explicit execution-boundary metadata and approval behavior surfaced for tools and reusable workflows
 - [x] structured audit logging for approval, tool, and runtime events
 - [x] secret redaction and scoped secret-reference handling
+- [x] secret-reference resolution now stays limited to explicit injection-safe surfaces instead of resolving into arbitrary tool calls
 
 ### Execution and integrations
 
@@ -78,6 +80,7 @@ title: Seraph Development Status
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
 - [x] forced approval wrapping for high-risk and approval-mode MCP workflow paths
 - [x] first operator workflow-control layer with workflow list/toggle/reload plus draft-to-cockpit support
+- [x] workflow loader/runtime metadata now derive from actual step tools and reject underdeclared workflow definitions
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability

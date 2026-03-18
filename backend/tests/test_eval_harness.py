@@ -734,9 +734,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["tool_policy_guardrails_behavior"]["balanced_shows_write_file"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_shell_execute"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["write_file_accepts_secret_refs"] is False
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_hides_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_shows_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_requires_approval"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_accepts_secret_refs"] is True
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1

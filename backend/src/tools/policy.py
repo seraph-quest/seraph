@@ -93,6 +93,17 @@ def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False) -> li
     return [str(boundary) for boundary in boundaries]
 
 
+def tool_accepts_secret_refs(tool_name: str, *, is_mcp: bool = False) -> bool:
+    """Return whether a tool is allowed to receive resolved secret references."""
+    if is_mcp:
+        return True
+
+    metadata = get_tool_metadata(tool_name)
+    if metadata is None:
+        return False
+    return bool(metadata.get("accepts_secret_refs", False))
+
+
 def get_current_tool_policy_mode() -> str:
     """Read the current tool policy mode from the shared observer context."""
     try:

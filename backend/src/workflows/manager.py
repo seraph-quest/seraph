@@ -226,6 +226,7 @@ class WorkflowManager:
                 "policy_modes": self._infer_policy_modes(workflow),
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
+                "accepts_secret_refs": self._accepts_secret_refs(workflow),
             }
             if available_tool_names is not None and active_skill_names is not None:
                 item.update(
@@ -285,8 +286,8 @@ class WorkflowManager:
         for workflow in self._workflows:
             if not workflow.enabled:
                 continue
-            if workflow.requires_tools and not all(
-                tool_name in tool_set for tool_name in workflow.requires_tools
+            if workflow.step_tools and not all(
+                tool_name in tool_set for tool_name in workflow.step_tools
             ):
                 continue
             if workflow.requires_skills and not all(
@@ -325,6 +326,7 @@ class WorkflowManager:
             "step_count": len(workflow.steps),
             "execution_boundaries": self._infer_execution_boundaries(workflow),
             "risk_level": self._infer_risk_level(workflow),
+            "accepts_secret_refs": self._accepts_secret_refs(workflow),
         }
 
     def _get_runtime_availability(
@@ -350,20 +352,21 @@ class WorkflowManager:
         }
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:
-        if any(tool_name.startswith("mcp_") for tool_name in workflow.requires_tools):
+        step_tools = workflow.step_tools
+        if any(tool_name.startswith("mcp_") for tool_name in step_tools):
             return ["full"]
         if any(
             tool_name in {"write_file", "update_goal", "update_soul", "store_secret", "delete_secret"}
-            for tool_name in workflow.requires_tools
+            for tool_name in step_tools
         ):
             return ["balanced", "full"]
-        if any(tool_name in {"shell_execute", "get_secret"} for tool_name in workflow.requires_tools):
+        if any(tool_name in {"shell_execute", "get_secret"} for tool_name in step_tools):
             return ["full"]
         return ["safe", "balanced", "full"]
 
     def _infer_execution_boundaries(self, workflow: Workflow) -> list[str]:
         boundaries: list[str] = []
-        for tool_name in workflow.requires_tools:
+        for tool_name in workflow.step_tools:
             if tool_name.startswith("mcp_"):
                 boundaries.append("external_mcp")
                 continue
@@ -380,6 +383,15 @@ class WorkflowManager:
         if policy_modes == ["balanced", "full"]:
             return "medium"
         return "low"
+
+    def _accepts_secret_refs(self, workflow: Workflow) -> bool:
+        for tool_name in workflow.step_tools:
+            if tool_name.startswith("mcp_"):
+                return True
+            tool_meta = TOOL_METADATA.get(tool_name, {})
+            if bool(tool_meta.get("accepts_secret_refs", False)):
+                return True
+        return False
 
 
 workflow_manager = WorkflowManager()

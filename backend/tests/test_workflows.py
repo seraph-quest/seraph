@@ -106,6 +106,21 @@ def invalid_workflows_dir(tmp_path):
         "---\n\n"
         "No steps.\n"
     )
+    (d / "undeclared-tool.md").write_text(
+        "---\n"
+        "name: underdeclared\n"
+        "description: workflow with an undeclared step tool\n"
+        "requires:\n"
+        "  tools: [web_search]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/test.md\n"
+        "      content: hi\n"
+        "---\n\n"
+        "Underdeclared.\n"
+    )
     return str(d)
 
 
@@ -128,6 +143,11 @@ class TestWorkflowLoader:
 
     def test_invalid_workflows_are_skipped(self, invalid_workflows_dir):
         assert load_workflows(invalid_workflows_dir) == []
+
+    def test_step_tools_property_tracks_runtime_tools(self, workflows_dir):
+        workflow = _parse_workflow_file(os.path.join(workflows_dir, "web-brief.md"))
+        assert workflow is not None
+        assert workflow.step_tools == ["web_search", "write_file"]
 
 
 class TestWorkflowManager:
@@ -227,6 +247,7 @@ class TestWorkflowManager:
         assert "saved tasks.md: task-a" in result
         assert mgr.get_tool_metadata(tool.name)["policy_modes"] == ["full"]
         assert mgr.get_tool_metadata(tool.name)["execution_boundaries"] == ["external_mcp", "workspace_write"]
+        assert mgr.get_tool_metadata(tool.name)["accepts_secret_refs"] is True
 
     def test_list_workflows_includes_policy_metadata(self, workflows_dir):
         mgr = WorkflowManager()
@@ -239,6 +260,7 @@ class TestWorkflowManager:
         assert web_brief["policy_modes"] == ["balanced", "full"]
         assert web_brief["execution_boundaries"] == ["external_read", "workspace_write"]
         assert web_brief["risk_level"] == "medium"
+        assert web_brief["accepts_secret_refs"] is False
 
     def test_list_workflows_includes_runtime_availability(self, workflows_dir):
         mgr = WorkflowManager()
@@ -277,6 +299,7 @@ class TestWorkflowApi:
                 "policy_modes": ["balanced", "full"],
                 "execution_boundaries": ["external_read", "workspace_write"],
                 "risk_level": "medium",
+                "accepts_secret_refs": False,
                 "is_available": False,
                 "missing_tools": ["write_file"],
                 "missing_skills": [],
@@ -295,6 +318,7 @@ class TestWorkflowApi:
         assert set(resp.json()["workflows"][0]["inputs"]) == {"query", "file_path"}
         assert resp.json()["workflows"][0]["approval_behavior"] == "never"
         assert resp.json()["workflows"][0]["requires_approval"] is False
+        assert resp.json()["workflows"][0]["accepts_secret_refs"] is False
         assert resp.json()["workflows"][0]["is_available"] is False
         assert resp.json()["workflows"][0]["missing_tools"] == ["write_file"]
 
@@ -364,6 +388,7 @@ class TestWorkflowSurfaces:
             "approval_behavior": "never",
             "risk_level": "medium",
             "execution_boundaries": ["external_read", "workspace_write"],
+            "accepts_secret_refs": False,
         }]
 
     def test_factory_wraps_high_risk_workflows_for_approval(self, async_db):

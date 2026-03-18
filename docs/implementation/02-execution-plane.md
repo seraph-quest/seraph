@@ -22,11 +22,12 @@
 - [x] first-class reusable workflows loaded from defaults and workspace files, with tool, skill, and MCP-aware gating
 - [x] explicit workflow metadata for policy modes, execution boundaries, approval behavior, and risk level exposed to operator-facing APIs
 - [x] first operator-facing workflow controls for enable/disable, reload, and draft-to-cockpit steering
+- [x] workflow loading now rejects underdeclared runtime step tools, and tool/workflow metadata now expose secret-reference acceptance explicitly for injection-safe paths
 
 ## Working On Now
 
-- [x] this workstream shipped the first workflow-facing hardening slice through `execution-safety-hardening-v1`
-- [x] this workstream now shares `execution-safety-hardening-v1` and `workflow-control-and-artifact-roundtrips-v1` in the master 10-PR queue
+- [x] this workstream has now shipped both workflow-facing hardening slices through `execution-safety-hardening-v1` and `execution-safety-hardening-v2`
+- [x] this workstream now hands the queue lead to `cockpit-workflow-views-v1`
 
 ## Still To Do On `develop`
 

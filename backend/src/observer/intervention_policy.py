@@ -60,6 +60,7 @@ def decide_intervention(
     salience_level: str = "medium",
     interruption_cost: str = "medium",
     requires_approval: bool = False,
+    recent_feedback_bias: str = "neutral",
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
     should_cost_budget = user_state_machine.should_cost_budget(
@@ -135,6 +136,14 @@ def decide_intervention(
             action=InterventionAction.act,
             reason="scheduled",
             delivery_decision=DeliveryDecision.deliver,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if recent_feedback_bias == "reduce_interruptions" and urgency < 4 and intervention_type != "alert":
+        return InterventionDecision(
+            action=InterventionAction.bundle,
+            reason="recent_negative_feedback",
+            delivery_decision=DeliveryDecision.queue,
             should_cost_budget=should_cost_budget,
         )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlmodel import select
@@ -19,6 +20,27 @@ def _excerpt(text: str, *, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3] + "..."
+
+
+@dataclass(frozen=True)
+class GuardianLearningSignal:
+    intervention_type: str
+    helpful_count: int
+    not_helpful_count: int
+    acknowledged_count: int
+    failed_count: int
+    bias: str
+
+    @classmethod
+    def neutral(cls, intervention_type: str) -> "GuardianLearningSignal":
+        return cls(
+            intervention_type=intervention_type,
+            helpful_count=0,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="neutral",
+        )
 
 
 class GuardianFeedbackRepository:
@@ -153,6 +175,41 @@ class GuardianFeedbackRepository:
                 summary += f": {item.content_excerpt}"
             lines.append(f"- {summary}")
         return "\n".join(lines)
+
+    async def get_learning_signal(
+        self,
+        *,
+        intervention_type: str,
+        limit: int = 12,
+    ) -> GuardianLearningSignal:
+        async with get_session() as db:
+            result = await db.execute(
+                select(GuardianIntervention)
+                .where(GuardianIntervention.intervention_type == intervention_type)
+                .order_by(GuardianIntervention.updated_at.desc())
+                .limit(limit)
+            )
+            interventions = list(result.scalars().all())
+
+        helpful_count = sum(1 for item in interventions if item.feedback_type == "helpful")
+        not_helpful_count = sum(1 for item in interventions if item.feedback_type == "not_helpful")
+        acknowledged_count = sum(1 for item in interventions if item.feedback_type == "acknowledged")
+        failed_count = sum(1 for item in interventions if item.latest_outcome == "failed")
+
+        bias = "neutral"
+        if not_helpful_count >= 2 or (
+            not_helpful_count >= 1 and helpful_count == 0 and failed_count >= 1
+        ):
+            bias = "reduce_interruptions"
+
+        return GuardianLearningSignal(
+            intervention_type=intervention_type,
+            helpful_count=helpful_count,
+            not_helpful_count=not_helpful_count,
+            acknowledged_count=acknowledged_count,
+            failed_count=failed_count,
+            bias=bias,
+        )
 
 
 guardian_feedback_repository = GuardianFeedbackRepository()

@@ -127,3 +127,21 @@ def test_decide_intervention_stays_silent_for_empty_non_ambient_payload():
     assert decision.action == InterventionAction.stay_silent
     assert decision.reason == "empty_content"
     assert decision.delivery_decision is None
+
+
+def test_decide_intervention_bundles_on_recent_negative_feedback():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Same kind of nudge again",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        recent_feedback_bias="reduce_interruptions",
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "recent_negative_feedback"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "queue"

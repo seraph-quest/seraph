@@ -45,8 +45,8 @@ This file explains:
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, and first native notification fallback
-- [ ] still missing: closed-loop learning from outcomes and stronger timing quality beyond the first salience model
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first native notification fallback, and a first feedback-driven interruption bias from recent negative outcomes
+- [ ] still missing: stronger timing quality beyond the first salience model and deeper multi-signal learning from outcomes
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -85,7 +85,7 @@ This file explains:
 - [x] This file should explain why the queue exists in its current order.
 - [x] The current queue starts with execution hardening because trust and privileged-path isolation are the most dangerous remaining gap.
 - [x] The next layer is cockpit depth plus workflow control because operator visibility and workflow leverage are where Seraph is still visibly behind the strongest reference systems.
-- [x] The next layer after that is feedback-driven guardian learning and salience calibration because proactive quality is now bottlenecked more by judgment than by missing primitives.
+- [x] The next layer after that is salience calibration and deeper learning because proactive quality is now bottlenecked more by judgment than by missing primitives.
 - [x] The later items in the current queue deepen desktop presence, cross-surface continuity, and broader behavioral proof for the stronger guardian product shape.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

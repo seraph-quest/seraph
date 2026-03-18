@@ -207,6 +207,71 @@ async def test_queue_when_no_budget():
 
 
 @pytest.mark.asyncio
+async def test_queue_when_recent_negative_feedback(async_db):
+    first = await guardian_feedback_repository.create_intervention(
+        session_id=None,
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="Stretch reminder.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="delivered",
+    )
+    await guardian_feedback_repository.record_feedback(first.id, feedback_type="not_helpful")
+    second = await guardian_feedback_repository.create_intervention(
+        session_id=None,
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="Another stretch reminder.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="delivered",
+    )
+    await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
+
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Try this again", intervention_type="advisory", urgency=3)
+        decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "recent_negative_feedback"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["details"]["learning_bias"] == "reduce_interruptions"
+            and event["details"]["learning_not_helpful_count"] == 2
+            and event["details"]["policy_reason"] == "recent_negative_feedback"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_urgent_delivers_through_blocked():
     ctx = _make_context(user_state="deep_work", interruption_mode="focus", attention_budget_remaining=0)
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)

@@ -149,6 +149,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "native_presence_notification_behavior",
                 "intervention_policy_behavior",
                 "guardian_feedback_loop",
+                "guardian_outcome_learning",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
@@ -308,6 +309,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["intervention_policy_behavior"]["high_interrupt_reason"] == "high_interruption_cost"
     assert details_by_name["intervention_policy_behavior"]["low_salience_action"] == "stay_silent"
     assert details_by_name["intervention_policy_behavior"]["low_salience_reason"] == "low_observer_salience"
+    assert details_by_name["intervention_policy_behavior"]["learned_bundle_action"] == "bundle"
+    assert details_by_name["intervention_policy_behavior"]["learned_bundle_reason"] == "recent_negative_feedback"
     assert details_by_name["guardian_feedback_loop"]["action"] == "act"
     assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
     assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"
@@ -324,6 +327,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_feedback_loop"]["prompt_contains_feedback_section"] is True
     assert details_by_name["guardian_feedback_loop"]["instructions_include_feedback"] is True
     assert details_by_name["guardian_feedback_loop"]["remaining_notifications"] == 0
+    assert details_by_name["guardian_outcome_learning"]["action"] == "bundle"
+    assert details_by_name["guardian_outcome_learning"]["reason"] == "recent_negative_feedback"
+    assert details_by_name["guardian_outcome_learning"]["queued"] is True
+    assert details_by_name["guardian_outcome_learning"]["broadcast_skipped"] is True
+    assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "reduce_interruptions"
+    assert details_by_name["guardian_outcome_learning"]["learning_not_helpful_count"] == 2
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"

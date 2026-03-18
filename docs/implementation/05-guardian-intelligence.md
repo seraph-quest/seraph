@@ -21,17 +21,18 @@
 - [x] explicit guardian-state synthesis that unifies observer context, memory, current session, recent sessions, confidence, and observer salience signals for downstream agent paths
 - [x] explicit intervention policy that distinguishes act, bundle, defer, request-approval, and stay-silent outcomes for proactive guardian messages, including low-salience suppression and high-interruption bundling
 - [x] persisted guardian intervention records and explicit user-feedback capture that flow back into guardian-state summaries
+- [x] first outcome-learning loop that uses recent negative feedback on the same intervention type to reduce future interruption eagerness for similar low-urgency nudges
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through outcome learning, salience calibration, and the deeper human/world model
+- [x] this workstream remains central in the repo-wide horizon through salience calibration and the deeper human/world model
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
-- [x] the next major gap after that foundation is deeper feedback-driven learning rather than more missing observer fields
+- [x] the first feedback-driven learning layer is now shipped, and the next major gap is better calibration and deeper modeling rather than more missing observer fields
 
 ## Still To Do On `develop`
 
 - [ ] richer human world modeling that goes beyond current retrieval plus heuristics
-- [ ] stronger learning loops based on intervention outcomes instead of only storing them
+- [ ] stronger learning loops based on intervention outcomes beyond the first negative-feedback interruption bias
 - [ ] stronger salience calibration and confidence quality beyond the first heuristic model
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 
@@ -47,6 +48,7 @@
 - [x] Seraph has an explicit guardian-state object rather than spreading that reasoning across call sites
 - [x] Seraph has an explicit intervention policy rather than only deliver-versus-queue heuristics
 - [x] Seraph records intervention outcomes and explicit user feedback in durable guardian state
+- [x] Seraph learns at least one policy-relevant lesson from intervention outcomes and explicit user feedback
 - [x] Seraph scores observer state by salience, confidence, and interruption cost before guardian strategy and delivery
-- [ ] Seraph learns from intervention outcomes in a way that changes future policy
+- [ ] Seraph reliably learns from intervention outcomes in a way that improves future policy quality beyond the first bias layer
 - [ ] Seraph reliably models the human well enough to intervene at consistently high quality

@@ -53,3 +53,49 @@ async def test_record_feedback_returns_none_for_missing_id(async_db):
     )
 
     assert result is None
+
+
+async def test_learning_signal_biases_after_negative_feedback(async_db):
+    first = await guardian_feedback_repository.create_intervention(
+        session_id=None,
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="Nudge to stretch.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="delivered",
+    )
+    await guardian_feedback_repository.record_feedback(first.id, feedback_type="not_helpful")
+
+    second = await guardian_feedback_repository.create_intervention(
+        session_id=None,
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="Another nudge.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="delivered",
+    )
+    await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+
+    assert signal.not_helpful_count == 2
+    assert signal.helpful_count == 0
+    assert signal.bias == "reduce_interruptions"

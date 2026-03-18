@@ -3577,6 +3577,100 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     }
 
 
+async def _eval_guardian_outcome_learning() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        first = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Take a stretch break.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(first.id, feedback_type="not_helpful")
+
+        second = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Another stretch break reminder.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
+
+        available_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=3,
+            data_quality="good",
+        )
+        mock_context_manager = MagicMock()
+        mock_context_manager.get_context.return_value = available_ctx
+        mock_context_manager.decrement_attention_budget = MagicMock()
+        mock_context_manager.is_daemon_connected.return_value = False
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
+        mock_insight_queue = MagicMock()
+        mock_insight_queue.enqueue = AsyncMock()
+        mock_log_event = AsyncMock()
+
+        with (
+            patch("src.observer.manager.context_manager", mock_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            decision = await deliver_or_queue(
+                WSResponse(
+                    type="proactive",
+                    content="Try the same kind of nudge again.",
+                    intervention_type="advisory",
+                    urgency=3,
+                    reasoning="available_capacity",
+                ),
+                guardian_confidence="grounded",
+            )
+
+        queued_event = _find_audit_call(
+            mock_log_event,
+            event_type="observer_delivery_queued",
+            tool_name="observer_delivery_gate",
+        )
+
+    return {
+        "action": decision.action.value,
+        "reason": decision.reason,
+        "queued": mock_insight_queue.enqueue.await_count == 1,
+        "broadcast_skipped": mock_ws_manager.broadcast.await_count == 0,
+        "learning_bias": queued_event["details"]["learning_bias"],
+        "learning_not_helpful_count": queued_event["details"]["learning_not_helpful_count"],
+    }
+
+
 def _eval_intervention_policy_behavior() -> dict[str, Any]:
     act = decide_intervention(
         message_type="proactive",
@@ -3649,6 +3743,16 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         salience_level="low",
         interruption_cost="low",
     )
+    learned_bundle = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="The same nudge after negative feedback",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        recent_feedback_bias="reduce_interruptions",
+    )
     return {
         "act_action": act.action.value,
         "act_reason": act.reason,
@@ -3664,6 +3768,8 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         "high_interrupt_reason": high_interrupt.reason,
         "low_salience_action": low_salience.action.value,
         "low_salience_reason": low_salience.reason,
+        "learned_bundle_action": learned_bundle.action.value,
+        "learned_bundle_reason": learned_bundle.reason,
     }
 
 
@@ -4240,6 +4346,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Proactive interventions persist outcomes and user feedback, and that summary flows back into guardian-state synthesis.",
         runner=_eval_guardian_feedback_loop,
+    ),
+    EvalScenario(
+        name="guardian_outcome_learning",
+        category="guardian",
+        description="Recent negative feedback on the same intervention type reduces future interruption eagerness and shows up in delivery audit details.",
+        runner=_eval_guardian_outcome_learning,
     ),
     EvalScenario(
         name="daily_briefing_fallback",

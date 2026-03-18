@@ -187,7 +187,7 @@ export function collectWorkflowRuns(events: CockpitAuditEvent[]): WorkflowRunRec
     }
 
     const queue = pending.get(key) ?? [];
-    const run = queue.pop() ?? {
+    const run = queue.shift() ?? {
       id: event.id,
       toolName,
       workflowName: readDetailsString(details, "workflow_name") ?? workflowNameFromTool(toolName),

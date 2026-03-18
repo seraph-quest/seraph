@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../game/EventBus", () => ({
@@ -271,7 +271,7 @@ describe("CockpitView", () => {
         );
       }
       return Promise.resolve(mockResponse({}));
-    });
+  });
 
     render(<CockpitView onSend={() => {}} />);
 
@@ -342,4 +342,48 @@ describe("CockpitView", () => {
     );
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   }, 15000);
+
+  it("does not process refresh payloads after the cockpit unmounts", async () => {
+    const deferredResponses = Array.from({ length: 11 }, () => {
+      let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+      const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    });
+    const jsonSpies = deferredResponses.map(() => vi.fn(async () => ({})));
+    let cockpitFetchCount = 0;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      const next = deferredResponses[cockpitFetchCount];
+      cockpitFetchCount += 1;
+      return next.promise;
+    });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(cockpitFetchCount).toBe(11));
+    view.unmount();
+
+    await act(async () => {
+      deferredResponses.forEach((response, index) => {
+        response.resolve({
+          ok: true,
+          json: jsonSpies[index],
+        });
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(jsonSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
 });

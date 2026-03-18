@@ -191,4 +191,118 @@ describe("collectWorkflowRuns", () => {
       },
     ]);
   });
+
+  it("matches repeated workflow runs in arrival order", () => {
+    const events: CockpitAuditEvent[] = [
+      {
+        id: "evt-call-1",
+        session_id: "session-1",
+        event_type: "tool_call",
+        tool_name: "workflow_web_brief_to_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "Calling workflow run one",
+        details: {
+          arguments: {
+            query: "first",
+            file_path: "notes/first.md",
+          },
+        },
+        created_at: "2026-03-18T12:01:00Z",
+      },
+      {
+        id: "evt-call-2",
+        session_id: "session-1",
+        event_type: "tool_call",
+        tool_name: "workflow_web_brief_to_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "Calling workflow run two",
+        details: {
+          arguments: {
+            query: "second",
+            file_path: "notes/second.md",
+          },
+        },
+        created_at: "2026-03-18T12:01:10Z",
+      },
+      {
+        id: "evt-file-1",
+        session_id: "session-1",
+        event_type: "tool_result",
+        tool_name: "write_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "write_file returned output (20 chars)",
+        details: {
+          arguments: {
+            file_path: "notes/first.md",
+          },
+        },
+        created_at: "2026-03-18T12:01:15Z",
+      },
+      {
+        id: "evt-file-2",
+        session_id: "session-1",
+        event_type: "tool_result",
+        tool_name: "write_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "write_file returned output (20 chars)",
+        details: {
+          arguments: {
+            file_path: "notes/second.md",
+          },
+        },
+        created_at: "2026-03-18T12:01:16Z",
+      },
+      {
+        id: "evt-result-1",
+        session_id: "session-1",
+        event_type: "tool_result",
+        tool_name: "workflow_web_brief_to_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "workflow_web_brief_to_file succeeded (2 steps)",
+        details: {
+          workflow_name: "web-brief-to-file",
+          step_tools: ["web_search", "write_file"],
+          artifact_paths: ["notes/first.md"],
+          continued_error_steps: [],
+        },
+        created_at: "2026-03-18T12:01:20Z",
+      },
+      {
+        id: "evt-result-2",
+        session_id: "session-1",
+        event_type: "tool_result",
+        tool_name: "workflow_web_brief_to_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "workflow_web_brief_to_file succeeded (2 steps)",
+        details: {
+          workflow_name: "web-brief-to-file",
+          step_tools: ["web_search", "write_file"],
+          artifact_paths: ["notes/second.md"],
+          continued_error_steps: [],
+        },
+        created_at: "2026-03-18T12:01:30Z",
+      },
+    ];
+
+    const runs = collectWorkflowRuns(events);
+
+    expect(runs).toHaveLength(2);
+    const firstRun = runs.find((run) => run.id === "evt-call-1");
+    const secondRun = runs.find((run) => run.id === "evt-call-2");
+
+    expect(firstRun).toBeDefined();
+    expect(firstRun?.arguments).toEqual({ query: "first", file_path: "notes/first.md" });
+    expect(firstRun?.artifactPaths).toEqual(["notes/first.md"]);
+    expect(firstRun?.artifacts.map((artifact) => artifact.filePath)).toEqual(["notes/first.md"]);
+    expect(secondRun).toBeDefined();
+    expect(secondRun?.arguments).toEqual({ query: "second", file_path: "notes/second.md" });
+    expect(secondRun?.artifactPaths).toEqual(["notes/second.md"]);
+    expect(secondRun?.artifacts.map((artifact) => artifact.filePath)).toEqual(["notes/second.md"]);
+  });
 });

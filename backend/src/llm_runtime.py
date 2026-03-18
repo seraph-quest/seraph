@@ -1019,6 +1019,19 @@ def _build_routing_decision_details(
     }
 
 
+def _attemptable_targets(
+    ordered_targets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Skip non-compliant targets when at least one compliant option exists."""
+    if any(target["policy_assessment"]["policy_compliant"] for target in ordered_targets):
+        return [
+            target
+            for target in ordered_targets
+            if target["policy_assessment"]["policy_compliant"]
+        ]
+    return ordered_targets
+
+
 def _register_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests[request_id] = False
@@ -1261,7 +1274,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
         last_error: Exception = RuntimeError("No fallback targets available")
 
-        for index, target in enumerate(ordered_targets):
+        attempt_targets = _attemptable_targets(ordered_targets)
+
+        for index, target in enumerate(attempt_targets):
             is_primary = target["source"] == "primary"
             try:
                 if is_primary:
@@ -1354,11 +1369,11 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                             "error": str(error),
                         }
                     )
-                if index + 1 < len(ordered_targets):
+                if index + 1 < len(attempt_targets):
                     logger.warning(
                         "LLM generate failed for %s, retrying with %s",
                         target["model_id"],
-                        ordered_targets[index + 1]["model_id"],
+                        attempt_targets[index + 1]["model_id"],
                         exc_info=True,
                     )
 
@@ -1502,7 +1517,9 @@ def completion_with_fallback_sync(
 
         last_error: Exception = RuntimeError("No fallback targets available")
 
-        for index, target in enumerate(ordered_targets):
+        attempt_targets = _attemptable_targets(ordered_targets)
+
+        for index, target in enumerate(attempt_targets):
             is_primary = target["source"] == "primary"
             try:
                 if is_primary:
@@ -1595,11 +1612,11 @@ def completion_with_fallback_sync(
                             "error": str(error),
                         }
                     )
-                if index + 1 < len(ordered_targets):
+                if index + 1 < len(attempt_targets):
                     logger.warning(
                         "LLM completion failed for model %s, retrying with %s",
                         target["model_id"],
-                        ordered_targets[index + 1]["model_id"],
+                        attempt_targets[index + 1]["model_id"],
                         exc_info=True,
                     )
 

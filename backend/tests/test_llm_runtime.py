@@ -1784,6 +1784,92 @@ def test_completion_with_fallback_applies_cost_and_latency_guardrails(async_db):
     assert "latency_guardrail_exceeded" in primary_candidate["reason_codes"]
 
 
+def test_completion_with_fallback_does_not_try_noncompliant_target_after_guardrail_skip(async_db):
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                "openai/gpt-4o-mini=tool_use|fast;"
+                "openai/gpt-4.1-nano=cheap"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"),
+        patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"),
+        patch(
+            "litellm.completion",
+            side_effect=[RuntimeError("compliant fallback down"), MagicMock()],
+        ) as mock_completion,
+    ):
+        with pytest.raises(RuntimeError, match="compliant fallback down"):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "stay within guardrails"}],
+                temperature=0.2,
+                max_tokens=128,
+                runtime_path="chat_agent",
+            )
+
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openai/gpt-4o-mini",
+    ]
+
+
+def test_fallback_litellm_model_does_not_try_noncompliant_target_after_guardrail_skip(async_db):
+    with (
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                "openai/gpt-4o-mini=tool_use|fast;"
+                "openai/gpt-4.1-nano=cheap"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "agent_generate=tool_use|fast"),
+        patch.object(settings, "runtime_policy_requirements", "agent_generate=tool_use"),
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            side_effect=AssertionError("primary target should be skipped"),
+        ),
+    ):
+        model = FallbackLiteLLMModel(
+            model_id="openrouter/anthropic/claude-sonnet-4",
+            api_key="primary-key",
+            api_base="https://openrouter.ai/api/v1",
+            runtime_profile="default",
+            runtime_path="chat_agent",
+        )
+        compliant_fallback = model._fallback_models[0]
+        noncompliant_fallback = model._fallback_models[1]
+
+        with (
+            patch.object(
+                compliant_fallback,
+                "generate",
+                side_effect=RuntimeError("compliant fallback down"),
+            ) as mock_compliant_generate,
+            patch.object(
+                noncompliant_fallback,
+                "generate",
+                return_value=MagicMock(),
+            ) as mock_noncompliant_generate,
+        ):
+            with pytest.raises(RuntimeError, match="compliant fallback down"):
+                model.generate([{"role": "user", "content": "stay within guardrails"}])
+
+        assert mock_compliant_generate.call_count == 1
+        mock_noncompliant_generate.assert_not_called()
+
+
 def test_fallback_litellm_model_skips_duplicate_fallback_target():
     with (
         patch.object(settings, "fallback_model", "openai/gpt-4o-mini"),

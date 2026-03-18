@@ -237,7 +237,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     refreshGoals();
   }, [loadSessions, refreshGoals]);
 
-  const refreshCockpit = useCallback(async (cancelled = false) => {
+  const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
     try {
       const [
         observerResponse,
@@ -265,22 +265,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         fetch(`${API_URL}/api/tools`),
       ]);
 
-      if (!cancelled && observerResponse.ok) {
+      if (!isCancelled() && observerResponse.ok) {
         const observerPayload = await observerResponse.json();
         setObserverState(observerPayload);
       }
 
-      if (!cancelled && auditResponse.ok) {
+      if (!isCancelled() && auditResponse.ok) {
         const auditPayload = await auditResponse.json();
         setAuditEvents(Array.isArray(auditPayload) ? auditPayload : []);
       }
 
-      if (!cancelled && approvalsResponse.ok) {
+      if (!isCancelled() && approvalsResponse.ok) {
         const approvalsPayload = await approvalsResponse.json();
         setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
       }
 
-      if (!cancelled && continuityResponse.ok) {
+      if (!isCancelled() && continuityResponse.ok) {
         const continuityPayload: ObserverContinuitySnapshot = await continuityResponse.json();
         setDaemonPresence(continuityPayload.daemon);
         setDesktopNotifications(continuityPayload.notifications ?? []);
@@ -288,36 +288,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
         setRecentInterventions(continuityPayload.recent_interventions ?? []);
       }
-      if (!cancelled && workflowsResponse.ok) {
+      if (!isCancelled() && workflowsResponse.ok) {
         const workflowPayload = await workflowsResponse.json();
         setWorkflows(Array.isArray(workflowPayload.workflows) ? workflowPayload.workflows : []);
       }
-      if (!cancelled && skillsResponse.ok) {
+      if (!isCancelled() && skillsResponse.ok) {
         const skillsPayload = await skillsResponse.json();
         setSkills(Array.isArray(skillsPayload.skills) ? skillsPayload.skills : []);
       }
-      if (!cancelled && serversResponse.ok) {
+      if (!isCancelled() && serversResponse.ok) {
         const serverPayload = await serversResponse.json();
         setMcpServers(Array.isArray(serverPayload.servers) ? serverPayload.servers : []);
       }
-      if (!cancelled && toolModeResponse.ok) {
+      if (!isCancelled() && toolModeResponse.ok) {
         const toolModePayload = await toolModeResponse.json();
         setToolPolicyMode(toolModePayload.mode ?? "unknown");
       }
-      if (!cancelled && mcpModeResponse.ok) {
+      if (!isCancelled() && mcpModeResponse.ok) {
         const mcpModePayload = await mcpModeResponse.json();
         setMcpPolicyMode(mcpModePayload.mode ?? "unknown");
       }
-      if (!cancelled && approvalModeResponse.ok) {
+      if (!isCancelled() && approvalModeResponse.ok) {
         const approvalModePayload = await approvalModeResponse.json();
         setApprovalMode(approvalModePayload.mode ?? "unknown");
       }
-      if (!cancelled && toolsResponse.ok) {
+      if (!isCancelled() && toolsResponse.ok) {
         const toolsPayload = await toolsResponse.json();
         setTools(Array.isArray(toolsPayload) ? toolsPayload : toolsPayload.tools ?? []);
       }
     } catch {
-      if (!cancelled) {
+      if (!isCancelled()) {
         setAuditEvents([]);
         setPendingApprovals([]);
         setDaemonPresence(null);
@@ -341,7 +341,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     const refresh = async () => {
       try {
-        await refreshCockpit(cancelled);
+        await refreshCockpit(() => cancelled);
       } catch {}
     };
 

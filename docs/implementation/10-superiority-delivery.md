@@ -63,14 +63,14 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, direct artifact-to-workflow draft handoff, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
 - [ ] still missing: deeper workflow history and more flexible workspace control beyond the first dedicated workflow-run layer
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, a first operator-facing workflow-control layer with draft-to-cockpit steering, and a first cockpit workflow-run/operator surface
-- [ ] still missing: richer direct workflow control, deeper workflow history, stronger artifact round-tripping, and easier extension ergonomics
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, and direct artifact-to-workflow draft handoff from cockpit inspectors
+- [ ] still missing: richer direct workflow control, deeper workflow history, and easier extension ergonomics
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
@@ -89,7 +89,8 @@ This file explains:
 - [x] `cockpit-workflow-views-v1` and `guardian-learning-loop-v2` are now the second and third shipped items from the refreshed queue on this branch.
 - [x] `cross-surface-continuity-v2` is now the fourth shipped item from the refreshed queue on this branch.
 - [x] `provider-policy-safeguards-v2` is now the fifth shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `artifact-evidence-roundtrip-v2` because the first strict provider safeguard layer is now in place and the next leverage gap shifts back to operator workflow density.
+- [x] `artifact-evidence-roundtrip-v2` is now the sixth shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `human-world-model-v2` because direct artifact/workflow handoff is now in place and the next leverage gap shifts back to adaptive guardian quality.
 - [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

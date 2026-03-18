@@ -60,6 +60,36 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/workflows")) {
+        return Promise.resolve(
+          mockResponse({
+            workflows: [
+              {
+                name: "summarize-file",
+                tool_name: "workflow_summarize_file",
+                description: "Summarize an existing workspace file",
+                inputs: {
+                  file_path: { type: "string", description: "Workspace file", required: true },
+                },
+                requires_tools: ["read_file"],
+                requires_skills: [],
+                user_invocable: true,
+                enabled: true,
+                step_count: 1,
+                file_path: "defaults/workflows/summarize-file.json",
+                policy_modes: ["balanced", "full"],
+                execution_boundaries: ["workspace"],
+                risk_level: "low",
+                requires_approval: false,
+                approval_behavior: "direct",
+                is_available: true,
+                missing_tools: [],
+                missing_skills: [],
+              },
+            ],
+          }),
+        );
+      }
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(
           mockResponse({
@@ -153,6 +183,10 @@ describe("CockpitView", () => {
 
     expect(screen.getByText("Draft Rerun")).toBeInTheDocument();
     expect(screen.getByText("Use Output")).toBeInTheDocument();
+    const runButton = screen.getByText("Run summarize-file");
+    expect(runButton).toBeInTheDocument();
+    fireEvent.click(runButton);
+    expect(screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/brief.md"\./)).toBeInTheDocument();
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   });
 });

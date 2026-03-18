@@ -91,7 +91,7 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#6 artifact-evidence-roundtrip-v2`
+- the current active item is `#7 human-world-model-v2`
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -103,7 +103,7 @@ It should always show the next 10 most valuable PRs, while the latest completed 
    unify browser state, daemon state, queued notifications, and recent interventions into one consistent continuity model
 5. [x] `provider-policy-safeguards-v2`:
    add capability constraints, cost and latency guardrails, and stronger routing safety beyond the current weighted scoring layer
-6. [ ] `artifact-evidence-roundtrip-v2`:
+6. [x] `artifact-evidence-roundtrip-v2`:
    deepen round-tripping between workflow outputs, evidence panes, file artifacts, and the command surface
 7. [ ] `human-world-model-v2`:
    grow the first explicit working-state and commitments model into stronger project, pressure, and recent-execution understanding
@@ -158,6 +158,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] second privileged-path hardening pass, including secret-ref containment to explicit injection-safe surfaces, workflow/operator metadata for secret-ref acceptance, and rejection of workflows whose runtime step tools are underdeclared
 - [x] first operator workflow-control layer in the settings surface, including workflow enable/disable, reload, draft-to-cockpit flow control, and artifact path round-tripping back into the command bar
 - [x] dedicated cockpit workflow-run views with richer workflow audit details, artifact-lineage linking, replay drafting, and workflow-specific inspector actions
+- [x] cockpit artifacts and workflow outputs can now draft compatible follow-on workflows directly from the inspector instead of only seeding generic command-bar context
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
 - [x] first strict provider-policy safeguard layer for runtime paths, including required capability intents plus cost/latency guardrails that reroute only when compliant targets exist and otherwise fail open with explicit audit visibility

@@ -22,11 +22,12 @@
 
 - [x] this workstream shipped the first operator workflow-control slice through `workflow-control-and-artifact-roundtrips-v1`
 - [x] this workstream partnered on `cockpit-workflow-views-v1`
+- [x] this workstream now ships `artifact-evidence-roundtrip-v2`
 - [x] this workstream now hands the queue forward to guardian learning and salience work
 
 ## Still To Do On `develop`
 
-- [ ] deeper workflow operating surfaces, richer workflow history, and stronger artifact round-tripping beyond the first settings/cockpit loop
+- [ ] deeper workflow operating surfaces and richer workflow history beyond the first settings/cockpit loop plus direct artifact-to-workflow drafting
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 
@@ -40,4 +41,5 @@
 - [x] Seraph can load reusable skills and external MCP tool surfaces
 - [x] Seraph can expose a specialist/delegation shape beyond a single monolithic agent
 - [x] Seraph can expose reusable workflows across tools, skills, delegation, and connected MCP capabilities
+- [x] Seraph can round-trip workflow artifacts back into both the command surface and compatible follow-on workflow drafts
 - [ ] Seraph compounds capability through extensions and workflows in a way that is simple to operate

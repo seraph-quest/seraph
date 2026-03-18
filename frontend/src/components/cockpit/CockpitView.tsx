@@ -6,6 +6,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
+import { buildWorkflowDraft, type WorkflowInfo } from "../settings/workflowDraft";
 import {
   collectArtifacts,
   collectWorkflowRuns,
@@ -127,6 +128,10 @@ function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
     : `Run workflow "${workflow.workflowName}".`;
 }
 
+function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
+  return Object.prototype.hasOwnProperty.call(workflow.inputs, "file_path");
+}
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
@@ -139,6 +144,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
   const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -174,11 +180,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     const refreshCockpit = async () => {
       try {
-        const [observerResponse, auditResponse, approvalsResponse, continuityResponse] = await Promise.all([
+        const [
+          observerResponse,
+          auditResponse,
+          approvalsResponse,
+          continuityResponse,
+          workflowsResponse,
+        ] = await Promise.all([
           fetch(`${API_URL}/api/observer/state`),
           fetch(`${API_URL}/api/audit/events?limit=12`),
           fetch(`${API_URL}/api/approvals/pending?limit=8`),
           fetch(`${API_URL}/api/observer/continuity`),
+          fetch(`${API_URL}/api/workflows`),
         ]);
 
         if (!cancelled && observerResponse.ok) {
@@ -202,6 +215,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
           setRecentInterventions(continuityPayload.recent_interventions ?? []);
         }
+        if (!cancelled && workflowsResponse.ok) {
+          const workflowPayload = await workflowsResponse.json();
+          setWorkflows(Array.isArray(workflowPayload.workflows) ? workflowPayload.workflows : []);
+        }
       } catch {
         if (!cancelled) {
           setAuditEvents([]);
@@ -209,6 +226,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           setDaemonPresence(null);
           setQueuedBundleCount(0);
           setRecentInterventions([]);
+          setWorkflows([]);
         }
       }
     };
@@ -248,6 +266,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const recentConversation = messages.slice(-18);
   const artifacts = useMemo(() => collectArtifacts(auditEvents), [auditEvents]);
   const workflowRuns = useMemo(() => collectWorkflowRuns(auditEvents).slice(0, 6), [auditEvents]);
+  const artifactRoundtripWorkflows = useMemo(
+    () =>
+      workflows.filter(
+        (workflow) =>
+          workflow.user_invocable
+          && workflow.enabled
+          && workflow.is_available !== false
+          && supportsArtifactRoundtrip(workflow),
+      ),
+    [workflows],
+  );
   const recentTrace = messages
     .filter((message) => message.role === "step" || message.role === "error")
     .slice(-8)
@@ -324,6 +353,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function queueComposerDraft(message: string) {
     setComposer(message);
     inputRef.current?.focus();
+  }
+
+  function queueArtifactWorkflowDraft(workflow: WorkflowInfo, artifactPath: string) {
+    queueComposerDraft(buildWorkflowDraft(workflow, artifactPath));
   }
 
   function renderInspector() {
@@ -433,10 +466,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     `Use the workspace file "${selectedInspector.workflow.artifactPaths[0]}" as context for the next action.`,
                   )
                 }
-              >
-                Use Output
-              </button>
-            )}
+                >
+                  Use Output
+                </button>
+              )}
+              {selectedInspector.workflow.artifactPaths[0]
+                && artifactRoundtripWorkflows.slice(0, 2).map((workflow) => (
+                  <button
+                    key={`${selectedInspector.workflow.id}:${workflow.name}`}
+                    className="cockpit-feedback-button"
+                    onClick={() =>
+                      queueArtifactWorkflowDraft(
+                        workflow,
+                        selectedInspector.workflow.artifactPaths[0]!,
+                      )
+                    }
+                  >
+                    Run {workflow.name}
+                  </button>
+                ))}
           </div>
         )}
         {selectedInspector.kind === "artifact" && (
@@ -448,9 +496,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   `Use the workspace file "${selectedInspector.artifact.filePath}" as context for the next action.`,
                 )
               }
-            >
-              Use In Command Bar
-            </button>
+              >
+                Use In Command Bar
+              </button>
+            {artifactRoundtripWorkflows.slice(0, 2).map((workflow) => (
+              <button
+                key={`${selectedInspector.artifact.id}:${workflow.name}`}
+                className="cockpit-feedback-button"
+                onClick={() =>
+                  queueArtifactWorkflowDraft(workflow, selectedInspector.artifact.filePath)
+                }
+              >
+                Run {workflow.name}
+              </button>
+            ))}
           </div>
         )}
         <div className="cockpit-inspector-details">

@@ -63,14 +63,14 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, direct artifact-to-workflow draft handoff, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
-- [ ] still missing: deeper workflow history and more flexible workspace control beyond the first dedicated workflow-run layer
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, direct artifact-to-workflow draft handoff, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, a first actionable desktop shell, a first cockpit-native operator surface for policy/extension/workflow state, and legacy village fallback
+- [ ] still missing: deeper workflow history and more flexible workspace control beyond the first dedicated workflow-run layer plus the first operator surface
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, and direct artifact-to-workflow draft handoff from cockpit inspectors
-- [ ] still missing: richer direct workflow control, deeper workflow history, and easier extension ergonomics
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, direct artifact-to-workflow draft handoff from cockpit inspectors, and a cockpit-native operator surface for workflow availability plus extension/runtime visibility
+- [ ] still missing: richer direct workflow control, deeper workflow history, and easier extension ergonomics beyond that first cockpit operator surface
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
@@ -92,7 +92,8 @@ This file explains:
 - [x] `artifact-evidence-roundtrip-v2` is now the sixth shipped item from the refreshed queue on this branch.
 - [x] `human-world-model-v2` is now the seventh shipped item from the refreshed queue on this branch.
 - [x] `native-desktop-shell-v2` is now the eighth shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `extension-operator-surface-v1` because the desktop shell is now actionable and the next leverage gap shifts to operator control of the extension/runtime surface.
+- [x] `extension-operator-surface-v1` is now the ninth shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `guardian-behavioral-evals-v3` because the operator/runtime surface is now materially more legible and the next leverage gap shifts to proving the deeper learned guardian flow end to end.
 - [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

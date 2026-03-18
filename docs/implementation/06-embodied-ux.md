@@ -15,6 +15,7 @@
 - [x] cockpit artifact and workflow inspectors can now draft compatible follow-on workflows directly from selected artifact paths
 - [x] persisted cockpit workspace presets for `default`, `focus`, and `review`, with inspector visibility persistence and keyboard switching
 - [x] cockpit-native bridge cues through live desktop status, pending native-notification state, deferred bundle visibility, recent intervention continuity, and browser-side native-presence controls in the operator surfaces
+- [x] cockpit-native operator surface for workflow availability, skills, MCP servers, and live policy state with direct reload controls
 - [x] cockpit-first default browser mode with explicit fallback to the legacy village shell
 - [x] retro village UI with Phaser-based world rendering
 - [x] animated avatar states with visible casting behavior during tool use
@@ -30,10 +31,11 @@
 - [x] this workstream partnered on `cross-surface-continuity-and-notification-controls`
 - [x] this workstream now ships `cockpit-workflow-views-v1`
 - [x] this workstream now ships `artifact-evidence-roundtrip-v2`
+- [x] this workstream now ships `extension-operator-surface-v1`
 
 ## Still To Do On `develop`
 
-- [ ] richer workflow history, broader keyboard/operator control, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer plus direct artifact/workflow draft handoff
+- [ ] richer workflow history, broader keyboard/operator control, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, direct artifact/workflow draft handoff, and first operator surface
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 
@@ -52,5 +54,6 @@
 - [x] cockpit artifacts can now round-trip back into the command bar for the next operator step
 - [x] cockpit artifacts can now also seed compatible follow-on workflow drafts directly from the inspector
 - [x] the cockpit now supports persisted workspace presets and keyboard switching for core navigation
+- [x] the cockpit now exposes first-class operator visibility for workflows, skills, MCP servers, and live policy state
 - [ ] the cockpit still needs broader workflow history, denser workflow control, and more flexible workspace ergonomics
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

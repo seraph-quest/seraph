@@ -86,8 +86,65 @@ describe("CockpitView", () => {
                 missing_tools: [],
                 missing_skills: [],
               },
+              {
+                name: "web-brief-to-file",
+                tool_name: "workflow_web_brief_to_file",
+                description: "Search and save a brief",
+                inputs: {
+                  query: { type: "string", description: "Search query", required: true },
+                  file_path: { type: "string", description: "Workspace file", required: true },
+                },
+                requires_tools: ["web_search", "write_file"],
+                requires_skills: [],
+                user_invocable: true,
+                enabled: true,
+                step_count: 2,
+                file_path: "defaults/workflows/web-brief-to-file.json",
+                policy_modes: ["balanced", "full"],
+                execution_boundaries: ["workspace", "network"],
+                risk_level: "medium",
+                requires_approval: false,
+                approval_behavior: "direct",
+                is_available: false,
+                missing_tools: ["write_file"],
+                missing_skills: [],
+              },
             ],
           }),
+        );
+      }
+      if (url.includes("/api/skills/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
+      if (url.includes("/api/workflows/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
+      if (url.includes("/api/skills")) {
+        return Promise.resolve(
+          mockResponse({
+            skills: [
+              { name: "goal-reflection", enabled: true, description: "Reflect on goals" },
+              { name: "calendar-planning", enabled: false, description: "Plan from calendar" },
+            ],
+          }),
+        );
+      }
+      if (url.includes("/api/mcp/servers")) {
+        return Promise.resolve(
+          mockResponse({
+            servers: [
+              { name: "browser", enabled: true, url: "http://localhost:9001/mcp" },
+              { name: "vault", enabled: false, url: "http://localhost:9002/mcp" },
+            ],
+          }),
+        );
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) {
+        return Promise.resolve(
+          mockResponse([
+            { name: "read_file", risk_level: "low", execution_boundaries: ["workspace"] },
+            { name: "shell_execute", risk_level: "high", execution_boundaries: ["workspace"] },
+            { name: "mcp_browser_search", risk_level: "medium", execution_boundaries: ["external_mcp"] },
+          ]),
         );
       }
       if (url.includes("/api/observer/continuity")) {
@@ -188,6 +245,9 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(screen.getByText("Workflow runs")).toBeInTheDocument());
     expect(screen.getByText("Desktop shell")).toBeInTheDocument();
+    expect(screen.getByText("Operator surface")).toBeInTheDocument();
+    expect(screen.getByText("tool balanced · mcp approval")).toBeInTheDocument();
+    expect(screen.getByText("blocked web-brief-to-file · tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getAllByText("Hold this until the browser is back.").length).toBeGreaterThan(0);
@@ -205,6 +265,13 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/observer/notifications/note-1/dismiss"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    fireEvent.click(screen.getByText("Reload Skills"));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/skills/reload"),
         expect.objectContaining({ method: "POST" }),
       ),
     );

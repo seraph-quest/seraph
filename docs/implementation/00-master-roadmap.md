@@ -91,7 +91,7 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#9 extension-operator-surface-v1`
+- the current active item is `#10 guardian-behavioral-evals-v3`
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -109,7 +109,7 @@ It should always show the next 10 most valuable PRs, while the latest completed 
    grow the first explicit working-state and commitments model into stronger project, pressure, and recent-execution understanding
 8. [x] `native-desktop-shell-v2`:
    move from a presence card plus notifications to a more coherent desktop control shell with actionable recents and controls
-9. [ ] `extension-operator-surface-v1`:
+9. [x] `extension-operator-surface-v1`:
    make skills, MCP servers, workflows, and policy state easier to operate and debug from one place
 10. [ ] `guardian-behavioral-evals-v3`:
    prove the next learning, workflow-density, and cross-surface behaviors with deeper end-to-end guardian contracts
@@ -159,6 +159,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] first operator workflow-control layer in the settings surface, including workflow enable/disable, reload, draft-to-cockpit flow control, and artifact path round-tripping back into the command bar
 - [x] dedicated cockpit workflow-run views with richer workflow audit details, artifact-lineage linking, replay drafting, and workflow-specific inspector actions
 - [x] cockpit artifacts and workflow outputs can now draft compatible follow-on workflows directly from the inspector instead of only seeding generic command-bar context
+- [x] the cockpit now exposes a compact operator surface for workflow availability, skills, MCP server state, and live policy modes with direct reload actions
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
 - [x] first strict provider-policy safeguard layer for runtime paths, including required capability intents plus cost/latency guardrails that reroute only when compliant targets exist and otherwise fail open with explicit audit visibility

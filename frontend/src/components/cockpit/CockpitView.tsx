@@ -93,6 +93,25 @@ interface ObserverContinuitySnapshot {
   recent_interventions: GuardianContinuityIntervention[];
 }
 
+interface SkillInfo {
+  name: string;
+  enabled: boolean;
+  description?: string;
+}
+
+interface McpServerInfo {
+  name: string;
+  enabled: boolean;
+  url?: string;
+  description?: string;
+}
+
+interface ToolInfo {
+  name: string;
+  risk_level?: string;
+  execution_boundaries?: string[];
+}
+
 type InspectorSelection =
   | { kind: "approval"; approval: PendingApproval }
   | { kind: "workflow"; workflow: WorkflowRunRecord }
@@ -165,6 +184,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
+  const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [toolPolicyMode, setToolPolicyMode] = useState("unknown");
+  const [mcpPolicyMode, setMcpPolicyMode] = useState("unknown");
+  const [approvalMode, setApprovalMode] = useState("unknown");
+  const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
   const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -203,12 +229,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         approvalsResponse,
         continuityResponse,
         workflowsResponse,
+        skillsResponse,
+        serversResponse,
+        toolModeResponse,
+        mcpModeResponse,
+        approvalModeResponse,
+        toolsResponse,
       ] = await Promise.all([
         fetch(`${API_URL}/api/observer/state`),
         fetch(`${API_URL}/api/audit/events?limit=12`),
         fetch(`${API_URL}/api/approvals/pending?limit=8`),
         fetch(`${API_URL}/api/observer/continuity`),
         fetch(`${API_URL}/api/workflows`),
+        fetch(`${API_URL}/api/skills`),
+        fetch(`${API_URL}/api/mcp/servers`),
+        fetch(`${API_URL}/api/settings/tool-policy-mode`),
+        fetch(`${API_URL}/api/settings/mcp-policy-mode`),
+        fetch(`${API_URL}/api/settings/approval-mode`),
+        fetch(`${API_URL}/api/tools`),
       ]);
 
       if (!cancelled && observerResponse.ok) {
@@ -238,6 +276,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         const workflowPayload = await workflowsResponse.json();
         setWorkflows(Array.isArray(workflowPayload.workflows) ? workflowPayload.workflows : []);
       }
+      if (!cancelled && skillsResponse.ok) {
+        const skillsPayload = await skillsResponse.json();
+        setSkills(Array.isArray(skillsPayload.skills) ? skillsPayload.skills : []);
+      }
+      if (!cancelled && serversResponse.ok) {
+        const serverPayload = await serversResponse.json();
+        setMcpServers(Array.isArray(serverPayload.servers) ? serverPayload.servers : []);
+      }
+      if (!cancelled && toolModeResponse.ok) {
+        const toolModePayload = await toolModeResponse.json();
+        setToolPolicyMode(toolModePayload.mode ?? "unknown");
+      }
+      if (!cancelled && mcpModeResponse.ok) {
+        const mcpModePayload = await mcpModeResponse.json();
+        setMcpPolicyMode(mcpModePayload.mode ?? "unknown");
+      }
+      if (!cancelled && approvalModeResponse.ok) {
+        const approvalModePayload = await approvalModeResponse.json();
+        setApprovalMode(approvalModePayload.mode ?? "unknown");
+      }
+      if (!cancelled && toolsResponse.ok) {
+        const toolsPayload = await toolsResponse.json();
+        setTools(Array.isArray(toolsPayload) ? toolsPayload : toolsPayload.tools ?? []);
+      }
     } catch {
       if (!cancelled) {
         setAuditEvents([]);
@@ -248,6 +310,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setQueuedBundleCount(0);
         setRecentInterventions([]);
         setWorkflows([]);
+        setSkills([]);
+        setMcpServers([]);
+        setTools([]);
+        setToolPolicyMode("unknown");
+        setMcpPolicyMode("unknown");
+        setApprovalMode("unknown");
       }
     }
   }, []);
@@ -308,6 +376,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           && supportsArtifactRoundtrip(workflow),
       ),
     [workflows],
+  );
+  const availableWorkflows = useMemo(
+    () => workflows.filter((workflow) => workflow.is_available !== false),
+    [workflows],
+  );
+  const blockedWorkflows = useMemo(
+    () => workflows.filter((workflow) => workflow.is_available === false),
+    [workflows],
+  );
+  const enabledSkills = useMemo(() => skills.filter((skill) => skill.enabled), [skills]);
+  const enabledMcpServers = useMemo(() => mcpServers.filter((server) => server.enabled), [mcpServers]);
+  const mcpTools = useMemo(
+    () => tools.filter((tool) => tool.name.startsWith("mcp_") || tool.execution_boundaries?.includes("external_mcp")),
+    [tools],
+  );
+  const highRiskTools = useMemo(
+    () => tools.filter((tool) => tool.risk_level === "high"),
+    [tools],
   );
   const recentTrace = messages
     .filter((message) => message.role === "step" || message.role === "error")
@@ -413,6 +499,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   function queueArtifactWorkflowDraft(workflow: WorkflowInfo, artifactPath: string) {
     queueComposerDraft(buildWorkflowDraft(workflow, artifactPath));
+  }
+
+  async function reloadOperatorSurface(path: "skills" | "workflows") {
+    setOperatorStatus(`Reloading ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/${path}/reload`, { method: "POST" });
+      if (!response.ok) {
+        setOperatorStatus(`Failed to reload ${path}`);
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${path} reloaded`);
+    } catch {
+      setOperatorStatus(`Failed to reload ${path}`);
+    }
   }
 
   function renderInspector() {
@@ -1150,6 +1251,87 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               ))}
               {desktopNotifications.length === 0 && queuedInsights.length === 0 && recentInterventions.length === 0 && (
                 <div className="cockpit-empty">No desktop continuity items yet.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="cockpit-panel">
+            <div className="cockpit-card-header">
+              <div className="cockpit-card-title">Operator surface</div>
+              <div className="cockpit-card-meta">
+                tool {toolPolicyMode} · mcp {mcpPolicyMode}
+              </div>
+            </div>
+            <div className="cockpit-state-grid">
+              <div>
+                <div className="cockpit-key">approval</div>
+                <div className="cockpit-value">{approvalMode}</div>
+              </div>
+              <div>
+                <div className="cockpit-key">visible tools</div>
+                <div className="cockpit-value">
+                  {tools.length} total · {highRiskTools.length} high risk
+                </div>
+              </div>
+              <div>
+                <div className="cockpit-key">skills</div>
+                <div className="cockpit-value">
+                  {enabledSkills.length}/{skills.length} enabled
+                </div>
+              </div>
+              <div>
+                <div className="cockpit-key">mcp</div>
+                <div className="cockpit-value">
+                  {enabledMcpServers.length}/{mcpServers.length} servers · {mcpTools.length} tools
+                </div>
+              </div>
+            </div>
+            <div className="cockpit-feedback-row">
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => setSettingsPanelOpen(true)}
+              >
+                Open Settings
+              </button>
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => void reloadOperatorSurface("skills")}
+              >
+                Reload Skills
+              </button>
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => void reloadOperatorSurface("workflows")}
+              >
+                Reload Workflows
+              </button>
+            </div>
+            <div className="cockpit-sublist">
+              <div className="cockpit-sublist-item">
+                workflows {availableWorkflows.length}/{workflows.length} available
+              </div>
+              {blockedWorkflows.slice(0, 2).map((workflow) => (
+                <div key={workflow.name} className="cockpit-sublist-item">
+                  blocked {workflow.name}
+                  {workflow.missing_tools?.length ? ` · tools ${workflow.missing_tools.join(", ")}` : ""}
+                  {workflow.missing_skills?.length ? ` · skills ${workflow.missing_skills.join(", ")}` : ""}
+                </div>
+              ))}
+              {enabledSkills.slice(0, 2).map((skill) => (
+                <div key={skill.name} className="cockpit-sublist-item">
+                  skill {skill.name}
+                </div>
+              ))}
+              {enabledMcpServers.slice(0, 2).map((server) => (
+                <div key={server.name} className="cockpit-sublist-item">
+                  mcp {server.name}
+                </div>
+              ))}
+              {operatorStatus && (
+                <div className="cockpit-sublist-item">{operatorStatus}</div>
+              )}
+              {workflows.length === 0 && skills.length === 0 && mcpServers.length === 0 && (
+                <div className="cockpit-empty">Operator surface unavailable.</div>
               )}
             </div>
           </section>

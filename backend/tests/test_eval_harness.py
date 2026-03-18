@@ -85,6 +85,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_path_patterns" in captured.out
     assert "provider_policy_capabilities" in captured.out
     assert "provider_policy_scoring" in captured.out
+    assert "provider_policy_safeguards" in captured.out
     assert "provider_routing_decision_audit" in captured.out
     assert "session_bound_llm_trace" in captured.out
     assert "session_consolidation_behavior" in captured.out
@@ -179,6 +180,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_path_patterns",
                 "provider_policy_capabilities",
                 "provider_policy_scoring",
+                "provider_policy_safeguards",
                 "provider_routing_decision_audit",
                 "session_bound_llm_trace",
                 "session_consolidation_behavior",
@@ -598,6 +600,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-mini",
         "openai/gpt-4o-mini",
     ]
+    assert details_by_name["provider_policy_safeguards"]["attempted_models"] == ["openai/gpt-4o-mini"]
+    assert details_by_name["provider_policy_safeguards"]["selected_model"] == "openai/gpt-4o-mini"
+    assert details_by_name["provider_policy_safeguards"]["rerouted_from_policy_guardrails"] is True
+    assert details_by_name["provider_policy_safeguards"]["required_policy_intents"] == ["tool_use"]
+    assert details_by_name["provider_policy_safeguards"]["max_cost_tier"] == "medium"
+    assert details_by_name["provider_policy_safeguards"]["max_latency_tier"] == "medium"
+    assert details_by_name["provider_policy_safeguards"]["primary_missing_required_intents"] == ["tool_use"]
+    assert details_by_name["provider_policy_safeguards"]["primary_cost_guardrail"] is False
+    assert details_by_name["provider_policy_safeguards"]["primary_latency_guardrail"] is False
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_model"] == (
         "openrouter/anthropic/claude-sonnet-4"
     )

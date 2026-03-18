@@ -2137,6 +2137,72 @@ def _eval_provider_policy_scoring() -> dict[str, Any]:
     }
 
 
+async def _eval_provider_policy_safeguards() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Guardrails selected the compliant target.")
+
+    _reset_target_health()
+    try:
+        async with _patched_async_db("src.audit.repository.get_session"):
+            with (
+                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+                patch.object(settings, "llm_api_key", "primary-key"),
+                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+                patch.object(settings, "fallback_model", ""),
+                patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+                patch.object(
+                    settings,
+                    "provider_capability_overrides",
+                    (
+                        "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                        "openai/gpt-4o-mini=tool_use|fast;"
+                        "openai/gpt-4.1-nano=cheap"
+                    ),
+                ),
+                patch.object(
+                    settings,
+                    "provider_cost_tiers",
+                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                ),
+                patch.object(
+                    settings,
+                    "provider_latency_tiers",
+                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                ),
+                patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"),
+                patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"),
+                patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"),
+                patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"),
+                patch("litellm.completion", return_value=completion_response) as mock_completion,
+            ):
+                response = completion_with_fallback_sync(
+                    messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
+                    temperature=0.2,
+                    max_tokens=128,
+                    runtime_path="chat_agent",
+                )
+                await asyncio.sleep(0)
+                events = await audit_repository.list_events(limit=10)
+    finally:
+        _reset_target_health()
+
+    routing_event = next(event for event in events if event["event_type"] == "llm_routing_decision")
+    primary_candidate = next(
+        candidate for candidate in routing_event["details"]["candidate_targets"] if candidate["source"] == "primary"
+    )
+    return {
+        "attempted_models": [call.kwargs["model"] for call in mock_completion.call_args_list],
+        "response_excerpt": response.choices[0].message.content,
+        "selected_model": routing_event["details"]["selected_model"],
+        "rerouted_from_policy_guardrails": routing_event["details"]["rerouted_from_policy_guardrails"],
+        "required_policy_intents": routing_event["details"]["required_policy_intents"],
+        "max_cost_tier": routing_event["details"]["max_cost_tier"],
+        "max_latency_tier": routing_event["details"]["max_latency_tier"],
+        "primary_missing_required_intents": primary_candidate["missing_required_intents"],
+        "primary_cost_guardrail": primary_candidate["within_cost_guardrail"],
+        "primary_latency_guardrail": primary_candidate["within_latency_guardrail"],
+    }
+
+
 async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
     completion_response = _make_litellm_response("Policy matched the fast fallback.")
     first_agent_response = MagicMock()
@@ -4836,6 +4902,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Runtime-path policy scoring can rank targets by weighted capability value instead of only intent order.",
         runner=_eval_provider_policy_scoring,
+    ),
+    EvalScenario(
+        name="provider_policy_safeguards",
+        category="runtime",
+        description="Runtime-path safeguards can require specific capabilities and steer away from targets that violate cost or latency guardrails when compliant targets exist.",
+        runner=_eval_provider_policy_safeguards,
     ),
     EvalScenario(
         name="provider_routing_decision_audit",

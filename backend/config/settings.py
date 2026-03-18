@@ -18,8 +18,13 @@ class Settings(BaseSettings):
     runtime_model_overrides: str = ""  # comma-separated runtime_path=model or runtime_path=profile:model entries
     runtime_fallback_overrides: str = ""  # semicolon-separated runtime_path=model_a|model_b entries
     runtime_policy_intents: str = ""  # semicolon-separated runtime_path=intent_a|intent_b entries
+    runtime_policy_requirements: str = ""  # semicolon-separated runtime_path=intent_a|intent_b entries that become hard requirements when compliant targets exist
     runtime_policy_scores: str = ""  # semicolon-separated runtime_path=intent_a:weight|intent_b:weight entries
+    runtime_max_cost_tier: str = ""  # semicolon-separated runtime_path=low|medium|high entries
+    runtime_max_latency_tier: str = ""  # semicolon-separated runtime_path=low|medium|high entries
     provider_capability_overrides: str = ""  # semicolon-separated model_or_glob=capability_a|capability_b entries
+    provider_cost_tiers: str = ""  # semicolon-separated model_or_glob=low|medium|high entries
+    provider_latency_tiers: str = ""  # semicolon-separated model_or_glob=low|medium|high entries
     llm_target_cooldown_seconds: int = 300  # temporarily deprioritize failed LLM targets across requests
     model_temperature: float = 0.7
     model_max_tokens: int = 4096

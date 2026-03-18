@@ -51,8 +51,8 @@ This file explains:
 
 ### 3. Reliability and legibility
 
-- [x] shipped foundations: runtime routing, fallbacks, scoring, structured audit visibility, and deterministic eval harness coverage
-- [ ] still missing: broader behavioral eval depth and richer provider policy beyond the current weighted router
+- [x] shipped foundations: runtime routing, fallbacks, weighted scoring, strict required-capability plus cost/latency safeguard routing, structured audit visibility, and deterministic eval harness coverage
+- [ ] still missing: broader behavioral eval depth and richer provider policy beyond the current weighted-plus-safeguard router
 - owners: Workstream 03
 
 ### 4. Presence and reach
@@ -88,7 +88,8 @@ This file explains:
 - [x] `execution-safety-hardening-v2` is now the first shipped item from the refreshed queue on this branch.
 - [x] `cockpit-workflow-views-v1` and `guardian-learning-loop-v2` are now the second and third shipped items from the refreshed queue on this branch.
 - [x] `cross-surface-continuity-v2` is now the fourth shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `provider-policy-safeguards-v2` because the first continuity bridge is now in place and the next reliability bottleneck shifts back to routing safety.
+- [x] `provider-policy-safeguards-v2` is now the fifth shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `artifact-evidence-roundtrip-v2` because the first strict provider safeguard layer is now in place and the next leverage gap shifts back to operator workflow density.
 - [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

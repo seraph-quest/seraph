@@ -167,3 +167,111 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
     assert payload["overview"]["summary"]["starter_packs_ready"] == 1
     enable_skill.assert_called_with("web-briefing")
     enable_workflow.assert_called_with("web-brief-to-file")
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_runbooks_only_include_ready_workflows(client):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch("src.api.capabilities.skill_manager.list_skills", return_value=[]),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "summarize-file",
+                    "tool_name": "workflow_summarize_file",
+                    "description": "Summarize file",
+                    "requires_tools": ["read_file"],
+                    "requires_skills": [],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                },
+                {
+                    "name": "web-brief-to-file",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "description": "Research and save",
+                    "requires_tools": ["web_search", "write_file"],
+                    "requires_skills": [],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+    ):
+        resp = await client.get("/api/capabilities/overview")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    runbook_ids = {item["id"] for item in payload["runbooks"]}
+    assert "workflow:summarize-file" in runbook_ids
+    assert "workflow:web-brief-to-file" not in runbook_ids
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_tool_policy_blocks(client):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="web_search")], ["web-briefing"], "approval"),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.api.capabilities.skill_manager.list_skills",
+            return_value=[
+                {
+                    "name": "web-briefing",
+                    "description": "Web briefing",
+                    "requires_tools": ["web_search", "write_file"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "file_path": "/tmp/web-briefing.md",
+                },
+            ],
+        ),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "description": "Research and save",
+                    "requires_tools": ["web_search", "write_file"],
+                    "requires_skills": ["web-briefing"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "step_count": 2,
+                    "file_path": "/tmp/web-brief-to-file.md",
+                    "policy_modes": ["balanced", "full"],
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "risk_level": "medium",
+                    "accepts_secret_refs": False,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+    ):
+        resp = await client.get("/api/capabilities/overview")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    recommendation_ids = {item["id"] for item in payload["recommendations"]}
+    assert "starter-pack:research-briefing" not in recommendation_ids
+    assert "tool-policy:write_file:full" in recommendation_ids

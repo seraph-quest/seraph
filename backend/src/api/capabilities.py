@@ -151,6 +151,23 @@ def _starter_pack_index() -> dict[str, dict[str, Any]]:
     }
 
 
+def _starter_pack_activation_would_change_state(
+    pack: dict[str, Any],
+    *,
+    skills_by_name: dict[str, dict[str, Any]],
+    workflows_by_name: dict[str, dict[str, Any]],
+) -> bool:
+    for skill_name in pack.get("skills", []):
+        skill = skills_by_name.get(str(skill_name))
+        if skill is None or not bool(skill.get("enabled", False)):
+            return True
+    for workflow_name in pack.get("workflows", []):
+        workflow = workflows_by_name.get(str(workflow_name))
+        if workflow is None or not bool(workflow.get("enabled", False)):
+            return True
+    return False
+
+
 def _recommended_actions(
     *,
     skills_by_name: dict[str, dict[str, Any]],
@@ -242,7 +259,15 @@ def _recommended_actions(
             ),
             None,
         )
-        if workflow.get("availability") == "blocked" and pack is not None:
+        if (
+            workflow.get("availability") == "blocked"
+            and pack is not None
+            and _starter_pack_activation_would_change_state(
+                pack,
+                skills_by_name=skills_by_name,
+                workflows_by_name=workflows_by_name,
+            )
+        ):
             add_recommendation({
                 "id": f"starter-pack:{pack['name']}",
                 "label": f"Activate {pack.get('label', pack['name'])}",
@@ -289,6 +314,8 @@ def _recommended_actions(
 
     for workflow in workflows_by_name.values():
         if not bool(workflow.get("user_invocable", False)):
+            continue
+        if workflow.get("availability") != "ready":
             continue
         runbooks.append({
             "id": f"workflow:{workflow['name']}",

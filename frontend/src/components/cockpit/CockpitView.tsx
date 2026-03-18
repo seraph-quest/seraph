@@ -1019,13 +1019,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
 
   async function openThread(sessionIdToOpen: string | null | undefined) {
-    if (!sessionIdToOpen) return;
+    if (!sessionIdToOpen) return false;
+    if (useChatStore.getState().sessionId === sessionIdToOpen) {
+      return true;
+    }
     await switchSession(sessionIdToOpen, "restored");
+    const opened = useChatStore.getState().sessionId === sessionIdToOpen;
+    if (!opened) {
+      setOperatorStatus("Unable to open that thread.");
+    }
+    return opened;
   }
 
   async function queueThreadDraft(message: string, sessionIdToOpen?: string | null) {
     if (sessionIdToOpen) {
-      await openThread(sessionIdToOpen);
+      const opened = await openThread(sessionIdToOpen);
+      if (!opened) return;
     }
     queueComposerDraft(message);
   }

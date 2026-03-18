@@ -11,9 +11,10 @@ import { CockpitView } from "./CockpitView";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 
-function mockResponse(data: unknown, ok = true) {
+function mockResponse(data: unknown, ok = true, status = ok ? 200 : 500) {
   return {
     ok,
+    status,
     json: async () => data,
   };
 }
@@ -505,6 +506,78 @@ describe("CockpitView", () => {
     expect(
       screen.getAllByText("You completed the workflow batch and refreshed the roadmap queue.").length,
     ).toBeGreaterThan(1);
+  });
+
+  it("does not queue a continuation draft when the target thread cannot be opened", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions/missing-session/messages")) {
+        return Promise.resolve(mockResponse({ detail: "Not found" }, false, 404));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(
+          mockResponse({
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            approval_mode: "high_risk",
+            summary: {},
+            native_tools: [],
+            skills: [],
+            workflows: [],
+            mcp_servers: [],
+            starter_packs: [],
+            catalog_items: [],
+            recommendations: [],
+            runbooks: [],
+          }),
+        );
+      }
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(
+          mockResponse({
+            daemon: { connected: false, pending_notification_count: 1, capture_mode: "balanced" },
+            notifications: [
+              {
+                id: "note-stale",
+                intervention_id: "intervention-stale",
+                title: "Resume stale thread",
+                body: "This thread no longer exists.",
+                intervention_type: "advisory",
+                urgency: 1,
+                created_at: "2026-03-18T12:03:00Z",
+                session_id: "missing-session",
+                resume_message: "Continue from stale thread",
+              },
+            ],
+            queued_insights: [],
+            queued_insight_count: 0,
+            recent_interventions: [],
+          }),
+        );
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => expect(screen.getByText("Unable to open that thread.")).toBeInTheDocument());
+    expect(screen.queryByDisplayValue("Continue from stale thread")).not.toBeInTheDocument();
+    expect(useChatStore.getState().sessionId).toBe("session-1");
   });
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {

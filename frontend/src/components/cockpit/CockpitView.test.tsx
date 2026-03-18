@@ -115,22 +115,54 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/skills/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
       if (url.includes("/api/workflows/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
+      if (url.includes("/api/skills/goal-reflection")) {
+        return Promise.resolve(mockResponse({ status: "updated" }));
+      }
       if (url.includes("/api/skills")) {
         return Promise.resolve(
           mockResponse({
             skills: [
-              { name: "goal-reflection", enabled: true, description: "Reflect on goals" },
-              { name: "calendar-planning", enabled: false, description: "Plan from calendar" },
+              {
+                name: "goal-reflection",
+                enabled: true,
+                description: "Reflect on goals",
+                requires_tools: ["reflect_goal"],
+                user_invocable: true,
+              },
+              {
+                name: "calendar-planning",
+                enabled: false,
+                description: "Plan from calendar",
+                requires_tools: ["calendar_events"],
+                user_invocable: false,
+              },
             ],
           }),
         );
+      }
+      if (url.includes("/api/mcp/servers/browser/test")) {
+        return Promise.resolve(mockResponse({ status: "ok", tool_count: 4 }));
       }
       if (url.includes("/api/mcp/servers")) {
         return Promise.resolve(
           mockResponse({
             servers: [
-              { name: "browser", enabled: true, url: "http://localhost:9001/mcp" },
-              { name: "vault", enabled: false, url: "http://localhost:9002/mcp" },
+              {
+                name: "browser",
+                enabled: true,
+                url: "http://localhost:9001/mcp",
+                status: "connected",
+                tool_count: 4,
+                connected: true,
+              },
+              {
+                name: "vault",
+                enabled: false,
+                url: "http://localhost:9002/mcp",
+                status: "auth_required",
+                status_message: "Missing token",
+                has_headers: true,
+              },
             ],
           }),
         );
@@ -246,11 +278,44 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Workflow runs")).toBeInTheDocument());
     expect(screen.getByText("Desktop shell")).toBeInTheDocument();
     expect(screen.getByText("Operator surface")).toBeInTheDocument();
-    expect(screen.getByText("tool balanced · mcp approval")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Set MCP policy to approval" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Set approval mode to high_risk" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("browser")).toBeInTheDocument();
+    expect(screen.getByText("4 tools live")).toBeInTheDocument();
+    expect(screen.getByText("vault")).toBeInTheDocument();
+    expect(screen.getByText("auth required")).toBeInTheDocument();
+    expect(screen.getByText("goal-reflection")).toBeInTheDocument();
+    expect(screen.getByText("invocable · reflect_goal")).toBeInTheDocument();
+    expect(screen.getByText("calendar-planning")).toBeInTheDocument();
+    expect(screen.getByText("runtime · calendar_events")).toBeInTheDocument();
+    expect(screen.getByText("invocable 1/2 available")).toBeInTheDocument();
+    expect(screen.getByText("approval 0 · blocked 1")).toBeInTheDocument();
     expect(screen.getByText("blocked web-brief-to-file · tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getAllByText("Hold this until the browser is back.").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/mcp/servers/browser/test"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Turn off goal-reflection" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/skills/goal-reflection"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Set tool policy to full" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
     fireEvent.click(screen.getAllByText("Draft Follow-up")[0]);
     expect(screen.getByDisplayValue(/Follow up on this desktop alert:/)).toBeInTheDocument();
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);

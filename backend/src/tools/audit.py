@@ -20,6 +20,21 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def _custom_result_payload(tool: Any, arguments: dict[str, Any], result: Any) -> tuple[str, dict[str, Any]] | None:
+    hook = getattr(tool, "get_audit_result_payload", None)
+    if not callable(hook):
+        return None
+    payload = hook(arguments, result)
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == 2
+        and isinstance(payload[0], str)
+        and isinstance(payload[1], dict)
+    ):
+        return payload
+    return None
+
+
 class AuditedTool(Tool):
     """Tool wrapper that records execution lifecycle events for real invocations."""
 
@@ -71,7 +86,11 @@ class AuditedTool(Tool):
             )
             raise
 
-        result_summary, result_details = summarize_tool_result(self.name, str(result))
+        custom_payload = _custom_result_payload(self.wrapped_tool, arguments, result)
+        if custom_payload is not None:
+            result_summary, result_details = custom_payload
+        else:
+            result_summary, result_details = summarize_tool_result(self.name, str(result))
         self._log_event(
             session_id=session_id,
             event_type="tool_result",

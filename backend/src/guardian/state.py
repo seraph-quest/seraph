@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from src.agent.session import session_manager
-from src.observer.context import CurrentContext
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
+from src.observer.context import CurrentContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,7 @@ class GuardianState:
     recent_sessions_summary: str
     recent_intervention_feedback: str
     confidence: GuardianStateConfidence
+    recent_execution_summary: str = ""
 
     @property
     def active_goals_summary(self) -> str:
@@ -64,7 +68,42 @@ class GuardianState:
         if self.recent_intervention_feedback:
             lines.extend(["", "Recent intervention feedback:", self.recent_intervention_feedback])
 
+        if self.recent_execution_summary:
+            lines.extend(["", "Recent execution:", self.recent_execution_summary])
+
         return "\n".join(lines)
+
+
+def _summarize_recent_execution(events: list[dict[str, object]]) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        event_type = str(event.get("event_type") or "")
+        tool_name = str(event.get("tool_name") or event_type or "runtime")
+        details = event.get("details")
+        detail_map = details if isinstance(details, dict) else {}
+        line = ""
+        if tool_name.startswith("workflow_"):
+            workflow_name = str(
+                detail_map.get("workflow_name")
+                or tool_name.removeprefix("workflow_").replace("_", "-")
+            )
+            continued_error_steps = detail_map.get("continued_error_steps")
+            if event_type == "tool_failed":
+                line = f"Workflow {workflow_name} failed recently"
+            elif isinstance(continued_error_steps, list) and continued_error_steps:
+                degraded_steps = ", ".join(str(step) for step in continued_error_steps[:2])
+                line = f"Workflow {workflow_name} degraded at {degraded_steps}"
+        elif event_type in {"tool_failed", "integration_failed"}:
+            line = f"{tool_name} failed recently"
+
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+        if len(lines) >= 3:
+            break
+    return "\n".join(f"- {line}" for line in lines)
 
 
 def _status_for_text(text: str, *, requested: bool = True) -> str:
@@ -122,8 +161,10 @@ async def build_guardian_state(
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import read_soul
     from src.memory.vector_store import search_formatted
+    from src.audit.repository import audit_repository
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.manager import context_manager
+    from src.observer.screen_repository import screen_observation_repo
 
     observer_context = (
         await context_manager.refresh() if refresh_observer else context_manager.get_context()
@@ -139,6 +180,19 @@ async def build_guardian_state(
         exclude_session_id=session_id
     )
     recent_intervention_feedback = await guardian_feedback_repository.summarize_recent(limit=5)
+    try:
+        recent_execution_summary = _summarize_recent_execution(
+            await audit_repository.list_events(limit=20, session_id=session_id)
+        )
+    except Exception:
+        logger.debug("Failed to load recent execution summary for guardian state", exc_info=True)
+        recent_execution_summary = ""
+
+    try:
+        active_projects = tuple(await screen_observation_repo.get_recent_projects(limit=3))
+    except Exception:
+        logger.debug("Failed to load recent projects for guardian state", exc_info=True)
+        active_projects = ()
 
     query = user_message or memory_query or ""
     memory_requested = bool(query.strip())
@@ -153,6 +207,8 @@ async def build_guardian_state(
         current_session_history=current_session_history,
         recent_sessions_summary=recent_sessions_summary,
         recent_intervention_feedback=recent_intervention_feedback,
+        active_projects=active_projects,
+        recent_execution_summary=recent_execution_summary,
     )
     world_model_status = _world_model_status(world_model)
 
@@ -185,5 +241,6 @@ async def build_guardian_state(
         current_session_history=current_session_history,
         recent_sessions_summary=recent_sessions_summary,
         recent_intervention_feedback=recent_intervention_feedback,
+        recent_execution_summary=recent_execution_summary,
         confidence=confidence,
     )

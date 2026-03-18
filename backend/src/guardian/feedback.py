@@ -30,6 +30,7 @@ class GuardianLearningSignal:
     acknowledged_count: int
     failed_count: int
     bias: str
+    channel_bias: str
 
     @classmethod
     def neutral(cls, intervention_type: str) -> "GuardianLearningSignal":
@@ -40,6 +41,7 @@ class GuardianLearningSignal:
             acknowledged_count=0,
             failed_count=0,
             bias="neutral",
+            channel_bias="neutral",
         )
 
 
@@ -201,6 +203,12 @@ class GuardianFeedbackRepository:
             not_helpful_count >= 1 and helpful_count == 0 and failed_count >= 1
         ):
             bias = "reduce_interruptions"
+        elif helpful_count >= 2 and not_helpful_count == 0:
+            bias = "prefer_direct_delivery"
+
+        channel_bias = "neutral"
+        if acknowledged_count >= 2 and not_helpful_count == 0:
+            channel_bias = "prefer_native_notification"
 
         return GuardianLearningSignal(
             intervention_type=intervention_type,
@@ -209,6 +217,7 @@ class GuardianFeedbackRepository:
             acknowledged_count=acknowledged_count,
             failed_count=failed_count,
             bias=bias,
+            channel_bias=channel_bias,
         )
 
 

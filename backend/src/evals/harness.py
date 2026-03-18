@@ -49,6 +49,7 @@ from src.api.observer import (
     dismiss_native_notification,
     enqueue_test_native_notification,
     get_next_native_notification,
+    get_observer_continuity,
     list_native_notifications,
     post_intervention_feedback,
     post_screen_context,
@@ -69,6 +70,7 @@ from src.memory.vector_store import _reset_vector_store_state, add_memory, searc
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
+from src.observer.insight_queue import insight_queue
 from src.observer.intervention_policy import decide_intervention
 from src.observer.native_notification_queue import native_notification_queue
 from src.observer.salience import derive_observer_assessment
@@ -1128,25 +1130,23 @@ def _eval_workflow_composition_behavior() -> dict[str, Any]:
 def _eval_provider_fallback_chain() -> dict[str, Any]:
     completion_response = _make_litellm_response("Resolved after ordered fallback chain.")
 
-    with (
-        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-        patch.object(settings, "fallback_model", ""),
-        patch.object(
-            settings,
-            "fallback_models",
-            "openai/gpt-4o-mini,openai/gpt-4.1-mini",
-        ),
-        patch.object(settings, "llm_api_key", "primary-key"),
-        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-        patch(
-            "litellm.completion",
-            side_effect=[
-                RuntimeError("primary down"),
-                RuntimeError("first fallback down"),
-                completion_response,
-            ],
-        ) as mock_completion,
-    ):
+    with patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"), \
+         patch.object(settings, "fallback_model", ""), \
+         patch.object(
+             settings,
+             "fallback_models",
+             "openai/gpt-4o-mini,openai/gpt-4.1-mini",
+         ), \
+         patch.object(settings, "llm_api_key", "primary-key"), \
+         patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"), \
+         patch(
+             "litellm.completion",
+             side_effect=[
+                 RuntimeError("primary down"),
+                 RuntimeError("first fallback down"),
+                 completion_response,
+             ],
+         ) as mock_completion:
         response = completion_with_fallback_sync(
             messages=[{"role": "user", "content": "route around provider issues"}],
             temperature=0.2,
@@ -2137,6 +2137,72 @@ def _eval_provider_policy_scoring() -> dict[str, Any]:
     }
 
 
+async def _eval_provider_policy_safeguards() -> dict[str, Any]:
+    completion_response = _make_litellm_response("Guardrails selected the compliant target.")
+
+    _reset_target_health()
+    try:
+        async with _patched_async_db("src.audit.repository.get_session"):
+            with (
+                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+                patch.object(settings, "llm_api_key", "primary-key"),
+                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+                patch.object(settings, "fallback_model", ""),
+                patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+                patch.object(
+                    settings,
+                    "provider_capability_overrides",
+                    (
+                        "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                        "openai/gpt-4o-mini=tool_use|fast;"
+                        "openai/gpt-4.1-nano=cheap"
+                    ),
+                ),
+                patch.object(
+                    settings,
+                    "provider_cost_tiers",
+                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                ),
+                patch.object(
+                    settings,
+                    "provider_latency_tiers",
+                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                ),
+                patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"),
+                patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"),
+                patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"),
+                patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"),
+                patch("litellm.completion", return_value=completion_response) as mock_completion,
+            ):
+                response = completion_with_fallback_sync(
+                    messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
+                    temperature=0.2,
+                    max_tokens=128,
+                    runtime_path="chat_agent",
+                )
+                await asyncio.sleep(0)
+                events = await audit_repository.list_events(limit=10)
+    finally:
+        _reset_target_health()
+
+    routing_event = next(event for event in events if event["event_type"] == "llm_routing_decision")
+    primary_candidate = next(
+        candidate for candidate in routing_event["details"]["candidate_targets"] if candidate["source"] == "primary"
+    )
+    return {
+        "attempted_models": [call.kwargs["model"] for call in mock_completion.call_args_list],
+        "response_excerpt": response.choices[0].message.content,
+        "selected_model": routing_event["details"]["selected_model"],
+        "rerouted_from_policy_guardrails": routing_event["details"]["rerouted_from_policy_guardrails"],
+        "required_policy_intents": routing_event["details"]["required_policy_intents"],
+        "max_cost_tier": routing_event["details"]["max_cost_tier"],
+        "max_latency_tier": routing_event["details"]["max_latency_tier"],
+        "primary_missing_required_intents": primary_candidate["missing_required_intents"],
+        "primary_cost_guardrail": primary_candidate["within_cost_guardrail"],
+        "primary_latency_guardrail": primary_candidate["within_latency_guardrail"],
+    }
+
+
 async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
     completion_response = _make_litellm_response("Policy matched the fast fallback.")
     first_agent_response = MagicMock()
@@ -3003,6 +3069,119 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    await native_notification_queue.clear()
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        for feedback_type, content in (
+            ("helpful", "That workflow reminder landed at the right moment."),
+            ("helpful", "Another workflow nudge was useful."),
+            ("acknowledged", "Acknowledged the workflow reminder from desktop."),
+            ("acknowledged", "Acted on the workflow reminder from the notification center."),
+        ):
+            intervention = await guardian_feedback_repository.create_intervention(
+                session_id="strategist-learning",
+                message_type="proactive",
+                intervention_type="advisory",
+                urgency=2,
+                content=content,
+                reasoning="aligned_work_activity",
+                is_scheduled=False,
+                guardian_confidence="grounded",
+                data_quality="good",
+                user_state="available",
+                interruption_mode="balanced",
+                policy_action="act",
+                policy_reason="available_capacity",
+                delivery_decision="deliver",
+                latest_outcome="delivered",
+            )
+            await guardian_feedback_repository.record_feedback(
+                intervention.id,
+                feedback_type=feedback_type,
+            )
+
+        strategist_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=2,
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="high",
+            last_daemon_post=time.time(),
+        )
+        mock_context_manager = MagicMock()
+        mock_context_manager.get_context.return_value = strategist_ctx
+        mock_context_manager.is_daemon_connected.return_value = True
+        mock_context_manager.decrement_attention_budget = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = (
+            '{"should_intervene": true, '
+            '"content": "Stay on the workflow review while the current context is still loaded.", '
+            '"intervention_type": "advisory", "urgency": 2, "reasoning": "Aligned work"}'
+        )
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+        mock_log_event = AsyncMock()
+        guardian_state = types.SimpleNamespace(
+            confidence=types.SimpleNamespace(overall="grounded")
+        )
+
+        with (
+            patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=guardian_state)),
+            patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+            patch("src.observer.manager.context_manager", mock_context_manager),
+            patch("src.api.observer.context_manager", mock_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            await run_strategist_tick()
+            continuity = await get_observer_continuity()
+
+        scheduler_event = _find_audit_call(
+            mock_log_event,
+            event_type="scheduler_job_succeeded",
+            tool_name="strategist_tick",
+        )
+        delivered_event = _find_audit_call(
+            mock_log_event,
+            event_type="observer_delivery_delivered",
+            tool_name="observer_delivery_gate",
+        )
+        notification = continuity["notifications"][0]
+        intervention = continuity["recent_interventions"][0]
+        queued_ids = [item.id for item in await insight_queue.peek_all()]
+        if queued_ids:
+            await insight_queue.delete_many(queued_ids)
+
+    remaining_notifications = await native_notification_queue.count()
+    await native_notification_queue.clear()
+
+    return {
+        "message_type": "proactive",
+        "urgency": 2,
+        "scheduler_delivery": scheduler_event["details"]["delivery"],
+        "scheduler_policy_action": scheduler_event["details"]["policy_action"],
+        "policy_reason": delivered_event["details"]["policy_reason"],
+        "learning_bias": delivered_event["details"]["learning_bias"],
+        "learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
+        "transport": delivered_event["details"]["transport"],
+        "broadcast_delivered_connections": delivered_event["details"]["delivered_connections"],
+        "continuity_notification_count": len(continuity["notifications"]),
+        "continuity_queued_insight_count": continuity["queued_insight_count"],
+        "continuity_surface": intervention["continuity_surface"],
+        "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
+        "notification_intervention_matches": notification["intervention_id"] == intervention["id"],
+        "remaining_notifications_before_cleanup": remaining_notifications,
+    }
+
+
 async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response(json.dumps({
@@ -3194,6 +3373,23 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
                 return_value="- [goal] Prepare investor brief\n- [loop] Follow up on investor questions",
             ),
             patch(
+                "src.audit.repository.audit_repository.list_events",
+                return_value=[
+                    {
+                        "event_type": "tool_result",
+                        "tool_name": "workflow_investor_brief",
+                        "details": {
+                            "workflow_name": "investor-brief",
+                            "continued_error_steps": ["write_file"],
+                        },
+                    }
+                ],
+            ),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Investor brief", "Fundraising follow-up"],
+            ),
+            patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
                 return_value="- advisory delivered, feedback=not_helpful: Too many nudges during prep.",
             ),
@@ -3215,7 +3411,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
             "active_commitments_count": len(state.world_model.active_commitments),
+            "active_projects_count": len(state.world_model.active_projects),
             "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
+            "includes_investor_project": "Investor brief" in state.world_model.active_projects,
             "includes_attention_pressure": any(
                 "Attention budget is nearly exhausted" in item
                 for item in state.world_model.open_loops_or_pressure
@@ -3224,8 +3422,13 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
                 "Recent intervention friction" in item
                 for item in state.world_model.open_loops_or_pressure
             ),
+            "includes_execution_pressure": any(
+                "investor-brief degraded" in item
+                for item in state.world_model.execution_pressure
+            ),
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
+            "agent_instructions_include_projects": "Active projects:" in instructions,
             "strategist_instructions_include_receptivity": (
                 "Intervention receptivity: low" in strategist_agent.instructions
             ),
@@ -3628,6 +3831,97 @@ async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]
     }
 
 
+async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    await native_notification_queue.clear()
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        mgr = ContextManager()
+        mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing continuity across browser and desktop.")
+        mgr.update_capture_mode("balanced")
+        mgr.record_native_notification(title="Seraph alert", outcome="queued")
+
+        native_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="continuity-session",
+            message_type="proactive",
+            intervention_type="alert",
+            urgency=5,
+            content="Desktop fallback is active.",
+            reasoning="browser_unavailable",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        notification = await native_notification_queue.enqueue(
+            intervention_id=native_intervention.id,
+            title="Seraph alert",
+            body="Desktop fallback is active.",
+            intervention_type="alert",
+            urgency=5,
+        )
+        await guardian_feedback_repository.update_outcome(
+            native_intervention.id,
+            latest_outcome="notification_acked",
+            transport="native_notification",
+            notification_id=notification.id,
+        )
+
+        bundle_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="continuity-session",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Bundle this until the browser reconnects.",
+            reasoning="high_interruption_cost",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="bundle",
+            policy_reason="high_interruption_cost",
+            delivery_decision="queue",
+            latest_outcome="queued",
+        )
+        await insight_queue.enqueue(
+            content="Bundle this until the browser reconnects.",
+            intervention_type="advisory",
+            urgency=3,
+            reasoning="high_interruption_cost",
+            intervention_id=bundle_intervention.id,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            continuity = await get_observer_continuity()
+
+        queued_ids = [item.id for item in await insight_queue.peek_all()]
+        if queued_ids:
+            await insight_queue.delete_many(queued_ids)
+        await native_notification_queue.clear()
+
+    surfaces = {item["continuity_surface"] for item in continuity["recent_interventions"]}
+    return {
+        "daemon_pending_notifications": continuity["daemon"]["pending_notification_count"],
+        "notification_count": len(continuity["notifications"]),
+        "notification_intervention_matches": continuity["notifications"][0]["intervention_id"] == native_intervention.id,
+        "queued_insight_count": continuity["queued_insight_count"],
+        "queued_bundle_matches": continuity["queued_insights"][0]["intervention_id"] == bundle_intervention.id,
+        "recent_surfaces": sorted(surfaces),
+        "native_surface_present": "native_notification" in surfaces,
+        "bundle_surface_present": "bundle_queue" in surfaces,
+    }
+
+
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -3829,6 +4123,81 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
             tool_name="observer_delivery_gate",
         )
 
+        for content, feedback_type in (
+            ("This direct nudge landed well.", "helpful"),
+            ("Another high-signal nudge landed well.", "helpful"),
+            ("Acked from native delivery.", "acknowledged"),
+            ("Acked from native delivery again.", "acknowledged"),
+        ):
+            intervention = await guardian_feedback_repository.create_intervention(
+                session_id=None,
+                message_type="proactive",
+                intervention_type="nudge",
+                urgency=2,
+                content=content,
+                reasoning="aligned_work_activity",
+                is_scheduled=False,
+                guardian_confidence="grounded",
+                data_quality="good",
+                user_state="available",
+                interruption_mode="balanced",
+                policy_action="act",
+                policy_reason="available_capacity",
+                delivery_decision="deliver",
+                latest_outcome="delivered",
+            )
+            await guardian_feedback_repository.record_feedback(
+                intervention.id,
+                feedback_type=feedback_type,
+            )
+
+        positive_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=2,
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="high",
+            last_daemon_post=time.time(),
+        )
+        positive_context_manager = MagicMock()
+        positive_context_manager.get_context.return_value = positive_ctx
+        positive_context_manager.decrement_attention_budget = MagicMock()
+        positive_context_manager.is_daemon_connected.return_value = True
+        positive_ws_manager = MagicMock()
+        positive_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+        positive_log_event = AsyncMock()
+
+        with (
+            patch("src.observer.manager.context_manager", positive_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", positive_ws_manager),
+            patch.object(audit_repository, "log_event", positive_log_event),
+        ):
+            positive_decision = await deliver_or_queue(
+                WSResponse(
+                    type="proactive",
+                    content="This is aligned, time-sensitive, and has landed well before.",
+                    intervention_type="nudge",
+                    urgency=2,
+                    reasoning="aligned_work_activity",
+                ),
+                guardian_confidence="grounded",
+            )
+
+        delivered_event = _find_audit_call(
+            positive_log_event,
+            event_type="observer_delivery_delivered",
+            tool_name="observer_delivery_gate",
+        )
+        positive_signal = await guardian_feedback_repository.get_learning_signal(
+            intervention_type="nudge",
+            limit=12,
+        )
+        remaining_notifications = await native_notification_queue.count()
+        await native_notification_queue.clear()
+
     return {
         "action": decision.action.value,
         "reason": decision.reason,
@@ -3836,6 +4205,14 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
         "broadcast_skipped": mock_ws_manager.broadcast.await_count == 0,
         "learning_bias": queued_event["details"]["learning_bias"],
         "learning_not_helpful_count": queued_event["details"]["learning_not_helpful_count"],
+        "positive_action": positive_decision.action.value,
+        "positive_reason": positive_decision.reason,
+        "positive_transport": delivered_event["details"]["transport"],
+        "positive_learning_bias": delivered_event["details"]["learning_bias"],
+        "positive_learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
+        "positive_helpful_count": positive_signal.helpful_count,
+        "positive_acknowledged_count": positive_signal.acknowledged_count,
+        "remaining_native_notifications": remaining_notifications,
     }
 
 
@@ -4373,9 +4750,11 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "balanced_shows_write_file": "write_file" in balanced_tools,
             "balanced_hides_shell_execute": "shell_execute" not in balanced_tools,
             "full_shows_shell_execute": "shell_execute" in full_tools,
+            "write_file_accepts_secret_refs": full_tools["write_file"]["accepts_secret_refs"],
             "mcp_disabled_hides_tool": "mcp_tasks" not in disabled_tools,
             "mcp_approval_shows_tool": "mcp_tasks" in approval_tools,
             "mcp_approval_requires_approval": approval_tools["mcp_tasks"]["requires_approval"],
+            "mcp_approval_accepts_secret_refs": approval_tools["mcp_tasks"]["accepts_secret_refs"],
         }
     finally:
         stack.close()
@@ -4662,6 +5041,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_provider_policy_scoring,
     ),
     EvalScenario(
+        name="provider_policy_safeguards",
+        category="runtime",
+        description="Runtime-path safeguards can require specific capabilities and steer away from targets that violate cost or latency guardrails when compliant targets exist.",
+        runner=_eval_provider_policy_safeguards,
+    ),
+    EvalScenario(
         name="provider_routing_decision_audit",
         category="runtime",
         description="Runtime routing writes structured decision records that explain selected and deferred targets.",
@@ -4690,6 +5075,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Strategist tick delivers the modeled intervention and records the resulting delivery outcome.",
         runner=_eval_strategist_tick_behavior,
+    ),
+    EvalScenario(
+        name="strategist_tick_learning_continuity_behavior",
+        category="guardian",
+        description="Strategist tick can use learned delivery bias to reroute a high-salience reminder through native notifications, and that intervention shows up in the continuity snapshot.",
+        runner=_eval_strategist_tick_learning_continuity_behavior,
     ),
     EvalScenario(
         name="guardian_state_synthesis",
@@ -4732,6 +5123,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="Browser-side native notification controls can inspect, dismiss, and bulk-clear desktop notifications without losing continuity state.",
         runner=_eval_cross_surface_notification_controls_behavior,
+    ),
+    EvalScenario(
+        name="cross_surface_continuity_behavior",
+        category="presence",
+        description="Browser and native continuity surfaces read one composed snapshot for daemon state, pending notifications, queued bundles, and recent interventions.",
+        runner=_eval_cross_surface_continuity_behavior,
     ),
     EvalScenario(
         name="intervention_policy_behavior",

@@ -68,6 +68,30 @@ def _summarize_workflow_result(workflow: Workflow, step_results: dict[str, dict[
     return "\n".join(lines)
 
 
+def _collect_artifact_paths(value: Any) -> list[str]:
+    paths: list[str] = []
+
+    def _visit(current: Any, key_hint: str | None = None) -> None:
+        if isinstance(current, dict):
+            for key, inner in current.items():
+                _visit(inner, str(key))
+            return
+        if isinstance(current, list):
+            for item in current:
+                _visit(item, key_hint)
+            return
+        if (
+            key_hint == "file_path"
+            and isinstance(current, str)
+            and current.strip()
+            and current not in paths
+        ):
+            paths.append(current)
+
+    _visit(value)
+    return paths
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -89,6 +113,7 @@ class WorkflowTool(Tool):
         }
         self.output_type = "string"
         self.is_initialized = True
+        self._last_audit_payload: tuple[str, dict[str, Any]] | None = None
 
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
@@ -101,6 +126,8 @@ class WorkflowTool(Tool):
             "last_result": "",
         }
         context.update(workflow_inputs)
+        continued_error_steps: list[str] = []
+        artifact_paths = _collect_artifact_paths(workflow_inputs)
 
         for step in self.workflow.steps:
             tool = self.tools_by_name.get(step.tool)
@@ -118,17 +145,49 @@ class WorkflowTool(Tool):
                 if not step.continue_on_error:
                     raise
                 result = f"Error: {exc}"
+                continued_error_steps.append(step.id)
             context["steps"][step.id] = {
                 "tool": step.tool,
                 "arguments": rendered_arguments,
                 "result": result,
             }
             context["last_result"] = result
+            for path in _collect_artifact_paths(rendered_arguments):
+                if path not in artifact_paths:
+                    artifact_paths.append(path)
 
+        result_text = ""
         if self.workflow.result_template:
             rendered = _render_value(self.workflow.result_template, context)
-            return str(rendered)
-        return _summarize_workflow_result(self.workflow, context["steps"])
+            result_text = str(rendered)
+        else:
+            result_text = _summarize_workflow_result(self.workflow, context["steps"])
+
+        status = "degraded" if continued_error_steps else "succeeded"
+        summary = f"{self.name} {status} ({len(self.workflow.steps)} steps)"
+        if continued_error_steps:
+            summary += f" with {len(continued_error_steps)} continued error step"
+            if len(continued_error_steps) != 1:
+                summary += "s"
+        self._last_audit_payload = (
+            summary,
+            {
+                "workflow_name": self.workflow.name,
+                "step_count": len(self.workflow.steps),
+                "step_tools": [step.tool for step in self.workflow.steps],
+                "artifact_paths": artifact_paths,
+                "continued_error_steps": continued_error_steps,
+                "content_redacted": True,
+            },
+        )
+        return result_text
+
+    def get_audit_result_payload(
+        self,
+        _arguments: dict[str, Any],
+        _result: Any,
+    ) -> tuple[str, dict[str, Any]] | None:
+        return self._last_audit_payload
 
     def _normalize_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
@@ -226,6 +285,7 @@ class WorkflowManager:
                 "policy_modes": self._infer_policy_modes(workflow),
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
+                "accepts_secret_refs": self._accepts_secret_refs(workflow),
             }
             if available_tool_names is not None and active_skill_names is not None:
                 item.update(
@@ -285,8 +345,8 @@ class WorkflowManager:
         for workflow in self._workflows:
             if not workflow.enabled:
                 continue
-            if workflow.requires_tools and not all(
-                tool_name in tool_set for tool_name in workflow.requires_tools
+            if workflow.step_tools and not all(
+                tool_name in tool_set for tool_name in workflow.step_tools
             ):
                 continue
             if workflow.requires_skills and not all(
@@ -325,6 +385,7 @@ class WorkflowManager:
             "step_count": len(workflow.steps),
             "execution_boundaries": self._infer_execution_boundaries(workflow),
             "risk_level": self._infer_risk_level(workflow),
+            "accepts_secret_refs": self._accepts_secret_refs(workflow),
         }
 
     def _get_runtime_availability(
@@ -350,20 +411,21 @@ class WorkflowManager:
         }
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:
-        if any(tool_name.startswith("mcp_") for tool_name in workflow.requires_tools):
+        step_tools = workflow.step_tools
+        if any(tool_name.startswith("mcp_") for tool_name in step_tools):
             return ["full"]
         if any(
             tool_name in {"write_file", "update_goal", "update_soul", "store_secret", "delete_secret"}
-            for tool_name in workflow.requires_tools
+            for tool_name in step_tools
         ):
             return ["balanced", "full"]
-        if any(tool_name in {"shell_execute", "get_secret"} for tool_name in workflow.requires_tools):
+        if any(tool_name in {"shell_execute", "get_secret"} for tool_name in step_tools):
             return ["full"]
         return ["safe", "balanced", "full"]
 
     def _infer_execution_boundaries(self, workflow: Workflow) -> list[str]:
         boundaries: list[str] = []
-        for tool_name in workflow.requires_tools:
+        for tool_name in workflow.step_tools:
             if tool_name.startswith("mcp_"):
                 boundaries.append("external_mcp")
                 continue
@@ -380,6 +442,15 @@ class WorkflowManager:
         if policy_modes == ["balanced", "full"]:
             return "medium"
         return "low"
+
+    def _accepts_secret_refs(self, workflow: Workflow) -> bool:
+        for tool_name in workflow.step_tools:
+            if tool_name.startswith("mcp_"):
+                return True
+            tool_meta = TOOL_METADATA.get(tool_name, {})
+            if bool(tool_meta.get("accepts_secret_refs", False)):
+                return True
+        return False
 
 
 workflow_manager = WorkflowManager()

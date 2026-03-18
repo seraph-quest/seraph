@@ -17,6 +17,8 @@ class GuardianWorldModel:
     open_loops_or_pressure: tuple[str, ...]
     focus_alignment: str
     intervention_receptivity: str
+    active_projects: tuple[str, ...] = ()
+    execution_pressure: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
         lines = [
@@ -29,9 +31,17 @@ class GuardianWorldModel:
             lines.append("Active commitments:")
             lines.extend(f"- {item}" for item in self.active_commitments)
 
+        if self.active_projects:
+            lines.append("Active projects:")
+            lines.extend(f"- {item}" for item in self.active_projects)
+
         if self.open_loops_or_pressure:
             lines.append("Open loops and pressure:")
             lines.extend(f"- {item}" for item in self.open_loops_or_pressure)
+
+        if self.execution_pressure:
+            lines.append("Recent execution pressure:")
+            lines.extend(f"- {item}" for item in self.execution_pressure)
 
         return "\n".join(lines)
 
@@ -105,6 +115,8 @@ def build_guardian_world_model(
     current_session_history: str,
     recent_sessions_summary: str,
     recent_intervention_feedback: str,
+    active_projects: tuple[str, ...] = (),
+    recent_execution_summary: str = "",
 ) -> GuardianWorldModel:
     """Build a first explicit working-state / commitments model from current signals."""
     memory_lines = _extract_lines(memory_context, limit=3)
@@ -136,6 +148,7 @@ def build_guardian_world_model(
     if observer_context.active_goals_summary:
         commitments.append(observer_context.active_goals_summary)
     commitments.extend(memory_lines[:1])
+    commitments.extend(active_projects[:2])
 
     open_loops: list[str] = []
     if observer_context.attention_budget_remaining <= 1:
@@ -148,6 +161,7 @@ def build_guardian_world_model(
         open_loops.append(recent_session_lines[0])
     for line in memory_lines[1:]:
         open_loops.append(line)
+    execution_pressure = _extract_lines(recent_execution_summary, limit=3)
 
     return GuardianWorldModel(
         current_focus=current_focus,
@@ -155,4 +169,6 @@ def build_guardian_world_model(
         open_loops_or_pressure=_dedupe(open_loops),
         focus_alignment=_derive_focus_alignment(observer_context),
         intervention_receptivity=_derive_intervention_receptivity(observer_context),
+        active_projects=_dedupe(list(active_projects)),
+        execution_pressure=_dedupe(execution_pressure),
     )

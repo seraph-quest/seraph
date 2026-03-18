@@ -51,6 +51,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_approval_contract" in captured.out
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
+    assert "strategist_tick_learning_continuity_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
@@ -58,6 +59,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "native_presence_notification_behavior" in captured.out
     assert "native_desktop_shell_behavior" in captured.out
     assert "cross_surface_notification_controls_behavior" in captured.out
+    assert "cross_surface_continuity_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
     assert "salience_calibration_behavior" in captured.out
     assert "observer_delivery_salience_confidence_behavior" in captured.out
@@ -84,6 +86,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "runtime_path_patterns" in captured.out
     assert "provider_policy_capabilities" in captured.out
     assert "provider_policy_scoring" in captured.out
+    assert "provider_policy_safeguards" in captured.out
     assert "provider_routing_decision_audit" in captured.out
     assert "session_bound_llm_trace" in captured.out
     assert "session_consolidation_behavior" in captured.out
@@ -148,6 +151,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_approval_contract",
                 "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
+                "strategist_tick_learning_continuity_behavior",
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
                 "observer_refresh_behavior",
@@ -155,6 +159,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "native_presence_notification_behavior",
                 "native_desktop_shell_behavior",
                 "cross_surface_notification_controls_behavior",
+                "cross_surface_continuity_behavior",
                 "intervention_policy_behavior",
                 "salience_calibration_behavior",
                 "observer_delivery_salience_confidence_behavior",
@@ -177,6 +182,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "runtime_path_patterns",
                 "provider_policy_capabilities",
                 "provider_policy_scoring",
+                "provider_policy_safeguards",
                 "provider_routing_decision_audit",
                 "session_bound_llm_trace",
                 "session_consolidation_behavior",
@@ -266,6 +272,57 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["content_mentions_refocus"] is True
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "deliver"
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
+        == "act"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
+        == "learned_direct_delivery"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
+        == "prefer_direct_delivery"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["learning_channel_bias"]
+        == "prefer_native_notification"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
+        == "native_notification"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["broadcast_delivered_connections"]
+        == 0
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
+        == 1
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
+        == 0
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
+        == "native_notification"
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
+        is True
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
+        is True
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
+        == 1
+    )
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["world_model_confidence"] == "grounded"
@@ -285,11 +342,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
     assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
     assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["active_projects_count"] >= 1
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_investor_project"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_execution_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True
     assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
@@ -322,6 +383,13 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_source"] == "browser_controls"
     assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_count"] == 1
     assert details_by_name["cross_surface_notification_controls_behavior"]["second_notification_preserved_until_bulk_clear"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["daemon_pending_notifications"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["notification_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["notification_intervention_matches"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["queued_insight_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["queued_bundle_matches"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["native_surface_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["bundle_surface_present"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
@@ -414,6 +482,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_outcome_learning"]["broadcast_skipped"] is True
     assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "reduce_interruptions"
     assert details_by_name["guardian_outcome_learning"]["learning_not_helpful_count"] == 2
+    assert details_by_name["guardian_outcome_learning"]["positive_action"] == "act"
+    assert details_by_name["guardian_outcome_learning"]["positive_reason"] == "learned_direct_delivery"
+    assert details_by_name["guardian_outcome_learning"]["positive_transport"] == "native_notification"
+    assert details_by_name["guardian_outcome_learning"]["positive_learning_bias"] == "prefer_direct_delivery"
+    assert (
+        details_by_name["guardian_outcome_learning"]["positive_learning_channel_bias"]
+        == "prefer_native_notification"
+    )
+    assert details_by_name["guardian_outcome_learning"]["positive_helpful_count"] == 2
+    assert details_by_name["guardian_outcome_learning"]["positive_acknowledged_count"] == 2
+    assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 1
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
@@ -578,6 +657,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-mini",
         "openai/gpt-4o-mini",
     ]
+    assert details_by_name["provider_policy_safeguards"]["attempted_models"] == ["openai/gpt-4o-mini"]
+    assert details_by_name["provider_policy_safeguards"]["selected_model"] == "openai/gpt-4o-mini"
+    assert details_by_name["provider_policy_safeguards"]["rerouted_from_policy_guardrails"] is True
+    assert details_by_name["provider_policy_safeguards"]["required_policy_intents"] == ["tool_use"]
+    assert details_by_name["provider_policy_safeguards"]["max_cost_tier"] == "medium"
+    assert details_by_name["provider_policy_safeguards"]["max_latency_tier"] == "medium"
+    assert details_by_name["provider_policy_safeguards"]["primary_missing_required_intents"] == ["tool_use"]
+    assert details_by_name["provider_policy_safeguards"]["primary_cost_guardrail"] is False
+    assert details_by_name["provider_policy_safeguards"]["primary_latency_guardrail"] is False
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_model"] == (
         "openrouter/anthropic/claude-sonnet-4"
     )
@@ -734,9 +822,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["tool_policy_guardrails_behavior"]["balanced_shows_write_file"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_shell_execute"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["write_file_accepts_secret_refs"] is False
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_hides_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_shows_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_requires_approval"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_accepts_secret_refs"] is True
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1

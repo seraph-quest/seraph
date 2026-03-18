@@ -24,6 +24,7 @@ _runtime_requests: dict[str, bool] = {}
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
 _KNOWN_RUNTIME_PROFILES = {"default", "local"}
+_GUARDRAIL_TIERS = {"low": 0, "medium": 1, "high": 2}
 _runtime_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "llm_runtime_request_id",
     default=None,
@@ -159,6 +160,16 @@ def runtime_policy_intents(runtime_path: str | None) -> list[str]:
     return _parse_policy_tags(value)
 
 
+def runtime_policy_requirements(runtime_path: str | None) -> list[str]:
+    """Return hard required policy intents for a runtime path."""
+    value = _select_runtime_entry(
+        settings.runtime_policy_requirements,
+        runtime_path=runtime_path,
+        separator=";",
+    )
+    return _parse_policy_tags(value)
+
+
 def runtime_policy_scores(runtime_path: str | None) -> dict[str, float]:
     """Return optional weighted policy scores for a runtime path."""
     value = _select_runtime_entry(
@@ -190,6 +201,33 @@ def runtime_policy_scores(runtime_path: str | None) -> dict[str, float]:
     return scores
 
 
+def _normalize_guardrail_tier(raw_value: str | None) -> str | None:
+    normalized = (raw_value or "").strip().lower()
+    if normalized in _GUARDRAIL_TIERS:
+        return normalized
+    return None
+
+
+def runtime_max_cost_tier(runtime_path: str | None) -> str | None:
+    return _normalize_guardrail_tier(
+        _select_runtime_entry(
+            settings.runtime_max_cost_tier,
+            runtime_path=runtime_path,
+            separator=";",
+        )
+    )
+
+
+def runtime_max_latency_tier(runtime_path: str | None) -> str | None:
+    return _normalize_guardrail_tier(
+        _select_runtime_entry(
+            settings.runtime_max_latency_tier,
+            runtime_path=runtime_path,
+            separator=";",
+        )
+    )
+
+
 def provider_capabilities(
     model_id: str | None,
     *,
@@ -206,6 +244,34 @@ def provider_capabilities(
     if profile == "local" and "local" not in capabilities:
         capabilities.append("local")
     return capabilities
+
+
+def provider_cost_tier(
+    model_id: str | None,
+    *,
+    profile: str | None = None,
+) -> str | None:
+    return _normalize_guardrail_tier(
+        _select_runtime_entry(
+            settings.provider_cost_tiers,
+            runtime_path=model_id,
+            separator=";",
+        )
+    )
+
+
+def provider_latency_tier(
+    model_id: str | None,
+    *,
+    profile: str | None = None,
+) -> str | None:
+    return _normalize_guardrail_tier(
+        _select_runtime_entry(
+            settings.provider_latency_tiers,
+            runtime_path=model_id,
+            separator=";",
+        )
+    )
 
 
 def runtime_profile_candidates(
@@ -576,21 +642,91 @@ def _partition_targets_by_health(
     return healthy_targets, unhealthy_targets
 
 
+def _tier_within_guardrail(actual: str | None, maximum: str | None) -> bool:
+    if maximum is None:
+        return True
+    if actual is None:
+        return False
+    return _GUARDRAIL_TIERS[actual] <= _GUARDRAIL_TIERS[maximum]
+
+
+def _target_policy_assessment(
+    *,
+    model_id: str,
+    profile: str | None,
+    runtime_path: str | None,
+) -> dict[str, Any]:
+    requirements = runtime_policy_requirements(runtime_path)
+    matched_requirements = _matched_policy_intents(
+        model_id=model_id,
+        profile=profile,
+        policy_intents=requirements,
+    )
+    missing_requirements = [
+        intent
+        for intent in requirements
+        if intent not in matched_requirements
+    ]
+    cost_tier = provider_cost_tier(model_id, profile=profile)
+    latency_tier = provider_latency_tier(model_id, profile=profile)
+    max_cost_tier = runtime_max_cost_tier(runtime_path)
+    max_latency_tier = runtime_max_latency_tier(runtime_path)
+    within_cost_guardrail = _tier_within_guardrail(cost_tier, max_cost_tier)
+    within_latency_guardrail = _tier_within_guardrail(latency_tier, max_latency_tier)
+    policy_compliant = (
+        not missing_requirements
+        and within_cost_guardrail
+        and within_latency_guardrail
+    )
+    return {
+        "required_policy_intents": requirements,
+        "matched_required_intents": matched_requirements,
+        "missing_required_intents": missing_requirements,
+        "cost_tier": cost_tier,
+        "latency_tier": latency_tier,
+        "max_cost_tier": max_cost_tier,
+        "max_latency_tier": max_latency_tier,
+        "within_cost_guardrail": within_cost_guardrail,
+        "within_latency_guardrail": within_latency_guardrail,
+        "policy_compliant": policy_compliant,
+    }
+
+
 def _order_targets_by_policy(
     targets: list[dict[str, Any]],
     *,
     runtime_path: str | None,
 ) -> list[dict[str, Any]]:
     intents = runtime_policy_intents(runtime_path)
-    if not intents:
-        return targets
+    score_weights = runtime_policy_scores(runtime_path)
+    annotated_targets: list[tuple[int, dict[str, Any]]] = []
+    any_compliant = False
+    for index, target in enumerate(targets):
+        annotated_target = dict(target)
+        assessment = _target_policy_assessment(
+            model_id=str(annotated_target["model_id"]),
+            profile=annotated_target.get("profile"),
+            runtime_path=runtime_path,
+        )
+        annotated_target["policy_assessment"] = assessment
+        if assessment["policy_compliant"]:
+            any_compliant = True
+        annotated_targets.append((index, annotated_target))
+
+    if not intents and not any(
+        target["policy_assessment"]["required_policy_intents"]
+        or target["policy_assessment"]["max_cost_tier"] is not None
+        or target["policy_assessment"]["max_latency_tier"] is not None
+        for _, target in annotated_targets
+    ):
+        return [target for _, target in annotated_targets]
 
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
-    score_weights = runtime_policy_scores(runtime_path)
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, float, tuple[int, ...], int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], int]:
         index, target = item
+        assessment = target["policy_assessment"]
         capabilities = set(
             provider_capabilities(
                 str(target["model_id"]),
@@ -609,11 +745,20 @@ def _order_targets_by_policy(
                 for capability in desired_capabilities
                 if capability in capabilities
             )
-        return (-local_score, -capability_score, capability_priority, index)
+        compliance_penalty = 0
+        safeguard_penalty = 0
+        if any_compliant and not assessment["policy_compliant"]:
+            compliance_penalty = 1
+            safeguard_penalty = len(assessment["missing_required_intents"])
+            if not assessment["within_cost_guardrail"]:
+                safeguard_penalty += 1
+            if not assessment["within_latency_guardrail"]:
+                safeguard_penalty += 1
+        return (compliance_penalty, safeguard_penalty, -local_score - capability_score, capability_priority, index)
 
     return [
         target
-        for _, target in sorted(enumerate(targets), key=_sort_key)
+        for _, target in sorted(annotated_targets, key=_sort_key)
     ]
 
 
@@ -658,6 +803,10 @@ def _candidate_reason_codes(
     decision: str,
     healthy: bool,
     rerouted_primary: bool,
+    missing_required_intents: list[str],
+    within_cost_guardrail: bool,
+    within_latency_guardrail: bool,
+    guardrail_fallback_only: bool,
 ) -> list[str]:
     reasons: list[str] = []
     if source == "primary":
@@ -680,7 +829,65 @@ def _candidate_reason_codes(
         reasons.append("unhealthy_cooldown")
     if rerouted_primary:
         reasons.append("rerouted_away_from_primary")
+    if missing_required_intents:
+        reasons.append("missing_required_intents")
+    if not within_cost_guardrail:
+        reasons.append("cost_guardrail_exceeded")
+    if not within_latency_guardrail:
+        reasons.append("latency_guardrail_exceeded")
+    if guardrail_fallback_only:
+        reasons.append("no_guardrail_compliant_targets")
     return reasons
+
+
+def _ordered_candidate_targets(
+    *,
+    primary_target: dict[str, Any],
+    fallback_targets: list[dict[str, Any]],
+    runtime_path: str | None,
+) -> list[dict[str, Any]]:
+    policy_ordered = _order_targets_by_policy(
+        [primary_target, *fallback_targets],
+        runtime_path=runtime_path,
+    )
+    primary_candidate = next(
+        target for target in policy_ordered if target["source"] == "primary"
+    )
+    fallback_candidates = [
+        target for target in policy_ordered if target["source"] != "primary"
+    ]
+    healthy_fallbacks, unhealthy_fallbacks = _partition_targets_by_health(
+        fallback_candidates
+    )
+    fallback_order = healthy_fallbacks + unhealthy_fallbacks
+
+    primary_assessment = primary_candidate["policy_assessment"]
+    guardrails_configured = bool(
+        primary_assessment["required_policy_intents"]
+        or primary_assessment["max_cost_tier"] is not None
+        or primary_assessment["max_latency_tier"] is not None
+    )
+    primary_healthy = _is_target_healthy(
+        model_id=str(primary_candidate["model_id"]),
+        api_base=primary_candidate.get("api_base"),
+        api_key=primary_candidate.get("api_key"),
+    )
+    compliant_targets_present = any(
+        target["policy_assessment"]["policy_compliant"]
+        for target in [primary_candidate, *fallback_order]
+    )
+    reroute_due_to_policy = (
+        guardrails_configured
+        and compliant_targets_present
+        and not primary_assessment["policy_compliant"]
+    )
+    reroute_due_to_health = (
+        not primary_healthy and any(healthy_fallbacks)
+    )
+    if reroute_due_to_policy or reroute_due_to_health:
+        healthy_targets, unhealthy_targets = _partition_targets_by_health(policy_ordered)
+        return healthy_targets + unhealthy_targets
+    return [primary_candidate, *fallback_order]
 
 
 def _build_routing_decision_details(
@@ -691,46 +898,35 @@ def _build_routing_decision_details(
     primary_api_base: str | None,
     primary_api_key: str | None,
     primary_profile: str | None,
-    primary_unhealthy: bool,
-    ordered_fallbacks: list[dict[str, Any]],
+    ordered_targets: list[dict[str, Any]],
     rerouted: bool,
+    rerouted_due_to_policy: bool,
 ) -> dict[str, Any]:
     policy_intents = runtime_policy_intents(runtime_path)
+    required_policy_intents = runtime_policy_requirements(runtime_path)
     policy_scores = runtime_policy_scores(runtime_path)
-    selected_target = (
-        ordered_fallbacks[0]
-        if rerouted and ordered_fallbacks
-        else {
-            "model_id": primary_model,
-            "api_base": primary_api_base,
-            "api_key": primary_api_key,
-            "profile": primary_profile,
-            "source": "primary",
-        }
+    max_cost_tier = runtime_max_cost_tier(runtime_path)
+    max_latency_tier = runtime_max_latency_tier(runtime_path)
+    primary_unhealthy = not _is_target_healthy(
+        model_id=primary_model,
+        api_base=primary_api_base,
+        api_key=primary_api_key,
     )
+    selected_target = ordered_targets[0]
     selected_target_key = _target_key(
         model_id=str(selected_target["model_id"]),
         api_base=selected_target.get("api_base"),
         api_key=selected_target.get("api_key"),
     )
-    attempt_order = (
-        [str(target["model_id"]) for target in ordered_fallbacks]
-        if rerouted
-        else [primary_model, *[str(target["model_id"]) for target in ordered_fallbacks]]
+    compliant_targets_present = any(
+        target["policy_assessment"]["policy_compliant"]
+        for target in ordered_targets
     )
 
     candidate_targets: list[dict[str, Any]] = []
-    for target in [
-        {
-            "model_id": primary_model,
-            "api_base": primary_api_base,
-            "api_key": primary_api_key,
-            "profile": primary_profile,
-            "source": "primary",
-        },
-        *ordered_fallbacks,
-    ]:
-        healthy = not primary_unhealthy if target["source"] == "primary" else _is_target_healthy(
+    for target in ordered_targets:
+        assessment = target["policy_assessment"]
+        healthy = _is_target_healthy(
             model_id=str(target["model_id"]),
             api_base=target.get("api_base"),
             api_key=target.get("api_key"),
@@ -748,6 +944,8 @@ def _build_routing_decision_details(
             decision = "skipped"
         elif not healthy:
             decision = "deprioritized"
+        elif compliant_targets_present and not assessment["policy_compliant"]:
+            decision = "skipped"
         else:
             decision = "deferred"
 
@@ -763,6 +961,14 @@ def _build_routing_decision_details(
                     profile=target.get("profile"),
                     policy_intents=policy_intents,
                 ),
+                "required_policy_intents": assessment["required_policy_intents"],
+                "matched_required_intents": assessment["matched_required_intents"],
+                "missing_required_intents": assessment["missing_required_intents"],
+                "cost_tier": assessment["cost_tier"],
+                "latency_tier": assessment["latency_tier"],
+                "within_cost_guardrail": assessment["within_cost_guardrail"],
+                "within_latency_guardrail": assessment["within_latency_guardrail"],
+                "policy_compliant": assessment["policy_compliant"],
                 "policy_score": _policy_score(
                     model_id=str(target["model_id"]),
                     profile=target.get("profile"),
@@ -774,21 +980,36 @@ def _build_routing_decision_details(
                     decision=decision,
                     healthy=healthy,
                     rerouted_primary=rerouted_primary,
+                    missing_required_intents=assessment["missing_required_intents"],
+                    within_cost_guardrail=assessment["within_cost_guardrail"],
+                    within_latency_guardrail=assessment["within_latency_guardrail"],
+                    guardrail_fallback_only=not compliant_targets_present and not assessment["policy_compliant"],
                 ),
             }
         )
+
+    attempt_order = [
+        target["model_id"]
+        for target in candidate_targets
+        if target["decision"] != "skipped"
+    ]
 
     return {
         "runtime_path": runtime_path,
         "runtime_profile": runtime_profile,
         "policy_intents": policy_intents,
+        "required_policy_intents": required_policy_intents,
         "policy_scores": policy_scores,
+        "max_cost_tier": max_cost_tier,
+        "max_latency_tier": max_latency_tier,
         "primary_model": primary_model,
         "selected_model": str(selected_target["model_id"]),
         "selected_profile": selected_target.get("profile"),
         "selected_source": selected_target["source"],
         "attempt_order": attempt_order,
-        "rerouted_from_unhealthy_primary": rerouted,
+        "rerouted_from_unhealthy_primary": rerouted and primary_unhealthy,
+        "rerouted_from_policy_guardrails": rerouted_due_to_policy,
+        "guardrail_compliant_targets_present": compliant_targets_present,
         "candidate_targets": candidate_targets,
         "rejected_targets": [
             target
@@ -796,6 +1017,19 @@ def _build_routing_decision_details(
             if target["decision"] != "selected"
         ],
     }
+
+
+def _attemptable_targets(
+    ordered_targets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Skip non-compliant targets when at least one compliant option exists."""
+    if any(target["policy_assessment"]["policy_compliant"] for target in ordered_targets):
+        return [
+            target
+            for target in ordered_targets
+            if target["policy_assessment"]["policy_compliant"]
+        ]
+    return ordered_targets
 
 
 def _register_request(request_id: str) -> None:
@@ -961,6 +1195,13 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
     ):
         primary_model = self.model_id
         request_id = _current_llm_request_id()
+        primary_target = {
+            "model_id": primary_model,
+            "api_base": self.api_base,
+            "api_key": self.api_key,
+            "profile": self._runtime_profile,
+            "source": "primary",
+        }
         fallback_targets = [
             {
                 "model_id": fallback_model.model_id,
@@ -972,21 +1213,26 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             }
             for fallback_model in self._fallback_models
         ]
-        healthy_fallbacks, unhealthy_fallbacks = _partition_targets_by_health(fallback_targets)
+        ordered_targets = _ordered_candidate_targets(
+            primary_target=primary_target,
+            fallback_targets=fallback_targets,
+            runtime_path="agent_generate",
+        )
         primary_unhealthy = not _is_target_healthy(
             model_id=primary_model,
             api_base=self.api_base,
             api_key=self.api_key,
         )
-        rerouted = primary_unhealthy and bool(healthy_fallbacks)
-        ordered_fallbacks = healthy_fallbacks + unhealthy_fallbacks
+        selected_target = ordered_targets[0]
+        rerouted = selected_target["source"] != "primary"
+        rerouted_due_to_policy = rerouted and not primary_unhealthy
 
         if _can_log_request(request_id):
             _log_llm_runtime_event_sync(
                 event_type="llm_routing_decision",
                 summary=(
                     f"Agent model routing selected "
-                    f"{ordered_fallbacks[0]['model_id'] if rerouted else primary_model}"
+                    f"{selected_target['model_id']}"
                 ),
                 details=_build_routing_decision_details(
                     runtime_path="agent_generate",
@@ -995,9 +1241,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     primary_api_base=self.api_base,
                     primary_api_key=self.api_key,
                     primary_profile=self._runtime_profile,
-                    primary_unhealthy=primary_unhealthy,
-                    ordered_fallbacks=ordered_fallbacks,
+                    ordered_targets=ordered_targets,
                     rerouted=rerouted,
+                    rerouted_due_to_policy=rerouted_due_to_policy,
                 ),
                 request_id=request_id,
             )
@@ -1006,16 +1252,17 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             _log_llm_runtime_event_sync(
                 event_type="llm_target_rerouted",
                 summary=(
-                    f"Agent model generate rerouted from unhealthy {primary_model} "
-                    f"to {healthy_fallbacks[0]['model_id']}"
+                    f"Agent model generate rerouted from {primary_model} "
+                    f"to {selected_target['model_id']}"
                 ),
                 details={
                     "runtime_path": "agent_generate",
                     "primary_model": primary_model,
-                    "rerouted_model": healthy_fallbacks[0]["model_id"],
-                    "rerouted_profile": healthy_fallbacks[0].get("profile"),
-                    "unhealthy_models": [primary_model],
-                    "cooldown_seconds": _target_cooldown_seconds(),
+                    "rerouted_model": selected_target["model_id"],
+                    "rerouted_profile": selected_target.get("profile"),
+                    "reroute_reason": "policy_guardrails" if rerouted_due_to_policy else "unhealthy_primary",
+                    "unhealthy_models": [primary_model] if primary_unhealthy else [],
+                    "cooldown_seconds": _target_cooldown_seconds() if primary_unhealthy else 0,
                 },
                 request_id=request_id,
             )
@@ -1025,67 +1272,46 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         attempted_fallback_models: list[str] = []
         fallback_errors: list[dict[str, str]] = []
 
-        if not rerouted:
+        last_error: Exception = RuntimeError("No fallback targets available")
+
+        attempt_targets = _attemptable_targets(ordered_targets)
+
+        for index, target in enumerate(attempt_targets):
+            is_primary = target["source"] == "primary"
             try:
-                response = super().generate(
-                    messages,
-                    stop_sequences=stop_sequences,
-                    response_format=response_format,
-                    tools_to_call_from=tools_to_call_from,
-                    **kwargs,
-                )
-                _mark_target_succeeded(
-                    model_id=primary_model,
-                    api_base=self.api_base,
-                    api_key=self.api_key,
-                )
-                if _can_log_request(request_id):
-                    _log_llm_runtime_event_sync(
-                        event_type="llm_primary_success",
-                        summary=f"Primary agent model generate succeeded via {primary_model}",
-                        details={
+                if is_primary:
+                    primary_attempted = True
+                    response = super().generate(
+                        messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
+                    _mark_target_succeeded(
+                        model_id=primary_model,
+                        api_base=self.api_base,
+                        api_key=self.api_key,
+                    )
+                    if _can_log_request(request_id):
+                        details = {
                             "runtime_path": "agent_generate",
                             "primary_model": primary_model,
                             "used_fallback": False,
-                        },
-                        request_id=request_id,
-                    )
-                return response
-            except Exception as error:
-                primary_attempted = True
-                primary_error = error
-                _mark_target_failed(
-                    model_id=primary_model,
-                    api_base=self.api_base,
-                    api_key=self.api_key,
-                )
-                if not ordered_fallbacks:
-                    if _can_log_request(request_id):
+                        }
+                        if attempted_fallback_models:
+                            details["attempted_fallback_models"] = attempted_fallback_models
+                            details["fallback_attempts"] = len(attempted_fallback_models)
                         _log_llm_runtime_event_sync(
-                            event_type="llm_primary_failure",
-                            summary=f"Primary agent model generate failed via {primary_model}",
-                            details={
-                                "runtime_path": "agent_generate",
-                                "primary_model": primary_model,
-                                "used_fallback": False,
-                                "error": str(error),
-                            },
+                            event_type="llm_primary_success",
+                            summary=f"Primary agent model generate succeeded via {primary_model}",
+                            details=details,
                             request_id=request_id,
                         )
-                    raise
-                logger.warning(
-                    "LLM generate failed for %s, retrying with fallback %s",
-                    primary_model,
-                    ordered_fallbacks[0]["model_id"],
-                    exc_info=True,
-                )
+                    return response
 
-        last_error: Exception = primary_error or RuntimeError("No fallback targets available")
-
-        for index, target in enumerate(ordered_fallbacks):
-            fallback_model = target["model"]
-            attempted_fallback_models.append(fallback_model.model_id)
-            try:
+                fallback_model = target["model"]
+                attempted_fallback_models.append(fallback_model.model_id)
                 response = fallback_model.generate(
                     messages,
                     stop_sequences=stop_sequences,
@@ -1110,8 +1336,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     }
                     if primary_error is not None:
                         details["primary_error"] = str(primary_error)
-                    if rerouted:
+                    if rerouted and primary_unhealthy:
                         details["rerouted_from_unhealthy_primary"] = True
+                    if rerouted_due_to_policy:
+                        details["rerouted_from_policy_guardrails"] = True
                     _log_llm_runtime_event_sync(
                         event_type="llm_fallback_success",
                         summary=f"Fallback agent model generate succeeded via {fallback_model.model_id}",
@@ -1119,24 +1347,33 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         request_id=request_id,
                     )
                 return response
-            except Exception as fallback_error:
-                last_error = fallback_error
-                _mark_target_failed(
-                    model_id=fallback_model.model_id,
-                    api_base=fallback_model.api_base,
-                    api_key=fallback_model.api_key,
-                )
-                fallback_errors.append(
-                    {
-                        "model": fallback_model.model_id,
-                        "error": str(fallback_error),
-                    }
-                )
-                if index + 1 < len(ordered_fallbacks):
+            except Exception as error:
+                last_error = error
+                if is_primary:
+                    primary_error = error
+                    _mark_target_failed(
+                        model_id=primary_model,
+                        api_base=self.api_base,
+                        api_key=self.api_key,
+                    )
+                else:
+                    fallback_model = target["model"]
+                    _mark_target_failed(
+                        model_id=fallback_model.model_id,
+                        api_base=fallback_model.api_base,
+                        api_key=fallback_model.api_key,
+                    )
+                    fallback_errors.append(
+                        {
+                            "model": fallback_model.model_id,
+                            "error": str(error),
+                        }
+                    )
+                if index + 1 < len(attempt_targets):
                     logger.warning(
-                        "Fallback model %s failed, retrying with next fallback %s",
-                        fallback_model.model_id,
-                        ordered_fallbacks[index + 1]["model_id"],
+                        "LLM generate failed for %s, retrying with %s",
+                        target["model_id"],
+                        attempt_targets[index + 1]["model_id"],
                         exc_info=True,
                     )
 
@@ -1154,12 +1391,26 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             }
             if primary_error is not None:
                 details["primary_error"] = str(primary_error)
-            if rerouted:
+            if rerouted and primary_unhealthy:
                 details["rerouted_from_unhealthy_primary"] = True
+            if rerouted_due_to_policy:
+                details["rerouted_from_policy_guardrails"] = True
             _log_llm_runtime_event_sync(
                 event_type="llm_fallback_failure",
                 summary=f"Fallback agent model generate failed via {attempted_fallback_models[-1]}",
                 details=details,
+                request_id=request_id,
+            )
+        elif primary_error is not None and _can_log_request(request_id):
+            _log_llm_runtime_event_sync(
+                event_type="llm_primary_failure",
+                summary=f"Primary agent model generate failed via {primary_model}",
+                details={
+                    "runtime_path": "agent_generate",
+                    "primary_model": primary_model,
+                    "used_fallback": False,
+                    "error": str(primary_error),
+                },
                 request_id=request_id,
             )
         raise last_error
@@ -1189,6 +1440,13 @@ def completion_with_fallback_sync(
             profile=profile,
         )
         primary_model = _safe_model_name(primary_kwargs)
+        primary_target = {
+            "model_id": primary_model,
+            "api_base": primary_kwargs.get("api_base"),
+            "api_key": primary_kwargs.get("api_key"),
+            "profile": resolved_profile,
+            "source": "primary",
+        }
         fallback_targets = _fallback_targets(
             primary_model_id=primary_model,
             primary_api_base=primary_kwargs.get("api_base"),
@@ -1197,21 +1455,26 @@ def completion_with_fallback_sync(
             runtime_path=runtime_path,
             profile=profile,
         )
-        healthy_fallbacks, unhealthy_fallbacks = _partition_targets_by_health(fallback_targets)
+        ordered_targets = _ordered_candidate_targets(
+            primary_target=primary_target,
+            fallback_targets=fallback_targets,
+            runtime_path=runtime_path,
+        )
         primary_unhealthy = not _is_target_healthy(
             model_id=primary_model,
             api_base=primary_kwargs.get("api_base"),
             api_key=primary_kwargs.get("api_key"),
         )
-        rerouted = primary_unhealthy and bool(healthy_fallbacks)
-        ordered_fallbacks = healthy_fallbacks + unhealthy_fallbacks
+        selected_target = ordered_targets[0]
+        rerouted = selected_target["source"] != "primary"
+        rerouted_due_to_policy = rerouted and not primary_unhealthy
 
         if _can_log_request(request_id):
             _log_llm_runtime_event_sync(
                 event_type="llm_routing_decision",
                 summary=(
                     f"LLM completion routing selected "
-                    f"{ordered_fallbacks[0]['model_id'] if rerouted else primary_model}"
+                    f"{selected_target['model_id']}"
                 ),
                 details=_build_routing_decision_details(
                     runtime_path=runtime_path,
@@ -1220,9 +1483,9 @@ def completion_with_fallback_sync(
                     primary_api_base=primary_kwargs.get("api_base"),
                     primary_api_key=primary_kwargs.get("api_key"),
                     primary_profile=resolved_profile,
-                    primary_unhealthy=primary_unhealthy,
-                    ordered_fallbacks=ordered_fallbacks,
+                    ordered_targets=ordered_targets,
                     rerouted=rerouted,
+                    rerouted_due_to_policy=rerouted_due_to_policy,
                 ),
                 request_id=request_id,
             )
@@ -1231,17 +1494,18 @@ def completion_with_fallback_sync(
             _log_llm_runtime_event_sync(
                 event_type="llm_target_rerouted",
                 summary=(
-                    f"LLM completion rerouted from unhealthy {primary_model} "
-                    f"to {healthy_fallbacks[0]['model_id']}"
+                    f"LLM completion rerouted from {primary_model} "
+                    f"to {selected_target['model_id']}"
                 ),
                 details={
                     "runtime_path": runtime_path,
                     "runtime_profile": resolved_profile,
                     "primary_model": primary_model,
-                    "rerouted_model": healthy_fallbacks[0]["model_id"],
-                    "rerouted_profile": healthy_fallbacks[0].get("profile"),
-                    "unhealthy_models": [primary_model],
-                    "cooldown_seconds": _target_cooldown_seconds(),
+                    "rerouted_model": selected_target["model_id"],
+                    "rerouted_profile": selected_target.get("profile"),
+                    "reroute_reason": "policy_guardrails" if rerouted_due_to_policy else "unhealthy_primary",
+                    "unhealthy_models": [primary_model] if primary_unhealthy else [],
+                    "cooldown_seconds": _target_cooldown_seconds() if primary_unhealthy else 0,
                 },
                 request_id=request_id,
             )
@@ -1251,73 +1515,51 @@ def completion_with_fallback_sync(
         attempted_fallback_models: list[str] = []
         fallback_errors: list[dict[str, str]] = []
 
-        if not rerouted:
+        last_error: Exception = RuntimeError("No fallback targets available")
+
+        attempt_targets = _attemptable_targets(ordered_targets)
+
+        for index, target in enumerate(attempt_targets):
+            is_primary = target["source"] == "primary"
             try:
-                response = litellm.completion(**primary_kwargs)
-                _mark_target_succeeded(
-                    model_id=primary_model,
-                    api_base=primary_kwargs.get("api_base"),
-                    api_key=primary_kwargs.get("api_key"),
-                )
-                if _can_log_request(request_id):
-                    _log_llm_runtime_event_sync(
-                        event_type="llm_primary_success",
-                        summary=f"Primary LLM completion succeeded via {primary_model}",
-                        details={
+                if is_primary:
+                    primary_attempted = True
+                    response = litellm.completion(**primary_kwargs)
+                    _mark_target_succeeded(
+                        model_id=primary_model,
+                        api_base=primary_kwargs.get("api_base"),
+                        api_key=primary_kwargs.get("api_key"),
+                    )
+                    if _can_log_request(request_id):
+                        details = {
                             "runtime_path": runtime_path,
                             "runtime_profile": resolved_profile,
                             "primary_model": primary_model,
                             "used_fallback": False,
-                        },
-                        request_id=request_id,
-                    )
-                return response
-            except Exception as error:
-                primary_attempted = True
-                primary_error = error
-                _mark_target_failed(
-                    model_id=primary_model,
-                    api_base=primary_kwargs.get("api_base"),
-                    api_key=primary_kwargs.get("api_key"),
-                )
-                if not ordered_fallbacks:
-                    if _can_log_request(request_id):
+                        }
+                        if attempted_fallback_models:
+                            details["attempted_fallback_models"] = attempted_fallback_models
+                            details["fallback_attempts"] = len(attempted_fallback_models)
                         _log_llm_runtime_event_sync(
-                            event_type="llm_primary_failure",
-                            summary=f"Primary LLM completion failed via {primary_model}",
-                            details={
-                                "runtime_path": runtime_path,
-                                "runtime_profile": resolved_profile,
-                                "primary_model": primary_model,
-                                "used_fallback": False,
-                                "error": str(error),
-                            },
+                            event_type="llm_primary_success",
+                            summary=f"Primary LLM completion succeeded via {primary_model}",
+                            details=details,
                             request_id=request_id,
                         )
-                    raise
-                logger.warning(
-                    "LLM completion failed for model %s, retrying with fallback %s",
-                    primary_model,
-                    ordered_fallbacks[0]["model_id"],
-                    exc_info=True,
+                    return response
+
+                fallback_kwargs = build_completion_kwargs(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    use_fallback=True,
+                    fallback_model_id=str(target["model_id"]),
+                    fallback_api_key=target["api_key"],
+                    fallback_api_base=target["api_base"],
+                    runtime_path=runtime_path,
                 )
-
-        last_error: Exception = primary_error or RuntimeError("No fallback targets available")
-
-        for index, target in enumerate(ordered_fallbacks):
-            fallback_kwargs = build_completion_kwargs(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                use_fallback=True,
-                fallback_model_id=str(target["model_id"]),
-                fallback_api_key=target["api_key"],
-                fallback_api_base=target["api_base"],
-                runtime_path=runtime_path,
-            )
-            fallback_model = _safe_model_name(fallback_kwargs)
-            attempted_fallback_models.append(fallback_model)
-            try:
+                fallback_model = _safe_model_name(fallback_kwargs)
+                attempted_fallback_models.append(fallback_model)
                 response = litellm.completion(**fallback_kwargs)
                 _mark_target_succeeded(
                     model_id=fallback_model,
@@ -1337,8 +1579,10 @@ def completion_with_fallback_sync(
                     }
                     if primary_error is not None:
                         details["primary_error"] = str(primary_error)
-                    if rerouted:
+                    if rerouted and primary_unhealthy:
                         details["rerouted_from_unhealthy_primary"] = True
+                    if rerouted_due_to_policy:
+                        details["rerouted_from_policy_guardrails"] = True
                     _log_llm_runtime_event_sync(
                         event_type="llm_fallback_success",
                         summary=f"Fallback LLM completion succeeded via {fallback_model}",
@@ -1346,24 +1590,33 @@ def completion_with_fallback_sync(
                         request_id=request_id,
                     )
                 return response
-            except Exception as fallback_error:
-                last_error = fallback_error
-                _mark_target_failed(
-                    model_id=fallback_model,
-                    api_base=target["api_base"],
-                    api_key=target["api_key"],
-                )
-                fallback_errors.append(
-                    {
-                        "model": fallback_model,
-                        "error": str(fallback_error),
-                    }
-                )
-                if index + 1 < len(ordered_fallbacks):
+            except Exception as error:
+                last_error = error
+                if is_primary:
+                    primary_error = error
+                    _mark_target_failed(
+                        model_id=primary_model,
+                        api_base=primary_kwargs.get("api_base"),
+                        api_key=primary_kwargs.get("api_key"),
+                    )
+                else:
+                    fallback_model = str(target["model_id"])
+                    _mark_target_failed(
+                        model_id=fallback_model,
+                        api_base=target["api_base"],
+                        api_key=target["api_key"],
+                    )
+                    fallback_errors.append(
+                        {
+                            "model": fallback_model,
+                            "error": str(error),
+                        }
+                    )
+                if index + 1 < len(attempt_targets):
                     logger.warning(
-                        "Fallback model %s failed, retrying with next fallback %s",
-                        fallback_model,
-                        ordered_fallbacks[index + 1]["model_id"],
+                        "LLM completion failed for model %s, retrying with %s",
+                        target["model_id"],
+                        attempt_targets[index + 1]["model_id"],
                         exc_info=True,
                     )
 
@@ -1382,12 +1635,27 @@ def completion_with_fallback_sync(
             }
             if primary_error is not None:
                 details["primary_error"] = str(primary_error)
-            if rerouted:
+            if rerouted and primary_unhealthy:
                 details["rerouted_from_unhealthy_primary"] = True
+            if rerouted_due_to_policy:
+                details["rerouted_from_policy_guardrails"] = True
             _log_llm_runtime_event_sync(
                 event_type="llm_fallback_failure",
                 summary=f"Fallback LLM completion failed via {attempted_fallback_models[-1]}",
                 details=details,
+                request_id=request_id,
+            )
+        elif primary_error is not None and _can_log_request(request_id):
+            _log_llm_runtime_event_sync(
+                event_type="llm_primary_failure",
+                summary=f"Primary LLM completion failed via {primary_model}",
+                details={
+                    "runtime_path": runtime_path,
+                    "runtime_profile": resolved_profile,
+                    "primary_model": primary_model,
+                    "used_fallback": False,
+                    "error": str(primary_error),
+                },
                 request_id=request_id,
             )
         raise last_error

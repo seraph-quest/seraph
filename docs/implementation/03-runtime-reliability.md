@@ -19,6 +19,7 @@
 - [x] runtime-path-specific fallback-chain overrides
 - [x] wildcard runtime-path routing rules, with exact-path overrides taking precedence
 - [x] first-class local runtime profile for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
+- [x] strict runtime-path provider safeguards for required capability intents plus cost/latency guardrails, with degrade-open behavior when no compliant target exists
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
@@ -29,13 +30,14 @@
 
 - [x] Runtime Reliability is no longer the repo-wide active focus after the first guardian behavior baseline shipped
 - [x] the previous runtime-focused queue is fully shipped on `develop`
-- [ ] broader guardian behavioral eval depth remains in the refreshed repo-wide 10-PR horizon through `guardian-behavioral-evals-v2`
-- [ ] richer provider policy still remains to do on `develop`, but it now sits behind higher-leverage product gaps in the refreshed queue
+- [x] `guardian-behavioral-evals-v3` is now shipped on this branch, including strategist-learning continuity proof on top of the earlier guardian baseline
+- [ ] richer provider policy still remains to do on `develop`, but the new safeguard layer means the remaining work is now deeper ranking/explainability rather than first-pass hard requirements and tier guardrails
+- [ ] the next runtime-facing queue item now shifts to `provider-policy-explainability-v1` rather than another first-pass guardrail slice
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider selection policy beyond weighted capability scoring, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool-policy guardrail, delegated workflow, and workflow-composition behavioral contracts
+- [ ] deepen provider selection policy beyond the shipped weighted scoring, required capability safeguards, tier guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
+- [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, strategist-learning continuity, consolidation, proactive, tool-policy guardrail, delegated workflow, and workflow-composition behavioral contracts
 
 ## Completed PR Sequence
 

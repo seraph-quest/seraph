@@ -53,6 +53,7 @@ async def list_tools():
             "approval_behavior": approval_behavior,
             "risk_level": risk_level,
             "execution_boundaries": execution_boundaries,
+            "accepts_secret_refs": bool(meta.get("accepts_secret_refs", is_mcp)) if meta else is_mcp,
         })
 
     # When delegation is active, also include specialist names so the frontend
@@ -69,6 +70,7 @@ async def list_tools():
                 "approval_behavior": "never",
                 "risk_level": "low",
                 "execution_boundaries": ["delegation"],
+                "accepts_secret_refs": False,
             })
 
     return result

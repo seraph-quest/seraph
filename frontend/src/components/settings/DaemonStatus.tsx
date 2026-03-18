@@ -23,30 +23,61 @@ interface PendingNotification {
   created_at: string;
 }
 
-interface PendingNotificationsData {
+interface QueuedInsightItem {
+  id: string;
+  intervention_id: string | null;
+  content_excerpt: string;
+  intervention_type: string;
+  urgency: number;
+  reasoning: string;
+  created_at: string;
+}
+
+interface RecentInterventionItem {
+  id: string;
+  session_id: string | null;
+  intervention_type: string;
+  content_excerpt: string;
+  policy_action: string;
+  policy_reason: string;
+  delivery_decision: string | null;
+  latest_outcome: string;
+  transport: string | null;
+  notification_id: string | null;
+  feedback_type: string | null;
+  updated_at: string;
+  continuity_surface: string;
+}
+
+interface ContinuitySnapshot {
+  daemon: DaemonStatusData;
   notifications: PendingNotification[];
-  pending_count: number;
+  queued_insights: QueuedInsightItem[];
+  queued_insight_count: number;
+  recent_interventions: RecentInterventionItem[];
+}
+
+function formatSurfaceLabel(value: string): string {
+  return value.replace(/_/g, " ");
 }
 
 export function DaemonStatus() {
   const [status, setStatus] = useState<DaemonStatusData | null>(null);
   const [notifications, setNotifications] = useState<PendingNotification[]>([]);
+  const [queuedInsights, setQueuedInsights] = useState<QueuedInsightItem[]>([]);
+  const [recentInterventions, setRecentInterventions] = useState<RecentInterventionItem[]>([]);
   const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
   const [dismissState, setDismissState] = useState<"idle" | "dismissing" | "dismissed" | "failed">("idle");
 
   async function fetchStatus() {
     try {
-      const [statusResponse, notificationsResponse] = await Promise.all([
-        fetch(`${API_URL}/api/observer/daemon-status`),
-        fetch(`${API_URL}/api/observer/notifications`),
-      ]);
-      if (statusResponse.ok) {
-        const data = await statusResponse.json();
-        setStatus(data);
-      }
-      if (notificationsResponse.ok) {
-        const data: PendingNotificationsData = await notificationsResponse.json();
+      const continuityResponse = await fetch(`${API_URL}/api/observer/continuity`);
+      if (continuityResponse.ok) {
+        const data: ContinuitySnapshot = await continuityResponse.json();
+        setStatus(data.daemon);
         setNotifications(data.notifications ?? []);
+        setQueuedInsights(data.queued_insights ?? []);
+        setRecentInterventions(data.recent_interventions ?? []);
       }
     } catch {
       // ignore
@@ -241,6 +272,56 @@ export function DaemonStatus() {
                 : dismissState === "failed"
                   ? "Dismiss failed"
                   : "Updating"}
+            </div>
+          )}
+        </div>
+
+        <div className="text-[9px] text-retro-text/50">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-retro-text/30 uppercase tracking-wider">Deferred bundle items</div>
+            <div className="text-retro-text/40">{queuedInsights.length}</div>
+          </div>
+          {queuedInsights.length === 0 ? (
+            <div className="text-retro-text/40">No deferred bundle items.</div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {queuedInsights.map((item) => (
+                <div key={item.id} className="border border-retro-text/10 rounded px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-retro-text truncate">{item.intervention_type}</div>
+                    <div className="text-retro-text/40 uppercase tracking-wider">urgency {item.urgency}</div>
+                  </div>
+                  <div className="text-retro-text/40 truncate">{item.content_excerpt}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="text-[9px] text-retro-text/50">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-retro-text/30 uppercase tracking-wider">Recent guardian continuity</div>
+            <div className="text-retro-text/40">{recentInterventions.length}</div>
+          </div>
+          {recentInterventions.length === 0 ? (
+            <div className="text-retro-text/40">No recent cross-surface guardian state yet.</div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {recentInterventions.slice(0, 4).map((item) => (
+                <div key={item.id} className="border border-retro-text/10 rounded px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-retro-text truncate">{item.intervention_type}</div>
+                    <div className="text-retro-text/40 uppercase tracking-wider">
+                      {formatSurfaceLabel(item.continuity_surface)}
+                    </div>
+                  </div>
+                  <div className="text-retro-text/40 truncate">{item.content_excerpt}</div>
+                  <div className="text-retro-text/30 truncate">
+                    {formatSurfaceLabel(item.latest_outcome)}
+                    {item.feedback_type ? ` · feedback ${formatSurfaceLabel(item.feedback_type)}` : ""}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

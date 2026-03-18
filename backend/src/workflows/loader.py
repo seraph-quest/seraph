@@ -51,6 +51,10 @@ class Workflow:
     def tool_name(self) -> str:
         return workflow_tool_name(self.name)
 
+    @property
+    def step_tools(self) -> list[str]:
+        return list(dict.fromkeys(step.tool for step in self.steps))
+
 
 def _parse_workflow_file(path: str) -> Workflow | None:
     """Parse a single markdown workflow file."""
@@ -159,6 +163,19 @@ def _parse_workflow_file(path: str) -> Workflow | None:
             "required": bool(input_spec.get("required", True)),
             "default": input_spec.get("default"),
         }
+
+    step_tools = list(dict.fromkeys(step.tool for step in parsed_steps))
+    missing_required_tools = [
+        tool_name for tool_name in step_tools
+        if tool_name not in requires_tools
+    ]
+    if missing_required_tools:
+        logger.warning(
+            "Workflow file %s has undeclared step tools: %s",
+            path,
+            ", ".join(missing_required_tools),
+        )
+        return None
 
     return Workflow(
         name=name,

@@ -32,6 +32,31 @@ class DummyFailTool(Tool):
         raise RuntimeError(f"failed:{code}")
 
 
+class DummyWorkflowLikeTool(Tool):
+    name = "workflow_web_brief_to_file"
+    description = "Dummy workflow"
+    inputs = {"query": {"type": "string", "description": "Query"}}
+    output_type = "string"
+
+    def forward(self, query: str) -> str:
+        return f"saved:{query}"
+
+    def get_audit_result_payload(self, arguments, result):
+        return (
+            "workflow_web_brief_to_file succeeded (2 steps)",
+            {
+                "workflow_name": "web-brief-to-file",
+                "step_count": 2,
+                "step_tools": ["web_search", "write_file"],
+                "artifact_paths": ["notes/brief.md"],
+                "continued_error_steps": [],
+                "content_redacted": True,
+                "query": arguments["query"],
+                "result_redacted": True,
+            },
+        )
+
+
 def _tool_context() -> CurrentContext:
     return CurrentContext(tool_policy_mode="full", mcp_policy_mode="full")
 
@@ -81,6 +106,28 @@ def test_audited_tool_logs_failure(async_db):
     assert len(tool_failures) == 1
     assert tool_failures[0]["tool_name"] == "shell_execute"
     assert tool_failures[0]["details"]["error"] == "failed:print('hi')"
+
+
+def test_audited_tool_uses_custom_result_payload(async_db):
+    tool = wrap_tools_for_audit([DummyWorkflowLikeTool()])[0]
+    tokens = set_runtime_context("s1", "high_risk")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            assert tool(query="seraph") == "saved:seraph"
+    finally:
+        reset_runtime_context(tokens)
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return events
+
+    events = asyncio.run(_fetch())
+    tool_result = next(e for e in events if e["event_type"] == "tool_result")
+    assert tool_result["summary"] == "workflow_web_brief_to_file succeeded (2 steps)"
+    assert tool_result["details"]["workflow_name"] == "web-brief-to-file"
+    assert tool_result["details"]["artifact_paths"] == ["notes/brief.md"]
+    assert tool_result["details"]["step_tools"] == ["web_search", "write_file"]
 
 
 def test_audited_tool_logging_fails_open(async_db):

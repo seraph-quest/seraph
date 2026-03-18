@@ -21,21 +21,23 @@
 - [x] explicit guardian-state synthesis that unifies observer context, memory, current session, recent sessions, confidence, and observer salience signals for downstream agent paths
 - [x] explicit intervention policy that distinguishes act, bundle, defer, request-approval, and stay-silent outcomes for proactive guardian messages, including low-salience suppression and high-interruption bundling
 - [x] persisted guardian intervention records and explicit user-feedback capture that flow back into guardian-state summaries
-- [x] first outcome-learning loop that uses recent negative feedback on the same intervention type to reduce future interruption eagerness for similar low-urgency nudges
+- [x] first multi-signal outcome-learning loop that uses recent outcomes on the same intervention type to reduce interruptions after negative feedback and prefer direct delivery or native reroute after repeated positive/acknowledged outcomes
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to bypass generic high-interruption bundling outside focus mode
 - [x] deeper guardian behavioral eval coverage that proves grounded high-salience delivery versus degraded-confidence defer behavior at the delivery gate
-- [x] first explicit human/world model that carries current focus, active commitments, open loops or pressure, focus alignment, and intervention receptivity inside guardian state
+- [x] deeper guardian behavioral eval coverage that proves strategist tick can combine learned delivery bias, native delivery, and continuity-state visibility in one deterministic contract
+- [x] guardian world model that now carries current focus, active commitments, active projects, open loops or pressure, recent execution pressure, focus alignment, and intervention receptivity inside guardian state
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through stronger learning quality and a deeper second world-model pass after the first explicit focus or commitments layer shipped
+- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the new project/execution-aware world-model pass shipped
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
-- [x] the first feedback-driven learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer multi-signal learning rather than more missing observer fields
+- [x] the first multi-signal learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
+- [x] `guardian-behavioral-evals-v3` is now shipped on this branch, so the next gap shifts to better world-model quality and stronger policy learning rather than more unproven first-pass behavior
 
 ## Still To Do On `develop`
 
-- [ ] richer human world modeling that goes beyond the first explicit focus, commitments, pressure, and receptivity layer
-- [ ] stronger learning loops based on intervention outcomes beyond the first negative-feedback interruption bias
+- [ ] richer human world modeling that goes beyond the new project/execution-aware world-model layer
+- [ ] stronger learning loops based on intervention outcomes beyond the first multi-signal delivery/channel bias layer
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 
@@ -55,6 +57,8 @@
 - [x] Seraph scores observer state by salience, confidence, and interruption cost before guardian strategy and delivery
 - [x] Seraph uses calibrated high-salience observer signals to change real delivery outcomes instead of only logging them
 - [x] Seraph has deterministic behavioral proof that the calibrated high-salience deliver path and degraded-confidence defer path stay distinct at the delivery gate
+- [x] Seraph has deterministic behavioral proof that strategist nudges can follow learned native-delivery bias and still remain visible through continuity surfaces
 - [x] Seraph has a first explicit world model inside guardian state instead of relying only on retrieval plus prompt prose
-- [ ] Seraph reliably learns from intervention outcomes in a way that improves future policy quality beyond the first bias layer
+- [x] Seraph's world model now reflects recent active projects and degraded execution signals instead of only static focus/commitment text
+- [ ] Seraph reliably learns from intervention outcomes in a way that improves future policy quality beyond the first delivery/channel bias layer
 - [ ] Seraph reliably models the human well enough to intervene at consistently high quality

@@ -58,6 +58,7 @@ async def test_tools_api_marks_mcp_tools_as_approval_required_in_approval_mode(c
     assert mcp_entry["approval_behavior"] == "always"
     assert mcp_entry["risk_level"] == "high"
     assert mcp_entry["execution_boundaries"] == ["external_mcp"]
+    assert mcp_entry["accepts_secret_refs"] is True
 
 
 @pytest.mark.asyncio
@@ -96,11 +97,12 @@ async def test_tools_api_surfaces_workflow_execution_boundaries(client):
         resp = await client.get("/api/tools")
     assert resp.status_code == 200
     assert resp.json() == [{
-        "name": "workflow_web_brief_to_file",
-        "description": "Search the web and save a note",
-        "policy_modes": ["balanced", "full"],
-        "requires_approval": False,
-        "approval_behavior": "never",
-        "risk_level": "medium",
-        "execution_boundaries": ["external_read", "workspace_write"],
-    }]
+            "name": "workflow_web_brief_to_file",
+            "description": "Search the web and save a note",
+            "policy_modes": ["balanced", "full"],
+            "requires_approval": False,
+            "approval_behavior": "never",
+            "risk_level": "medium",
+            "execution_boundaries": ["external_read", "workspace_write"],
+            "accepts_secret_refs": False,
+        }]

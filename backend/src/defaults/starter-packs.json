@@ -1,0 +1,28 @@
+{
+  "packs": [
+    {
+      "name": "daily-operator-rhythm",
+      "label": "Daily Operator Rhythm",
+      "description": "Turn on the core daily planning and reflection skills plus a reusable goal snapshot workflow.",
+      "skills": ["morning-intention", "daily-standup", "evening-journal"],
+      "workflows": ["goal-snapshot-to-file"],
+      "sample_prompt": "Run a morning intention and save a goal snapshot for today."
+    },
+    {
+      "name": "research-briefing",
+      "label": "Research Briefing",
+      "description": "Enable web research helpers and the note-saving workflow for repeatable briefs.",
+      "skills": ["web-briefing"],
+      "workflows": ["web-brief-to-file"],
+      "sample_prompt": "Search the web for the latest Warsaw weather and save a concise brief."
+    },
+    {
+      "name": "weekly-alignment",
+      "label": "Weekly Alignment",
+      "description": "Enable weekly review and planning routines grounded in goals and soul context.",
+      "skills": ["goal-reflection", "weekly-planner"],
+      "workflows": ["goal-snapshot-to-file"],
+      "sample_prompt": "Reflect on my goals and prepare a weekly plan from the current priorities."
+    }
+  ]
+}

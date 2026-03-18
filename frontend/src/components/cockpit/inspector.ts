@@ -34,6 +34,11 @@ export interface WorkflowRunRecord {
   continuedErrorSteps: string[];
   arguments?: Record<string, unknown>;
   artifacts: ArtifactRecord[];
+  riskLevel?: string;
+  executionBoundaries?: string[];
+  acceptsSecretRefs?: boolean;
+  pendingApprovalCount?: number;
+  pendingApprovalIds?: string[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

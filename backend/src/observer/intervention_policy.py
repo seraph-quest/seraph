@@ -62,6 +62,8 @@ def decide_intervention(
     interruption_cost: str = "medium",
     requires_approval: bool = False,
     recent_feedback_bias: str = "neutral",
+    learning_channel_bias: str = "neutral",
+    learning_escalation_bias: str = "neutral",
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
     should_cost_budget = user_state_machine.should_cost_budget(
@@ -145,6 +147,20 @@ def decide_intervention(
             action=InterventionAction.bundle,
             reason="recent_negative_feedback",
             delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if (
+        learning_escalation_bias == "prefer_async_native"
+        and learning_channel_bias == "prefer_native_notification"
+        and urgency >= 3
+        and intervention_type != "alert"
+        and user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}
+    ):
+        return InterventionDecision(
+            action=InterventionAction.act,
+            reason="learned_async_native_delivery",
+            delivery_decision=DeliveryDecision.deliver,
             should_cost_budget=should_cost_budget,
         )
 

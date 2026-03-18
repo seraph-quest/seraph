@@ -166,6 +166,30 @@ def test_decide_intervention_can_learn_direct_delivery_on_high_salience():
 
     assert decision.action == InterventionAction.act
     assert decision.reason == "learned_direct_delivery"
+
+
+def test_decide_intervention_can_learn_async_native_delivery_when_user_is_blocked():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Leave this as a desktop-visible reminder.",
+        urgency=3,
+        user_state="deep_work",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        data_quality="good",
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        recent_feedback_bias="neutral",
+        learning_channel_bias="prefer_native_notification",
+        learning_escalation_bias="prefer_async_native",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "learned_async_native_delivery"
     assert decision.delivery_decision is not None
     assert decision.delivery_decision.value == "deliver"
 

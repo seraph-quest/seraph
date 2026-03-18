@@ -26,6 +26,7 @@ export function useWebSocket() {
     setAgentBusy,
     setAmbientState,
     setChatPanelOpen,
+    markSessionContinuity,
   } = useChatStore();
 
   const { onToolDetected, onFinalAnswer, onThinking } = useAgentAnimation();
@@ -40,6 +41,7 @@ export function useWebSocket() {
     role: "user",
     content: message,
     timestamp: Date.now(),
+    sessionId: useChatStore.getState().sessionId,
   }), []);
 
   const buildErrorMessage = useCallback((message: string): ChatMessage => ({
@@ -47,6 +49,7 @@ export function useWebSocket() {
     role: "error",
     content: message,
     timestamp: Date.now(),
+    sessionId: useChatStore.getState().sessionId,
   }), []);
 
   const sendSocketMessage = useCallback(
@@ -108,6 +111,7 @@ export function useWebSocket() {
             role: "approval",
             content: detail.message ?? "Approval required before continuing.",
             timestamp: Date.now(),
+            sessionId,
             approvalId: detail.approval_id,
             toolUsed: detail.tool_name,
             riskLevel: detail.risk_level,
@@ -137,6 +141,7 @@ export function useWebSocket() {
         role: "agent",
         content: responseText,
         timestamp: Date.now(),
+        sessionId: nextSessionId,
       });
 
       await useChatStore.getState().fetchProfile();
@@ -171,13 +176,7 @@ export function useWebSocket() {
       useChatStore.getState().fetchProfile();
       useChatStore.getState().fetchToolRegistry();
 
-      // Await sessions load before restoring last session to avoid race
-      useChatStore.getState().loadSessions().then(() => {
-        const stored = useChatStore.getState().sessionId;
-        if (stored && useChatStore.getState().messages.length === 0) {
-          useChatStore.getState().switchSession(stored);
-        }
-      });
+      void useChatStore.getState().restoreLastSession();
 
       if (pendingResumeRef.current) {
         const pending = pendingResumeRef.current;
@@ -200,7 +199,13 @@ export function useWebSocket() {
 
         if (data.session_id) {
           const current = useChatStore.getState().sessionId;
-          if (!current) setSessionId(data.session_id);
+          if (!current) {
+            setSessionId(data.session_id);
+          } else if (current !== data.session_id) {
+            markSessionContinuity(data.session_id, "new_activity");
+            void useChatStore.getState().loadSessions();
+            return;
+          }
         }
 
         if (data.type === "step") {
@@ -214,6 +219,7 @@ export function useWebSocket() {
             role: "step",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
             stepNumber: data.step ?? undefined,
             toolUsed: tool ?? undefined,
           };
@@ -227,6 +233,7 @@ export function useWebSocket() {
             role: "agent",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
           };
           addMessage(agentMsg);
 
@@ -250,6 +257,7 @@ export function useWebSocket() {
             role: "error",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
           };
           addMessage(errorMsg);
         } else if (data.type === "approval_required") {
@@ -260,6 +268,7 @@ export function useWebSocket() {
             role: "approval",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
             approvalId: data.approval_id,
             toolUsed: data.tool_name,
             riskLevel: data.risk_level,
@@ -273,6 +282,7 @@ export function useWebSocket() {
             role: "proactive",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
             interventionId: data.intervention_id,
             urgency: data.urgency ?? undefined,
             interventionType: data.intervention_type ?? undefined,
@@ -318,7 +328,7 @@ export function useWebSocket() {
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
+  }, [addMessage, markSessionContinuity, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
   const skipOnboarding = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;

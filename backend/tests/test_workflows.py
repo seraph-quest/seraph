@@ -261,6 +261,70 @@ class TestWorkflowManager:
         assert mgr.get_tool_metadata(tool.name)["execution_boundaries"] == ["external_mcp", "workspace_write"]
         assert mgr.get_tool_metadata(tool.name)["accepts_secret_refs"] is True
 
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded (2 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "step_tools": ["web_search", "write_file"],
+                        "artifact_paths": ["notes/brief.md"],
+                        "continued_error_steps": [],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                },
+            ],
+        ),
+        patch(
+            "src.api.workflows.approval_repository.list_pending",
+            return_value=[
+                {
+                    "id": "approval-1",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "session_id": "session-1",
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["runs"]) == 1
+    run = payload["runs"][0]
+    assert run["workflow_name"] == "web-brief-to-file"
+    assert run["risk_level"] == "medium"
+    assert run["execution_boundaries"] == ["external_read", "workspace_write"]
+    assert run["artifact_paths"] == ["notes/brief.md"]
+    assert run["pending_approval_count"] == 1
+    assert run["pending_approval_ids"] == ["approval-1"]
+
     def test_list_workflows_includes_policy_metadata(self, workflows_dir):
         mgr = WorkflowManager()
         mgr.init(workflows_dir)

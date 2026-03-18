@@ -134,3 +134,4 @@ async def test_learning_signal_can_prefer_direct_delivery_and_native_channel(asy
     assert signal.not_helpful_count == 0
     assert signal.bias == "prefer_direct_delivery"
     assert signal.channel_bias == "prefer_native_notification"
+    assert signal.escalation_bias == "prefer_async_native"

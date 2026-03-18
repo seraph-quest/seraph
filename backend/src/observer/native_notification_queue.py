@@ -16,6 +16,9 @@ class NativeNotification:
     body: str
     intervention_type: str | None
     urgency: int | None
+    surface: str
+    session_id: str | None
+    resume_message: str | None
     created_at: str
 
     def to_dict(self) -> dict[str, str | int | None]:
@@ -37,6 +40,9 @@ class NativeNotificationQueue:
         body: str,
         intervention_type: str | None,
         urgency: int | None,
+        surface: str = "notification",
+        session_id: str | None = None,
+        resume_message: str | None = None,
     ) -> NativeNotification:
         notification = NativeNotification(
             id=str(uuid4()),
@@ -45,6 +51,9 @@ class NativeNotificationQueue:
             body=body,
             intervention_type=intervention_type,
             urgency=urgency,
+            surface=surface,
+            session_id=session_id,
+            resume_message=resume_message,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         async with self._lock:

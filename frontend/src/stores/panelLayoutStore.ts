@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { CockpitLayoutId } from "../components/cockpit/layouts";
+import { useCockpitLayoutStore } from "./cockpitLayoutStore";
 
 export interface PanelRect {
   x: number;
@@ -241,12 +242,15 @@ function defaultZStack(): string[] {
 
 interface PanelLayoutStore {
   panels: Record<string, PanelRect>;
+  cockpitLayouts: Partial<Record<CockpitLayoutId, Record<string, PanelRect>>>;
   zStack: string[];
 
   setRect: (id: string, rect: Partial<PanelRect>) => void;
   bringToFront: (id: string) => void;
   resetPanel: (id: string) => void;
   applyCockpitLayout: (layoutId: CockpitLayoutId, inspectorVisible?: boolean) => void;
+  saveCockpitLayout: (layoutId: CockpitLayoutId) => void;
+  resetCockpitLayout: (layoutId: CockpitLayoutId, inspectorVisible?: boolean) => void;
   getZIndex: (id: string) => number;
 }
 
@@ -254,15 +258,34 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
   persist(
     (set, get) => ({
       panels: defaultPanels(),
+      cockpitLayouts: {
+        default: getPackedCockpitPanels("default", true),
+        focus: getPackedCockpitPanels("focus", true),
+        review: getPackedCockpitPanels("review", true),
+      },
       zStack: defaultZStack(),
 
       setRect: (id, rect) =>
-        set((state) => ({
-          panels: {
-            ...state.panels,
-            [id]: { ...state.panels[id], ...rect },
-          },
-        })),
+        set((state) => {
+          const nextPanel = { ...state.panels[id], ...rect };
+          const nextState: Partial<PanelLayoutStore> = {
+            panels: {
+              ...state.panels,
+              [id]: nextPanel,
+            },
+          };
+          if (COCKPIT_PANE_IDS.includes(id as (typeof COCKPIT_PANE_IDS)[number])) {
+            const activeLayoutId = useCockpitLayoutStore.getState().activeLayoutId;
+            nextState.cockpitLayouts = {
+              ...state.cockpitLayouts,
+              [activeLayoutId]: {
+                ...(state.cockpitLayouts[activeLayoutId] ?? getPackedCockpitPanels(activeLayoutId, true)),
+                [id]: nextPanel,
+              },
+            };
+          }
+          return nextState as PanelLayoutStore;
+        }),
 
       bringToFront: (id) =>
         set((state) => {
@@ -280,13 +303,62 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
         })),
 
       applyCockpitLayout: (layoutId, inspectorVisible = true) =>
-        set((state) => ({
-          panels: {
-            ...state.panels,
-            ...getPackedCockpitPanels(layoutId, inspectorVisible),
-          },
-          zStack: [...state.zStack.filter((id) => !COCKPIT_PANE_IDS.includes(id as (typeof COCKPIT_PANE_IDS)[number])), ...COCKPIT_PANE_IDS],
-        })),
+        set((state) => {
+          const packed = getPackedCockpitPanels(layoutId, inspectorVisible);
+          const saved = state.cockpitLayouts[layoutId] ?? {};
+          const visiblePaneIds = Object.keys(packed);
+          const resolvedPanels: Record<string, PanelRect> = { ...packed };
+          visiblePaneIds.forEach((id) => {
+            if (saved[id]) {
+              resolvedPanels[id] = saved[id]!;
+            }
+          });
+          return {
+            panels: {
+              ...state.panels,
+              ...resolvedPanels,
+            },
+            cockpitLayouts: {
+              ...state.cockpitLayouts,
+              [layoutId]: resolvedPanels,
+            },
+            zStack: [
+              ...state.zStack.filter((id) => !COCKPIT_PANE_IDS.includes(id as (typeof COCKPIT_PANE_IDS)[number])),
+              ...COCKPIT_PANE_IDS,
+            ],
+          };
+        }),
+
+      saveCockpitLayout: (layoutId) =>
+        set((state) => {
+          const currentPanels: Record<string, PanelRect> = {};
+          for (const paneId of COCKPIT_PANE_IDS) {
+            if (state.panels[paneId]) {
+              currentPanels[paneId] = state.panels[paneId];
+            }
+          }
+          return {
+            cockpitLayouts: {
+              ...state.cockpitLayouts,
+              [layoutId]: currentPanels,
+            },
+          };
+        }),
+
+      resetCockpitLayout: (layoutId, inspectorVisible = true) =>
+        set((state) => {
+          const packed = getPackedCockpitPanels(layoutId, inspectorVisible);
+          return {
+            panels: {
+              ...state.panels,
+              ...packed,
+            },
+            cockpitLayouts: {
+              ...state.cockpitLayouts,
+              [layoutId]: packed,
+            },
+          };
+        }),
 
       getZIndex: (id) => {
         const idx = get().zStack.indexOf(id);
@@ -297,6 +369,7 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
       name: "seraph_panel_layout",
       partialize: (state) => ({
         panels: state.panels,
+        cockpitLayouts: state.cockpitLayouts,
         zStack: state.zStack,
       }),
       merge: (persisted, current) => {
@@ -315,6 +388,7 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
           ...current,
           ...persistedState,
           panels: mergedPanels,
+          cockpitLayouts: persistedState.cockpitLayouts ?? current.cockpitLayouts,
           zStack: mergedZStack,
         };
       },

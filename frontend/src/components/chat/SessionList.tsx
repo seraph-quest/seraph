@@ -4,8 +4,10 @@ import { useChatStore } from "../../stores/chatStore";
 export function SessionList() {
   const sessions = useChatStore((s) => s.sessions);
   const sessionId = useChatStore((s) => s.sessionId);
+  const sessionContinuity = useChatStore((s) => s.sessionContinuity);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const switchSession = useChatStore((s) => s.switchSession);
+  const clearSessionContinuity = useChatStore((s) => s.clearSessionContinuity);
   const newSession = useChatStore((s) => s.newSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -65,13 +67,21 @@ export function SessionList() {
           ) : (
             <button
               className="flex-1 text-left truncate"
-              onClick={() => switchSession(s.id)}
+              onClick={() => {
+                clearSessionContinuity(s.id);
+                switchSession(s.id, "live");
+              }}
               onDoubleClick={() => {
                 setEditingId(s.id);
                 setEditingTitle(s.title);
               }}
             >
               {s.title}
+              {sessionContinuity[s.id] && (
+                <span className="ml-1 text-retro-highlight/70">
+                  · {sessionContinuity[s.id] === "new_activity" ? "new" : sessionContinuity[s.id]}
+                </span>
+              )}
             </button>
           )}
           <button

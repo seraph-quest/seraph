@@ -5,6 +5,7 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   timestamp: number;
+  sessionId?: string | null;
   interventionId?: string;
   stepNumber?: number;
   toolUsed?: string;
@@ -67,6 +68,8 @@ export interface SessionInfo {
   last_message: string | null;
   last_message_role: string | null;
 }
+
+export type SessionContinuityState = "live" | "restored" | "new_activity";
 
 export interface GoalInfo {
   id: string;

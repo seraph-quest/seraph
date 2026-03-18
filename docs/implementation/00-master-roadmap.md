@@ -44,12 +44,12 @@ Legend for the checklist column:
 | Workstream | Checklist | Notes |
 |---|---|---|
 | 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret handling are shipped; deeper isolation and narrower privileged execution paths are still left |
-| 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, web search, and first-class reusable workflows are shipped; stronger execution safety and richer workflow control are still left |
+| 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, web search, first-class reusable workflows, starter packs, and workflow-run replay context are shipped; stronger execution safety and richer workflow control are still left |
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
-| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, a first coherent desktop presence surface, and a unified browser/native continuity snapshot are shipped; broader channel reach and deeper cross-surface continuity are still left |
-| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
-| 06. Embodied Interface | `[ ]` | The guardian cockpit is now the active browser shell, with a pane workspace, drag/resize plus grid snap, packed layout presets, linked evidence, and keyboard workspace control shipped; denser workflow-operating surfaces are still left |
-| 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
+| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, a first coherent desktop presence surface, unified browser/native continuity, and native action-card resume payloads are shipped; broader channel reach and deeper cross-surface continuity are still left |
+| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, structured world-model fusion, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
+| 06. Embodied Interface | `[ ]` | The guardian cockpit is now the active browser shell, with a pane workspace, drag/resize plus grid snap, saved layout composition, session continuity restore, linked evidence, and keyboard workspace control shipped; denser workflow-operating surfaces are still left |
+| 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, reusable workflow composition, starter packs, capability discovery, and first workflow history/replay surfaces are shipped; stronger extension ergonomics and clearer workflow control are still left |
 
 ## Progress Summary
 
@@ -57,7 +57,8 @@ Legend for the checklist column:
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
 - [x] The guardian cockpit is now the active interface path, with the village retained only as a legacy fallback rather than a parallel active shell.
-- [ ] Seraph is still behind the strongest reference systems on workflow-operating density, deeper salience/intervention quality, native reach, deeper execution hardening, and operator workflow control.
+- [x] Seraph now exposes a first coherent capability surface for tools, skills, workflows, MCP servers, starter packs, workflow runs, and active thread continuity from inside the cockpit itself.
+- [ ] Seraph is still behind the strongest reference systems on deeper execution hardening, richer workflow-operating density, stronger long-horizon intervention learning, broader native reach, and fuller cross-surface threading.
 - [ ] No workstream is complete yet.
 
 ## Completed 10-PR Batches
@@ -65,6 +66,29 @@ Legend for the checklist column:
 Completed batches stay visible instead of being deleted on queue refresh.
 
 ### Latest Completed 10-PR Batch
+
+1. [x] `capability-discovery-and-activation-v1`:
+   make Seraph's shipped tools, skills, workflows, MCP servers, and policy-gated capabilities visible and operable from the cockpit, including clear blocked-state reasons and one-click activation paths
+2. [x] `session-restore-and-thread-continuity-v1`:
+   make reloads and reconnects restore the active thread predictably, clarify fresh-thread semantics, and preserve continuity across browser refreshes instead of feeling like a reset to empty state
+3. [x] `execution-safety-hardening-v3`:
+   tighten privileged execution isolation again around workflow replay, extension surfaces, artifact round-trips, and native-channel side effects before Seraph compounds more leverage
+4. [x] `starter-skill-and-workflow-packs-v1`:
+   ship clearer default starter packs so a fresh workspace feels capable immediately instead of relying on hidden bundled skills and workflows
+5. [x] `workflow-history-and-replay-v1`:
+   add deeper workflow history, rerun context, and artifact-linked replay so the cockpit can operate long-lived workflow chains instead of only recent runs
+6. [x] `extension-debugging-and-recovery-v1`:
+   deepen the cockpit operator surface into real debugging and recovery for skills, MCP servers, and blocked workflows instead of only status plus reload
+7. [x] `world-model-memory-fusion-v3`:
+   fuse observer state, goals, recent execution pressure, and memory recall into a stronger explicit world model that tracks durable projects and active constraints more accurately
+8. [x] `guardian-learning-policy-v3`:
+   make guardian learning shape salience thresholds, intervention phrasing, and escalation policy beyond the current delivery and channel bias layer
+9. [x] `native-channel-expansion-v1`:
+   expand proactive reach beyond browser plus desktop notifications into a broader but still policy-controlled native presence surface
+10. [x] `cockpit-layout-composition-v2`:
+   deepen operator workspace control with more flexible layout composition, stronger inspector linking, and better history-density inside the cockpit
+
+### Previous Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -87,7 +111,7 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `guardian-behavioral-evals-v3`:
    prove the next learning, workflow-density, and cross-surface behaviors with deeper end-to-end guardian contracts
 
-### Previous Completed 10-PR Batch
+### Earlier Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v1`:
    deepen privileged execution isolation, policy visibility, and hardening boundaries before Seraph expands more leverage on top of the current action layer
@@ -116,28 +140,28 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#1 execution-safety-hardening-v3`
+- the current active item is `#1 execution-safety-hardening-v4`
 
-1. [ ] `execution-safety-hardening-v3`:
-   tighten privileged execution isolation again around workflow replay, extension surfaces, artifact round-trips, and native-channel side effects before Seraph compounds more leverage
-2. [ ] `workflow-history-and-replay-v1`:
-   add deeper workflow history, rerun context, and artifact-linked replay so the cockpit can operate long-lived workflow chains instead of only recent runs
-3. [ ] `extension-debugging-and-recovery-v1`:
-   deepen the cockpit operator surface into real debugging and recovery for skills, MCP servers, and blocked workflows instead of only status plus reload
-4. [ ] `world-model-memory-fusion-v3`:
-   fuse observer state, goals, recent execution pressure, and memory recall into a stronger explicit world model that tracks durable projects and active constraints more accurately
-5. [ ] `guardian-learning-policy-v3`:
-   make guardian learning shape salience thresholds, intervention phrasing, and escalation policy beyond the current delivery and channel bias layer
-6. [ ] `native-channel-expansion-v1`:
-   expand proactive reach beyond browser plus desktop notifications into a broader but still policy-controlled native presence surface
-7. [ ] `cockpit-layout-composition-v2`:
-   deepen operator workspace control with more flexible layout composition, stronger inspector linking, and better history-density inside the cockpit
-8. [ ] `cross-surface-threading-v1`:
-   preserve one coherent thread across browser sessions, desktop alerts, queued bundles, and later follow-up so continuity becomes operational rather than just inspectable
-9. [ ] `provider-policy-explainability-v1`:
-   make runtime routing easier to trust by exposing why targets were selected, skipped, or degraded directly in operator-facing surfaces
+1. [ ] `execution-safety-hardening-v4`:
+   harden replay, native action-card resume paths, approval recovery, secret-bearing workflow surfaces, and operator-triggered follow-on execution before the new cockpit leverage compounds further
+2. [ ] `workflow-timeline-and-approval-replay-v2`:
+   turn workflow history into a real operating timeline with approval recovery, artifact lineage, and deeper rerun context instead of only recent run cards
+3. [ ] `capability-pack-install-and-recommendations-v1`:
+   go beyond visibility by adding recommended packs, install guidance, and clearer enable-or-fix-next actions for tools, skills, workflows, and MCP capability bundles
+4. [ ] `extension-debugging-and-recovery-v2`:
+   add health diagnostics, blocked-step repair, and dependency recovery for skills, workflows, and MCP servers beyond the first inspector-facing recovery surface
+5. [ ] `session-threading-across-surfaces-v2`:
+   unify browser sessions, native notifications, workflow resumes, and audit traces into one explicit thread model instead of only restoring the last browser session
+6. [ ] `world-model-memory-fusion-v4`:
+   deepen the structured world model into durable projects, routines, constraints, and longer-lived execution context rather than the current first fusion layer
+7. [ ] `guardian-learning-policy-v4`:
+   make learning change phrasing, cadence, escalation, and bundle-versus-interrupt decisions beyond the new delivery and channel bias layer
+8. [ ] `native-channel-expansion-v2`:
+   extend the first action-card/native continuation model into broader yet still policy-controlled native channels
+9. [ ] `cockpit-layout-composition-v3`:
+   add richer pane composition, saved named workspaces, and denser multi-pane operating patterns beyond the first per-layout save and reset model
 10. [ ] `guardian-behavioral-evals-v4`:
-   expand deterministic proof to the next batch of world-model, workflow-history, and cross-surface continuity behaviors after those features land
+   prove capability activation, workflow replay, cross-surface thread continuity, and learned intervention policy with deeper behavioral contracts
 
 ## Queue Maintenance Rule
 
@@ -175,25 +199,29 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and a first actionable desktop control shell inside the cockpit
 - [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, cockpit-to-settings linkage for queued desktop state, and desktop-shell draft/continue actions over pending notifications, queued bundle items, and recent interventions
 - [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces
+- [x] first capability-overview and starter-pack APIs now expose tools, skills, workflows, MCP servers, blocked-state reasons, and recommended starter bundles in one operator-readable shape
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
-- [x] the cockpit now supports a pane workspace with drag/resize, grid snap, packed `default` / `focus` / `review` layout presets, inspector visibility persistence, and layout switching from both the header and keyboard shortcuts
+- [x] the cockpit now supports a pane workspace with drag/resize, grid snap, packed `default` / `focus` / `review` layout presets, inspector visibility persistence, layout switching from both the header and keyboard shortcuts, plus per-layout save and reset behavior
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
+- [x] starter packs now bundle default skills and workflows into obvious operator-invocable packages instead of leaving capability discovery entirely to disk inspection
 - [x] first privileged-workflow hardening pass, including explicit workflow/tool execution-boundary metadata, richer approval behavior in tools/workflows APIs, and forced approval wrapping for approval-mode MCP workflow execution
 - [x] second privileged-path hardening pass, including secret-ref containment to explicit injection-safe surfaces, workflow/operator metadata for secret-ref acceptance, and rejection of workflows whose runtime step tools are underdeclared
+- [x] third workflow/operator hardening pass now carries workflow-run risk, approval, secret-ref, and execution-boundary context into replay/history surfaces so reruns remain boundary-aware
 - [x] first operator workflow-control layer in the settings surface, including workflow enable/disable, reload, draft-to-cockpit flow control, and artifact path round-tripping back into the command bar
 - [x] dedicated cockpit workflow-run views with richer workflow audit details, artifact-lineage linking, replay drafting, and workflow-specific inspector actions
 - [x] cockpit artifacts and workflow outputs can now draft compatible follow-on workflows directly from the inspector instead of only seeding generic command-bar context
-- [x] the cockpit now exposes a compact operator surface for workflow availability, skills, MCP server state, and live policy modes with direct reload actions
+- [x] the cockpit now exposes a compact operator surface for workflow availability, starter packs, tools, skills, MCP server state, and live policy modes with direct reload and activation actions
+- [x] the cockpit now restores the last active browser session on reload, tracks fresh-thread semantics explicitly, and marks background session activity instead of silently mixing threads
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
 - [x] first strict provider-policy safeguard layer for runtime paths, including required capability intents plus cost/latency guardrails that reroute only when compliant targets exist and otherwise fail open with explicit audit visibility
 - [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, salience/confidence signals, memory recall, session history, recent sessions, recent intervention feedback, and confidence into one structured downstream input
-- [x] explicit guardian world model now also carries recent active projects and recent execution pressure from workflow/tool outcomes, not only focus, commitments, and receptivity
+- [x] explicit guardian world model now also carries recent active projects, active constraints, recurring patterns, and recent execution pressure from workflow/tool outcomes, not only focus, commitments, and receptivity
 - [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus salience-aware policy reasons
 - [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state
-- [x] second outcome-learning layer that now lets recent positive and acknowledged outcomes change direct-delivery timing and native-channel preference, not only interruption reduction
+- [x] second outcome-learning layer now lets recent positive and acknowledged outcomes change direct-delivery timing, native-channel preference, and async-native escalation bias, not only interruption reduction
 - [x] guardian behavioral proof now explicitly covers the calibrated high-salience deliver path versus degraded-confidence defer path at the proactive delivery gate
 - [x] deeper guardian behavioral proof now also covers strategist tick learning its way into native-notification delivery and continuity-surface presence when high-signal learned nudges should bypass the browser
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths

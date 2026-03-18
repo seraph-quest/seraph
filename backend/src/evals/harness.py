@@ -45,8 +45,11 @@ from src.api.observer import (
     ScreenObservationData,
     ack_native_notification,
     daemon_status,
+    dismiss_all_native_notifications,
+    dismiss_native_notification,
     enqueue_test_native_notification,
     get_next_native_notification,
+    list_native_notifications,
     post_intervention_feedback,
     post_screen_context,
 )
@@ -3506,6 +3509,54 @@ async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    mgr = ContextManager()
+    mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing pending desktop notifications.")
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.api.observer.context_manager", mgr),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        first = await enqueue_test_native_notification()
+        second = await enqueue_test_native_notification()
+        listed_before = await list_native_notifications()
+        dismissed = await dismiss_native_notification(first["id"])
+        listed_after_single = await list_native_notifications()
+        dismissed_all = await dismiss_all_native_notifications()
+        final_status = await daemon_status()
+
+    dismiss_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_dismissed",
+        tool_name="observer_daemon:notifications",
+    )
+    dismiss_all_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_dismissed_all",
+        tool_name="observer_daemon:notifications",
+    )
+    await native_notification_queue.clear()
+
+    return {
+        "listed_before_pending_count": listed_before["pending_count"],
+        "listed_before_titles": [item["title"] for item in listed_before["notifications"]],
+        "dismissed_single": dismissed["dismissed"],
+        "listed_after_single_pending_count": listed_after_single["pending_count"],
+        "dismissed_all_count": dismissed_all["dismissed_count"],
+        "final_pending_count": final_status["pending_notification_count"],
+        "final_outcome": final_status["last_native_notification_outcome"],
+        "dismiss_event_source": dismiss_event["details"]["source"],
+        "dismiss_all_event_source": dismiss_all_event["details"]["source"],
+        "dismiss_all_event_count": dismiss_all_event["details"]["dismissed_count"],
+        "second_notification_preserved_until_bulk_clear": (
+            len(listed_after_single["notifications"]) == 1
+            and listed_after_single["notifications"][0]["id"] == second["id"]
+        ),
+    }
+
+
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -4509,6 +4560,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="Native presence exposes daemon status, pending-notification state, and a safe test desktop-notification path.",
         runner=_eval_native_desktop_shell_behavior,
+    ),
+    EvalScenario(
+        name="cross_surface_notification_controls_behavior",
+        category="presence",
+        description="Browser-side native notification controls can inspect, dismiss, and bulk-clear desktop notifications without losing continuity state.",
+        runner=_eval_cross_surface_notification_controls_behavior,
     ),
     EvalScenario(
         name="intervention_policy_behavior",

@@ -309,6 +309,35 @@ class TestObserverAPI:
         )
 
     @pytest.mark.asyncio
+    async def test_list_native_notifications(self, client):
+        await native_notification_queue.clear()
+        first = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph alert",
+            body="Browser is closed; use the daemon path.",
+            intervention_type="alert",
+            urgency=5,
+        )
+        second = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph follow-up",
+            body="Second desktop notification.",
+            intervention_type="advisory",
+            urgency=3,
+        )
+
+        resp = await client.get("/api/observer/notifications")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["pending_count"] == 2
+        assert [item["id"] for item in payload["notifications"]] == [first.id, second.id]
+        assert payload["notifications"][0]["title"] == "Seraph alert"
+        assert payload["notifications"][1]["title"] == "Seraph follow-up"
+
+        await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):
         await native_notification_queue.clear()
         intervention = await guardian_feedback_repository.create_intervention(
@@ -353,6 +382,102 @@ class TestObserverAPI:
             and event["tool_name"] == "observer_daemon:notifications"
             and event["details"]["notification_id"] == notification.id
             and event["details"]["intervention_id"] == intervention.id
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_dismiss_native_notification(self, async_db, client):
+        await native_notification_queue.clear()
+        mgr = ContextManager()
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Dismiss me",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        notification = await native_notification_queue.enqueue(
+            intervention_id=intervention.id,
+            title="Seraph",
+            body="Dismiss me",
+            intervention_type="advisory",
+            urgency=3,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.post(f"/api/observer/notifications/{notification.id}/dismiss")
+            status = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"dismissed": True}
+        assert await native_notification_queue.count() == 0
+        updated = await guardian_feedback_repository.get(intervention.id)
+        assert updated is not None
+        assert updated.latest_outcome == "notification_dismissed"
+        assert updated.transport == "native_notification"
+
+        status_payload = status.json()
+        assert status_payload["pending_notification_count"] == 0
+        assert status_payload["last_native_notification_outcome"] == "dismissed"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_dismissed"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["notification_id"] == notification.id
+            and event["details"]["source"] == "browser_controls"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_dismiss_all_native_notifications(self, async_db, client):
+        await native_notification_queue.clear()
+        mgr = ContextManager()
+        first = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph one",
+            body="First desktop notification.",
+            intervention_type="test",
+            urgency=1,
+        )
+        second = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph two",
+            body="Second desktop notification.",
+            intervention_type="test",
+            urgency=1,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.post("/api/observer/notifications/dismiss-all")
+            status = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"dismissed_count": 2}
+        assert await native_notification_queue.count() == 0
+
+        status_payload = status.json()
+        assert status_payload["pending_notification_count"] == 0
+        assert status_payload["last_native_notification_title"] == second.title
+        assert status_payload["last_native_notification_outcome"] == "dismissed"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_dismissed_all"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["dismissed_count"] == 2
+            and event["details"]["source"] == "browser_controls"
             for event in events
         )
 

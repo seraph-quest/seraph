@@ -66,7 +66,7 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, and a checked item may remain visible until the next scheduled refresh.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#8 cross-surface-continuity-and-notification-controls`
+- the current active item is `#9 guardian-behavioral-evals-v2`
 
 1. [x] `execution-safety-hardening-v1`:
    deepen privileged execution isolation, policy visibility, and hardening boundaries before Seraph expands more leverage on top of the current action layer
@@ -82,8 +82,8 @@ It should always show the next 10 most valuable PRs, and a checked item may rema
    make the cockpit feel like a real operator workspace with saved workspaces, stronger keyboard control, and denser navigation ergonomics
 7. [x] `native-desktop-shell-v1`:
    move beyond browser-plus-daemon by shipping a more coherent native desktop presence around the existing observer and notification foundations
-8. [ ] `cross-surface-continuity-and-notification-controls`:
-   connect ambient observation, proactive delivery, and deliberate interaction with clearer notification controls and stronger continuity between browser and native surfaces
+8. [x] `cross-surface-continuity-and-notification-controls`:
+   connect ambient observation, proactive delivery, and deliberate interaction by exposing pending native notifications back into the browser and adding explicit browser-side notification controls
 9. [ ] `guardian-behavioral-evals-v2`:
    expand behavioral eval coverage from the first guardian baseline into deeper intervention-quality, workflow, and cockpit-adjacent contracts
 10. [ ] `human-world-model-v1`:
@@ -121,6 +121,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
 - [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, and desktop-notification fallback when browser delivery is unavailable
+- [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, and cockpit-to-settings linkage for queued desktop state
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
 - [x] the cockpit now supports persisted `default` / `focus` / `review` workspace presets, inspector visibility persistence, and layout switching from both the header and keyboard shortcuts

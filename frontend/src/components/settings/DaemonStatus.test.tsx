@@ -37,6 +37,22 @@ describe("DaemonStatus", () => {
         last_native_notification_outcome: "queued_test",
       }),
     );
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        pending_count: 1,
+        notifications: [
+          {
+            id: "notif-1",
+            intervention_id: null,
+            title: "Seraph desktop shell",
+            body: "Native presence is connected. This is a test notification.",
+            intervention_type: "test",
+            urgency: 1,
+            created_at: "2026-03-18T10:00:00Z",
+          },
+        ],
+      }),
+    );
 
     render(<DaemonStatus />);
 
@@ -44,7 +60,9 @@ describe("DaemonStatus", () => {
     expect(screen.getByText("Balanced")).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.getByText("Queued test notification")).toBeInTheDocument();
-    expect(screen.getByText("Seraph desktop shell")).toBeInTheDocument();
+    expect(screen.getAllByText("Seraph desktop shell")).toHaveLength(2);
+    expect(screen.getByText("Native presence is connected. This is a test notification.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 
   it("queues a test notification and refreshes the visible native status", async () => {
@@ -60,6 +78,12 @@ describe("DaemonStatus", () => {
           last_native_notification_at: null,
           last_native_notification_title: null,
           last_native_notification_outcome: null,
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({
+          pending_count: 0,
+          notifications: [],
         }),
       )
       .mockResolvedValueOnce(
@@ -85,6 +109,22 @@ describe("DaemonStatus", () => {
           last_native_notification_outcome: "queued_test",
         }),
       );
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        pending_count: 1,
+        notifications: [
+          {
+            id: "notif-1",
+            intervention_id: null,
+            title: "Seraph desktop shell",
+            body: "Native presence is connected. This is a test notification.",
+            intervention_type: "test",
+            urgency: 1,
+            created_at: "2026-03-18T10:00:00Z",
+          },
+        ],
+      }),
+    );
 
     render(<DaemonStatus />);
 
@@ -101,5 +141,93 @@ describe("DaemonStatus", () => {
       ),
     ).toBe(true);
     expect(screen.getByText("1")).toBeInTheDocument();
+  });
+
+  it("dismisses queued native notifications from the browser controls", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mockResponse({
+          connected: true,
+          last_post: 123,
+          active_window: "Arc — Guardian Cockpit",
+          has_screen_context: true,
+          capture_mode: "balanced",
+          pending_notification_count: 2,
+          last_native_notification_at: "2026-03-18T10:00:00Z",
+          last_native_notification_title: "Seraph desktop shell",
+          last_native_notification_outcome: "queued_test",
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({
+          pending_count: 2,
+          notifications: [
+            {
+              id: "notif-1",
+              intervention_id: null,
+              title: "Seraph desktop shell",
+              body: "Native presence is connected. This is a test notification.",
+              intervention_type: "test",
+              urgency: 1,
+              created_at: "2026-03-18T10:00:00Z",
+            },
+            {
+              id: "notif-2",
+              intervention_id: null,
+              title: "Seraph alert",
+              body: "Second desktop notification.",
+              intervention_type: "alert",
+              urgency: 5,
+              created_at: "2026-03-18T10:01:00Z",
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse({ dismissed: true }))
+      .mockResolvedValueOnce(
+        mockResponse({
+          connected: true,
+          last_post: 123,
+          active_window: "Arc — Guardian Cockpit",
+          has_screen_context: true,
+          capture_mode: "balanced",
+          pending_notification_count: 1,
+          last_native_notification_at: "2026-03-18T10:02:00Z",
+          last_native_notification_title: "Seraph desktop shell",
+          last_native_notification_outcome: "dismissed",
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({
+          pending_count: 1,
+          notifications: [
+            {
+              id: "notif-2",
+              intervention_id: null,
+              title: "Seraph alert",
+              body: "Second desktop notification.",
+              intervention_type: "alert",
+              urgency: 5,
+              created_at: "2026-03-18T10:01:00Z",
+            },
+          ],
+        }),
+      );
+
+    render(<DaemonStatus />);
+
+    await waitFor(() => expect(screen.getByText("Seraph alert")).toBeInTheDocument());
+    await userEvent.click(screen.getAllByRole("button", { name: "Dismiss" })[0]);
+
+    await waitFor(() => expect(screen.getByText("Desktop queue updated")).toBeInTheDocument());
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, options]) =>
+          typeof url === "string" &&
+          url.includes("/api/observer/notifications/notif-1/dismiss") &&
+          options?.method === "POST",
+      ),
+    ).toBe(true);
+    expect(screen.getByText("Desktop notification dismissed in browser")).toBeInTheDocument();
   });
 });

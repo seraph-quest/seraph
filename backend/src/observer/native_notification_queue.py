@@ -64,6 +64,10 @@ class NativeNotificationQueue:
                     return item
         return None
 
+    async def list(self) -> list[NativeNotification]:
+        async with self._lock:
+            return list(self._items)
+
     async def ack(self, notification_id: str) -> bool:
         async with self._lock:
             for idx, item in enumerate(self._items):
@@ -71,6 +75,19 @@ class NativeNotificationQueue:
                     self._items.pop(idx)
                     return True
         return False
+
+    async def dismiss(self, notification_id: str) -> NativeNotification | None:
+        async with self._lock:
+            for idx, item in enumerate(self._items):
+                if item.id == notification_id:
+                    return self._items.pop(idx)
+        return None
+
+    async def dismiss_all(self) -> list[NativeNotification]:
+        async with self._lock:
+            items = list(self._items)
+            self._items.clear()
+            return items
 
     async def count(self) -> int:
         async with self._lock:

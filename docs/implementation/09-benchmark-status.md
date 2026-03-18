@@ -35,7 +35,7 @@ This file owns three implementation questions:
 | Runtime reliability and eval rigor | `[ ]` | fallback chains, routing policy, structured runtime audit, and broad deterministic eval harness coverage | richer behavioral eval depth and broader provider-policy sophistication | 03 |
 | Workflow composition and delegation | `[ ]` | specialists, MCP, skills, delegation foundations, and first-class reusable workflows | clearer operator-facing workflow control, artifact round-tripping, and easier extension ergonomics | 07, 02 |
 | Dense interface efficiency | `[ ]` | guardian cockpit default with linked state, interventions, audit, trace, fixed composer, persisted `default` / `focus` / `review` layouts, keyboard layout switching, and legacy village fallback | stronger workflow-operating density, richer artifact/workflow views, and more flexible operator workspace control | 06, 07 |
-| Presence and reach across surfaces | `[ ]` | browser delivery, proactive queue/bundle delivery, native daemon, and a first desktop presence surface built on daemon status plus notification fallback | stronger cross-surface continuity and broader channels | 04, 06 |
+| Presence and reach across surfaces | `[ ]` | browser delivery, proactive queue/bundle delivery, native daemon, a first desktop presence surface built on daemon status plus notification fallback, and browser-side controls for pending native notifications | broader channels and continuity beyond the first browser/native notification bridge | 04, 06 |
 
 ## What This Means On `develop`
 

@@ -390,9 +390,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               desktop {daemonPresence?.connected ? "live" : "offline"}
             </span>
             {daemonPresence && (
-              <span className="cockpit-pill">
+              <button
+                type="button"
+                className="cockpit-pill"
+                onClick={() => setSettingsPanelOpen(true)}
+                title="Open settings to inspect or dismiss pending desktop notifications"
+              >
                 native {daemonPresence.pending_notification_count} queued
-              </span>
+              </button>
             )}
             <span className="cockpit-pill">
               budget {observerState?.attention_budget_remaining ?? "?"}

@@ -50,6 +50,19 @@ class NotificationAckResponse(BaseModel):
     acked: bool
 
 
+class NativeNotificationListResponse(BaseModel):
+    notifications: list[NativeNotificationResponse]
+    pending_count: int
+
+
+class NotificationDismissResponse(BaseModel):
+    dismissed: bool
+
+
+class NotificationDismissAllResponse(BaseModel):
+    dismissed_count: int
+
+
 class DaemonStatusResponse(BaseModel):
     connected: bool
     last_post: float | None
@@ -166,6 +179,16 @@ async def daemon_status():
     }
 
 
+@router.get("/observer/notifications", response_model=NativeNotificationListResponse)
+async def list_native_notifications():
+    """Return pending native notifications for browser-side continuity controls."""
+    notifications = [item.to_dict() for item in await native_notification_queue.list()]
+    return {
+        "notifications": notifications,
+        "pending_count": len(notifications),
+    }
+
+
 @router.get("/observer/notifications/next", response_model=NativeNotificationPollResponse)
 async def get_next_native_notification():
     """Return the next pending native notification for the daemon, if any."""
@@ -226,6 +249,74 @@ async def ack_native_notification(notification_id: str):
         },
     )
     return {"acked": acked}
+
+
+@router.post("/observer/notifications/{notification_id}/dismiss", response_model=NotificationDismissResponse)
+async def dismiss_native_notification(notification_id: str):
+    """Dismiss a pending native notification from the browser control surface."""
+    from src.guardian.feedback import guardian_feedback_repository
+
+    notification = await native_notification_queue.dismiss(notification_id)
+    if notification is not None and notification.intervention_id:
+        try:
+            await guardian_feedback_repository.update_outcome(
+                notification.intervention_id,
+                latest_outcome="notification_dismissed",
+                transport="native_notification",
+                notification_id=notification.id,
+            )
+        except Exception:
+            logger.debug("Failed to persist native notification dismissal", exc_info=True)
+    if notification is not None:
+        context_manager.record_native_notification(
+            title=notification.title,
+            outcome="dismissed",
+        )
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="dismissed" if notification is not None else "dismiss_missing",
+        details={
+            "notification_id": notification_id,
+            "intervention_id": notification.intervention_id if notification is not None else None,
+            "source": "browser_controls",
+        },
+    )
+    return {"dismissed": notification is not None}
+
+
+@router.post("/observer/notifications/dismiss-all", response_model=NotificationDismissAllResponse)
+async def dismiss_all_native_notifications():
+    """Dismiss all pending native notifications from the browser control surface."""
+    from src.guardian.feedback import guardian_feedback_repository
+
+    notifications = await native_notification_queue.dismiss_all()
+    for notification in notifications:
+        if notification.intervention_id:
+            try:
+                await guardian_feedback_repository.update_outcome(
+                    notification.intervention_id,
+                    latest_outcome="notification_dismissed",
+                    transport="native_notification",
+                    notification_id=notification.id,
+                )
+            except Exception:
+                logger.debug("Failed to persist native notification dismissal", exc_info=True)
+    if notifications:
+        context_manager.record_native_notification(
+            title=notifications[-1].title,
+            outcome="dismissed",
+        )
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="dismissed_all" if notifications else "dismiss_all_empty",
+        details={
+            "dismissed_count": len(notifications),
+            "source": "browser_controls",
+        },
+    )
+    return {"dismissed_count": len(notifications)}
 
 
 @router.post("/observer/notifications/test", response_model=NativeNotificationResponse)

@@ -56,6 +56,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
     assert "native_desktop_shell_behavior" in captured.out
+    assert "cross_surface_notification_controls_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
     assert "salience_calibration_behavior" in captured.out
     assert "guardian_feedback_loop" in captured.out
@@ -150,6 +151,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
                 "native_desktop_shell_behavior",
+                "cross_surface_notification_controls_behavior",
                 "intervention_policy_behavior",
                 "salience_calibration_behavior",
                 "guardian_feedback_loop",
@@ -288,6 +290,20 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["native_desktop_shell_behavior"]["acked_outcome"] == "acked"
     assert details_by_name["native_desktop_shell_behavior"]["queued_event_source"] == "test_endpoint"
     assert details_by_name["native_desktop_shell_behavior"]["ack_event_matches"] is True
+    assert details_by_name["cross_surface_notification_controls_behavior"]["listed_before_pending_count"] == 2
+    assert details_by_name["cross_surface_notification_controls_behavior"]["listed_before_titles"] == [
+        "Seraph desktop shell",
+        "Seraph desktop shell",
+    ]
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismissed_single"] is True
+    assert details_by_name["cross_surface_notification_controls_behavior"]["listed_after_single_pending_count"] == 1
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismissed_all_count"] == 1
+    assert details_by_name["cross_surface_notification_controls_behavior"]["final_pending_count"] == 0
+    assert details_by_name["cross_surface_notification_controls_behavior"]["final_outcome"] == "dismissed"
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_event_source"] == "browser_controls"
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_source"] == "browser_controls"
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_count"] == 1
+    assert details_by_name["cross_surface_notification_controls_behavior"]["second_notification_preserved_until_bulk_clear"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"

@@ -13,16 +13,41 @@ interface DaemonStatusData {
   last_native_notification_outcome: string | null;
 }
 
+interface PendingNotification {
+  id: string;
+  intervention_id: string | null;
+  title: string;
+  body: string;
+  intervention_type: string | null;
+  urgency: number | null;
+  created_at: string;
+}
+
+interface PendingNotificationsData {
+  notifications: PendingNotification[];
+  pending_count: number;
+}
+
 export function DaemonStatus() {
   const [status, setStatus] = useState<DaemonStatusData | null>(null);
+  const [notifications, setNotifications] = useState<PendingNotification[]>([]);
   const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+  const [dismissState, setDismissState] = useState<"idle" | "dismissing" | "dismissed" | "failed">("idle");
 
   async function fetchStatus() {
     try {
-      const response = await fetch(`${API_URL}/api/observer/daemon-status`);
-      if (!response.ok) return;
-      const data = await response.json();
-      setStatus(data);
+      const [statusResponse, notificationsResponse] = await Promise.all([
+        fetch(`${API_URL}/api/observer/daemon-status`),
+        fetch(`${API_URL}/api/observer/notifications`),
+      ]);
+      if (statusResponse.ok) {
+        const data = await statusResponse.json();
+        setStatus(data);
+      }
+      if (notificationsResponse.ok) {
+        const data: PendingNotificationsData = await notificationsResponse.json();
+        setNotifications(data.notifications ?? []);
+      }
     } catch {
       // ignore
     }
@@ -52,6 +77,42 @@ export function DaemonStatus() {
     }
   }
 
+  async function handleDismissNotification(notificationId: string) {
+    if (dismissState === "dismissing") return;
+    setDismissState("dismissing");
+    try {
+      const response = await fetch(`${API_URL}/api/observer/notifications/${notificationId}/dismiss`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        setDismissState("failed");
+        return;
+      }
+      await fetchStatus();
+      setDismissState("dismissed");
+    } catch {
+      setDismissState("failed");
+    }
+  }
+
+  async function handleDismissAllNotifications() {
+    if (dismissState === "dismissing") return;
+    setDismissState("dismissing");
+    try {
+      const response = await fetch(`${API_URL}/api/observer/notifications/dismiss-all`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        setDismissState("failed");
+        return;
+      }
+      await fetchStatus();
+      setDismissState("dismissed");
+    } catch {
+      setDismissState("failed");
+    }
+  }
+
   const connected = status?.connected ?? false;
   const dotColor = connected ? "bg-green-400" : "bg-retro-text/30";
   const activeWindow = status?.active_window;
@@ -77,6 +138,8 @@ export function DaemonStatus() {
         ? "Queued test notification"
         : lastNativeOutcome === "acked"
           ? "Desktop notification acknowledged"
+          : lastNativeOutcome === "dismissed"
+            ? "Desktop notification dismissed in browser"
           : "No desktop notification sent yet";
 
   return (
@@ -131,6 +194,54 @@ export function DaemonStatus() {
             <span className="text-[9px] text-retro-text/40">
               {testState === "sent" ? "Queued" : testState === "failed" ? "Failed" : "Sending"}
             </span>
+          )}
+        </div>
+
+        <div className="text-[9px] text-retro-text/50">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-retro-text/30 uppercase tracking-wider">Pending desktop notifications</div>
+            {notifications.length > 1 && (
+              <button
+                onClick={() => void handleDismissAllNotifications()}
+                disabled={dismissState === "dismissing"}
+                className="text-[9px] uppercase tracking-wider text-retro-text/50 hover:text-retro-highlight disabled:opacity-40"
+              >
+                Dismiss all
+              </button>
+            )}
+          </div>
+          {notifications.length === 0 ? (
+            <div className="text-retro-text/40">No pending desktop notifications.</div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {notifications.map((notification) => (
+                <div
+                  key={notification.id}
+                  className="border border-retro-text/10 rounded px-2 py-1 flex items-start justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-retro-text truncate">{notification.title}</div>
+                    <div className="text-retro-text/40 truncate">{notification.body}</div>
+                  </div>
+                  <button
+                    onClick={() => void handleDismissNotification(notification.id)}
+                    disabled={dismissState === "dismissing"}
+                    className="text-[9px] uppercase tracking-wider text-retro-text/50 hover:text-retro-highlight disabled:opacity-40"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {dismissState !== "idle" && (
+            <div className="mt-1 text-retro-text/40">
+              {dismissState === "dismissed"
+                ? "Desktop queue updated"
+                : dismissState === "failed"
+                  ? "Dismiss failed"
+                  : "Updating"}
+            </div>
           )}
         </div>
       </div>

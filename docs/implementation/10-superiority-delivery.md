@@ -57,8 +57,8 @@ This file explains:
 
 ### 4. Presence and reach
 
-- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, and a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, and desktop-notification fallback
-- [ ] still missing: stronger non-browser continuity, richer notification controls, and broader reach channels
+- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, and browser-side controls for pending native notifications
+- [ ] still missing: broader reach channels and continuity beyond the first browser/native notification bridge
 - owners: Workstream 04, Workstream 06
 
 ### 5. Operator cockpit
@@ -84,7 +84,7 @@ This file explains:
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
 - [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
-- [x] The first cockpit-depth tranche and first desktop-presence tranche are now shipped through linked evidence, saved layouts, and native desktop presence, so the next active queue pressure moves toward cross-surface continuity and deeper guardian proof.
+- [x] The first cockpit-depth tranche, first desktop-presence tranche, and first browser/native continuity tranche are now shipped through linked evidence, saved layouts, native desktop presence, and browser-side notification controls, so the next active queue pressure moves toward deeper guardian proof.
 - [x] The later items in the current queue deepen behavioral evals and world-model quality because proactive quality is now bottlenecked more by judgment than by missing primitives.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

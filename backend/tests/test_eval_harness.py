@@ -59,6 +59,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "cross_surface_notification_controls_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
     assert "salience_calibration_behavior" in captured.out
+    assert "observer_delivery_salience_confidence_behavior" in captured.out
     assert "guardian_feedback_loop" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
@@ -154,6 +155,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "cross_surface_notification_controls_behavior",
                 "intervention_policy_behavior",
                 "salience_calibration_behavior",
+                "observer_delivery_salience_confidence_behavior",
                 "guardian_feedback_loop",
                 "guardian_outcome_learning",
                 "agent_local_runtime_profile",
@@ -357,6 +359,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["salience_calibration_behavior"]["urgent_override_reason"] == "urgent"
     assert details_by_name["salience_calibration_behavior"]["scheduled_override_action"] == "act"
     assert details_by_name["salience_calibration_behavior"]["scheduled_override_reason"] == "scheduled"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_action"] == "act"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_reason"] == "calibrated_high_salience"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_delivery_decision"] == "deliver"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_transport"] == "websocket"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_delivered_connections"] == 1
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_budget_decremented"] is True
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_observer_confidence"] == "grounded"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_salience_reason"] == "aligned_work_activity"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_interruption_cost"] == "high"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_action"] == "defer"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_reason"] == "low_observer_confidence"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_delivery_decision"] is None
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_observer_confidence"] == "degraded"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_salience_reason"] == "aligned_work_activity"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_transport_present"] is False
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_broadcast_skipped"] is True
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_queue_skipped"] is True
     assert details_by_name["guardian_feedback_loop"]["action"] == "act"
     assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
     assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"

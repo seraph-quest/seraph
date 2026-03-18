@@ -23,10 +23,11 @@
 - [x] persisted guardian intervention records and explicit user-feedback capture that flow back into guardian-state summaries
 - [x] first outcome-learning loop that uses recent negative feedback on the same intervention type to reduce future interruption eagerness for similar low-urgency nudges
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to bypass generic high-interruption bundling outside focus mode
+- [x] deeper guardian behavioral eval coverage that proves grounded high-salience delivery versus degraded-confidence defer behavior at the delivery gate
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through deeper human/world modeling and stronger learning quality after the first salience calibration pass
+- [x] this workstream remains central in the repo-wide horizon through deeper human/world modeling and stronger learning quality after the first salience calibration and behavioral-proof passes
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
 - [x] the first feedback-driven learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer multi-signal learning rather than more missing observer fields
 
@@ -52,5 +53,6 @@
 - [x] Seraph learns at least one policy-relevant lesson from intervention outcomes and explicit user feedback
 - [x] Seraph scores observer state by salience, confidence, and interruption cost before guardian strategy and delivery
 - [x] Seraph uses calibrated high-salience observer signals to change real delivery outcomes instead of only logging them
+- [x] Seraph has deterministic behavioral proof that the calibrated high-salience deliver path and degraded-confidence defer path stay distinct at the delivery gate
 - [ ] Seraph reliably learns from intervention outcomes in a way that improves future policy quality beyond the first bias layer
 - [ ] Seraph reliably models the human well enough to intervene at consistently high quality

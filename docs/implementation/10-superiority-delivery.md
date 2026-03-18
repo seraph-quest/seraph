@@ -45,7 +45,7 @@ This file explains:
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first feedback-driven interruption bias from recent negative outcomes, and calibrated high-salience timing overrides
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first feedback-driven interruption bias from recent negative outcomes, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate
 - [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment
 - owners: Workstream 05, Workstream 04
 
@@ -84,8 +84,8 @@ This file explains:
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
 - [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
-- [x] The first cockpit-depth tranche, first desktop-presence tranche, and first browser/native continuity tranche are now shipped through linked evidence, saved layouts, native desktop presence, and browser-side notification controls, so the next active queue pressure moves toward deeper guardian proof.
-- [x] The later items in the current queue deepen behavioral evals and world-model quality because proactive quality is now bottlenecked more by judgment than by missing primitives.
+- [x] The first cockpit-depth tranche, first desktop-presence tranche, and first browser/native continuity tranche are now shipped through linked evidence, saved layouts, native desktop presence, browser-side notification controls, and a stronger guardian behavioral proof layer, so the next active queue pressure moves toward deeper world modeling.
+- [x] The last items in the current queue now deepen world-model quality because proactive quality is bottlenecked more by judgment and modeling than by missing primitives.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

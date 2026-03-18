@@ -38,7 +38,7 @@ title: Seraph Development Status
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is broader guardian behavioral proof and stronger world-model quality on top of the newly shipped cockpit workspace ergonomics and first browser/native continuity controls.
+- [x] The next strategic focus is stronger world-model quality on top of the newly shipped cockpit workspace ergonomics, first browser/native continuity controls, and deeper guardian behavioral proof.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -104,6 +104,7 @@ title: Seraph Development Status
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
 - [x] first feedback-driven guardian learning loop that reduces interruption eagerness for similar low-urgency interventions after recent negative outcomes
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
+- [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] strategist agent and strategist scheduler tick
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
@@ -130,7 +131,7 @@ title: Seraph Development Status
 ### Runtime and execution
 
 - [ ] richer provider selection policy beyond weighted scoring, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
+- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
 - [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
 
 ### Guardian intelligence

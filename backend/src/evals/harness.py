@@ -3993,6 +3993,95 @@ def _eval_salience_calibration_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_observer_delivery_salience_confidence_behavior() -> dict[str, Any]:
+    calibrated_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    degraded_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        data_quality="good",
+        observer_confidence="degraded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.side_effect = [calibrated_ctx, degraded_ctx]
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_context_manager.is_daemon_connected.return_value = False
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
+    mock_insight_queue = MagicMock()
+    mock_insight_queue.enqueue = AsyncMock()
+    mock_log_event = AsyncMock()
+
+    calibrated_message = WSResponse(
+        type="proactive",
+        content="This active goal work can justify an interruption right now.",
+        intervention_type="advisory",
+        urgency=3,
+        reasoning="Aligned work and grounded observer state",
+    )
+    degraded_message = WSResponse(
+        type="proactive",
+        content="The observer signal is degraded, so defer instead of interrupting.",
+        intervention_type="advisory",
+        urgency=3,
+        reasoning="Observer confidence is degraded",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        calibrated = await deliver_or_queue(calibrated_message, guardian_confidence="grounded")
+        degraded = await deliver_or_queue(degraded_message, guardian_confidence="grounded")
+
+    delivered_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_delivered",
+        tool_name="observer_delivery_gate",
+    )
+    deferred_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_deferred",
+        tool_name="observer_delivery_gate",
+    )
+
+    return {
+        "calibrated_action": calibrated.action.value,
+        "calibrated_reason": calibrated.reason,
+        "calibrated_delivery_decision": (
+            calibrated.delivery_decision.value if calibrated.delivery_decision else None
+        ),
+        "calibrated_transport": delivered_event["details"]["transport"],
+        "calibrated_delivered_connections": delivered_event["details"]["delivered_connections"],
+        "calibrated_budget_decremented": mock_context_manager.decrement_attention_budget.call_count == 1,
+        "calibrated_observer_confidence": delivered_event["details"]["observer_confidence"],
+        "calibrated_salience_reason": delivered_event["details"]["salience_reason"],
+        "calibrated_interruption_cost": delivered_event["details"]["interruption_cost"],
+        "degraded_action": degraded.action.value,
+        "degraded_reason": degraded.reason,
+        "degraded_delivery_decision": degraded.delivery_decision.value if degraded.delivery_decision else None,
+        "degraded_observer_confidence": deferred_event["details"]["observer_confidence"],
+        "degraded_salience_reason": deferred_event["details"]["salience_reason"],
+        "degraded_transport_present": "transport" in deferred_event["details"],
+        "degraded_broadcast_skipped": mock_ws_manager.broadcast.await_count == 1,
+        "degraded_queue_skipped": mock_insight_queue.enqueue.await_count == 0,
+    }
+
+
 async def _eval_observer_daemon_ingest_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.update_screen_context = MagicMock()
@@ -4578,6 +4667,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Aligned active-work signals raise salience, and high-salience grounded nudges can cut through high interruption cost outside focus mode.",
         runner=_eval_salience_calibration_behavior,
+    ),
+    EvalScenario(
+        name="observer_delivery_salience_confidence_behavior",
+        category="guardian",
+        description="Grounded high-salience observer state can still deliver through high interruption cost, while degraded observer confidence defers before transport.",
+        runner=_eval_observer_delivery_salience_confidence_behavior,
     ),
     EvalScenario(
         name="guardian_feedback_loop",

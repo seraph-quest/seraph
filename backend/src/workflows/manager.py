@@ -210,6 +210,7 @@ class WorkflowManager:
                 "name": workflow.name,
                 "tool_name": workflow.tool_name,
                 "description": workflow.description,
+                "inputs": workflow.inputs,
                 "requires_tools": workflow.requires_tools,
                 "requires_skills": workflow.requires_skills,
                 "user_invocable": workflow.user_invocable,
@@ -303,6 +304,7 @@ class WorkflowManager:
         policy_modes = self._infer_policy_modes(workflow)
         return {
             "description": workflow.description,
+            "inputs": workflow.inputs,
             "policy_modes": policy_modes,
             "requires_tools": workflow.requires_tools,
             "requires_skills": workflow.requires_skills,

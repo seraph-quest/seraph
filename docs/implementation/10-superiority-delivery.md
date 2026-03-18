@@ -63,14 +63,14 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, and legacy village fallback
-- [ ] still missing: stronger workflow-control density, saved-layout control surfaces, and broader keyboard/operator ergonomics
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, artifact round-trip into the command bar, and legacy village fallback
+- [ ] still missing: stronger dedicated workflow-control density, saved-layout control surfaces, and broader keyboard/operator ergonomics
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, delegation primitives, and first-class reusable workflows
-- [ ] still missing: clearer operator-facing workflow control, stronger artifact round-tripping, and easier extension ergonomics
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, and a first operator-facing workflow-control layer with draft-to-cockpit steering
+- [ ] still missing: richer direct workflow control, stronger artifact round-tripping, and easier extension ergonomics
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening

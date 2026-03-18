@@ -33,7 +33,7 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The repo-wide active delivery batch is now led by workflow control, feedback-driven guardian learning, salience calibration, and stronger native/operator continuity.
+- [x] The repo-wide active delivery batch is now led by feedback-driven guardian learning, salience calibration, and stronger native/operator continuity after the first workflow-control layer shipped.
 - [ ] That batch is not complete yet.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
@@ -77,6 +77,7 @@ title: Seraph Development Status
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
 - [x] forced approval wrapping for high-risk and approval-mode MCP workflow paths
+- [x] first operator workflow-control layer with workflow list/toggle/reload plus draft-to-cockpit support
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability
@@ -109,7 +110,7 @@ title: Seraph Development Status
 
 ### Current interface surface
 
-- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, and fixed composer
+- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, and fixed composer
 - [x] legacy Phaser village mode with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
@@ -138,13 +139,13 @@ title: Seraph Development Status
 
 ### Interface and presence
 
-- [ ] richer cockpit density with workflow operating views, saved layouts, and broader keyboard/operator control beyond the new linked evidence shell
+- [ ] richer cockpit density with dedicated workflow operating views, saved layouts, and broader keyboard/operator control beyond the current linked evidence shell
 - [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
 - [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
 
 ### Workflow and leverage
 
-- [ ] clearer operator-facing workflow control and artifact round-tripping on top of the shipped workflow runtime
+- [ ] deeper operator-facing workflow control and artifact round-tripping beyond the first settings/cockpit loop
 - [ ] stronger extension ergonomics around reusable capabilities and workflows
 
 ## Practical Summary

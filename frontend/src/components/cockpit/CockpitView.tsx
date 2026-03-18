@@ -164,6 +164,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
   }, []);
 
+  useEffect(() => {
+    const handleCompose = (event: Event) => {
+      const message = (event as CustomEvent<{ message?: string }>).detail?.message?.trim();
+      if (!message) return;
+      setComposer(message);
+      inputRef.current?.focus();
+    };
+
+    window.addEventListener("seraph-cockpit-compose", handleCompose as EventListener);
+    return () => {
+      window.removeEventListener("seraph-cockpit-compose", handleCompose as EventListener);
+    };
+  }, []);
+
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const recentConversation = messages.slice(-18);
   const artifacts = useMemo(() => collectArtifacts(auditEvents), [auditEvents]);
@@ -235,6 +249,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setComposer("");
   }
 
+  function queueComposerDraft(message: string) {
+    setComposer(message);
+    inputRef.current?.focus();
+  }
+
   function renderInspector() {
     if (!selectedInspector) {
       return (
@@ -304,6 +323,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <div className="cockpit-inspector-title">{title}</div>
         <div className="cockpit-inspector-meta">{meta}</div>
         <div className="cockpit-inspector-body">{body}</div>
+        {selectedInspector.kind === "artifact" && (
+          <div className="cockpit-feedback-row">
+            <button
+              className="cockpit-feedback-button"
+              onClick={() =>
+                queueComposerDraft(
+                  `Use the workspace file "${selectedInspector.artifact.filePath}" as context for the next action.`,
+                )
+              }
+            >
+              Use In Command Bar
+            </button>
+          </div>
+        )}
         <div className="cockpit-inspector-details">
           {Object.entries(details).map(([key, value]) => (
             <div key={key} className="cockpit-inspector-detail">

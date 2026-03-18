@@ -234,6 +234,7 @@ class TestWorkflowManager:
         workflows = mgr.list_workflows()
         web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
 
+        assert set(web_brief["inputs"]) == {"query", "file_path"}
         assert web_brief["policy_modes"] == ["balanced", "full"]
         assert web_brief["execution_boundaries"] == ["external_read", "workspace_write"]
         assert web_brief["risk_level"] == "medium"
@@ -248,6 +249,10 @@ class TestWorkflowApi:
                 "name": "web-brief-to-file",
                 "tool_name": "workflow_web_brief_to_file",
                 "description": "Search and save",
+                "inputs": {
+                    "query": {"type": "string", "description": "Query to search", "required": True, "default": None},
+                    "file_path": {"type": "string", "description": "Output path", "required": True, "default": None},
+                },
                 "requires_tools": ["web_search", "write_file"],
                 "requires_skills": [],
                 "user_invocable": True,
@@ -263,6 +268,7 @@ class TestWorkflowApi:
             resp = await client.get("/api/workflows")
         assert resp.status_code == 200
         assert resp.json()["workflows"][0]["tool_name"] == "workflow_web_brief_to_file"
+        assert set(resp.json()["workflows"][0]["inputs"]) == {"query", "file_path"}
         assert resp.json()["workflows"][0]["approval_behavior"] == "never"
         assert resp.json()["workflows"][0]["requires_approval"] is False
 

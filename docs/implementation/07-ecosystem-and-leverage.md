@@ -20,12 +20,12 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the first queue item, but it is back in the near-term horizon after the first workflow runtime shipped
-- [x] this workstream now shares `workflow-control-and-artifact-roundtrips-v1` after `workflow-composition-v1` shipped on `develop`
+- [x] this workstream shipped the first operator workflow-control slice through `workflow-control-and-artifact-roundtrips-v1`
+- [x] this workstream now hands the queue forward to guardian learning and salience work
 
 ## Still To Do On `develop`
 
-- [ ] clearer operator-facing workflow control and artifact round-tripping on top of the reusable workflow runtime
+- [ ] deeper workflow operating surfaces and stronger artifact round-tripping beyond the first settings/cockpit loop
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

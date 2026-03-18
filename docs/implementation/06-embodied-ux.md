@@ -25,7 +25,7 @@
 
 ## Still To Do On `develop`
 
-- [ ] richer workflow-state widgets, saved layouts, and stronger keyboard/operator control inside the cockpit
+- [ ] richer dedicated workflow-state widgets, saved layouts, and stronger keyboard/operator control inside the cockpit
 - [ ] saved layouts, stronger keyboard workflow control, and denser operator ergonomics
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
@@ -42,5 +42,6 @@
 - [x] tool use and agent activity are visible in the world
 - [x] the primary workflow surface is now a guardian cockpit instead of defaulting to the village
 - [x] the cockpit now has linked evidence, artifact, and approval density beyond the first shell
+- [x] cockpit artifacts can now round-trip back into the command bar for the next operator step
 - [ ] the cockpit still needs stronger workflow control density and workspace ergonomics
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

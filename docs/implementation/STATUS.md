@@ -33,11 +33,12 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] Guardian Intelligence is now the active implementation track.
-- [ ] Guardian Intelligence is not complete yet.
+- [x] The repo-wide active delivery batch is now led by stronger native/operator continuity, deeper guardian-quality work, and the remaining post-cockpit-baseline items after the first saved-layout pass shipped.
+- [ ] That batch is not complete yet.
+- [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus after the cockpit and first salience foundation is cockpit depth, workflow control ergonomics, execution hardening, native reach, and deeper guardian learning.
+- [x] The next strategic focus is deeper execution hardening, cockpit workflow density, and stronger adaptive guardian quality on top of the newly shipped world-model and behavioral-proof foundations.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -45,7 +46,7 @@ title: Seraph Development Status
 - [x] dense guardian cockpit as the primary operator surface
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
-- [x] non-browser presence through notifications and native reach
+- [x] non-browser presence through a first coherent desktop surface, notifications, and native reach
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops
 
 ## Shipped On `develop`
@@ -62,6 +63,7 @@ title: Seraph Development Status
 - [x] tool policy modes for `safe`, `balanced`, and `full`
 - [x] MCP policy modes for `disabled`, `approval`, and `full`
 - [x] approval-gated high-risk actions in chat and WebSocket flows
+- [x] explicit execution-boundary metadata and approval behavior surfaced for tools and reusable workflows
 - [x] structured audit logging for approval, tool, and runtime events
 - [x] secret redaction and scoped secret-reference handling
 
@@ -74,6 +76,8 @@ title: Seraph Development Status
 - [x] MCP server management and runtime-managed server configuration
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
+- [x] forced approval wrapping for high-risk and approval-mode MCP workflow paths
+- [x] first operator workflow-control layer with workflow list/toggle/reload plus draft-to-cockpit support
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability
@@ -95,22 +99,26 @@ title: Seraph Development Status
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
+- [x] first explicit guardian world model for focus, commitments, open loops or pressure, focus alignment, and intervention receptivity
 - [x] observer salience, confidence, and interruption-cost scoring for observer refresh, guardian state, and proactive policy
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
+- [x] first feedback-driven guardian learning loop that reduces interruption eagerness for similar low-urgency interventions after recent negative outcomes
+- [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
+- [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] strategist agent and strategist scheduler tick
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
-- [x] native-notification fallback delivery when browser sockets are unavailable but the daemon is connected
+- [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, native-notification fallback delivery when browser sockets are unavailable but the daemon is connected, and browser-side inspect/dismiss controls for queued desktop notifications
 
 ### Current interface surface
 
-- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, and fixed composer
+- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, fixed composer, and persisted layout presets with keyboard switching
 - [x] legacy Phaser village mode with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
-- [x] macOS daemon notification fallback for non-browser proactive reach
+- [x] macOS daemon-backed desktop presence card plus browser-side inspect/dismiss controls for native notifications and notification fallback for non-browser proactive reach
 
 ### Ecosystem foundations
 
@@ -124,31 +132,31 @@ title: Seraph Development Status
 ### Runtime and execution
 
 - [ ] richer provider selection policy beyond weighted scoring, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
-- [ ] stronger execution isolation and privileged-path hardening
+- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
+- [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
 
 ### Guardian intelligence
 
-- [ ] stronger learning and feedback loops so proactive behavior improves over time instead of staying policy-only and outcome-capture-only
-- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality
-- [ ] stronger salience calibration and confidence quality beyond the first heuristic model
+- [ ] stronger learning and feedback loops beyond the first negative-feedback interruption bias
+- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the first explicit focus or commitments layer
+- [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 
 ### Interface and presence
 
-- [ ] richer cockpit density with linked evidence, artifact, workflow, and approval views beyond the first shell
-- [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
-- [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
+- [ ] richer cockpit density with dedicated workflow operating views and broader keyboard/operator control beyond the first linked-evidence plus saved-layout shell
+- [ ] richer cross-surface continuity and broader non-browser presence beyond the first desktop-presence and browser/native notification-control layer
+- [ ] stronger cross-surface continuity between ambient observation and deliberate interaction beyond the new pending-notification bridge
 
 ### Workflow and leverage
 
-- [ ] clearer operator-facing workflow control and artifact round-tripping on top of the shipped workflow runtime
+- [ ] deeper operator-facing workflow control and artifact round-tripping beyond the first settings/cockpit loop
 - [ ] stronger extension ergonomics around reusable capabilities and workflows
 
 ## Practical Summary
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are cockpit maturity and density, feedback-driven intervention quality, workflow control ergonomics, native reach, and execution hardening.
+- [ ] The biggest gaps against the reference systems are deeper execution hardening, workflow-control ergonomics, stronger intervention learning and world modeling, native reach, and still-denser cockpit operation.
 - [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
 
 ## Workstream View

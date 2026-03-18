@@ -119,13 +119,23 @@ async def deliver_or_queue(
     from src.observer.manager import context_manager
     from src.observer.insight_queue import insight_queue
     from src.scheduler.connection_manager import ws_manager
+    from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
 
     ctx = context_manager.get_context()
     intervention_type = message.intervention_type or message.type
     urgency = message.urgency or 0
     policy_decision: InterventionDecision | None = None
+    learning_signal = GuardianLearningSignal.neutral(intervention_type)
 
     try:
+        try:
+            learning_signal = await guardian_feedback_repository.get_learning_signal(
+                intervention_type=intervention_type,
+                limit=12,
+            )
+        except Exception:
+            logger.debug("Failed to compute guardian learning signal", exc_info=True)
+
         policy_decision = decide_intervention(
             message_type=message.type,
             intervention_type=intervention_type,
@@ -139,8 +149,10 @@ async def deliver_or_queue(
             guardian_confidence=guardian_confidence,
             observer_confidence=ctx.observer_confidence,
             salience_level=ctx.salience_level,
+            salience_reason=ctx.salience_reason,
             interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
+            recent_feedback_bias=learning_signal.bias,
         )
 
         event_details = {
@@ -153,6 +165,11 @@ async def deliver_or_queue(
             "salience_reason": ctx.salience_reason,
             "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
+            "learning_bias": learning_signal.bias,
+            "learning_helpful_count": learning_signal.helpful_count,
+            "learning_not_helpful_count": learning_signal.not_helpful_count,
+            "learning_acknowledged_count": learning_signal.acknowledged_count,
+            "learning_failed_count": learning_signal.failed_count,
             "policy_action": policy_decision.action.value,
             "policy_reason": policy_decision.reason,
         }
@@ -190,6 +207,10 @@ async def deliver_or_queue(
                         body=message.content,
                         intervention_type=intervention_type,
                         urgency=urgency,
+                    )
+                    context_manager.record_native_notification(
+                        title=notification.title,
+                        outcome="queued",
                     )
                     if policy_decision.should_cost_budget:
                         context_manager.decrement_attention_budget()

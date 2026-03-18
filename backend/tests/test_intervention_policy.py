@@ -127,3 +127,145 @@ def test_decide_intervention_stays_silent_for_empty_non_ambient_payload():
     assert decision.action == InterventionAction.stay_silent
     assert decision.reason == "empty_content"
     assert decision.delivery_decision is None
+
+
+def test_decide_intervention_bundles_on_recent_negative_feedback():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Same kind of nudge again",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        recent_feedback_bias="reduce_interruptions",
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "recent_negative_feedback"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "queue"
+
+
+def test_decide_intervention_acts_on_calibrated_high_salience():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="You're in the middle of the goal you're actively shipping.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "calibrated_high_salience"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "deliver"
+
+
+def test_decide_intervention_defers_on_low_observer_confidence():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Signal is too weak to interrupt on.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        observer_confidence="degraded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+    )
+
+    assert decision.action == InterventionAction.defer
+    assert decision.reason == "low_observer_confidence"
+    assert decision.delivery_decision is None
+
+
+def test_decide_intervention_defers_on_degraded_observer_state():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="State is degraded.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        data_quality="degraded",
+    )
+
+    assert decision.action == InterventionAction.defer
+    assert decision.reason == "degraded_observer_state"
+    assert decision.delivery_decision is None
+
+
+def test_decide_intervention_keeps_focus_mode_quiet_even_when_salience_is_high():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="You're in the middle of the goal you're actively shipping.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="focus",
+        attention_budget_remaining=1,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "high_interruption_cost"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "queue"
+
+
+def test_decide_intervention_scheduled_overrides_low_confidence_guards():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Scheduled review.",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        is_scheduled=True,
+        guardian_confidence="partial",
+        observer_confidence="degraded",
+        data_quality="degraded",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "scheduled"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "deliver"
+
+
+def test_decide_intervention_urgent_overrides_confidence_and_interruption_guards():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="alert",
+        content="Urgent issue.",
+        urgency=5,
+        user_state="available",
+        interruption_mode="focus",
+        attention_budget_remaining=0,
+        guardian_confidence="partial",
+        observer_confidence="degraded",
+        salience_level="low",
+        salience_reason="background",
+        interruption_cost="high",
+        data_quality="degraded",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "urgent"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "deliver"

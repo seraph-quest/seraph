@@ -12,6 +12,7 @@ import { ToolPolicyModeToggle } from "./settings/ToolPolicyModeToggle";
 import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
 import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
 import { AuditLogPanel } from "./settings/AuditLogPanel";
+import { WorkflowPanel } from "./settings/WorkflowPanel";
 
 interface SkillInfo {
   name: string;
@@ -590,6 +591,8 @@ export function SettingsPanel() {
           <ApprovalModeToggle />
 
           <AuditLogPanel />
+
+          <WorkflowPanel />
 
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">

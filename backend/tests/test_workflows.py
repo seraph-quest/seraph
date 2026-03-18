@@ -11,6 +11,10 @@ import pytest
 
 from src.workflows.loader import Workflow, _parse_workflow_file, load_workflows
 from src.workflows.manager import WorkflowManager
+from src.approval.exceptions import ApprovalRequired
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.agent.factory import get_tools
+from src.tools.approval import ApprovalTool
 
 
 class DummyTool:
@@ -222,6 +226,33 @@ class TestWorkflowManager:
         assert tool.name == "workflow_mcp_export"
         assert "saved tasks.md: task-a" in result
         assert mgr.get_tool_metadata(tool.name)["policy_modes"] == ["full"]
+        assert mgr.get_tool_metadata(tool.name)["execution_boundaries"] == ["external_mcp", "workspace_write"]
+
+    def test_list_workflows_includes_policy_metadata(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+
+        workflows = mgr.list_workflows()
+        web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
+
+        assert set(web_brief["inputs"]) == {"query", "file_path"}
+        assert web_brief["policy_modes"] == ["balanced", "full"]
+        assert web_brief["execution_boundaries"] == ["external_read", "workspace_write"]
+        assert web_brief["risk_level"] == "medium"
+
+    def test_list_workflows_includes_runtime_availability(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+
+        workflows = mgr.list_workflows(
+            available_tool_names=["web_search"],
+            active_skill_names=[],
+        )
+        web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
+
+        assert web_brief["is_available"] is False
+        assert web_brief["missing_tools"] == ["write_file"]
+        assert web_brief["missing_skills"] == []
 
 
 class TestWorkflowApi:
@@ -233,18 +264,39 @@ class TestWorkflowApi:
                 "name": "web-brief-to-file",
                 "tool_name": "workflow_web_brief_to_file",
                 "description": "Search and save",
+                "inputs": {
+                    "query": {"type": "string", "description": "Query to search", "required": True, "default": None},
+                    "file_path": {"type": "string", "description": "Output path", "required": True, "default": None},
+                },
                 "requires_tools": ["web_search", "write_file"],
                 "requires_skills": [],
                 "user_invocable": True,
                 "enabled": True,
                 "step_count": 2,
                 "file_path": "/tmp/web-brief.md",
+                "policy_modes": ["balanced", "full"],
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "risk_level": "medium",
+                "is_available": False,
+                "missing_tools": ["write_file"],
+                "missing_skills": [],
             }
         ]
-        with patch("src.api.workflows.workflow_manager", mock_mgr):
+        with (
+            patch("src.api.workflows.workflow_manager", mock_mgr),
+            patch(
+                "src.api.workflows.get_base_tools_and_active_skills",
+                return_value=([SimpleNamespace(name="web_search")], [], "disabled"),
+            ),
+        ):
             resp = await client.get("/api/workflows")
         assert resp.status_code == 200
         assert resp.json()["workflows"][0]["tool_name"] == "workflow_web_brief_to_file"
+        assert set(resp.json()["workflows"][0]["inputs"]) == {"query", "file_path"}
+        assert resp.json()["workflows"][0]["approval_behavior"] == "never"
+        assert resp.json()["workflows"][0]["requires_approval"] is False
+        assert resp.json()["workflows"][0]["is_available"] is False
+        assert resp.json()["workflows"][0]["missing_tools"] == ["write_file"]
 
     @pytest.mark.asyncio
     async def test_update_workflow_logs(self, client):
@@ -298,6 +350,8 @@ class TestWorkflowSurfaces:
             patch("src.api.tools.workflow_manager.get_tool_metadata", return_value={
                 "description": "Search the web and save a note",
                 "policy_modes": ["balanced", "full"],
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
             }),
         ):
             resp = await client.get("/api/tools")
@@ -307,7 +361,109 @@ class TestWorkflowSurfaces:
             "description": "Search the web and save a note",
             "policy_modes": ["balanced", "full"],
             "requires_approval": False,
+            "approval_behavior": "never",
+            "risk_level": "medium",
+            "execution_boundaries": ["external_read", "workspace_write"],
         }]
+
+    def test_factory_wraps_high_risk_workflows_for_approval(self, async_db):
+        class DummyWorkflowTool:
+            name = "workflow_shell_run"
+            description = "Run shell via workflow"
+            inputs = {"code": {"type": "string", "description": "Code"}}
+            output_type = "string"
+
+            def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+                return "ok"
+
+        with (
+            patch("src.agent.factory.discover_tools", return_value=[]),
+            patch("src.agent.factory.mcp_manager.get_tools", return_value=[]),
+            patch("src.agent.factory.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.factory.workflow_manager.build_workflow_tools", return_value=[DummyWorkflowTool()]),
+            patch("src.agent.factory.workflow_manager.get_tool_metadata", return_value={
+                "description": "Run shell via workflow",
+                "policy_modes": ["full"],
+                "risk_level": "high",
+                "execution_boundaries": ["sandbox_execution"],
+            }),
+        ):
+            workflow_tool = next(tool for tool in get_tools() if tool.name == "workflow_shell_run")
+
+        tokens = set_runtime_context("s1", "high_risk")
+        try:
+            with pytest.raises(ApprovalRequired):
+                workflow_tool(code="print('hi')")
+        finally:
+            reset_runtime_context(tokens)
+
+    def test_factory_keeps_medium_risk_workflows_direct(self, async_db):
+        class DummyWorkflowTool:
+            name = "workflow_web_brief_to_file"
+            description = "Run a medium-risk workflow"
+            inputs = {
+                "query": {"type": "string", "description": "Query"},
+                "file_path": {"type": "string", "description": "Path"},
+            }
+            output_type = "string"
+
+            def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+                return "ok"
+
+        with (
+            patch("src.agent.factory.discover_tools", return_value=[]),
+            patch("src.agent.factory.mcp_manager.get_tools", return_value=[]),
+            patch("src.agent.factory.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.factory.workflow_manager.build_workflow_tools", return_value=[DummyWorkflowTool()]),
+            patch("src.agent.factory.workflow_manager.get_tool_metadata", return_value={
+                "description": "Run a medium-risk workflow",
+                "policy_modes": ["balanced", "full"],
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+            }),
+        ):
+            workflow_tool = next(tool for tool in get_tools() if tool.name == "workflow_web_brief_to_file")
+
+        assert not isinstance(workflow_tool, ApprovalTool)
+
+        tokens = set_runtime_context("s1", "high_risk")
+        try:
+            assert workflow_tool(query="seraph", file_path="notes.md") == "ok"
+        finally:
+            reset_runtime_context(tokens)
+
+    def test_factory_forces_approval_for_mcp_workflows_when_mcp_mode_requires_it(self, async_db):
+        class DummyWorkflowTool:
+            name = "workflow_mcp_export"
+            description = "Export via MCP"
+            inputs = {"file_path": {"type": "string", "description": "Path"}}
+            output_type = "string"
+
+            def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+                return "ok"
+
+        ctx = SimpleNamespace(tool_policy_mode="full", mcp_policy_mode="approval")
+        with (
+            patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+            patch("src.agent.factory.discover_tools", return_value=[]),
+            patch("src.agent.factory.mcp_manager.get_tools", return_value=[]),
+            patch("src.agent.factory.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.factory.workflow_manager.build_workflow_tools", return_value=[DummyWorkflowTool()]),
+            patch("src.agent.factory.workflow_manager.get_tool_metadata", return_value={
+                "description": "Export via MCP",
+                "policy_modes": ["full"],
+                "risk_level": "high",
+                "execution_boundaries": ["external_mcp", "workspace_write"],
+            }),
+        ):
+            workflow_tool = next(tool for tool in get_tools() if tool.name == "workflow_mcp_export")
+
+        tokens = set_runtime_context("s1", "off")
+        try:
+            with pytest.raises(ApprovalRequired):
+                workflow_tool(file_path="tasks.md")
+        finally:
+            reset_runtime_context(tokens)
 
     def test_build_all_specialists_adds_workflow_runner(self):
         native_tool = MagicMock()
@@ -338,3 +494,39 @@ class TestWorkflowSurfaces:
 
         workflow_runner = next(s for s in specialists if s.name == "workflow_runner")
         assert workflow_runner.tools == [workflow_tool]
+
+    def test_build_all_specialists_keeps_medium_risk_workflows_direct(self):
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+        workflow_tool.description = "Search and save"
+        workflow_tool.inputs = {"query": {"type": "string", "description": "Query"}}
+        workflow_tool.output_type = "string"
+
+        with patch("src.agent.specialists.create_specialist") as mock_create_specialist:
+            with (
+                patch("src.agent.specialists.discover_tools", return_value=[]),
+                patch("src.agent.specialists.filter_tools", side_effect=lambda tools, *_args, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_secret_refs", side_effect=lambda tools: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_audit", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.mcp_manager.get_config", return_value=[]),
+                patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+                patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+                patch("src.agent.specialists.workflow_manager.get_tool_metadata", return_value={
+                    "description": "Search and save",
+                    "policy_modes": ["balanced", "full"],
+                    "risk_level": "medium",
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                }),
+            ):
+                mock_create_specialist.side_effect = lambda name, description, tools, temperature, max_steps: SimpleNamespace(
+                    name=name,
+                    description=description,
+                    tools=tools,
+                )
+                from src.agent.specialists import build_all_specialists
+
+                specialists = build_all_specialists()
+
+        workflow_runner = next(s for s in specialists if s.name == "workflow_runner")
+        assert len(workflow_runner.tools) == 1
+        assert not isinstance(workflow_runner.tools[0], ApprovalTool)

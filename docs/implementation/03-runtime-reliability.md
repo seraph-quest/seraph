@@ -28,8 +28,9 @@
 ## Working On Now
 
 - [x] Runtime Reliability is no longer the repo-wide active focus after the first guardian behavior baseline shipped
-- [x] this workstream has shipped the first two items in the current repo-wide 10-PR horizon
-- [ ] richer provider policy and broader eval depth still remain in the queue after the current guardian-intelligence slice
+- [x] the previous runtime-focused queue is fully shipped on `develop`
+- [ ] broader guardian behavioral eval depth remains in the refreshed repo-wide 10-PR horizon through `guardian-behavioral-evals-v2`
+- [ ] richer provider policy still remains to do on `develop`, but it now sits behind higher-leverage product gaps in the refreshed queue
 
 ## Still To Do On `develop`
 

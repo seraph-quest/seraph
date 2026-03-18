@@ -52,6 +52,10 @@ def derive_observer_assessment(
     interruption_mode: str,
     attention_budget_remaining: int,
 ) -> ObserverAssessment:
+    has_active_goals = bool(active_goals_summary.strip())
+    has_recent_git_activity = bool(recent_git_activity)
+    has_screen_activity = bool((screen_context or "").strip() or (active_window or "").strip())
+
     if data_quality == "good":
         observer_confidence = "grounded"
     elif data_quality == "degraded":
@@ -60,6 +64,7 @@ def derive_observer_assessment(
         observer_confidence = "degraded"
 
     upcoming_event_soon = _has_upcoming_event_soon(upcoming_events)
+    aligned_work_activity = has_active_goals and has_recent_git_activity and has_screen_activity
 
     if current_event:
         salience_level = "high"
@@ -67,13 +72,16 @@ def derive_observer_assessment(
     elif upcoming_event_soon:
         salience_level = "high"
         salience_reason = "upcoming_event"
-    elif active_goals_summary.strip():
+    elif aligned_work_activity:
+        salience_level = "high"
+        salience_reason = "aligned_work_activity"
+    elif has_active_goals:
         salience_level = "medium"
         salience_reason = "active_goals"
-    elif recent_git_activity:
+    elif has_recent_git_activity:
         salience_level = "medium"
         salience_reason = "recent_git_activity"
-    elif (screen_context or "").strip() or (active_window or "").strip():
+    elif has_screen_activity:
         salience_level = "medium"
         salience_reason = "screen_activity"
     else:

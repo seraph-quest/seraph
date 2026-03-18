@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from src.agent.factory import get_base_tools_and_active_skills
 from src.audit.runtime import log_integration_event
 from src.workflows.manager import workflow_manager
 
@@ -15,7 +16,30 @@ class UpdateWorkflowRequest(BaseModel):
 
 @router.get("/workflows")
 async def list_workflows():
-    return {"workflows": workflow_manager.list_workflows()}
+    base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
+    workflows = []
+    for workflow in workflow_manager.list_workflows(
+        available_tool_names=[tool.name for tool in base_tools],
+        active_skill_names=active_skill_names,
+    ):
+        boundaries = workflow.get("execution_boundaries", [])
+        risk_level = workflow.get("risk_level", "low")
+        requires_approval = (
+            risk_level == "high"
+            or ("external_mcp" in boundaries and mcp_mode == "approval")
+        )
+        if "external_mcp" in boundaries and mcp_mode == "approval":
+            approval_behavior = "always"
+        elif risk_level == "high":
+            approval_behavior = "high_risk_mode"
+        else:
+            approval_behavior = "never"
+        workflows.append({
+            **workflow,
+            "requires_approval": requires_approval,
+            "approval_behavior": approval_behavior,
+        })
+    return {"workflows": workflows}
 
 
 @router.put("/workflows/{name}")

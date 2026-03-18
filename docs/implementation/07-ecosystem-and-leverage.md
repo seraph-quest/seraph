@@ -20,12 +20,12 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus after `workflow-composition-v1` shipped on this branch
-- [x] this workstream now owns the remaining workflow-control and extension-ergonomics gap after `workflow-composition-v1`
+- [x] this workstream shipped the first operator workflow-control slice through `workflow-control-and-artifact-roundtrips-v1`
+- [x] this workstream now hands the queue forward to guardian learning and salience work
 
 ## Still To Do On `develop`
 
-- [ ] clearer operator-facing workflow control and artifact round-tripping on top of the reusable workflow runtime
+- [ ] deeper workflow operating surfaces and stronger artifact round-tripping beyond the first settings/cockpit loop
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

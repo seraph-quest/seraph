@@ -39,14 +39,14 @@ This file explains:
 
 ### 1. Guardian state and human model
 
-- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, and explicit guardian-state synthesis
-- [ ] still missing: stronger human/world modeling quality and better-calibrated salience/confidence beyond the first heuristic layer
+- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a first explicit world-model layer for focus, commitments, pressure, and receptivity, and a first calibrated aligned-work/high-salience pass
+- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the first explicit world-model and calibration layers
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, and first native notification fallback
-- [ ] still missing: closed-loop learning from outcomes and stronger timing quality beyond the first salience model
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first feedback-driven interruption bias from recent negative outcomes, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate
+- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -57,33 +57,37 @@ This file explains:
 
 ### 4. Presence and reach
 
-- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, and first desktop-notification fallback path
-- [ ] still missing: richer desktop shell, stronger non-browser continuity, and broader reach channels
+- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, and browser-side controls for pending native notifications
+- [ ] still missing: broader reach channels and continuity beyond the first browser/native notification bridge
 - owners: Workstream 04, Workstream 06
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, and legacy village fallback
-- [ ] still missing: denser linked evidence, artifact, workflow, approval, and saved-layout control surfaces
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, artifact round-trip into the command bar, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
+- [ ] still missing: stronger dedicated workflow-control density and more flexible workspace control beyond the first saved-layout layer
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, delegation primitives, and first-class reusable workflows
-- [ ] still missing: clearer operator-facing workflow control, stronger artifact round-tripping, and easier extension ergonomics
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, and a first operator-facing workflow-control layer with draft-to-cockpit steering
+- [ ] still missing: richer direct workflow control, stronger artifact round-tripping, and easier extension ergonomics
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
 
-- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, and audit logging
-- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries
+- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, and forced approval wrapping for high-risk/approval-mode workflow paths
+- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that first hardening pass
 - owners: Workstream 01, Workstream 02
 
 ## Queue Ownership
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current next unchecked items are execution hardening, workflow control ergonomics, richer native reach, and deeper guardian learning after the cockpit and salience foundations land.
+- [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
+- [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
+- [x] The new queue starts with `execution-safety-hardening-v2` because privileged execution risk is still the highest-cost failure mode once leverage grows further.
+- [x] The next queue pressure then moves into cockpit workflow density and richer learning because Seraph now has enough foundations that usability and adaptive intervention quality matter more than missing primitives.
+- [x] The refreshed queue still keeps cross-surface continuity, provider safeguards, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

@@ -15,17 +15,16 @@
 - [x] native macOS observer daemon for screen and OCR ingest
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product
-- [x] first native desktop-notification path when browser delivery is unavailable but the daemon is connected
+- [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and browser-side controls for pending native notifications
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
-- [x] this workstream lands `native-presence-notifications` in the master 10-PR queue on this branch
+- [x] this workstream shipped `native-desktop-shell-v1`
+- [x] this workstream shipped `cross-surface-continuity-and-notification-controls`
 
 ## Still To Do On `develop`
 
-- [ ] native-feeling desktop shell beyond the current browser-plus-daemon split
-- [ ] richer notification controls and broader interruption channels outside the current in-product delivery surface
+- [ ] richer notification controls and broader interruption channels outside the first browser/native continuity layer
 - [ ] broader external communication channels
 - [ ] better cross-surface continuity between ambient observation and deliberate interaction
 
@@ -39,4 +38,5 @@
 - [x] Seraph can observe and update state outside the immediate chat loop
 - [x] Seraph can proactively surface output in the current product
 - [x] Seraph has at least one real non-browser presence path outside the browser tab
-- [ ] Seraph feels like a coherent desktop presence rather than a browser app plus daemon
+- [x] Seraph now has a coherent first desktop presence surface rather than only a browser app plus hidden daemon fallback
+- [x] browser and native pending-notification state now have a first shared control surface

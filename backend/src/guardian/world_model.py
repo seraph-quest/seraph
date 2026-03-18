@@ -1,0 +1,158 @@
+"""First-pass explicit human/world model layered on top of guardian state."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from src.observer.context import CurrentContext
+
+_TAG_PREFIX_RE = re.compile(r"^\[[^\]]+\]\s*")
+
+
+@dataclass(frozen=True)
+class GuardianWorldModel:
+    current_focus: str
+    active_commitments: tuple[str, ...]
+    open_loops_or_pressure: tuple[str, ...]
+    focus_alignment: str
+    intervention_receptivity: str
+
+    def to_prompt_block(self) -> str:
+        lines = [
+            f"Current focus: {self.current_focus}",
+            f"Focus alignment: {self.focus_alignment}",
+            f"Intervention receptivity: {self.intervention_receptivity}",
+        ]
+
+        if self.active_commitments:
+            lines.append("Active commitments:")
+            lines.extend(f"- {item}" for item in self.active_commitments)
+
+        if self.open_loops_or_pressure:
+            lines.append("Open loops and pressure:")
+            lines.extend(f"- {item}" for item in self.open_loops_or_pressure)
+
+        return "\n".join(lines)
+
+
+def _clean_line(line: str) -> str:
+    line = line.strip()
+    if not line:
+        return ""
+    if line.startswith("- "):
+        line = line[2:].strip()
+    line = _TAG_PREFIX_RE.sub("", line)
+    return " ".join(line.split())
+
+
+def _extract_lines(block: str, *, limit: int = 2) -> list[str]:
+    results: list[str] = []
+    for raw_line in block.splitlines():
+        line = _clean_line(raw_line)
+        if not line:
+            continue
+        results.append(line)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _dedupe(items: list[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return tuple(ordered)
+
+
+def _derive_focus_alignment(observer_context: CurrentContext) -> str:
+    if observer_context.salience_reason in {
+        "current_event",
+        "upcoming_event",
+        "aligned_work_activity",
+    }:
+        return "high"
+    if observer_context.salience_reason in {"active_goals", "recent_git_activity", "screen_activity"}:
+        return "medium"
+    return "low"
+
+
+def _derive_intervention_receptivity(observer_context: CurrentContext) -> str:
+    if (
+        observer_context.interruption_mode == "focus"
+        or observer_context.user_state in {"deep_work", "in_meeting", "away"}
+        or observer_context.interruption_cost == "high"
+        or observer_context.attention_budget_remaining <= 1
+    ):
+        return "low"
+    if (
+        observer_context.user_state == "winding_down"
+        or observer_context.interruption_cost == "medium"
+        or observer_context.observer_confidence != "grounded"
+    ):
+        return "medium"
+    return "high"
+
+
+def build_guardian_world_model(
+    *,
+    observer_context: CurrentContext,
+    memory_context: str,
+    current_session_history: str,
+    recent_sessions_summary: str,
+    recent_intervention_feedback: str,
+) -> GuardianWorldModel:
+    """Build a first explicit working-state / commitments model from current signals."""
+    memory_lines = _extract_lines(memory_context, limit=3)
+    recent_session_lines = _extract_lines(recent_sessions_summary, limit=2)
+
+    current_focus = "No clear focus signal"
+    if observer_context.current_event:
+        current_focus = observer_context.current_event
+    elif observer_context.active_goals_summary and observer_context.active_window:
+        current_focus = f"{observer_context.active_goals_summary} while in {observer_context.active_window}"
+    elif observer_context.active_goals_summary:
+        current_focus = observer_context.active_goals_summary
+    elif observer_context.active_window:
+        current_focus = observer_context.active_window
+    elif observer_context.screen_context:
+        current_focus = observer_context.screen_context.strip().splitlines()[0][:120]
+    elif current_session_history.strip():
+        current_focus = _extract_lines(current_session_history, limit=1)[0]
+    elif recent_session_lines:
+        current_focus = recent_session_lines[0]
+
+    commitments: list[str] = []
+    if observer_context.current_event:
+        commitments.append(observer_context.current_event)
+    for event in observer_context.upcoming_events[:2]:
+        summary = str(event.get("summary") or "").strip()
+        if summary:
+            commitments.append(summary)
+    if observer_context.active_goals_summary:
+        commitments.append(observer_context.active_goals_summary)
+    commitments.extend(memory_lines[:1])
+
+    open_loops: list[str] = []
+    if observer_context.attention_budget_remaining <= 1:
+        open_loops.append("Attention budget is nearly exhausted")
+    if observer_context.user_state in {"deep_work", "in_meeting", "away", "winding_down"}:
+        open_loops.append(f"Current state: {observer_context.user_state}")
+    if "not_helpful" in recent_intervention_feedback or "failed" in recent_intervention_feedback:
+        open_loops.append("Recent intervention friction is present")
+    if recent_session_lines:
+        open_loops.append(recent_session_lines[0])
+    for line in memory_lines[1:]:
+        open_loops.append(line)
+
+    return GuardianWorldModel(
+        current_focus=current_focus,
+        active_commitments=_dedupe(commitments),
+        open_loops_or_pressure=_dedupe(open_loops),
+        focus_alignment=_derive_focus_alignment(observer_context),
+        intervention_receptivity=_derive_intervention_receptivity(observer_context),
+    )

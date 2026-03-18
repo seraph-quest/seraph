@@ -7,6 +7,7 @@ import pytest
 
 from src.audit.repository import audit_repository
 from src.guardian.state import GuardianState, GuardianStateConfidence
+from src.guardian.world_model import GuardianWorldModel
 from src.observer.context import CurrentContext
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.strategist_tick import run_strategist_tick
@@ -38,6 +39,13 @@ def _make_guardian_state() -> GuardianState:
     return GuardianState(
         soul_context="# Soul\n\n## Goals\n- Ship guardian state",
         observer_context=_make_context(),
+        world_model=GuardianWorldModel(
+            current_focus="2 active goals",
+            active_commitments=("2 active goals",),
+            open_loops_or_pressure=("Attention budget is nearly exhausted",),
+            focus_alignment="medium",
+            intervention_receptivity="low",
+        ),
         memory_context="- [goal] Ship guardian state",
         current_session_history="",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
@@ -45,6 +53,7 @@ def _make_guardian_state() -> GuardianState:
         confidence=GuardianStateConfidence(
             overall="grounded",
             observer="good",
+            world_model="grounded",
             memory="grounded",
             current_session="not_requested",
             recent_sessions="grounded",

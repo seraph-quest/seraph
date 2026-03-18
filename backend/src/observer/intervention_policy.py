@@ -58,8 +58,10 @@ def decide_intervention(
     guardian_confidence: str | None = None,
     observer_confidence: str = "grounded",
     salience_level: str = "medium",
+    salience_reason: str = "background",
     interruption_cost: str = "medium",
     requires_approval: bool = False,
+    recent_feedback_bias: str = "neutral",
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
     should_cost_budget = user_state_machine.should_cost_budget(
@@ -138,11 +140,37 @@ def decide_intervention(
             should_cost_budget=should_cost_budget,
         )
 
+    if recent_feedback_bias == "reduce_interruptions" and urgency < 4 and intervention_type != "alert":
+        return InterventionDecision(
+            action=InterventionAction.bundle,
+            reason="recent_negative_feedback",
+            delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
     if user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}:
         return InterventionDecision(
             action=InterventionAction.bundle,
             reason="blocked_state",
             delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if (
+        interruption_cost == "high"
+        and urgency >= 3
+        and salience_level == "high"
+        and salience_reason in {"current_event", "upcoming_event", "aligned_work_activity"}
+        and observer_confidence == "grounded"
+        and guardian_confidence not in {"degraded", "partial", "empty"}
+        and interruption_mode != InterruptionMode.focus.value
+        and attention_budget_remaining > 0
+        and intervention_type != "alert"
+    ):
+        return InterventionDecision(
+            action=InterventionAction.act,
+            reason="calibrated_high_salience",
+            delivery_decision=DeliveryDecision.deliver,
             should_cost_budget=should_cost_budget,
         )
 

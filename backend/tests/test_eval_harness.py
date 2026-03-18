@@ -52,10 +52,15 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
+    assert "guardian_world_model_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
+    assert "native_desktop_shell_behavior" in captured.out
+    assert "cross_surface_notification_controls_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
+    assert "salience_calibration_behavior" in captured.out
+    assert "observer_delivery_salience_confidence_behavior" in captured.out
     assert "guardian_feedback_loop" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
@@ -144,11 +149,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
                 "guardian_state_synthesis",
+                "guardian_world_model_behavior",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
+                "native_desktop_shell_behavior",
+                "cross_surface_notification_controls_behavior",
                 "intervention_policy_behavior",
+                "salience_calibration_behavior",
+                "observer_delivery_salience_confidence_behavior",
                 "guardian_feedback_loop",
+                "guardian_outcome_learning",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
@@ -257,8 +268,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["world_model_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_salience"] == "high"
     assert details_by_name["guardian_state_synthesis"]["observer_interruption_cost"] == "low"
+    assert details_by_name["guardian_state_synthesis"]["world_model_focus"] == "Ship guardian state while in VS Code"
+    assert details_by_name["guardian_state_synthesis"]["world_model_alignment"] == "medium"
     assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
@@ -266,6 +280,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
     assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
+    assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "grounded"
+    assert details_by_name["guardian_world_model_behavior"]["current_focus"] == "Prepare investor brief while in Arc"
+    assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
+    assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
+    assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
+    assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
     assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"
@@ -273,6 +298,30 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["native_presence_notification_behavior"]["notification_body_matches"] is True
     assert details_by_name["native_presence_notification_behavior"]["acked"] is True
     assert details_by_name["native_presence_notification_behavior"]["remaining_notifications"] == 0
+    assert details_by_name["native_desktop_shell_behavior"]["initial_capture_mode"] == "balanced"
+    assert details_by_name["native_desktop_shell_behavior"]["initial_pending_notifications"] == 0
+    assert details_by_name["native_desktop_shell_behavior"]["queued_title"] == "Seraph desktop shell"
+    assert details_by_name["native_desktop_shell_behavior"]["queued_pending_notifications"] == 1
+    assert details_by_name["native_desktop_shell_behavior"]["queued_outcome"] == "queued_test"
+    assert details_by_name["native_desktop_shell_behavior"]["acked"] is True
+    assert details_by_name["native_desktop_shell_behavior"]["acked_pending_notifications"] == 0
+    assert details_by_name["native_desktop_shell_behavior"]["acked_outcome"] == "acked"
+    assert details_by_name["native_desktop_shell_behavior"]["queued_event_source"] == "test_endpoint"
+    assert details_by_name["native_desktop_shell_behavior"]["ack_event_matches"] is True
+    assert details_by_name["cross_surface_notification_controls_behavior"]["listed_before_pending_count"] == 2
+    assert details_by_name["cross_surface_notification_controls_behavior"]["listed_before_titles"] == [
+        "Seraph desktop shell",
+        "Seraph desktop shell",
+    ]
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismissed_single"] is True
+    assert details_by_name["cross_surface_notification_controls_behavior"]["listed_after_single_pending_count"] == 1
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismissed_all_count"] == 1
+    assert details_by_name["cross_surface_notification_controls_behavior"]["final_pending_count"] == 0
+    assert details_by_name["cross_surface_notification_controls_behavior"]["final_outcome"] == "dismissed"
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_event_source"] == "browser_controls"
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_source"] == "browser_controls"
+    assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_count"] == 1
+    assert details_by_name["cross_surface_notification_controls_behavior"]["second_notification_preserved_until_bulk_clear"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
@@ -308,6 +357,41 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["intervention_policy_behavior"]["high_interrupt_reason"] == "high_interruption_cost"
     assert details_by_name["intervention_policy_behavior"]["low_salience_action"] == "stay_silent"
     assert details_by_name["intervention_policy_behavior"]["low_salience_reason"] == "low_observer_salience"
+    assert details_by_name["intervention_policy_behavior"]["learned_bundle_action"] == "bundle"
+    assert details_by_name["intervention_policy_behavior"]["learned_bundle_reason"] == "recent_negative_feedback"
+    assert details_by_name["salience_calibration_behavior"]["aligned_work_salience_level"] == "high"
+    assert details_by_name["salience_calibration_behavior"]["aligned_work_salience_reason"] == "aligned_work_activity"
+    assert details_by_name["salience_calibration_behavior"]["single_goal_salience_level"] == "medium"
+    assert details_by_name["salience_calibration_behavior"]["single_goal_salience_reason"] == "active_goals"
+    assert details_by_name["salience_calibration_behavior"]["calibrated_action"] == "act"
+    assert details_by_name["salience_calibration_behavior"]["calibrated_reason"] == "calibrated_high_salience"
+    assert details_by_name["salience_calibration_behavior"]["focus_mode_action"] == "bundle"
+    assert details_by_name["salience_calibration_behavior"]["focus_mode_reason"] == "high_interruption_cost"
+    assert details_by_name["salience_calibration_behavior"]["low_observer_confidence_action"] == "defer"
+    assert details_by_name["salience_calibration_behavior"]["low_observer_confidence_reason"] == "low_observer_confidence"
+    assert details_by_name["salience_calibration_behavior"]["degraded_state_action"] == "defer"
+    assert details_by_name["salience_calibration_behavior"]["degraded_state_reason"] == "degraded_observer_state"
+    assert details_by_name["salience_calibration_behavior"]["urgent_override_action"] == "act"
+    assert details_by_name["salience_calibration_behavior"]["urgent_override_reason"] == "urgent"
+    assert details_by_name["salience_calibration_behavior"]["scheduled_override_action"] == "act"
+    assert details_by_name["salience_calibration_behavior"]["scheduled_override_reason"] == "scheduled"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_action"] == "act"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_reason"] == "calibrated_high_salience"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_delivery_decision"] == "deliver"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_transport"] == "websocket"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_delivered_connections"] == 1
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_budget_decremented"] is True
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_observer_confidence"] == "grounded"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_salience_reason"] == "aligned_work_activity"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["calibrated_interruption_cost"] == "high"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_action"] == "defer"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_reason"] == "low_observer_confidence"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_delivery_decision"] is None
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_observer_confidence"] == "degraded"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_salience_reason"] == "aligned_work_activity"
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_transport_present"] is False
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_broadcast_skipped"] is True
+    assert details_by_name["observer_delivery_salience_confidence_behavior"]["degraded_queue_skipped"] is True
     assert details_by_name["guardian_feedback_loop"]["action"] == "act"
     assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
     assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"
@@ -324,6 +408,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_feedback_loop"]["prompt_contains_feedback_section"] is True
     assert details_by_name["guardian_feedback_loop"]["instructions_include_feedback"] is True
     assert details_by_name["guardian_feedback_loop"]["remaining_notifications"] == 0
+    assert details_by_name["guardian_outcome_learning"]["action"] == "bundle"
+    assert details_by_name["guardian_outcome_learning"]["reason"] == "recent_negative_feedback"
+    assert details_by_name["guardian_outcome_learning"]["queued"] is True
+    assert details_by_name["guardian_outcome_learning"]["broadcast_skipped"] is True
+    assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "reduce_interruptions"
+    assert details_by_name["guardian_outcome_learning"]["learning_not_helpful_count"] == 2
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"

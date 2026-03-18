@@ -1,8 +1,18 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+
+import { EventBus } from "../../game/EventBus";
 import { API_URL } from "../../config/constants";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
+import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
+import {
+  collectArtifacts,
+  formatInspectorValue,
+  type ArtifactRecord,
+  type CockpitAuditEvent,
+} from "./inspector";
+import { COCKPIT_LAYOUTS, getCockpitLayout } from "./layouts";
 
 interface CockpitViewProps {
   onSend: (message: string) => void;
@@ -23,15 +33,29 @@ interface ObserverState {
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
-interface AuditEvent {
+interface PendingApproval {
   id: string;
-  event_type: string;
-  tool_name: string | null;
+  session_id?: string | null;
+  tool_name: string;
+  risk_level: string;
+  status: string;
   summary: string;
   created_at: string;
-  risk_level: string;
-  policy_mode: string;
 }
+
+interface DaemonPresenceState {
+  connected: boolean;
+  pending_notification_count: number;
+  capture_mode: string;
+  last_native_notification_outcome?: string | null;
+}
+
+type InspectorSelection =
+  | { kind: "approval"; approval: PendingApproval }
+  | { kind: "intervention"; message: ChatMessage }
+  | { kind: "trace"; message: ChatMessage }
+  | { kind: "audit"; event: CockpitAuditEvent }
+  | { kind: "artifact"; artifact: ArtifactRecord };
 
 function formatAge(value: number | string): string {
   const timestamp = typeof value === "number" ? value : new Date(value).getTime();
@@ -69,8 +93,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
+  const [approvalState, setApprovalState] = useState<Record<string, string>>({});
+  const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
+  const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
+  const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
+  const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
+  const setLayout = useCockpitLayoutStore((s) => s.setLayout);
+  const resetLayout = useCockpitLayoutStore((s) => s.resetLayout);
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -80,11 +112,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const ambientState = useChatStore((s) => s.ambientState);
   const ambientTooltip = useChatStore((s) => s.ambientTooltip);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
-  const toolRegistry = useChatStore((s) => s.toolRegistry);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const newSession = useChatStore((s) => s.newSession);
-  const fetchToolRegistry = useChatStore((s) => s.fetchToolRegistry);
   const setQuestPanelOpen = useChatStore((s) => s.setQuestPanelOpen);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
   const setInterfaceMode = useChatStore((s) => s.setInterfaceMode);
@@ -96,18 +126,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   useEffect(() => {
     loadSessions();
-    fetchToolRegistry();
     refreshGoals();
-  }, [loadSessions, fetchToolRegistry, refreshGoals]);
+  }, [loadSessions, refreshGoals]);
 
   useEffect(() => {
     let cancelled = false;
 
     const refreshCockpit = async () => {
       try {
-        const [observerResponse, auditResponse] = await Promise.all([
+        const [observerResponse, auditResponse, approvalsResponse, daemonResponse] = await Promise.all([
           fetch(`${API_URL}/api/observer/state`),
-          fetch(`${API_URL}/api/audit/events?limit=10`),
+          fetch(`${API_URL}/api/audit/events?limit=12`),
+          fetch(`${API_URL}/api/approvals/pending?limit=8`),
+          fetch(`${API_URL}/api/observer/daemon-status`),
         ]);
 
         if (!cancelled && observerResponse.ok) {
@@ -119,9 +150,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const auditPayload = await auditResponse.json();
           setAuditEvents(Array.isArray(auditPayload) ? auditPayload : []);
         }
+
+        if (!cancelled && approvalsResponse.ok) {
+          const approvalsPayload = await approvalsResponse.json();
+          setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
+        }
+
+        if (!cancelled && daemonResponse.ok) {
+          const daemonPayload = await daemonResponse.json();
+          setDaemonPresence(daemonPayload);
+        }
       } catch {
         if (!cancelled) {
           setAuditEvents([]);
+          setPendingApprovals([]);
+          setDaemonPresence(null);
         }
       }
     };
@@ -142,8 +185,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
   }, []);
 
+  useEffect(() => {
+    const handleCompose = (event: Event) => {
+      const message = (event as CustomEvent<{ message?: string }>).detail?.message?.trim();
+      if (!message) return;
+      setComposer(message);
+      inputRef.current?.focus();
+    };
+
+    window.addEventListener("seraph-cockpit-compose", handleCompose as EventListener);
+    return () => {
+      window.removeEventListener("seraph-cockpit-compose", handleCompose as EventListener);
+    };
+  }, []);
+
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
+  const activeLayout = getCockpitLayout(activeLayoutId);
   const recentConversation = messages.slice(-18);
+  const artifacts = useMemo(() => collectArtifacts(auditEvents), [auditEvents]);
   const recentTrace = messages
     .filter((message) => message.role === "step" || message.role === "error")
     .slice(-8)
@@ -152,9 +211,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .filter((message) => message.role === "proactive" || message.role === "approval")
     .slice(-6)
     .reverse();
-  const workflowTools = toolRegistry
-    .filter((tool) => tool.name.startsWith("workflow_"))
-    .slice(0, 4);
   const topGoals = collectGoalTitles(goalTree, 5);
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
   const submitDisabled = connectionStatus !== "connected" || isAgentBusy || !composer.trim();
@@ -178,12 +234,141 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function handleApprovalDecision(approval: PendingApproval, decision: "approve" | "deny") {
+    if (approvalState[approval.id] === "saving") return;
+    setApprovalState((current) => ({ ...current, [approval.id]: "saving" }));
+
+    try {
+      const response = await fetch(`${API_URL}/api/approvals/${approval.id}/${decision}`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        setApprovalState((current) => ({ ...current, [approval.id]: "failed" }));
+        return;
+      }
+
+      const payload = await response.json();
+      const nextStatus = payload?.status ?? (decision === "approve" ? "approved" : "denied");
+      setApprovalState((current) => ({ ...current, [approval.id]: nextStatus }));
+      setPendingApprovals((current) => current.filter((item) => item.id !== approval.id));
+
+      if (decision === "approve" && payload?.resume_message) {
+        EventBus.emit("approval-resume", {
+          sessionId: payload.session_id ?? approval.session_id ?? null,
+          message: payload.resume_message,
+        });
+      }
+    } catch {
+      setApprovalState((current) => ({ ...current, [approval.id]: "failed" }));
+    }
+  }
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     const message = composer.trim();
     if (!message || submitDisabled) return;
     onSend(message);
     setComposer("");
+  }
+
+  function queueComposerDraft(message: string) {
+    setComposer(message);
+    inputRef.current?.focus();
+  }
+
+  function renderInspector() {
+    if (!selectedInspector) {
+      return (
+        <div className="cockpit-empty">
+          Select an approval, intervention, trace row, audit event, or recent output to inspect it here.
+        </div>
+      );
+    }
+
+    let title = "";
+    let meta = "";
+    let body = "";
+    let details: Record<string, unknown> = {};
+
+    if (selectedInspector.kind === "approval") {
+      const approval = selectedInspector.approval;
+      title = approval.tool_name;
+      meta = `${approval.risk_level} approval`;
+      body = approval.summary;
+      details = {
+        approval_id: approval.id,
+        session_id: approval.session_id ?? "n/a",
+        status: approval.status,
+        resolution: approvalState[approval.id] ?? "pending",
+      };
+    } else if (selectedInspector.kind === "intervention") {
+      const message = selectedInspector.message;
+      title = message.interventionType ?? "intervention";
+      meta = `${formatAge(message.timestamp)} ago`;
+      body = message.content;
+      details = {
+        intervention_id: message.interventionId ?? "n/a",
+        feedback: message.interventionId ? feedbackState[message.interventionId] ?? "unrated" : "n/a",
+        urgency: message.urgency ?? "n/a",
+      };
+    } else if (selectedInspector.kind === "trace") {
+      const message = selectedInspector.message;
+      const relatedAudit = auditEvents.find((event) => event.tool_name === message.toolUsed);
+      title = message.toolUsed ?? "trace step";
+      meta = `step ${message.stepNumber ?? "?"}`;
+      body = message.content;
+      details = {
+        tool: message.toolUsed ?? "n/a",
+        related_audit: relatedAudit?.summary ?? "none",
+        risk_level: relatedAudit?.risk_level ?? "n/a",
+      };
+    } else if (selectedInspector.kind === "audit") {
+      const event = selectedInspector.event;
+      title = event.tool_name ?? event.event_type;
+      meta = `${event.event_type} · ${event.risk_level}`;
+      body = event.summary;
+      details = event.details ?? {};
+    } else {
+      const artifact = selectedInspector.artifact;
+      title = artifact.filePath;
+      meta = artifact.source;
+      body = artifact.summary;
+      details = {
+        file_path: artifact.filePath,
+        session_id: artifact.sessionId ?? "n/a",
+        created_at: artifact.createdAt,
+      };
+    }
+
+    return (
+      <div className="cockpit-inspector">
+        <div className="cockpit-inspector-title">{title}</div>
+        <div className="cockpit-inspector-meta">{meta}</div>
+        <div className="cockpit-inspector-body">{body}</div>
+        {selectedInspector.kind === "artifact" && (
+          <div className="cockpit-feedback-row">
+            <button
+              className="cockpit-feedback-button"
+              onClick={() =>
+                queueComposerDraft(
+                  `Use the workspace file "${selectedInspector.artifact.filePath}" as context for the next action.`,
+                )
+              }
+            >
+              Use In Command Bar
+            </button>
+          </div>
+        )}
+        <div className="cockpit-inspector-details">
+          {Object.entries(details).map(([key, value]) => (
+            <div key={key} className="cockpit-inspector-detail">
+              <div className="cockpit-key">{key.replace(/_/g, " ")}</div>
+              <pre className="cockpit-inspector-value">{formatInspectorValue(value)}</pre>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -201,6 +386,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <div className="cockpit-pill-row">
             <span className={`cockpit-pill cockpit-pill--${connectionStatus}`}>{connectionLabel}</span>
             <span className="cockpit-pill">{ambientState.replace("_", " ")}</span>
+            <span className="cockpit-pill">
+              desktop {daemonPresence?.connected ? "live" : "offline"}
+            </span>
+            {daemonPresence && (
+              <button
+                type="button"
+                className="cockpit-pill"
+                onClick={() => setSettingsPanelOpen(true)}
+                title="Open settings to inspect or dismiss pending desktop notifications"
+              >
+                native {daemonPresence.pending_notification_count} queued
+              </button>
+            )}
             <span className="cockpit-pill">
               budget {observerState?.attention_budget_remaining ?? "?"}
             </span>
@@ -237,10 +435,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               Legacy village
             </button>
           </div>
+
+          <div className="cockpit-layout-row">
+            {Object.values(COCKPIT_LAYOUTS).map((layout) => (
+              <button
+                key={layout.id}
+                className={`cockpit-action cockpit-action--ghost ${
+                  activeLayoutId === layout.id ? "cockpit-action--active" : ""
+                }`}
+                onClick={() => setLayout(layout.id)}
+                title={layout.description}
+              >
+                {layout.label}
+              </button>
+            ))}
+            <button className="cockpit-action cockpit-action--ghost" onClick={() => resetLayout()}>
+              Reset view
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="cockpit-grid">
+      <div className={`cockpit-grid cockpit-grid--${activeLayoutId}`}>
+        {activeLayout.sections.rail && (
         <aside className="cockpit-rail">
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
@@ -303,37 +520,82 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
-              <div className="cockpit-card-title">Capabilities</div>
-              <div className="cockpit-card-meta">{toolRegistry.length} tools</div>
-            </div>
-            <div className="cockpit-metric-grid">
-              <div className="cockpit-metric">
-                <div className="cockpit-metric-value">{workflowTools.length}</div>
-                <div className="cockpit-metric-label">workflows</div>
-              </div>
-              <div className="cockpit-metric">
-                <div className="cockpit-metric-value">{recentInterventions.length}</div>
-                <div className="cockpit-metric-label">interventions</div>
-              </div>
-              <div className="cockpit-metric">
-                <div className="cockpit-metric-value">{auditEvents.length}</div>
-                <div className="cockpit-metric-label">recent audits</div>
-              </div>
+              <div className="cockpit-card-title">Recent outputs</div>
+              <div className="cockpit-card-meta">{artifacts.length} files</div>
             </div>
             <div className="cockpit-sublist">
-              {workflowTools.map((tool) => (
-                <div key={tool.name} className="cockpit-sublist-item">
-                  {tool.name.replace("workflow_", "").replace(/_/g, " ")}
+              {artifacts.map((artifact) => (
+                <button
+                  key={artifact.id}
+                  className={`cockpit-sublist-button ${
+                    selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
+                      ? "active"
+                      : ""
+                  }`}
+                  onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                >
+                  <span>{artifact.filePath}</span>
+                  <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
+                </button>
+              ))}
+              {artifacts.length === 0 && (
+                <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="cockpit-panel">
+            <div className="cockpit-card-header">
+              <div className="cockpit-card-title">Pending approvals</div>
+              <div className="cockpit-card-meta">{pendingApprovals.length} waiting</div>
+            </div>
+            <div className="cockpit-list">
+              {pendingApprovals.map((approval) => (
+                <div key={approval.id} className="cockpit-row">
+                  <button
+                    className={`cockpit-row-button ${
+                      selectedInspector?.kind === "approval" && selectedInspector.approval.id === approval.id
+                        ? "active"
+                        : ""
+                    }`}
+                    onClick={() => setSelectedInspector({ kind: "approval", approval })}
+                  >
+                    <div className="cockpit-row-header">
+                      <span className="cockpit-role">{approval.tool_name}</span>
+                      <span className="cockpit-row-age">{formatAge(approval.created_at)}</span>
+                    </div>
+                    <div className="cockpit-row-body">{approval.summary}</div>
+                    <div className="cockpit-row-meta">{approval.risk_level} risk</div>
+                  </button>
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void handleApprovalDecision(approval, "approve")}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void handleApprovalDecision(approval, "deny")}
+                    >
+                      Deny
+                    </button>
+                    <span className="cockpit-feedback-status">
+                      {approvalState[approval.id] ?? "pending"}
+                    </span>
+                  </div>
                 </div>
               ))}
-              {workflowTools.length === 0 && (
-                <div className="cockpit-empty">No workflow tools loaded.</div>
+              {pendingApprovals.length === 0 && (
+                <div className="cockpit-empty">No pending approvals.</div>
               )}
             </div>
           </section>
         </aside>
+        )}
 
-        <main className="cockpit-center">
+        <main className={`cockpit-center ${activeLayout.centerSingleColumn ? "cockpit-center--single" : ""}`}>
+          {activeLayout.sections.guardianState && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Guardian state</div>
@@ -385,22 +647,31 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </div>
             </div>
           </section>
+          )}
 
+          {activeLayout.sections.interventions && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Interventions</div>
-              <div className="cockpit-card-meta">
-                {recentInterventions.length} recent
-              </div>
+              <div className="cockpit-card-meta">{recentInterventions.length} recent</div>
             </div>
             <div className="cockpit-list">
               {recentInterventions.map((message) => (
                 <div key={message.id} className="cockpit-row">
-                  <div className="cockpit-row-header">
-                    <span className="cockpit-role">{labelForRole(message)}</span>
-                    <span className="cockpit-row-age">{formatAge(message.timestamp)}</span>
-                  </div>
-                  <div className="cockpit-row-body">{message.content}</div>
+                  <button
+                    className={`cockpit-row-button ${
+                      selectedInspector?.kind === "intervention" && selectedInspector.message.id === message.id
+                        ? "active"
+                        : ""
+                    }`}
+                    onClick={() => setSelectedInspector({ kind: "intervention", message })}
+                  >
+                    <div className="cockpit-row-header">
+                      <span className="cockpit-role">{labelForRole(message)}</span>
+                      <span className="cockpit-row-age">{formatAge(message.timestamp)}</span>
+                    </div>
+                    <div className="cockpit-row-body">{message.content}</div>
+                  </button>
                   {message.interventionId && (
                     <div className="cockpit-feedback-row">
                       <button
@@ -427,7 +698,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               )}
             </div>
           </section>
+          )}
 
+          {activeLayout.sections.audit && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Audit surface</div>
@@ -435,7 +708,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </div>
             <div className="cockpit-list">
               {auditEvents.map((event) => (
-                <div key={event.id} className="cockpit-row">
+                <button
+                  key={event.id}
+                  className={`cockpit-row-button ${
+                    selectedInspector?.kind === "audit" && selectedInspector.event.id === event.id
+                      ? "active"
+                      : ""
+                  }`}
+                  onClick={() => setSelectedInspector({ kind: "audit", event })}
+                >
                   <div className="cockpit-row-header">
                     <span className="cockpit-role">{event.tool_name ?? event.event_type}</span>
                     <span className="cockpit-row-age">{formatAge(event.created_at)}</span>
@@ -444,38 +725,62 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-row-meta">
                     {event.event_type} · {event.risk_level} · {event.policy_mode}
                   </div>
-                </div>
+                </button>
               ))}
               {auditEvents.length === 0 && (
                 <div className="cockpit-empty">No audit events available.</div>
               )}
             </div>
           </section>
+          )}
 
+          {activeLayout.sections.trace && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Live trace</div>
-              <div className="cockpit-card-meta">
-                {isAgentBusy ? "agent active" : "idle"}
-              </div>
+              <div className="cockpit-card-meta">{isAgentBusy ? "agent active" : "idle"}</div>
             </div>
             <div className="cockpit-list">
               {recentTrace.map((message) => (
-                <div key={message.id} className="cockpit-row">
+                <button
+                  key={message.id}
+                  className={`cockpit-row-button ${
+                    selectedInspector?.kind === "trace" && selectedInspector.message.id === message.id
+                      ? "active"
+                      : ""
+                  }`}
+                  onClick={() => setSelectedInspector({ kind: "trace", message })}
+                >
                   <div className="cockpit-row-header">
                     <span className="cockpit-role">{labelForRole(message)}</span>
                     <span className="cockpit-row-age">{formatAge(message.timestamp)}</span>
                   </div>
                   <div className="cockpit-row-body">{message.content}</div>
-                </div>
+                </button>
               ))}
               {recentTrace.length === 0 && (
                 <div className="cockpit-empty">No live tool or error trace yet.</div>
               )}
             </div>
           </section>
+          )}
+
+          {activeLayout.sections.inspector && inspectorVisible && (
+          <section
+            className={`cockpit-panel ${activeLayout.centerSingleColumn ? "" : "cockpit-panel--span-2"}`}
+          >
+            <div className="cockpit-card-header">
+              <div className="cockpit-card-title">Operations inspector</div>
+              <div className="cockpit-card-meta">
+                {selectedInspector ? selectedInspector.kind : "nothing selected"}
+              </div>
+            </div>
+            <div className="cockpit-feed">{renderInspector()}</div>
+          </section>
+          )}
         </main>
 
+        {activeLayout.sections.conversation && (
         <aside className="cockpit-chatrail">
           <section className="cockpit-panel cockpit-chat-panel">
             <div className="cockpit-card-header">
@@ -500,11 +805,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </div>
           </section>
         </aside>
+        )}
       </div>
 
       <form className="cockpit-composer" onSubmit={handleSubmit}>
         <div className="cockpit-composer-meta">
           <span>command bar</span>
+          <span>
+            {activeLayout.label} · Shift+1/2/3 layouts · Shift+I inspector · Shift+C composer
+          </span>
           <span>{isAgentBusy ? "agent busy" : "ready"}</span>
         </div>
         <div className="cockpit-composer-row">

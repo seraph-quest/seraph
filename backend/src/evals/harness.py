@@ -44,7 +44,12 @@ from src.api.observer import (
     ScreenContextRequest,
     ScreenObservationData,
     ack_native_notification,
+    daemon_status,
+    dismiss_all_native_notifications,
+    dismiss_native_notification,
+    enqueue_test_native_notification,
     get_next_native_notification,
+    list_native_notifications,
     post_intervention_feedback,
     post_screen_context,
 )
@@ -66,6 +71,7 @@ from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.intervention_policy import decide_intervention
 from src.observer.native_notification_queue import native_notification_queue
+from src.observer.salience import derive_observer_assessment
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
@@ -3142,8 +3148,11 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
         return {
             "overall_confidence": state.confidence.overall,
             "observer_confidence": state.confidence.observer,
+            "world_model_confidence": state.confidence.world_model,
             "observer_salience": state.observer_context.salience_level,
             "observer_interruption_cost": state.observer_context.interruption_cost,
+            "world_model_focus": state.world_model.current_focus,
+            "world_model_alignment": state.world_model.focus_alignment,
             "memory_confidence": state.confidence.memory,
             "current_session_confidence": state.confidence.current_session,
             "recent_sessions_confidence": state.confidence.recent_sessions,
@@ -3152,6 +3161,74 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             "current_history_mentions_guardian_state": "Build explicit guardian state." in state.current_session_history,
             "instructions_include_guardian_state": "--- GUARDIAN STATE ---" in instructions,
             "instructions_include_recent_sessions": "Recent sessions:" in instructions,
+        }
+
+
+async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
+    async with _patched_async_db("src.agent.session.get_session"):
+        await session_manager.get_or_create("current")
+        await session_manager.add_message("current", "user", "What needs attention today?")
+        await session_manager.add_message("current", "assistant", "Protect meeting prep and ship the brief.")
+        await session_manager.get_or_create("prior")
+        await session_manager.update_title("prior", "Investor follow-up")
+        await session_manager.add_message("prior", "assistant", "Close the investor loop before tomorrow.")
+
+        ctx = _make_context(
+            active_goals_summary="Prepare investor brief",
+            active_window="Arc",
+            screen_context="Reviewing investor meeting notes",
+            upcoming_events=[{"summary": "Investor sync", "start": "2026-03-18T14:00:00Z"}],
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="high",
+            attention_budget_remaining=1,
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+            patch(
+                "src.memory.vector_store.search_formatted",
+                return_value="- [goal] Prepare investor brief\n- [loop] Follow up on investor questions",
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="- advisory delivered, feedback=not_helpful: Too many nudges during prep.",
+            ),
+            patch("src.agent.factory.get_model", return_value=MagicMock()),
+            patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
+            patch("src.agent.strategist.LiteLLMModel", return_value=MagicMock()),
+        ):
+            state = await build_guardian_state(
+                session_id="current",
+                user_message="What needs attention today?",
+            )
+            create_agent(guardian_state=state)
+            strategist_agent = create_strategist_agent(guardian_state=state)
+
+        instructions = mock_agent_cls.call_args.kwargs["instructions"]
+        return {
+            "world_model_confidence": state.confidence.world_model,
+            "current_focus": state.world_model.current_focus,
+            "focus_alignment": state.world_model.focus_alignment,
+            "intervention_receptivity": state.world_model.intervention_receptivity,
+            "active_commitments_count": len(state.world_model.active_commitments),
+            "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
+            "includes_attention_pressure": any(
+                "Attention budget is nearly exhausted" in item
+                for item in state.world_model.open_loops_or_pressure
+            ),
+            "includes_feedback_pressure": any(
+                "Recent intervention friction" in item
+                for item in state.world_model.open_loops_or_pressure
+            ),
+            "agent_instructions_include_world_model": "World model:" in instructions,
+            "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
+            "strategist_instructions_include_receptivity": (
+                "Intervention receptivity: low" in strategist_agent.instructions
+            ),
         }
 
 
@@ -3460,6 +3537,97 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    mgr = ContextManager()
+    mgr.update_screen_context("VS Code — shell.py", "Editing native presence shell state.")
+    mgr.update_capture_mode("balanced")
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.api.observer.context_manager", mgr),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        initial_status = await daemon_status()
+        queued = await enqueue_test_native_notification()
+        queued_status = await daemon_status()
+        acked = await ack_native_notification(queued["id"])
+        acked_status = await daemon_status()
+
+    queued_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_queued",
+        tool_name="observer_daemon:notifications",
+    )
+    ack_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_acked",
+        tool_name="observer_daemon:notifications",
+    )
+    await native_notification_queue.clear()
+
+    return {
+        "initial_capture_mode": initial_status["capture_mode"],
+        "initial_pending_notifications": initial_status["pending_notification_count"],
+        "queued_title": queued["title"],
+        "queued_pending_notifications": queued_status["pending_notification_count"],
+        "queued_outcome": queued_status["last_native_notification_outcome"],
+        "acked": acked["acked"],
+        "acked_pending_notifications": acked_status["pending_notification_count"],
+        "acked_outcome": acked_status["last_native_notification_outcome"],
+        "queued_event_source": queued_event["details"]["source"],
+        "ack_event_matches": ack_event["details"]["notification_id"] == queued["id"],
+    }
+
+
+async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    mgr = ContextManager()
+    mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing pending desktop notifications.")
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.api.observer.context_manager", mgr),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        first = await enqueue_test_native_notification()
+        second = await enqueue_test_native_notification()
+        listed_before = await list_native_notifications()
+        dismissed = await dismiss_native_notification(first["id"])
+        listed_after_single = await list_native_notifications()
+        dismissed_all = await dismiss_all_native_notifications()
+        final_status = await daemon_status()
+
+    dismiss_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_dismissed",
+        tool_name="observer_daemon:notifications",
+    )
+    dismiss_all_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_dismissed_all",
+        tool_name="observer_daemon:notifications",
+    )
+    await native_notification_queue.clear()
+
+    return {
+        "listed_before_pending_count": listed_before["pending_count"],
+        "listed_before_titles": [item["title"] for item in listed_before["notifications"]],
+        "dismissed_single": dismissed["dismissed"],
+        "listed_after_single_pending_count": listed_after_single["pending_count"],
+        "dismissed_all_count": dismissed_all["dismissed_count"],
+        "final_pending_count": final_status["pending_notification_count"],
+        "final_outcome": final_status["last_native_notification_outcome"],
+        "dismiss_event_source": dismiss_event["details"]["source"],
+        "dismiss_all_event_source": dismiss_all_event["details"]["source"],
+        "dismiss_all_event_count": dismiss_all_event["details"]["dismissed_count"],
+        "second_notification_preserved_until_bulk_clear": (
+            len(listed_after_single["notifications"]) == 1
+            and listed_after_single["notifications"][0]["id"] == second["id"]
+        ),
+    }
+
+
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -3577,6 +3745,100 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     }
 
 
+async def _eval_guardian_outcome_learning() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        first = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Take a stretch break.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(first.id, feedback_type="not_helpful")
+
+        second = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Another stretch break reminder.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
+
+        available_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=3,
+            data_quality="good",
+        )
+        mock_context_manager = MagicMock()
+        mock_context_manager.get_context.return_value = available_ctx
+        mock_context_manager.decrement_attention_budget = MagicMock()
+        mock_context_manager.is_daemon_connected.return_value = False
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
+        mock_insight_queue = MagicMock()
+        mock_insight_queue.enqueue = AsyncMock()
+        mock_log_event = AsyncMock()
+
+        with (
+            patch("src.observer.manager.context_manager", mock_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            decision = await deliver_or_queue(
+                WSResponse(
+                    type="proactive",
+                    content="Try the same kind of nudge again.",
+                    intervention_type="advisory",
+                    urgency=3,
+                    reasoning="available_capacity",
+                ),
+                guardian_confidence="grounded",
+            )
+
+        queued_event = _find_audit_call(
+            mock_log_event,
+            event_type="observer_delivery_queued",
+            tool_name="observer_delivery_gate",
+        )
+
+    return {
+        "action": decision.action.value,
+        "reason": decision.reason,
+        "queued": mock_insight_queue.enqueue.await_count == 1,
+        "broadcast_skipped": mock_ws_manager.broadcast.await_count == 0,
+        "learning_bias": queued_event["details"]["learning_bias"],
+        "learning_not_helpful_count": queued_event["details"]["learning_not_helpful_count"],
+    }
+
+
 def _eval_intervention_policy_behavior() -> dict[str, Any]:
     act = decide_intervention(
         message_type="proactive",
@@ -3649,6 +3911,16 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         salience_level="low",
         interruption_cost="low",
     )
+    learned_bundle = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="The same nudge after negative feedback",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        recent_feedback_bias="reduce_interruptions",
+    )
     return {
         "act_action": act.action.value,
         "act_reason": act.reason,
@@ -3664,6 +3936,220 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         "high_interrupt_reason": high_interrupt.reason,
         "low_salience_action": low_salience.action.value,
         "low_salience_reason": low_salience.reason,
+        "learned_bundle_action": learned_bundle.action.value,
+        "learned_bundle_reason": learned_bundle.reason,
+    }
+
+
+def _eval_salience_calibration_behavior() -> dict[str, Any]:
+    aligned_work = derive_observer_assessment(
+        current_event=None,
+        upcoming_events=[],
+        recent_git_activity=[{"msg": "ship guardian calibration"}],
+        active_goals_summary="Ship guardian calibration",
+        active_window="VS Code",
+        screen_context="Editing guardian policy code",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+    )
+    single_goal = derive_observer_assessment(
+        current_event=None,
+        upcoming_events=[],
+        recent_git_activity=None,
+        active_goals_summary="Ship guardian calibration",
+        active_window=None,
+        screen_context=None,
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+    )
+    calibrated_act = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This work is directly on your active goal.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        guardian_confidence="grounded",
+        observer_confidence=aligned_work.observer_confidence,
+        salience_level=aligned_work.salience_level,
+        salience_reason=aligned_work.salience_reason,
+        interruption_cost="high",
+    )
+    focus_mode_bundle = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This work is directly on your active goal.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="focus",
+        attention_budget_remaining=1,
+        guardian_confidence="grounded",
+        observer_confidence=aligned_work.observer_confidence,
+        salience_level=aligned_work.salience_level,
+        salience_reason=aligned_work.salience_reason,
+        interruption_cost="high",
+    )
+    low_observer_confidence = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="The observer signal is too weak to interrupt on.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        observer_confidence="degraded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+    )
+    degraded_state = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="The observer state is degraded.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        data_quality="degraded",
+    )
+    urgent_override = decide_intervention(
+        message_type="proactive",
+        intervention_type="alert",
+        content="Urgent issue.",
+        urgency=5,
+        user_state="available",
+        interruption_mode="focus",
+        attention_budget_remaining=0,
+        guardian_confidence="partial",
+        observer_confidence="degraded",
+        salience_level="low",
+        salience_reason="background",
+        interruption_cost="high",
+        data_quality="degraded",
+    )
+    scheduled_override = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Scheduled review.",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        is_scheduled=True,
+        guardian_confidence="partial",
+        observer_confidence="degraded",
+        data_quality="degraded",
+    )
+    return {
+        "aligned_work_salience_level": aligned_work.salience_level,
+        "aligned_work_salience_reason": aligned_work.salience_reason,
+        "single_goal_salience_level": single_goal.salience_level,
+        "single_goal_salience_reason": single_goal.salience_reason,
+        "calibrated_action": calibrated_act.action.value,
+        "calibrated_reason": calibrated_act.reason,
+        "focus_mode_action": focus_mode_bundle.action.value,
+        "focus_mode_reason": focus_mode_bundle.reason,
+        "low_observer_confidence_action": low_observer_confidence.action.value,
+        "low_observer_confidence_reason": low_observer_confidence.reason,
+        "degraded_state_action": degraded_state.action.value,
+        "degraded_state_reason": degraded_state.reason,
+        "urgent_override_action": urgent_override.action.value,
+        "urgent_override_reason": urgent_override.reason,
+        "scheduled_override_action": scheduled_override.action.value,
+        "scheduled_override_reason": scheduled_override.reason,
+    }
+
+
+async def _eval_observer_delivery_salience_confidence_behavior() -> dict[str, Any]:
+    calibrated_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    degraded_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        data_quality="good",
+        observer_confidence="degraded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.side_effect = [calibrated_ctx, degraded_ctx]
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_context_manager.is_daemon_connected.return_value = False
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
+    mock_insight_queue = MagicMock()
+    mock_insight_queue.enqueue = AsyncMock()
+    mock_log_event = AsyncMock()
+
+    calibrated_message = WSResponse(
+        type="proactive",
+        content="This active goal work can justify an interruption right now.",
+        intervention_type="advisory",
+        urgency=3,
+        reasoning="Aligned work and grounded observer state",
+    )
+    degraded_message = WSResponse(
+        type="proactive",
+        content="The observer signal is degraded, so defer instead of interrupting.",
+        intervention_type="advisory",
+        urgency=3,
+        reasoning="Observer confidence is degraded",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        calibrated = await deliver_or_queue(calibrated_message, guardian_confidence="grounded")
+        degraded = await deliver_or_queue(degraded_message, guardian_confidence="grounded")
+
+    delivered_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_delivered",
+        tool_name="observer_delivery_gate",
+    )
+    deferred_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_deferred",
+        tool_name="observer_delivery_gate",
+    )
+
+    return {
+        "calibrated_action": calibrated.action.value,
+        "calibrated_reason": calibrated.reason,
+        "calibrated_delivery_decision": (
+            calibrated.delivery_decision.value if calibrated.delivery_decision else None
+        ),
+        "calibrated_transport": delivered_event["details"]["transport"],
+        "calibrated_delivered_connections": delivered_event["details"]["delivered_connections"],
+        "calibrated_budget_decremented": mock_context_manager.decrement_attention_budget.call_count == 1,
+        "calibrated_observer_confidence": delivered_event["details"]["observer_confidence"],
+        "calibrated_salience_reason": delivered_event["details"]["salience_reason"],
+        "calibrated_interruption_cost": delivered_event["details"]["interruption_cost"],
+        "degraded_action": degraded.action.value,
+        "degraded_reason": degraded.reason,
+        "degraded_delivery_decision": degraded.delivery_decision.value if degraded.delivery_decision else None,
+        "degraded_observer_confidence": deferred_event["details"]["observer_confidence"],
+        "degraded_salience_reason": deferred_event["details"]["salience_reason"],
+        "degraded_transport_present": "transport" in deferred_event["details"],
+        "degraded_broadcast_skipped": mock_ws_manager.broadcast.await_count == 1,
+        "degraded_queue_skipped": mock_insight_queue.enqueue.await_count == 0,
     }
 
 
@@ -4212,6 +4698,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_guardian_state_synthesis,
     ),
     EvalScenario(
+        name="guardian_world_model_behavior",
+        category="guardian",
+        description="Guardian state now carries a first explicit world model for focus, commitments, pressure, and intervention receptivity.",
+        runner=_eval_guardian_world_model_behavior,
+    ),
+    EvalScenario(
         name="observer_refresh_behavior",
         category="behavior",
         description="Observer refresh preserves screen context, rebuilds guardian context, and schedules queued-bundle delivery on unblock transitions.",
@@ -4230,16 +4722,46 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_native_presence_notification_behavior,
     ),
     EvalScenario(
+        name="native_desktop_shell_behavior",
+        category="presence",
+        description="Native presence exposes daemon status, pending-notification state, and a safe test desktop-notification path.",
+        runner=_eval_native_desktop_shell_behavior,
+    ),
+    EvalScenario(
+        name="cross_surface_notification_controls_behavior",
+        category="presence",
+        description="Browser-side native notification controls can inspect, dismiss, and bulk-clear desktop notifications without losing continuity state.",
+        runner=_eval_cross_surface_notification_controls_behavior,
+    ),
+    EvalScenario(
         name="intervention_policy_behavior",
         category="guardian",
         description="Intervention policy explicitly distinguishes act, bundle, defer, request_approval, and stay_silent outcomes.",
         runner=_eval_intervention_policy_behavior,
     ),
     EvalScenario(
+        name="salience_calibration_behavior",
+        category="guardian",
+        description="Aligned active-work signals raise salience, and high-salience grounded nudges can cut through high interruption cost outside focus mode.",
+        runner=_eval_salience_calibration_behavior,
+    ),
+    EvalScenario(
+        name="observer_delivery_salience_confidence_behavior",
+        category="guardian",
+        description="Grounded high-salience observer state can still deliver through high interruption cost, while degraded observer confidence defers before transport.",
+        runner=_eval_observer_delivery_salience_confidence_behavior,
+    ),
+    EvalScenario(
         name="guardian_feedback_loop",
         category="guardian",
         description="Proactive interventions persist outcomes and user feedback, and that summary flows back into guardian-state synthesis.",
         runner=_eval_guardian_feedback_loop,
+    ),
+    EvalScenario(
+        name="guardian_outcome_learning",
+        category="guardian",
+        description="Recent negative feedback on the same intervention type reduces future interruption eagerness and shows up in delivery audit details.",
+        runner=_eval_guardian_outcome_learning,
     ),
     EvalScenario(
         name="daily_briefing_fallback",

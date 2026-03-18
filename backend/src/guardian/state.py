@@ -7,12 +7,14 @@ from dataclasses import dataclass
 
 from src.agent.session import session_manager
 from src.observer.context import CurrentContext
+from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
 
 
 @dataclass(frozen=True)
 class GuardianStateConfidence:
     overall: str
     observer: str
+    world_model: str
     memory: str
     current_session: str
     recent_sessions: str
@@ -22,6 +24,7 @@ class GuardianStateConfidence:
 class GuardianState:
     soul_context: str
     observer_context: CurrentContext
+    world_model: GuardianWorldModel
     memory_context: str
     current_session_history: str
     recent_sessions_summary: str
@@ -37,9 +40,13 @@ class GuardianState:
         lines = [
             f"Overall confidence: {self.confidence.overall}",
             f"Observer confidence: {self.confidence.observer}",
+            f"World-model confidence: {self.confidence.world_model}",
             f"Memory confidence: {self.confidence.memory}",
             f"Current session confidence: {self.confidence.current_session}",
             f"Recent sessions confidence: {self.confidence.recent_sessions}",
+            "",
+            "World model:",
+            self.world_model.to_prompt_block(),
             "",
             "Observer snapshot:",
             self.observer_context.to_prompt_block(),
@@ -69,22 +76,40 @@ def _status_for_text(text: str, *, requested: bool = True) -> str:
 def _overall_confidence(
     *,
     observer_confidence: str,
+    world_model_status: str,
     memory_status: str,
     current_session_status: str,
     recent_sessions_status: str,
 ) -> str:
     grounded_signals = sum(
         1
-        for status in (memory_status, current_session_status, recent_sessions_status)
+        for status in (
+            world_model_status,
+            memory_status,
+            current_session_status,
+            recent_sessions_status,
+        )
         if status == "grounded"
     )
     if observer_confidence == "degraded":
         return "degraded"
     if observer_confidence == "partial":
         return "partial" if grounded_signals else "degraded"
-    if grounded_signals >= 2:
+    if grounded_signals >= 2 and world_model_status != "empty":
         return "grounded"
     return "partial"
+
+
+def _world_model_status(world_model: GuardianWorldModel) -> str:
+    if world_model.current_focus != "No clear focus signal" and world_model.active_commitments:
+        return "grounded"
+    if (
+        world_model.current_focus != "No clear focus signal"
+        or world_model.active_commitments
+        or world_model.open_loops_or_pressure
+    ):
+        return "partial"
+    return "empty"
 
 
 async def build_guardian_state(
@@ -122,10 +147,19 @@ async def build_guardian_state(
         if memory_requested
         else ""
     )
+    world_model = build_guardian_world_model(
+        observer_context=observer_context,
+        memory_context=memory_context,
+        current_session_history=current_session_history,
+        recent_sessions_summary=recent_sessions_summary,
+        recent_intervention_feedback=recent_intervention_feedback,
+    )
+    world_model_status = _world_model_status(world_model)
 
     confidence = GuardianStateConfidence(
         overall=_overall_confidence(
             observer_confidence=observer_context.observer_confidence,
+            world_model_status=world_model_status,
             memory_status=_status_for_text(memory_context, requested=memory_requested),
             current_session_status=_status_for_text(
                 current_session_history,
@@ -134,6 +168,7 @@ async def build_guardian_state(
             recent_sessions_status=_status_for_text(recent_sessions_summary),
         ),
         observer=observer_context.observer_confidence,
+        world_model=world_model_status,
         memory=_status_for_text(memory_context, requested=memory_requested),
         current_session=_status_for_text(
             current_session_history,
@@ -145,6 +180,7 @@ async def build_guardian_state(
     return GuardianState(
         soul_context=soul_context,
         observer_context=observer_context,
+        world_model=world_model,
         memory_context=memory_context,
         current_session_history=current_session_history,
         recent_sessions_summary=recent_sessions_summary,

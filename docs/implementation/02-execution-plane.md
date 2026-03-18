@@ -20,16 +20,18 @@
 - [x] dynamic MCP tool loading and runtime-managed MCP server configuration
 - [x] visible tool execution in chat, WebSocket, onboarding, strategist, and specialist flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, with tool, skill, and MCP-aware gating
+- [x] explicit workflow metadata for policy modes, execution boundaries, approval behavior, and risk level exposed to operator-facing APIs
+- [x] first operator-facing workflow controls for enable/disable, reload, and draft-to-cockpit steering
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus after `workflow-composition-v1` shipped on this branch
-- [x] this workstream now shares `execution-safety-hardening-v1` in the master 10-PR queue
+- [x] this workstream shipped the first workflow-facing hardening slice through `execution-safety-hardening-v1`
+- [x] this workstream now shares `execution-safety-hardening-v1` and `workflow-control-and-artifact-roundtrips-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] clearer operator-facing workflow control, approval visibility, and artifact round-tripping on top of the new workflow runtime
+- [ ] richer direct workflow execution, approval visibility, and artifact round-tripping on top of the hardened workflow runtime
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Non-Goals

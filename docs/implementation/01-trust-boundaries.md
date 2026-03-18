@@ -17,16 +17,18 @@
 - [x] secret egress redaction for surfaced responses and errors
 - [x] vault CRUD with audit visibility
 - [x] session-scoped secret references for safer downstream tool usage
+- [x] explicit execution-boundary metadata and approval behavior surfaced for tools and reusable workflows
+- [x] forced approval wrapping for reusable workflows that cross high-risk or approval-mode MCP boundaries
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
-- [x] this workstream owns `execution-safety-hardening-v1` in the master 10-PR queue
+- [x] this workstream shipped the first refreshed queue item through `execution-safety-hardening-v1`
+- [x] this workstream now hands the queue lead to workflow control and guardian-learning work
 - [ ] reduce reliance on raw secret retrieval in favor of narrower secret-injection paths
 
 ## Still To Do On `develop`
 
-- [ ] tighten isolation between planning, privileged execution, and future workflow layers
+- [ ] tighten isolation between planning, privileged execution, and future workflow layers beyond the first metadata/approval hardening pass
 - [ ] add deeper policy distinctions inside MCP and external execution paths
 - [ ] keep trust UX strict without making approvals noisy or unusable
 
@@ -37,6 +39,6 @@
 
 ## Acceptance Checklist
 
-- [ ] privileged tools cannot run without an explicit policy path
+- [x] privileged reusable workflows now expose an explicit policy path through approval behavior and execution-boundary metadata
 - [x] high-risk actions are pauseable and resumable with audit visibility
 - [ ] secret use is scoped and auditable end to end

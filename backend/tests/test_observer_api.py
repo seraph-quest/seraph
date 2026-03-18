@@ -79,6 +79,8 @@ class TestObserverAPI:
     async def test_daemon_status_disconnected(self, client):
         """Daemon status returns disconnected when no POST received."""
         mgr = ContextManager()
+        mgr.update_capture_mode("balanced")
+        await native_notification_queue.clear()
         with patch("src.api.observer.context_manager", mgr):
             resp = await client.get("/api/observer/daemon-status")
 
@@ -88,12 +90,26 @@ class TestObserverAPI:
         assert data["last_post"] is None
         assert data["active_window"] is None
         assert data["has_screen_context"] is False
+        assert data["capture_mode"] == "balanced"
+        assert data["pending_notification_count"] == 0
+        assert data["last_native_notification_at"] is None
+        assert data["last_native_notification_title"] is None
+        assert data["last_native_notification_outcome"] is None
 
     @pytest.mark.asyncio
     async def test_daemon_status_connected(self, client):
         """Daemon status returns connected after a recent POST."""
         mgr = ContextManager()
         mgr.update_screen_context("VS Code — main.py", None)
+        mgr.record_native_notification(title="Seraph desktop shell", outcome="queued_test")
+        await native_notification_queue.clear()
+        await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph desktop shell",
+            body="Test pending native notification.",
+            intervention_type="test",
+            urgency=1,
+        )
         with patch("src.api.observer.context_manager", mgr):
             resp = await client.get("/api/observer/daemon-status")
 
@@ -102,6 +118,12 @@ class TestObserverAPI:
         assert data["connected"] is True
         assert data["last_post"] is not None
         assert data["active_window"] == "VS Code — main.py"
+        assert data["capture_mode"] == "on_switch"
+        assert data["pending_notification_count"] == 1
+        assert data["last_native_notification_title"] == "Seraph desktop shell"
+        assert data["last_native_notification_outcome"] == "queued_test"
+        assert data["last_native_notification_at"] is not None
+        await native_notification_queue.clear()
 
     @pytest.mark.asyncio
     async def test_daemon_status_stale(self, client):
@@ -287,6 +309,35 @@ class TestObserverAPI:
         )
 
     @pytest.mark.asyncio
+    async def test_list_native_notifications(self, client):
+        await native_notification_queue.clear()
+        first = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph alert",
+            body="Browser is closed; use the daemon path.",
+            intervention_type="alert",
+            urgency=5,
+        )
+        second = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph follow-up",
+            body="Second desktop notification.",
+            intervention_type="advisory",
+            urgency=3,
+        )
+
+        resp = await client.get("/api/observer/notifications")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["pending_count"] == 2
+        assert [item["id"] for item in payload["notifications"]] == [first.id, second.id]
+        assert payload["notifications"][0]["title"] == "Seraph alert"
+        assert payload["notifications"][1]["title"] == "Seraph follow-up"
+
+        await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):
         await native_notification_queue.clear()
         intervention = await guardian_feedback_repository.create_intervention(
@@ -333,6 +384,132 @@ class TestObserverAPI:
             and event["details"]["intervention_id"] == intervention.id
             for event in events
         )
+
+    @pytest.mark.asyncio
+    async def test_dismiss_native_notification(self, async_db, client):
+        await native_notification_queue.clear()
+        mgr = ContextManager()
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Dismiss me",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        notification = await native_notification_queue.enqueue(
+            intervention_id=intervention.id,
+            title="Seraph",
+            body="Dismiss me",
+            intervention_type="advisory",
+            urgency=3,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.post(f"/api/observer/notifications/{notification.id}/dismiss")
+            status = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"dismissed": True}
+        assert await native_notification_queue.count() == 0
+        updated = await guardian_feedback_repository.get(intervention.id)
+        assert updated is not None
+        assert updated.latest_outcome == "notification_dismissed"
+        assert updated.transport == "native_notification"
+
+        status_payload = status.json()
+        assert status_payload["pending_notification_count"] == 0
+        assert status_payload["last_native_notification_outcome"] == "dismissed"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_dismissed"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["notification_id"] == notification.id
+            and event["details"]["source"] == "browser_controls"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_dismiss_all_native_notifications(self, async_db, client):
+        await native_notification_queue.clear()
+        mgr = ContextManager()
+        first = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph one",
+            body="First desktop notification.",
+            intervention_type="test",
+            urgency=1,
+        )
+        second = await native_notification_queue.enqueue(
+            intervention_id=None,
+            title="Seraph two",
+            body="Second desktop notification.",
+            intervention_type="test",
+            urgency=1,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.post("/api/observer/notifications/dismiss-all")
+            status = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"dismissed_count": 2}
+        assert await native_notification_queue.count() == 0
+
+        status_payload = status.json()
+        assert status_payload["pending_notification_count"] == 0
+        assert status_payload["last_native_notification_title"] == second.title
+        assert status_payload["last_native_notification_outcome"] == "dismissed"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_dismissed_all"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["dismissed_count"] == 2
+            and event["details"]["source"] == "browser_controls"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_enqueue_test_native_notification(self, async_db, client):
+        await native_notification_queue.clear()
+        mgr = ContextManager()
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.post("/api/observer/notifications/test")
+            status = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["title"] == "Seraph desktop shell"
+        assert payload["intervention_type"] == "test"
+        assert await native_notification_queue.count() == 1
+
+        status_payload = status.json()
+        assert status_payload["pending_notification_count"] == 1
+        assert status_payload["last_native_notification_title"] == "Seraph desktop shell"
+        assert status_payload["last_native_notification_outcome"] == "queued_test"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_queued"
+            and event["tool_name"] == "observer_daemon:notifications"
+            and event["details"]["notification_id"] == payload["id"]
+            and event["details"]["source"] == "test_endpoint"
+            for event in events
+        )
+
+        await native_notification_queue.clear()
 
     @pytest.mark.asyncio
     async def test_post_intervention_feedback(self, async_db, client):

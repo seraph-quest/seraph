@@ -60,10 +60,35 @@ Legend for the checklist column:
 - [ ] Seraph is still behind the strongest reference systems on workflow-operating density, deeper salience/intervention quality, native reach, deeper execution hardening, and operator workflow control.
 - [ ] No workstream is complete yet.
 
-## Rolling 10-PR List
+## Last Completed 10-PR Batch
+
+This keeps the latest completed implementation batch visible instead of deleting it on queue refresh.
+
+1. [x] `execution-safety-hardening-v1`:
+   deepen privileged execution isolation, policy visibility, and hardening boundaries before Seraph expands more leverage on top of the current action layer
+2. [x] `cockpit-linked-evidence-panels-v2`:
+   make the guardian cockpit materially denser with linked evidence, trace, approval, and artifact panes so operator visibility becomes a real strength instead of just a first shell
+3. [x] `workflow-control-and-artifact-roundtrips-v1`:
+   turn shipped workflow composition into something easy to steer by adding operator-facing workflow control, approval visibility, and artifact round-tripping
+4. [x] `guardian-outcome-learning-v1`:
+   make stored intervention outcomes and explicit feedback change future guardian behavior instead of only being recorded
+5. [x] `salience-calibration-v2`:
+   improve interruption timing and proactive judgment by calibrating confidence, salience, and interruption cost beyond the first heuristic layer
+6. [x] `saved-layouts-and-keyboard-control-v1`:
+   make the cockpit feel like a real operator workspace with saved workspaces, stronger keyboard control, and denser navigation ergonomics
+7. [x] `native-desktop-shell-v1`:
+   move beyond browser-plus-daemon by shipping a more coherent native desktop presence around the existing observer and notification foundations
+8. [x] `cross-surface-continuity-and-notification-controls`:
+   connect ambient observation, proactive delivery, and deliberate interaction by exposing pending native notifications back into the browser and adding explicit browser-side notification controls
+9. [x] `guardian-behavioral-evals-v2`:
+   expand behavioral eval coverage from the first guardian baseline into deeper intervention-quality, workflow, and cockpit-adjacent contracts
+10. [x] `human-world-model-v1`:
+   deepen guardian-state quality from retrieval-plus-heuristics into a stronger explicit human/world model that can support consistently better intervention quality
+
+## Current Rolling 10-PR List
 
 This is the authoritative PR list for the implementation side.
-It should always show the next 10 most valuable PRs, and a checked item may remain visible until the next scheduled refresh.
+It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
 - the current active item is `#1 execution-safety-hardening-v2`
@@ -92,6 +117,7 @@ It should always show the next 10 most valuable PRs, and a checked item may rema
 ## Queue Maintenance Rule
 
 - keep exactly 10 future PRs visible here
+- keep the most recent completed 10-PR batch visible above with checkmarks
 - rerank and rewrite the queue whenever the number of landed PRs from the published queue is divisible by 5
 - rerank earlier if new evidence from `docs/research/` materially changes the priority order
 

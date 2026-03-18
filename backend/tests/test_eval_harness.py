@@ -56,6 +56,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
+    assert "salience_calibration_behavior" in captured.out
     assert "guardian_feedback_loop" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
@@ -148,6 +149,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
                 "intervention_policy_behavior",
+                "salience_calibration_behavior",
                 "guardian_feedback_loop",
                 "guardian_outcome_learning",
                 "agent_local_runtime_profile",
@@ -311,6 +313,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["intervention_policy_behavior"]["low_salience_reason"] == "low_observer_salience"
     assert details_by_name["intervention_policy_behavior"]["learned_bundle_action"] == "bundle"
     assert details_by_name["intervention_policy_behavior"]["learned_bundle_reason"] == "recent_negative_feedback"
+    assert details_by_name["salience_calibration_behavior"]["aligned_work_salience_level"] == "high"
+    assert details_by_name["salience_calibration_behavior"]["aligned_work_salience_reason"] == "aligned_work_activity"
+    assert details_by_name["salience_calibration_behavior"]["single_goal_salience_level"] == "medium"
+    assert details_by_name["salience_calibration_behavior"]["single_goal_salience_reason"] == "active_goals"
+    assert details_by_name["salience_calibration_behavior"]["calibrated_action"] == "act"
+    assert details_by_name["salience_calibration_behavior"]["calibrated_reason"] == "calibrated_high_salience"
+    assert details_by_name["salience_calibration_behavior"]["focus_mode_action"] == "bundle"
+    assert details_by_name["salience_calibration_behavior"]["focus_mode_reason"] == "high_interruption_cost"
+    assert details_by_name["salience_calibration_behavior"]["low_observer_confidence_action"] == "defer"
+    assert details_by_name["salience_calibration_behavior"]["low_observer_confidence_reason"] == "low_observer_confidence"
+    assert details_by_name["salience_calibration_behavior"]["degraded_state_action"] == "defer"
+    assert details_by_name["salience_calibration_behavior"]["degraded_state_reason"] == "degraded_observer_state"
+    assert details_by_name["salience_calibration_behavior"]["urgent_override_action"] == "act"
+    assert details_by_name["salience_calibration_behavior"]["urgent_override_reason"] == "urgent"
+    assert details_by_name["salience_calibration_behavior"]["scheduled_override_action"] == "act"
+    assert details_by_name["salience_calibration_behavior"]["scheduled_override_reason"] == "scheduled"
     assert details_by_name["guardian_feedback_loop"]["action"] == "act"
     assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
     assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"

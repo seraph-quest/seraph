@@ -66,6 +66,7 @@ from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.intervention_policy import decide_intervention
 from src.observer.native_notification_queue import native_notification_queue
+from src.observer.salience import derive_observer_assessment
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
@@ -3773,6 +3774,129 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_salience_calibration_behavior() -> dict[str, Any]:
+    aligned_work = derive_observer_assessment(
+        current_event=None,
+        upcoming_events=[],
+        recent_git_activity=[{"msg": "ship guardian calibration"}],
+        active_goals_summary="Ship guardian calibration",
+        active_window="VS Code",
+        screen_context="Editing guardian policy code",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+    )
+    single_goal = derive_observer_assessment(
+        current_event=None,
+        upcoming_events=[],
+        recent_git_activity=None,
+        active_goals_summary="Ship guardian calibration",
+        active_window=None,
+        screen_context=None,
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+    )
+    calibrated_act = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This work is directly on your active goal.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        guardian_confidence="grounded",
+        observer_confidence=aligned_work.observer_confidence,
+        salience_level=aligned_work.salience_level,
+        salience_reason=aligned_work.salience_reason,
+        interruption_cost="high",
+    )
+    focus_mode_bundle = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This work is directly on your active goal.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="focus",
+        attention_budget_remaining=1,
+        guardian_confidence="grounded",
+        observer_confidence=aligned_work.observer_confidence,
+        salience_level=aligned_work.salience_level,
+        salience_reason=aligned_work.salience_reason,
+        interruption_cost="high",
+    )
+    low_observer_confidence = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="The observer signal is too weak to interrupt on.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        observer_confidence="degraded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+    )
+    degraded_state = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="The observer state is degraded.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        data_quality="degraded",
+    )
+    urgent_override = decide_intervention(
+        message_type="proactive",
+        intervention_type="alert",
+        content="Urgent issue.",
+        urgency=5,
+        user_state="available",
+        interruption_mode="focus",
+        attention_budget_remaining=0,
+        guardian_confidence="partial",
+        observer_confidence="degraded",
+        salience_level="low",
+        salience_reason="background",
+        interruption_cost="high",
+        data_quality="degraded",
+    )
+    scheduled_override = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Scheduled review.",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        is_scheduled=True,
+        guardian_confidence="partial",
+        observer_confidence="degraded",
+        data_quality="degraded",
+    )
+    return {
+        "aligned_work_salience_level": aligned_work.salience_level,
+        "aligned_work_salience_reason": aligned_work.salience_reason,
+        "single_goal_salience_level": single_goal.salience_level,
+        "single_goal_salience_reason": single_goal.salience_reason,
+        "calibrated_action": calibrated_act.action.value,
+        "calibrated_reason": calibrated_act.reason,
+        "focus_mode_action": focus_mode_bundle.action.value,
+        "focus_mode_reason": focus_mode_bundle.reason,
+        "low_observer_confidence_action": low_observer_confidence.action.value,
+        "low_observer_confidence_reason": low_observer_confidence.reason,
+        "degraded_state_action": degraded_state.action.value,
+        "degraded_state_reason": degraded_state.reason,
+        "urgent_override_action": urgent_override.action.value,
+        "urgent_override_reason": urgent_override.reason,
+        "scheduled_override_action": scheduled_override.action.value,
+        "scheduled_override_reason": scheduled_override.reason,
+    }
+
+
 async def _eval_observer_daemon_ingest_audit() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.update_screen_context = MagicMock()
@@ -4340,6 +4464,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Intervention policy explicitly distinguishes act, bundle, defer, request_approval, and stay_silent outcomes.",
         runner=_eval_intervention_policy_behavior,
+    ),
+    EvalScenario(
+        name="salience_calibration_behavior",
+        category="guardian",
+        description="Aligned active-work signals raise salience, and high-salience grounded nudges can cut through high interruption cost outside focus mode.",
+        runner=_eval_salience_calibration_behavior,
     ),
     EvalScenario(
         name="guardian_feedback_loop",

@@ -272,6 +272,72 @@ async def test_queue_when_recent_negative_feedback(async_db):
 
 
 @pytest.mark.asyncio
+async def test_high_salience_calibration_delivers_despite_high_interruption_cost(async_db):
+    ctx = _make_context(
+        attention_budget_remaining=1,
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="This work is directly on your active goal.", intervention_type="advisory", urgency=3)
+        decision = await deliver_or_queue(msg, guardian_confidence="grounded")
+
+        assert decision.action == InterventionAction.act
+        assert decision.reason == "calibrated_high_salience"
+        mock_ws.broadcast.assert_called_once_with(msg)
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["details"]["policy_action"] == "act"
+            and event["details"]["policy_reason"] == "calibrated_high_salience"
+            and event["details"]["salience_reason"] == "aligned_work_activity"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_degraded_observer_confidence_defers_without_transport_or_queue(async_db):
+    ctx = _make_context(
+        observer_confidence="degraded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Hold off until confidence is better.", intervention_type="advisory", urgency=3)
+        decision = await deliver_or_queue(msg, guardian_confidence="grounded")
+
+        assert decision.action == InterventionAction.defer
+        assert decision.reason == "low_observer_confidence"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_deferred"
+            and event["details"]["policy_reason"] == "low_observer_confidence"
+            and event["details"]["salience_reason"] == "aligned_work_activity"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_urgent_delivers_through_blocked():
     ctx = _make_context(user_state="deep_work", interruption_mode="focus", attention_budget_remaining=0)
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)

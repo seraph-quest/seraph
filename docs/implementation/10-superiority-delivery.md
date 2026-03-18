@@ -39,14 +39,14 @@ This file explains:
 
 ### 1. Guardian state and human model
 
-- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, and explicit guardian-state synthesis
-- [ ] still missing: stronger human/world modeling quality and better-calibrated salience/confidence beyond the first heuristic layer
+- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, and a first calibrated aligned-work/high-salience pass
+- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the first calibration layer
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first native notification fallback, and a first feedback-driven interruption bias from recent negative outcomes
-- [ ] still missing: stronger timing quality beyond the first salience model and deeper multi-signal learning from outcomes
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first native notification fallback, a first feedback-driven interruption bias from recent negative outcomes, and calibrated high-salience timing overrides
+- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -85,7 +85,7 @@ This file explains:
 - [x] This file should explain why the queue exists in its current order.
 - [x] The current queue starts with execution hardening because trust and privileged-path isolation are the most dangerous remaining gap.
 - [x] The next layer is cockpit depth plus workflow control because operator visibility and workflow leverage are where Seraph is still visibly behind the strongest reference systems.
-- [x] The next layer after that is salience calibration and deeper learning because proactive quality is now bottlenecked more by judgment than by missing primitives.
+- [x] The next layer after that is deeper learning and world-model quality because proactive quality is now bottlenecked more by judgment than by missing primitives.
 - [x] The later items in the current queue deepen desktop presence, cross-surface continuity, and broader behavioral proof for the stronger guardian product shape.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

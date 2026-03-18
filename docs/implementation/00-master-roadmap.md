@@ -72,7 +72,7 @@ This is the rolling execution queue. It should always show the next 10 most valu
    turn shipped workflow composition into something easy to steer by adding operator-facing workflow control, approval visibility, and artifact round-tripping
 4. [x] `guardian-outcome-learning-v1`:
    make stored intervention outcomes and explicit feedback change future guardian behavior instead of only being recorded
-5. [ ] `salience-calibration-v2`:
+5. [x] `salience-calibration-v2`:
    improve interruption timing and proactive judgment by calibrating confidence, salience, and interruption cost beyond the first heuristic layer
 6. [ ] `saved-layouts-and-keyboard-control-v1`:
    make the cockpit feel like a real operator workspace with saved workspaces, stronger keyboard control, and denser navigation ergonomics
@@ -118,6 +118,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
 - [x] first native desktop-notification fallback path when browser delivery is unavailable but the daemon is connected
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
+- [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
 - [x] first privileged-workflow hardening pass, including explicit workflow/tool execution-boundary metadata, richer approval behavior in tools/workflows APIs, and forced approval wrapping for approval-mode MCP workflow execution

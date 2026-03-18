@@ -149,6 +149,7 @@ async def deliver_or_queue(
             guardian_confidence=guardian_confidence,
             observer_confidence=ctx.observer_confidence,
             salience_level=ctx.salience_level,
+            salience_reason=ctx.salience_reason,
             interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
             recent_feedback_bias=learning_signal.bias,

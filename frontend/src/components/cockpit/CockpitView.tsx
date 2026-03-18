@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { EventBus } from "../../game/EventBus";
 import { API_URL } from "../../config/constants";
@@ -71,6 +71,24 @@ interface GuardianContinuityIntervention {
 
 interface ObserverContinuitySnapshot {
   daemon: DaemonPresenceState;
+  notifications: Array<{
+    id: string;
+    intervention_id: string | null;
+    title: string;
+    body: string;
+    intervention_type: string | null;
+    urgency: number | null;
+    created_at: string;
+  }>;
+  queued_insights: Array<{
+    id: string;
+    intervention_id: string | null;
+    content_excerpt: string;
+    intervention_type: string;
+    urgency: number;
+    reasoning: string;
+    created_at: string;
+  }>;
   queued_insight_count: number;
   recent_interventions: GuardianContinuityIntervention[];
 }
@@ -142,6 +160,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
+  const [desktopNotifications, setDesktopNotifications] = useState<ObserverContinuitySnapshot["notifications"]>([]);
+  const [queuedInsights, setQueuedInsights] = useState<ObserverContinuitySnapshot["queued_insights"]>([]);
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
@@ -175,69 +195,81 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     refreshGoals();
   }, [loadSessions, refreshGoals]);
 
+  const refreshCockpit = useCallback(async (cancelled = false) => {
+    try {
+      const [
+        observerResponse,
+        auditResponse,
+        approvalsResponse,
+        continuityResponse,
+        workflowsResponse,
+      ] = await Promise.all([
+        fetch(`${API_URL}/api/observer/state`),
+        fetch(`${API_URL}/api/audit/events?limit=12`),
+        fetch(`${API_URL}/api/approvals/pending?limit=8`),
+        fetch(`${API_URL}/api/observer/continuity`),
+        fetch(`${API_URL}/api/workflows`),
+      ]);
+
+      if (!cancelled && observerResponse.ok) {
+        const observerPayload = await observerResponse.json();
+        setObserverState(observerPayload);
+      }
+
+      if (!cancelled && auditResponse.ok) {
+        const auditPayload = await auditResponse.json();
+        setAuditEvents(Array.isArray(auditPayload) ? auditPayload : []);
+      }
+
+      if (!cancelled && approvalsResponse.ok) {
+        const approvalsPayload = await approvalsResponse.json();
+        setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
+      }
+
+      if (!cancelled && continuityResponse.ok) {
+        const continuityPayload: ObserverContinuitySnapshot = await continuityResponse.json();
+        setDaemonPresence(continuityPayload.daemon);
+        setDesktopNotifications(continuityPayload.notifications ?? []);
+        setQueuedInsights(continuityPayload.queued_insights ?? []);
+        setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
+        setRecentInterventions(continuityPayload.recent_interventions ?? []);
+      }
+      if (!cancelled && workflowsResponse.ok) {
+        const workflowPayload = await workflowsResponse.json();
+        setWorkflows(Array.isArray(workflowPayload.workflows) ? workflowPayload.workflows : []);
+      }
+    } catch {
+      if (!cancelled) {
+        setAuditEvents([]);
+        setPendingApprovals([]);
+        setDaemonPresence(null);
+        setDesktopNotifications([]);
+        setQueuedInsights([]);
+        setQueuedBundleCount(0);
+        setRecentInterventions([]);
+        setWorkflows([]);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
-    const refreshCockpit = async () => {
+    const refresh = async () => {
       try {
-        const [
-          observerResponse,
-          auditResponse,
-          approvalsResponse,
-          continuityResponse,
-          workflowsResponse,
-        ] = await Promise.all([
-          fetch(`${API_URL}/api/observer/state`),
-          fetch(`${API_URL}/api/audit/events?limit=12`),
-          fetch(`${API_URL}/api/approvals/pending?limit=8`),
-          fetch(`${API_URL}/api/observer/continuity`),
-          fetch(`${API_URL}/api/workflows`),
-        ]);
-
-        if (!cancelled && observerResponse.ok) {
-          const observerPayload = await observerResponse.json();
-          setObserverState(observerPayload);
-        }
-
-        if (!cancelled && auditResponse.ok) {
-          const auditPayload = await auditResponse.json();
-          setAuditEvents(Array.isArray(auditPayload) ? auditPayload : []);
-        }
-
-        if (!cancelled && approvalsResponse.ok) {
-          const approvalsPayload = await approvalsResponse.json();
-          setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
-        }
-
-        if (!cancelled && continuityResponse.ok) {
-          const continuityPayload: ObserverContinuitySnapshot = await continuityResponse.json();
-          setDaemonPresence(continuityPayload.daemon);
-          setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
-          setRecentInterventions(continuityPayload.recent_interventions ?? []);
-        }
-        if (!cancelled && workflowsResponse.ok) {
-          const workflowPayload = await workflowsResponse.json();
-          setWorkflows(Array.isArray(workflowPayload.workflows) ? workflowPayload.workflows : []);
-        }
-      } catch {
-        if (!cancelled) {
-          setAuditEvents([]);
-          setPendingApprovals([]);
-          setDaemonPresence(null);
-          setQueuedBundleCount(0);
-          setRecentInterventions([]);
-          setWorkflows([]);
-        }
-      }
+        await refreshCockpit(cancelled);
+      } catch {}
     };
 
-    refreshCockpit();
-    const interval = window.setInterval(refreshCockpit, 12_000);
+    void refresh();
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, 12_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [refreshCockpit]);
 
   useEffect(() => {
     const focusComposer = () => inputRef.current?.focus();
@@ -353,6 +385,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function queueComposerDraft(message: string) {
     setComposer(message);
     inputRef.current?.focus();
+  }
+
+  async function dismissDesktopNotification(notificationId: string) {
+    try {
+      const response = await fetch(`${API_URL}/api/observer/notifications/${notificationId}/dismiss`, {
+        method: "POST",
+      });
+      if (!response.ok) return;
+      await refreshCockpit();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function dismissAllDesktopNotifications() {
+    try {
+      const response = await fetch(`${API_URL}/api/observer/notifications/dismiss-all`, {
+        method: "POST",
+      });
+      if (!response.ok) return;
+      await refreshCockpit();
+    } catch {
+      // ignore
+    }
   }
 
   function queueArtifactWorkflowDraft(workflow: WorkflowInfo, artifactPath: string) {
@@ -1004,6 +1060,96 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               ))}
               {recentConversation.length === 0 && (
                 <div className="cockpit-empty">No conversation yet. Use the command bar below.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="cockpit-panel">
+            <div className="cockpit-card-header">
+              <div className="cockpit-card-title">Desktop shell</div>
+              <div className="cockpit-card-meta">
+                {daemonPresence?.connected ? "linked" : "offline"} · {desktopNotifications.length} alerts
+              </div>
+            </div>
+            <div className="cockpit-sublist">
+              <div className="cockpit-sublist-item">
+                capture {daemonPresence?.capture_mode ?? "unknown"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
+              </div>
+            </div>
+            <div className="cockpit-list">
+              {desktopNotifications.slice(0, 3).map((notification) => (
+                <div key={notification.id} className="cockpit-row">
+                  <div className="cockpit-row-header">
+                    <span className="cockpit-role">{notification.title}</span>
+                    <span className="cockpit-row-age">{formatAge(notification.created_at)}</span>
+                  </div>
+                  <div className="cockpit-row-body">{notification.body}</div>
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => queueComposerDraft(`Follow up on this desktop alert: ${notification.body}`)}
+                    >
+                      Draft Follow-up
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void dismissDesktopNotification(notification.id)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {desktopNotifications.length > 1 && (
+                <button className="cockpit-feedback-button" onClick={() => void dismissAllDesktopNotifications()}>
+                  Dismiss All Alerts
+                </button>
+              )}
+              {queuedInsights.slice(0, 2).map((item) => (
+                <div key={item.id} className="cockpit-row">
+                  <div className="cockpit-row-header">
+                    <span className="cockpit-role">{item.intervention_type}</span>
+                    <span className="cockpit-row-age">{formatAge(item.created_at)}</span>
+                  </div>
+                  <div className="cockpit-row-body">{item.content_excerpt}</div>
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => queueComposerDraft(`Follow up on this deferred guardian item: ${item.content_excerpt}`)}
+                    >
+                      Draft Follow-up
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {recentInterventions.slice(0, 2).map((item) => (
+                <div key={`desktop-${item.id}`} className="cockpit-row">
+                  <div className="cockpit-row-header">
+                    <span className="cockpit-role">{item.intervention_type}</span>
+                    <span className="cockpit-row-age">{formatAge(item.updated_at)}</span>
+                  </div>
+                  <div className="cockpit-row-body">{item.content_excerpt}</div>
+                  <div className="cockpit-row-meta">
+                    {formatContinuityLabel(item.continuity_surface)} · {formatContinuityLabel(item.latest_outcome)}
+                  </div>
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => queueComposerDraft(`Continue from this guardian intervention: ${item.content_excerpt}`)}
+                    >
+                      Continue
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => sendFeedback(item.id, "helpful")}
+                    >
+                      Helpful
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {desktopNotifications.length === 0 && queuedInsights.length === 0 && recentInterventions.length === 0 && (
+                <div className="cockpit-empty">No desktop continuity items yet.</div>
               )}
             </div>
           </section>

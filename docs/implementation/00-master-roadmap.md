@@ -91,7 +91,7 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#8 native-desktop-shell-v2`
+- the current active item is `#9 extension-operator-surface-v1`
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -107,7 +107,7 @@ It should always show the next 10 most valuable PRs, while the latest completed 
    deepen round-tripping between workflow outputs, evidence panes, file artifacts, and the command surface
 7. [x] `human-world-model-v2`:
    grow the first explicit working-state and commitments model into stronger project, pressure, and recent-execution understanding
-8. [ ] `native-desktop-shell-v2`:
+8. [x] `native-desktop-shell-v2`:
    move from a presence card plus notifications to a more coherent desktop control shell with actionable recents and controls
 9. [ ] `extension-operator-surface-v1`:
    make skills, MCP servers, workflows, and policy state easier to operate and debug from one place
@@ -146,8 +146,8 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
 - [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
-- [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, and desktop-notification fallback when browser delivery is unavailable
-- [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, and cockpit-to-settings linkage for queued desktop state
+- [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and a first actionable desktop control shell inside the cockpit
+- [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, cockpit-to-settings linkage for queued desktop state, and desktop-shell draft/continue actions over pending notifications, queued bundle items, and recent interventions
 - [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode

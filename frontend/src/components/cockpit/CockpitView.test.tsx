@@ -94,7 +94,17 @@ describe("CockpitView", () => {
         return Promise.resolve(
           mockResponse({
             daemon: { connected: false, pending_notification_count: 1, capture_mode: "balanced" },
-            notifications: [],
+            notifications: [
+              {
+                id: "note-1",
+                intervention_id: "intervention-1",
+                title: "Guardian nudge",
+                body: "Stand up and reset before the next block.",
+                intervention_type: "advisory",
+                urgency: 2,
+                created_at: "2026-03-18T12:03:00Z",
+              },
+            ],
             queued_insights: [
               {
                 id: "queue-1",
@@ -177,8 +187,12 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Workflow runs")).toBeInTheDocument());
+    expect(screen.getByText("Desktop shell")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
-    expect(screen.getByText("Hold this until the browser is back.")).toBeInTheDocument();
+    expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
+    expect(screen.getAllByText("Hold this until the browser is back.").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByText("Draft Follow-up")[0]);
+    expect(screen.getByDisplayValue(/Follow up on this desktop alert:/)).toBeInTheDocument();
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
     expect(screen.getByText("Draft Rerun")).toBeInTheDocument();
@@ -187,6 +201,13 @@ describe("CockpitView", () => {
     expect(runButton).toBeInTheDocument();
     fireEvent.click(runButton);
     expect(screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/brief.md"\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Dismiss"));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/observer/notifications/note-1/dismiss"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   });
 });

@@ -57,8 +57,8 @@ This file explains:
 
 ### 4. Presence and reach
 
-- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, and a shared continuity snapshot for daemon state, deferred bundles, pending native notifications, and recent interventions
-- [ ] still missing: broader reach channels and continuity beyond the first browser/native continuity snapshot
+- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, a shared continuity snapshot for daemon state, deferred bundles, pending native notifications, and recent interventions, plus a first actionable cockpit desktop-shell surface for follow-up and dismiss flows
+- [ ] still missing: broader reach channels and continuity beyond the first browser/native continuity snapshot and desktop-shell control layer
 - owners: Workstream 04, Workstream 06
 
 ### 5. Operator cockpit
@@ -91,7 +91,8 @@ This file explains:
 - [x] `provider-policy-safeguards-v2` is now the fifth shipped item from the refreshed queue on this branch.
 - [x] `artifact-evidence-roundtrip-v2` is now the sixth shipped item from the refreshed queue on this branch.
 - [x] `human-world-model-v2` is now the seventh shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `native-desktop-shell-v2` because the world model is now project/execution-aware and the next leverage gap shifts back to operator presence and reach.
+- [x] `native-desktop-shell-v2` is now the eighth shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `extension-operator-surface-v1` because the desktop shell is now actionable and the next leverage gap shifts to operator control of the extension/runtime surface.
 - [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

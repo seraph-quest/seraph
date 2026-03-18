@@ -13,16 +13,28 @@ Seraph uses the same high-level documentation split as `maas`:
 - `docs/implementation/` is the shipped-state and delivery surface
 - `docs/implementation/STATUS.md` is the live status ledger
 
-This implementation tree is the canonical answer to four questions:
+This implementation tree is the canonical delivery-side answer to four questions:
 
 1. What is shipped on `develop`?
-2. What is the target product shape?
-3. What is still left before Seraph gets there?
+2. How does the research-defined target product shape translate into delivery on `develop`?
+3. What is still left on `develop` before Seraph reaches that research-defined target?
 4. What are the next most valuable PRs?
+
+## Docs Contract
+
+- `docs/research/` defines target product shape, evidence rules, benchmark logic, and superiority program logic.
+- `docs/implementation/STATUS.md` is the fastest shipped-state snapshot.
+- this roadmap owns the live 10-PR queue and queue refresh rule.
+- `docs/implementation/08-docs-contract.md` explains the boundary between research truth and implementation truth.
+- `docs/implementation/09-benchmark-status.md` mirrors the benchmark axes from research as shipped implementation status.
+- `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
+- `docs/implementation/01` through `07` are the only workstream docs; `08` through `10` are cross-cutting implementation mirrors, not extra workstreams.
+- if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
 
 ## Current Status
 
 Read this roadmap together with [Development Status](./STATUS.md).
+For the implementation-side mirrors of the evidence, benchmark, and superiority layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), and [10. Superiority Delivery](./10-superiority-delivery.md).
 
 Legend for the checklist column:
 
@@ -32,19 +44,20 @@ Legend for the checklist column:
 | Workstream | Checklist | Notes |
 |---|---|---|
 | 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret handling are shipped; deeper isolation and narrower privileged execution paths are still left |
-| 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, and web search are shipped; richer workflow execution and stronger execution safety are still left |
+| 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, web search, and first-class reusable workflows are shipped; stronger execution safety and richer workflow control are still left |
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
-| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, and native daemon foundations are shipped; native notifications and broader channel reach are still left |
-| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, explicit guardian state, and intervention policy are shipped foundations; salience modeling and feedback loops are still left |
-| 06. Embodied UX | `[ ]` | The current village UI is shipped, but the target interface is now a dense guardian cockpit rather than a village-first shell |
-| 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, catalog/install surfaces, and delegation foundations are shipped; workflow composition and stronger extension ergonomics are still left |
+| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, and first native notifications are shipped; broader channel reach and a richer desktop shell are still left |
+| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
+| 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with legacy village fallback is shipped, but denser linked evidence, artifact, and operator-control surfaces are still left |
+| 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
 
 ## Progress Summary
 
 - [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
-- [ ] Seraph is still behind the strongest reference systems on dense interface efficiency, workflow composition, native reach, and execution hardening.
+- [x] The first guardian cockpit shell is now shipped, with the village retained as a legacy mode rather than the default workflow.
+- [ ] Seraph is still behind the strongest reference systems on cockpit maturity and density, feedback-driven intervention quality, native reach, execution hardening, and operator workflow control.
 - [ ] No workstream is complete yet.
 
 ## Next Recommended PR Sequence
@@ -59,16 +72,16 @@ This is the rolling execution queue. It should always show the next 10 most valu
    merge observer signals, memory, goals, sessions, and confidence into one structured guardian-state input
 4. [x] `intervention-policy-v1`:
    make intervene, defer, bundle, request-approval, and stay-silent decisions explicit and state-aware
-5. [ ] `native-presence-notifications`:
+5. [x] `native-presence-notifications`:
    add the first real non-browser presence path with desktop notifications and interrupt-aware reach
-6. [ ] `workflow-composition-v1`:
+6. [x] `workflow-composition-v1`:
    add first-class reusable multi-step workflows across tools, specialists, skills, and MCP
-7. [ ] `guardian-feedback-loop`:
-   capture intervention outcomes and user feedback so timing and action quality can improve
-8. [ ] `operator-cockpit-v1`:
-   replace the village as the default workflow surface with a dense multi-pane guardian cockpit
-9. [ ] `observer-salience-and-confidence-model`:
-   score observer inputs by confidence, urgency, and interruption cost before they reach strategy and delivery layers
+7. [x] `guardian-feedback-loop`:
+   capture intervention outcomes and explicit user feedback so timing and action quality can improve
+8. [x] `operator-cockpit-v1`:
+   ship the first cockpit-first browser shell with linked state, interventions, audit, trace, and a legacy village fallback
+9. [x] `observer-salience-and-confidence-model`:
+   score observer inputs by confidence, salience, and interruption cost before they reach strategy and delivery layers
 10. [ ] `execution-safety-hardening-v1`:
    deepen isolation, policy visibility, and privileged execution boundaries to close the gap versus stronger execution-first systems
 
@@ -85,8 +98,10 @@ This is the rolling execution queue. It should always show the next 10 most valu
 3. Runtime Reliability
 4. Presence And Reach
 5. Guardian Intelligence
-6. Embodied UX
-7. Ecosystem And Leverage
+6. Embodied Interface
+7. Ecosystem And Delegation
+
+Implementation docs `08` through `10` are supporting mirror layers for this roadmap, not additional workstreams.
 
 ## Stable Interfaces
 
@@ -100,18 +115,23 @@ This is the rolling execution queue. It should always show the next 10 most valu
 ## Current Shipped Slice On `develop`
 
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
+- [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
+- [x] first native desktop-notification fallback path when browser delivery is unavailable but the daemon is connected
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
+- [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
-- [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, memory recall, session history, recent sessions, and confidence into one structured downstream input
-- [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus policy audit reasons
+- [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, salience/confidence signals, memory recall, session history, recent sessions, recent intervention feedback, and confidence into one structured downstream input
+- [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus salience-aware policy reasons
+- [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
-- [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, intervention policy behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
+- [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, guardian feedback loop behavior, intervention policy behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, workflow composition behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
 
 ## Recommended Reading Order
 
 1. Read [Development Status](./STATUS.md) for the live shipped vs unfinished view.
 2. Read this file for workstream ordering and current scope.
-3. Read `01` through `07` for detailed per-workstream checklists.
-4. Read the research docs for the benchmark and superiority target.
-5. Treat `/legacy` docs as supporting history, not the live source of truth.
+3. Read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), and [10. Superiority Delivery](./10-superiority-delivery.md) for the implementation-side mirrors of the research benchmark/program docs.
+4. Read `01` through `07` for detailed per-workstream checklists.
+5. Read the research docs for the benchmark and superiority target.
+6. Treat `/legacy` docs as supporting history, not the live source of truth.

@@ -4,6 +4,10 @@
 
 - [ ] Workstream 02 is only partially shipped on `develop`.
 
+## Paired Research
+
+- primary design doc: [05. Execution Plane](/research/execution-plane)
+
 ## Shipped On `develop`
 
 - [x] 17 built-in tool capabilities registered through the native tool registry
@@ -15,16 +19,17 @@
 - [x] web-search tool surface
 - [x] dynamic MCP tool loading and runtime-managed MCP server configuration
 - [x] visible tool execution in chat, WebSocket, onboarding, strategist, and specialist flows
+- [x] first-class reusable workflows loaded from defaults and workspace files, with tool, skill, and MCP-aware gating
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
-- [x] this workstream owns `workflow-composition-v1` and shares `execution-safety-hardening-v1` in the master 10-PR queue
+- [ ] this workstream is not the repo-wide active focus after `workflow-composition-v1` shipped on this branch
+- [x] this workstream now shares `execution-safety-hardening-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] stronger multi-step workflow composition on top of the current tool primitives
+- [ ] clearer operator-facing workflow control, approval visibility, and artifact round-tripping on top of the new workflow runtime
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Non-Goals
@@ -42,4 +47,4 @@
 
 - [x] Seraph can browse, search, read/write local files, inspect goals, and use the shell
 - [x] Seraph can use connected MCP servers in the current runtime
-- [ ] Seraph can execute richer cross-tool workflows than it can today
+- [x] Seraph can execute richer cross-tool workflows than it could before the reusable workflow runtime

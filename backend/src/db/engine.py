@@ -24,19 +24,28 @@ async_session_factory = sessionmaker(
 
 async def _ensure_legacy_columns(conn) -> None:
     """Backfill columns for older local SQLite databases."""
-    result = await conn.exec_driver_sql("PRAGMA table_info(user_profiles)")
-    columns = {row[1] for row in result.fetchall()}
-    if "tool_policy_mode" not in columns:
+    async def _table_columns(table_name: str) -> set[str]:
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in result.fetchall()}
+
+    user_profile_columns = await _table_columns("user_profiles")
+    if user_profile_columns and "tool_policy_mode" not in user_profile_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE user_profiles ADD COLUMN tool_policy_mode VARCHAR DEFAULT 'full'"
         )
-    if "mcp_policy_mode" not in columns:
+    if user_profile_columns and "mcp_policy_mode" not in user_profile_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE user_profiles ADD COLUMN mcp_policy_mode VARCHAR DEFAULT 'full'"
         )
-    if "approval_mode" not in columns:
+    if user_profile_columns and "approval_mode" not in user_profile_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE user_profiles ADD COLUMN approval_mode VARCHAR DEFAULT 'high_risk'"
+        )
+
+    queued_insight_columns = await _table_columns("queued_insights")
+    if queued_insight_columns and "intervention_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN intervention_id VARCHAR"
         )
 
 

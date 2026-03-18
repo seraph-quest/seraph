@@ -14,6 +14,10 @@ export function useKeyboardShortcuts() {
       switch (e.key.toLowerCase()) {
         case "c":
           if (!e.shiftKey) return;
+          if (s.interfaceMode === "cockpit") {
+            window.dispatchEvent(new CustomEvent("seraph-cockpit-focus-composer"));
+            break;
+          }
           if (!s.chatPanelOpen) bringToFront("chat");
           s.setChatPanelOpen(!s.chatPanelOpen);
           break;

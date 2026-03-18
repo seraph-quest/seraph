@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a retro village browser UI, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The current research direction is a denser guardian cockpit for power users, not a village-first shell.
+  Seraph ships today with a guardian cockpit browser shell, a legacy village mode, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The live product direction is a denser guardian cockpit for power users, not a village-first shell.
 </p>
 
 ---
@@ -46,7 +46,7 @@ open http://localhost:8004/docs   # Swagger API docs
 | **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90 |
 | **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
 | **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
-| **Tools** | 17 built-in tool capabilities (auto-discovered) + plug-and-play MCP servers |
+| **Tools** | 17 built-in tool capabilities (auto-discovered) + reusable workflows + plug-and-play MCP servers |
 | **Scheduler** | APScheduler — 9 jobs across briefings, reviews, strategist, observer cleanup, and memory/goal maintenance |
 | **Daemon** | Native macOS — window tracking, optional OCR (Apple Vision / OpenRouter) |
 | **Infra** | Docker Compose (backend + frontend + snekbox sandbox + http-mcp), uv |
@@ -57,6 +57,7 @@ open http://localhost:8004/docs   # Swagger API docs
 
 ```
 frontend/src/
+  components/cockpit/ Guardian cockpit shell, state rails, intervention feed
   game/              Phaser 3 village scene, sprites, EventBus
   components/        React overlays — chat, quest panel, settings
   hooks/             useWebSocket, useAgentAnimation
@@ -65,9 +66,10 @@ frontend/src/
   config/            Constants, default positions, waypoints
 
 backend/src/
-  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, mcp)
+  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, workflows, mcp)
   agent/             smolagents factory, onboarding, strategist, session manager
   tools/             @tool implementations + MCP manager
+  workflows/         Reusable multi-step workflow loader, runtime, and gating
   memory/            Soul file, LanceDB vector store, embedder, consolidator
   goals/             Hierarchical goal CRUD
   plugins/           Tool auto-discovery + registry
@@ -80,7 +82,7 @@ docs/                Docusaurus docs site
 
 ---
 
-## Current Embodiment Surface
+## Current Legacy Embodiment Surface
 
 ```
 User sends message  -->  THINKING
@@ -88,7 +90,7 @@ User sends message  -->  THINKING
   Response ready    -->  SPEAKING  -->  IDLE  -->  WANDERING
 ```
 
-Tool use currently triggers a casting animation with a magic effect overlay at the agent's position. This is the shipped surface today, but the live docs now treat the dense guardian cockpit as the future primary interface direction.
+Tool use currently triggers a casting animation with a magic effect overlay at the agent's position inside the legacy village mode. The default browser shell is now the guardian cockpit; the village remains available as an alternate embodiment surface.
 
 ---
 
@@ -136,7 +138,7 @@ Current truth:
 
 - [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
-- [x] the source-of-truth docs now target a power-user guardian cockpit as the future primary UI
+- [x] the source-of-truth docs now target a power-user guardian cockpit and the browser app now defaults to that shell
 - [ ] no workstream is complete yet
 - [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
 
@@ -144,6 +146,9 @@ Start with:
 
 - [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
 - [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/implementation/08-docs-contract.md](docs/implementation/08-docs-contract.md)
+- [docs/implementation/09-benchmark-status.md](docs/implementation/09-benchmark-status.md)
+- [docs/implementation/10-superiority-delivery.md](docs/implementation/10-superiority-delivery.md)
 - [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 - [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
 - [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)

@@ -10,6 +10,10 @@ This file records the current evidence-backed comparison between Seraph on `deve
 
 The goal is not to win every category on paper. The goal is to identify exactly where Seraph is ahead, behind, or still unknown, then tie that to implementation work.
 
+Implementation mirror:
+
+- `docs/implementation/09-benchmark-status.md` owns the shipped-on-`develop` translation of these axes
+
 ## How To Read This
 
 - `Ahead` means Seraph’s currently shipped repo surface is stronger on the reviewed evidence.
@@ -34,12 +38,13 @@ The goal is not to win every category on paper. The goal is to identify exactly 
 
 ### Current Read
 
-Seraph is currently behind OpenClaw on operator console density, workflow composition, safe execution breadth, and cross-channel reach. It is roughly at par on longitudinal memory. Intervention quality and eval rigor remain unclear from the reviewed official OpenClaw materials.
+Seraph is currently behind OpenClaw on operator console density, workflow leverage breadth, safe execution breadth, and cross-channel reach. It is roughly at par on longitudinal memory. Intervention quality and eval rigor remain unclear from the reviewed official OpenClaw materials.
 
 ### Why
 
 - OpenClaw’s official Control UI exposes chat, tool-event cards, sessions, cron, skills, health, logs, and config in one operator surface.
 - OpenClaw documents first-class multi-agent composition and explicit workflow primitives through sub-agents and OpenProse.
+- Seraph now ships first-class reusable workflows, but OpenClaw still appears ahead on composition breadth and operator control around those workflows.
 - OpenClaw documents broader safety controls around sandboxing, approvals, browser execution, and gateway security than Seraph has shipped on `develop`.
 - Seraph’s current strengths relative to OpenClaw remain its guardian-specific memory, observer loop, proactive scaffolding, and deterministic runtime eval harness, but the reviewed OpenClaw sources do not give enough evidence to score intervention quality or eval rigor decisively.
 
@@ -61,7 +66,7 @@ Seraph is currently ahead of Hermes on longitudinal memory, guardian-style inter
 ### Why
 
 - Hermes ships a strong TUI with persistent status, slash-command grammar, interrupt-and-redirect, and strong terminal ergonomics.
-- Hermes ships broader workflow surfaces today through tools, skills, background sessions, messaging channels, cron, and code execution.
+- Hermes ships broader workflow surfaces today through tools, skills, background sessions, messaging channels, cron, and code execution; Seraph now has first-class reusable workflows but not yet the same operator-facing workflow density.
 - Hermes memory is intentionally bounded and file-based, while Seraph already ships soul, vector memory, consolidation, goals, and observer-driven state.
 - Seraph documents a deterministic runtime eval harness and broader guardian-specific proactive scaffolding than the official Hermes materials show.
 
@@ -82,7 +87,7 @@ Seraph is currently ahead of IronClaw on guardian-style intervention scaffolding
 
 - IronClaw documents a security-first execution model with capability permissions, isolation layers, and protected secret handling.
 - IronClaw documents both TUI and dashboard-style operator surfaces with logs, jobs, routines, and extensions.
-- IronClaw documents broader composition through MCP, WASM tools/channels, hooks, and routines.
+- IronClaw documents broader composition through MCP, WASM tools/channels, hooks, and routines; Seraph now has first-class reusable workflows but remains behind on breadth and operator control.
 - Seraph currently has stronger guardian-specific strategist, briefing, review, and proactive delivery scaffolding than the official IronClaw materials show.
 
 ### Sources
@@ -96,5 +101,5 @@ Seraph is currently ahead of IronClaw on guardian-style intervention scaffolding
 The benchmark is clear enough to set priorities:
 
 - Seraph’s strongest relative moat is still guardian-specific memory plus intervention scaffolding.
-- Seraph’s biggest gaps are now operator cockpit quality, workflow composition, native reach, and execution hardening.
+- Seraph’s biggest gaps are now operator cockpit quality, workflow control ergonomics, native reach, and execution hardening.
 - The next product push should therefore combine guardian-state and intervention improvements with an interface and execution program, not just more runtime seam work.

@@ -15,7 +15,7 @@ import threading
 import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,11 +35,19 @@ from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_agent, create_orchestrator, get_model
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
+from src.agent.specialists import build_all_specialists, create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
 from src.api.mcp import test_server as test_mcp_server
-from src.api.observer import ScreenContextRequest, ScreenObservationData, post_screen_context
+from src.api.observer import (
+    InterventionFeedbackRequest,
+    ScreenContextRequest,
+    ScreenObservationData,
+    ack_native_notification,
+    get_next_native_notification,
+    post_intervention_feedback,
+    post_screen_context,
+)
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
 from src.app import create_app
@@ -57,6 +65,7 @@ from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
 from src.observer.intervention_policy import decide_intervention
+from src.observer.native_notification_queue import native_notification_queue
 from src.observer.user_state import DeliveryDecision
 from src.scheduler.jobs.activity_digest import run_activity_digest
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
@@ -69,6 +78,7 @@ from src.tools.browser_tool import browse_webpage
 from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
+from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
 from src.vault.repository import VaultRepository
 
@@ -386,6 +396,8 @@ def _make_sync_client_with_db():
         "src.approval.repository.get_session",
         "src.audit.repository.get_session",
         "src.goals.repository.get_session",
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
         "src.vault.repository.get_session",
         "src.api.profile.get_db",
         "src.api.settings.get_db",
@@ -970,6 +982,141 @@ def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
         stack.close()
         for item in patches:
             item.stop()
+
+
+def _eval_workflow_composition_behavior() -> dict[str, Any]:
+    class _FakeTool:
+        def __init__(self, name: str, responder: Callable[..., str]):
+            self.name = name
+            self.description = f"{name} tool"
+            self.inputs = {}
+            self.output_type = "string"
+            self.calls: list[dict[str, Any]] = []
+            self._responder = responder
+
+        def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+            self.calls.append(dict(kwargs))
+            return self._responder(**kwargs)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workflows_dir = os.path.join(tmpdir, "workflows")
+        os.makedirs(workflows_dir, exist_ok=True)
+
+        with open(os.path.join(workflows_dir, "web-brief.md"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "---\n"
+                "name: web-brief-to-file\n"
+                "description: Search the web and save a note\n"
+                "requires:\n"
+                "  tools: [web_search, write_file]\n"
+                "inputs:\n"
+                "  query:\n"
+                "    type: string\n"
+                "  file_path:\n"
+                "    type: string\n"
+                "steps:\n"
+                "  - id: search\n"
+                "    tool: web_search\n"
+                "    arguments:\n"
+                "      query: \"{{ query }}\"\n"
+                "  - id: save\n"
+                "    tool: write_file\n"
+                "    arguments:\n"
+                "      file_path: \"{{ file_path }}\"\n"
+                "      content: |\n"
+                "        Search results\n"
+                "\n"
+                "        {{ steps.search.result }}\n"
+                "result: Saved search results for {{ query }} to {{ file_path }}.\n"
+                "---\n"
+            )
+        with open(os.path.join(workflows_dir, "goal-snapshot.md"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "---\n"
+                "name: goal-snapshot-to-file\n"
+                "description: Export goals into a note\n"
+                "requires:\n"
+                "  tools: [get_goals, write_file]\n"
+                "  skills: [goal-reflection]\n"
+                "inputs:\n"
+                "  file_path:\n"
+                "    type: string\n"
+                "steps:\n"
+                "  - id: goals\n"
+                "    tool: get_goals\n"
+                "    arguments: {}\n"
+                "  - id: save\n"
+                "    tool: write_file\n"
+                "    arguments:\n"
+                "      file_path: \"{{ file_path }}\"\n"
+                "      content: \"{{ steps.goals.result }}\"\n"
+                "---\n"
+            )
+
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+        search_tool = _FakeTool("web_search", lambda query: f"SEARCH<{query}>")
+        goal_tool = _FakeTool("get_goals", lambda: "- Ship workflows")
+        write_calls: list[dict[str, Any]] = []
+
+        def _write(file_path: str, content: str) -> str:
+            write_calls.append({"file_path": file_path, "content": content})
+            return f"saved {file_path}"
+
+        write_tool_obj = _FakeTool("write_file", _write)
+
+        without_skill = mgr.build_workflow_tools(
+            [search_tool, goal_tool, write_tool_obj],
+            active_skill_names=[],
+        )
+        with_skill = mgr.build_workflow_tools(
+            [search_tool, goal_tool, write_tool_obj],
+            active_skill_names=["goal-reflection"],
+        )
+
+        web_workflow = next(
+            tool for tool in with_skill
+            if tool.name == "workflow_web_brief_to_file"
+        )
+        result = web_workflow(
+            query="workflow composition",
+            file_path="notes/workflow.md",
+        )
+
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+        native_tool = MagicMock()
+        native_tool.name = "read_file"
+        with patch("src.agent.specialists.create_specialist") as mock_create_specialist:
+            with (
+                patch("src.agent.specialists.discover_tools", return_value=[native_tool]),
+                patch("src.agent.specialists.filter_tools", side_effect=lambda tools, *_args, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_secret_refs", side_effect=lambda tools: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_audit", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_with_forced_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.mcp_manager.get_config", return_value=[]),
+                patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[types.SimpleNamespace(name="goal-reflection")]),
+                patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+            ):
+                mock_create_specialist.side_effect = lambda name, description, tools, temperature, max_steps: types.SimpleNamespace(
+                    name=name,
+                    description=description,
+                    tools=tools,
+                )
+                specialists = build_all_specialists()
+
+        workflow_runner = next(s for s in specialists if s.name == "workflow_runner")
+        return {
+            "without_skill_tool_names": sorted(tool.name for tool in without_skill),
+            "with_skill_tool_names": sorted(tool.name for tool in with_skill),
+            "web_search_called_with": search_tool.calls[0]["query"],
+            "saved_file_path": write_calls[0]["file_path"],
+            "saved_content_contains_search": "SEARCH<workflow composition>" in write_calls[0]["content"],
+            "result": result,
+            "workflow_runner_present": workflow_runner.name == "workflow_runner",
+            "workflow_runner_tool_names": [tool.name for tool in workflow_runner.tools],
+        }
 
 
 def _eval_provider_fallback_chain() -> dict[str, Any]:
@@ -2968,12 +3115,20 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             active_window="VS Code",
             screen_context="Editing roadmap",
             data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
         )
 
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="- advisory delivered, feedback=helpful: Stretch and refocus.",
+            ),
             patch("src.agent.factory.get_model", return_value=MagicMock()),
             patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
         ):
@@ -2987,6 +3142,8 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
         return {
             "overall_confidence": state.confidence.overall,
             "observer_confidence": state.confidence.observer,
+            "observer_salience": state.observer_context.salience_level,
+            "observer_interruption_cost": state.observer_context.interruption_cost,
             "memory_confidence": state.confidence.memory,
             "current_session_confidence": state.confidence.current_session,
             "recent_sessions_confidence": state.confidence.recent_sessions,
@@ -3063,12 +3220,13 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
     )
     mock_insight_queue = MagicMock()
     mock_insight_queue.enqueue = AsyncMock()
-    mock_insight_queue.drain = AsyncMock(
+    mock_insight_queue.peek_all = AsyncMock(
         side_effect=[
-            [MagicMock(content="Calendar alert: standup")],
-            [MagicMock(content="Goal reminder: exercise")],
+            [MagicMock(id="bundle-1", content="Calendar alert: standup")],
+            [MagicMock(id="bundle-2", content="Goal reminder: exercise")],
         ]
     )
+    mock_insight_queue.delete_many = AsyncMock(return_value=1)
     mock_log_event = AsyncMock()
 
     with (
@@ -3112,6 +3270,7 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
         "bundle_delivered_connections": bundle_delivered["details"]["delivered_connections"],
         "bundle_failed_count": failed_bundle_count,
         "bundle_failed_error": bundle_failed["details"]["error"],
+        "bundle_failed_queue_retained": bundle_failed["details"]["queue_retained"],
     }
 
 
@@ -3134,7 +3293,10 @@ async def _eval_observer_refresh_behavior() -> dict[str, Any]:
             "src.observer.sources.calendar_source.gather_calendar",
             new_callable=AsyncMock,
             return_value={
-                "upcoming_events": [{"summary": "Design review", "start": "10:00"}],
+                "upcoming_events": [{
+                    "summary": "Design review",
+                    "start": (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat(),
+                }],
                 "current_event": None,
             },
         ),
@@ -3162,6 +3324,10 @@ async def _eval_observer_refresh_behavior() -> dict[str, Any]:
     return {
         "new_user_state": ctx.user_state,
         "data_quality": ctx.data_quality,
+        "observer_confidence": ctx.observer_confidence,
+        "salience_level": ctx.salience_level,
+        "salience_reason": ctx.salience_reason,
+        "interruption_cost": ctx.interruption_cost,
         "screen_context_preserved": ctx.screen_context == "Editing guardian eval contracts",
         "active_window_preserved": ctx.active_window == "VS Code",
         "goal_summary": ctx.active_goals_summary,
@@ -3229,6 +3395,188 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    available_ctx = _make_context(
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        last_daemon_post=time.time(),
+    )
+    mock_context_manager = MagicMock()
+    mock_context_manager.get_context.return_value = available_ctx
+    mock_context_manager.decrement_attention_budget = MagicMock()
+    mock_context_manager.is_daemon_connected.return_value = True
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+    mock_log_event = AsyncMock()
+    message = WSResponse(
+        type="proactive",
+        content="Guardian fallback through native notifications.",
+        intervention_type="alert",
+        urgency=5,
+        reasoning="Browser is not connected",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager", mock_context_manager),
+        patch("src.api.observer.context_manager", mock_context_manager),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        decision = await deliver_or_queue(message)
+        polled = await get_next_native_notification()
+        notification = polled["notification"]
+        acked = await ack_native_notification(notification["id"])
+
+    delivered_event = _find_audit_call(
+        mock_log_event,
+        event_type="observer_delivery_delivered",
+        tool_name="observer_delivery_gate",
+    )
+    integration_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="observer_daemon:notifications",
+    )
+    ack_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_acked",
+        tool_name="observer_daemon:notifications",
+    )
+    remaining = await native_notification_queue.count()
+    await native_notification_queue.clear()
+
+    return {
+        "action": decision.action.value,
+        "delivery_decision": decision.delivery_decision.value if decision.delivery_decision else None,
+        "transport": delivered_event["details"]["transport"],
+        "notification_title": notification["title"],
+        "notification_body_matches": notification["body"] == message.content,
+        "integration_pending_count": integration_event["details"]["pending_count"],
+        "acked": acked["acked"],
+        "ack_event_matches": ack_event["details"]["notification_id"] == notification["id"],
+        "remaining_notifications": remaining,
+    }
+
+
+async def _eval_guardian_feedback_loop() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    await native_notification_queue.clear()
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        await session_manager.get_or_create("feedback-current")
+        await session_manager.add_message("feedback-current", "user", "How should Seraph intervene better?")
+        await session_manager.add_message("feedback-current", "assistant", "Track intervention outcomes explicitly.")
+        await session_manager.get_or_create("feedback-prior")
+        await session_manager.update_title("feedback-prior", "Guardian feedback retrospective")
+        await session_manager.add_message(
+            "feedback-prior",
+            "assistant",
+            "The last proactive reminder landed at a good time.",
+        )
+
+        available_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=3,
+            data_quality="good",
+            active_goals_summary="Improve guardian intervention quality",
+            last_daemon_post=time.time(),
+        )
+        mock_context_manager = MagicMock()
+        mock_context_manager.get_context.return_value = available_ctx
+        mock_context_manager.decrement_attention_budget = MagicMock()
+        mock_context_manager.is_daemon_connected.return_value = True
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+        mock_log_event = AsyncMock()
+        message = WSResponse(
+            type="proactive",
+            content="Guardian note: take a short stretch before the next deep-work block.",
+            intervention_type="advisory",
+            urgency=4,
+            reasoning="recent_interruptions",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager", mock_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nSeraph"),
+            patch("src.memory.vector_store.search_formatted", return_value="- [pattern] Stretch breaks improve focus"),
+            patch("src.agent.factory.get_model", return_value=MagicMock()),
+            patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            decision = await deliver_or_queue(
+                message,
+                guardian_confidence="grounded",
+                session_id="feedback-current",
+            )
+            polled = await get_next_native_notification()
+            notification = polled["notification"]
+            acked = await ack_native_notification(notification["id"])
+            feedback = await post_intervention_feedback(
+                message.intervention_id or "",
+                InterventionFeedbackRequest(
+                    feedback_type="helpful",
+                    note="Good timing.",
+                ),
+            )
+            state = await build_guardian_state(
+                session_id="feedback-current",
+                user_message="How should Seraph intervene better?",
+            )
+            create_agent(guardian_state=state)
+
+        assert notification is not None
+        assert message.intervention_id is not None
+
+        delivery_event = _find_audit_call(
+            mock_log_event,
+            event_type="observer_delivery_delivered",
+            tool_name="observer_delivery_gate",
+        )
+        ack_event = _find_audit_call(
+            mock_log_event,
+            event_type="integration_acked",
+            tool_name="observer_daemon:notifications",
+        )
+        feedback_event = _find_audit_call(
+            mock_log_event,
+            event_type="integration_succeeded",
+            tool_name="observer_feedback:intervention",
+        )
+        intervention = await guardian_feedback_repository.get(message.intervention_id)
+        assert intervention is not None
+        instructions = mock_agent_cls.call_args.kwargs["instructions"]
+        remaining = await native_notification_queue.count()
+
+    await native_notification_queue.clear()
+    return {
+        "action": decision.action.value,
+        "delivery_decision": decision.delivery_decision.value if decision.delivery_decision else None,
+        "delivery_transport": delivery_event["details"]["transport"],
+        "intervention_id_present": bool(message.intervention_id),
+        "notification_intervention_matches": notification["intervention_id"] == message.intervention_id,
+        "acked": acked["acked"],
+        "feedback_recorded": feedback["recorded"],
+        "ack_event_matches": ack_event["details"]["intervention_id"] == message.intervention_id,
+        "feedback_type": feedback_event["details"]["feedback_type"],
+        "latest_outcome": intervention.latest_outcome,
+        "stored_feedback_type": intervention.feedback_type,
+        "summary_contains_feedback": "feedback=helpful" in state.recent_intervention_feedback,
+        "summary_mentions_excerpt": "take a short stretch" in state.recent_intervention_feedback.lower(),
+        "prompt_contains_feedback_section": "Recent intervention feedback:" in state.to_prompt_block(),
+        "instructions_include_feedback": "Recent intervention feedback:" in instructions,
+        "remaining_notifications": remaining,
+    }
+
+
 def _eval_intervention_policy_behavior() -> dict[str, Any]:
     act = decide_intervention(
         message_type="proactive",
@@ -3277,6 +3625,30 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         interruption_mode="balanced",
         attention_budget_remaining=2,
     )
+    high_interrupt = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Interrupt later",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        observer_confidence="grounded",
+        salience_level="high",
+        interruption_cost="high",
+    )
+    low_salience = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Background nudge",
+        urgency=1,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        observer_confidence="grounded",
+        salience_level="low",
+        interruption_cost="low",
+    )
     return {
         "act_action": act.action.value,
         "act_reason": act.reason,
@@ -3288,6 +3660,10 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         "approval_reason": request_approval.reason,
         "silent_action": stay_silent.action.value,
         "silent_reason": stay_silent.reason,
+        "high_interrupt_action": high_interrupt.action.value,
+        "high_interrupt_reason": high_interrupt.reason,
+        "low_salience_action": low_salience.action.value,
+        "low_salience_reason": low_salience.reason,
     }
 
 
@@ -3722,6 +4098,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_delegated_tool_workflow_degraded_behavior,
     ),
     EvalScenario(
+        name="workflow_composition_behavior",
+        category="behavior",
+        description="Workflow composition builds reusable multi-step tools, skill-gates them, executes sequential steps, and exposes them through the workflow_runner specialist.",
+        runner=_eval_workflow_composition_behavior,
+    ),
+    EvalScenario(
         name="mcp_specialist_local_runtime_profile",
         category="runtime",
         description="Dynamic MCP specialists can route through the local profile using their sanitized runtime path.",
@@ -3842,10 +4224,22 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_observer_delivery_decision_behavior,
     ),
     EvalScenario(
+        name="native_presence_notification_behavior",
+        category="presence",
+        description="When browser delivery is unavailable but the daemon is connected, proactive messages reroute through native notifications.",
+        runner=_eval_native_presence_notification_behavior,
+    ),
+    EvalScenario(
         name="intervention_policy_behavior",
         category="guardian",
         description="Intervention policy explicitly distinguishes act, bundle, defer, request_approval, and stay_silent outcomes.",
         runner=_eval_intervention_policy_behavior,
+    ),
+    EvalScenario(
+        name="guardian_feedback_loop",
+        category="guardian",
+        description="Proactive interventions persist outcomes and user feedback, and that summary flows back into guardian-state synthesis.",
+        runner=_eval_guardian_feedback_loop,
     ),
     EvalScenario(
         name="daily_briefing_fallback",

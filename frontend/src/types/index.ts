@@ -5,6 +5,7 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   timestamp: number;
+  interventionId?: string;
   stepNumber?: number;
   toolUsed?: string;
   urgency?: number;
@@ -26,6 +27,7 @@ export interface WSResponse {
   session_id: string;
   step: number | null;
   seq: number | null;
+  intervention_id?: string;
   approval_id?: string;
   tool_name?: string;
   risk_level?: string;

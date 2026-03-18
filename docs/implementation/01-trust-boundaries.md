@@ -4,6 +4,10 @@
 
 - [ ] Workstream 01 is only partially shipped on `develop`.
 
+## Paired Research
+
+- primary design doc: [04. Trust And Governance](/research/trust-and-governance)
+
 ## Shipped On `develop`
 
 - [x] tool policy modes for `safe`, `balanced`, and `full`
@@ -16,7 +20,7 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
+- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
 - [x] this workstream owns `execution-safety-hardening-v1` in the master 10-PR queue
 - [ ] reduce reliance on raw secret retrieval in favor of narrower secret-injection paths
 

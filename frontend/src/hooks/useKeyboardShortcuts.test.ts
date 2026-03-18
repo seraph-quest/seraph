@@ -6,6 +6,7 @@ function resetStore() {
     chatPanelOpen: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
+    interfaceMode: "village",
   });
 }
 
@@ -38,6 +39,7 @@ describe("useKeyboardShortcuts", () => {
       switch (e.key.toLowerCase()) {
         case "c":
           if (!e.shiftKey) return;
+          if (s.interfaceMode === "cockpit") break;
           s.setChatPanelOpen(!s.chatPanelOpen);
           break;
         case "q":
@@ -138,5 +140,11 @@ describe("useKeyboardShortcuts", () => {
   it("handles uppercase Shift+C", () => {
     fireKey("C", { shiftKey: true });
     expect(useChatStore.getState().chatPanelOpen).toBe(true);
+  });
+
+  it("Shift+C does not toggle chat in cockpit mode", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
+    fireKey("c", { shiftKey: true });
+    expect(useChatStore.getState().chatPanelOpen).toBe(false);
   });
 });

@@ -949,7 +949,7 @@ export class VillageScene extends Phaser.Scene {
     }
   }
 
-  private rebuildCollisionGridForInterior(building: BuildingDef, floorIndex: number) {
+  private rebuildCollisionGridForInterior(building: BuildingDef, _floorIndex: number) {
     if (!this.savedExteriorGrid) return;
 
     // Clone the exterior grid

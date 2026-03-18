@@ -9,6 +9,8 @@ import type {
   ToolMeta,
 } from "../types";
 
+export type InterfaceMode = "cockpit" | "village";
+
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
@@ -22,6 +24,7 @@ interface ChatStore {
   chatMaximized: boolean;
   questPanelOpen: boolean;
   settingsPanelOpen: boolean;
+  interfaceMode: InterfaceMode;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
   magicEffectPoolSize: number;
@@ -41,6 +44,7 @@ interface ChatStore {
   toggleChatMaximized: () => void;
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsPanelOpen: (open: boolean) => void;
+  setInterfaceMode: (mode: InterfaceMode) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
   setMagicEffectPoolSize: (size: number) => void;
@@ -58,7 +62,41 @@ interface ChatStore {
 }
 
 const LAST_SESSION_KEY = "seraph_last_session_id";
+const INTERFACE_MODE_KEY = "seraph_interface_mode";
 const MAX_MESSAGES = 500;
+
+function safeStorageGet(key: string): string | null {
+  if (typeof localStorage === "undefined" || typeof localStorage.getItem !== "function") {
+    return null;
+  }
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(key: string, value: string): void {
+  if (typeof localStorage === "undefined" || typeof localStorage.setItem !== "function") {
+    return;
+  }
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures so the app still works in constrained environments.
+  }
+}
+
+function safeStorageRemove(key: string): void {
+  if (typeof localStorage === "undefined" || typeof localStorage.removeItem !== "function") {
+    return;
+  }
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures so the app still works in constrained environments.
+  }
+}
 
 const defaultVisual: AgentVisualState = {
   animationState: "idle",
@@ -69,7 +107,7 @@ const defaultVisual: AgentVisualState = {
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
-  sessionId: localStorage.getItem(LAST_SESSION_KEY),
+  sessionId: safeStorageGet(LAST_SESSION_KEY),
   sessions: [],
   connectionStatus: "disconnected",
   isAgentBusy: false,
@@ -80,6 +118,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   chatMaximized: false,
   questPanelOpen: false,
   settingsPanelOpen: false,
+  interfaceMode: safeStorageGet(INTERFACE_MODE_KEY) === "village" ? "village" : "cockpit",
   onboardingCompleted: null,
   toolRegistry: [],
   magicEffectPoolSize: 0,
@@ -95,7 +134,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set({ messages: messages.length > MAX_MESSAGES ? messages.slice(-MAX_MESSAGES) : messages }),
 
   setSessionId: (id) => {
-    localStorage.setItem(LAST_SESSION_KEY, id);
+    safeStorageSet(LAST_SESSION_KEY, id);
     set({ sessionId: id });
   },
 
@@ -123,6 +162,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setQuestPanelOpen: (open) => set({ questPanelOpen: open }),
 
   setSettingsPanelOpen: (open) => set({ settingsPanelOpen: open }),
+
+  setInterfaceMode: (mode) => {
+    safeStorageSet(INTERFACE_MODE_KEY, mode);
+    set({ interfaceMode: mode });
+  },
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
 
@@ -178,7 +222,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const res = await fetch(`${API_URL}/api/user/onboarding/restart`, { method: "POST" });
       if (res.ok) {
-        localStorage.removeItem(LAST_SESSION_KEY);
+        safeStorageRemove(LAST_SESSION_KEY);
         set({ onboardingCompleted: false, sessionId: null, messages: [] });
       }
     } catch (err) {
@@ -211,7 +255,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           stepNumber: m.step_number as number | undefined,
           toolUsed: m.tool_used as string | undefined,
         }));
-        localStorage.setItem(LAST_SESSION_KEY, sessionId);
+        safeStorageSet(LAST_SESSION_KEY, sessionId);
         set({ sessionId, messages: chatMessages });
       }
     } catch (err) {
@@ -220,7 +264,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   newSession: () => {
-    localStorage.removeItem(LAST_SESSION_KEY);
+    safeStorageRemove(LAST_SESSION_KEY);
     set({ sessionId: null, messages: [] });
   },
 
@@ -230,7 +274,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const { sessions, sessionId: currentId } = get();
       set({ sessions: sessions.filter((s) => s.id !== sessionId) });
       if (currentId === sessionId) {
-        localStorage.removeItem(LAST_SESSION_KEY);
+        safeStorageRemove(LAST_SESSION_KEY);
         set({ sessionId: null, messages: [] });
       }
     } catch (err) {

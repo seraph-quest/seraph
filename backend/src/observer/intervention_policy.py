@@ -56,6 +56,9 @@ def decide_intervention(
     is_scheduled: bool = False,
     data_quality: str = "good",
     guardian_confidence: str | None = None,
+    observer_confidence: str = "grounded",
+    salience_level: str = "medium",
+    interruption_cost: str = "medium",
     requires_approval: bool = False,
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
@@ -81,6 +84,14 @@ def decide_intervention(
             should_cost_budget=should_cost_budget,
         )
 
+    if observer_confidence == "degraded" and urgency < 4 and not is_scheduled:
+        return InterventionDecision(
+            action=InterventionAction.defer,
+            reason="low_observer_confidence",
+            delivery_decision=None,
+            should_cost_budget=should_cost_budget,
+        )
+
     if guardian_confidence in {"degraded", "partial", "empty"} and urgency < 4 and not is_scheduled:
         return InterventionDecision(
             action=InterventionAction.defer,
@@ -93,6 +104,20 @@ def decide_intervention(
         return InterventionDecision(
             action=InterventionAction.defer,
             reason="degraded_observer_state",
+            delivery_decision=None,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if (
+        salience_level == "low"
+        and urgency <= 1
+        and not is_scheduled
+        and message_type != "ambient"
+        and intervention_type != "alert"
+    ):
+        return InterventionDecision(
+            action=InterventionAction.stay_silent,
+            reason="low_observer_salience",
             delivery_decision=None,
             should_cost_budget=should_cost_budget,
         )
@@ -117,6 +142,14 @@ def decide_intervention(
         return InterventionDecision(
             action=InterventionAction.bundle,
             reason="blocked_state",
+            delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if interruption_cost == "high" and urgency < 4 and intervention_type != "alert":
+        return InterventionDecision(
+            action=InterventionAction.bundle,
+            reason="high_interruption_cost",
             delivery_decision=DeliveryDecision.queue,
             should_cost_budget=should_cost_budget,
         )

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type CSSProperties, type PointerEventHandler, type RefObject } from "react";
+import { useCallback, useEffect, useRef, type CSSProperties, type PointerEventHandler } from "react";
 import { usePanelLayoutStore, PANEL_MIN_SIZES } from "../stores/panelLayoutStore";
 
 export type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";

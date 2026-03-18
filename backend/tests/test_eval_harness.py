@@ -54,7 +54,9 @@ def test_main_lists_available_scenarios(capsys):
     assert "guardian_state_synthesis" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
+    assert "native_presence_notification_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
+    assert "guardian_feedback_loop" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
@@ -64,6 +66,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "delegation_local_runtime_profile" in captured.out
     assert "delegated_tool_workflow_behavior" in captured.out
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
+    assert "workflow_composition_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -143,11 +146,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "guardian_state_synthesis",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
+                "native_presence_notification_behavior",
                 "intervention_policy_behavior",
+                "guardian_feedback_loop",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
                 "delegated_tool_workflow_degraded_behavior",
+                "workflow_composition_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -250,7 +256,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
-    assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "good"
+    assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["observer_salience"] == "high"
+    assert details_by_name["guardian_state_synthesis"]["observer_interruption_cost"] == "low"
     assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
@@ -258,9 +266,20 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
     assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
+    assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
+    assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
+    assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"
+    assert details_by_name["native_presence_notification_behavior"]["notification_title"] == "Seraph alert"
+    assert details_by_name["native_presence_notification_behavior"]["notification_body_matches"] is True
+    assert details_by_name["native_presence_notification_behavior"]["acked"] is True
+    assert details_by_name["native_presence_notification_behavior"]["remaining_notifications"] == 0
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
+    assert details_by_name["observer_refresh_behavior"]["observer_confidence"] == "grounded"
+    assert details_by_name["observer_refresh_behavior"]["salience_level"] == "high"
+    assert details_by_name["observer_refresh_behavior"]["salience_reason"] == "upcoming_event"
+    assert details_by_name["observer_refresh_behavior"]["interruption_cost"] == "high"
     assert details_by_name["observer_refresh_behavior"]["screen_context_preserved"] is True
     assert details_by_name["observer_refresh_behavior"]["active_window_preserved"] is True
     assert details_by_name["observer_refresh_behavior"]["goal_summary"] == "Ship guardian behavioral evals"
@@ -285,6 +304,26 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["intervention_policy_behavior"]["approval_reason"] == "requires_approval"
     assert details_by_name["intervention_policy_behavior"]["silent_action"] == "stay_silent"
     assert details_by_name["intervention_policy_behavior"]["silent_reason"] == "empty_content"
+    assert details_by_name["intervention_policy_behavior"]["high_interrupt_action"] == "bundle"
+    assert details_by_name["intervention_policy_behavior"]["high_interrupt_reason"] == "high_interruption_cost"
+    assert details_by_name["intervention_policy_behavior"]["low_salience_action"] == "stay_silent"
+    assert details_by_name["intervention_policy_behavior"]["low_salience_reason"] == "low_observer_salience"
+    assert details_by_name["guardian_feedback_loop"]["action"] == "act"
+    assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
+    assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"
+    assert details_by_name["guardian_feedback_loop"]["intervention_id_present"] is True
+    assert details_by_name["guardian_feedback_loop"]["notification_intervention_matches"] is True
+    assert details_by_name["guardian_feedback_loop"]["acked"] is True
+    assert details_by_name["guardian_feedback_loop"]["feedback_recorded"] is True
+    assert details_by_name["guardian_feedback_loop"]["ack_event_matches"] is True
+    assert details_by_name["guardian_feedback_loop"]["feedback_type"] == "helpful"
+    assert details_by_name["guardian_feedback_loop"]["latest_outcome"] == "feedback_received"
+    assert details_by_name["guardian_feedback_loop"]["stored_feedback_type"] == "helpful"
+    assert details_by_name["guardian_feedback_loop"]["summary_contains_feedback"] is True
+    assert details_by_name["guardian_feedback_loop"]["summary_mentions_excerpt"] is True
+    assert details_by_name["guardian_feedback_loop"]["prompt_contains_feedback_section"] is True
+    assert details_by_name["guardian_feedback_loop"]["instructions_include_feedback"] is True
+    assert details_by_name["guardian_feedback_loop"]["remaining_notifications"] == 0
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
@@ -315,6 +354,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["delegated_tool_workflow_degraded_behavior"]["final_mentions_fallback"] is True
     assert details_by_name["delegated_tool_workflow_degraded_behavior"]["saved_plan_mentions_incident_trace"] is True
     assert details_by_name["delegated_tool_workflow_degraded_behavior"]["tool_call_count"] == 5
+    assert details_by_name["workflow_composition_behavior"]["without_skill_tool_names"] == [
+        "workflow_web_brief_to_file",
+    ]
+    assert details_by_name["workflow_composition_behavior"]["with_skill_tool_names"] == [
+        "workflow_goal_snapshot_to_file",
+        "workflow_web_brief_to_file",
+    ]
+    assert details_by_name["workflow_composition_behavior"]["web_search_called_with"] == "workflow composition"
+    assert details_by_name["workflow_composition_behavior"]["saved_file_path"] == "notes/workflow.md"
+    assert details_by_name["workflow_composition_behavior"]["saved_content_contains_search"] is True
+    assert details_by_name["workflow_composition_behavior"]["result"] == (
+        "Saved search results for workflow composition to notes/workflow.md."
+    )
+    assert details_by_name["workflow_composition_behavior"]["workflow_runner_present"] is True
+    assert details_by_name["workflow_composition_behavior"]["workflow_runner_tool_names"] == [
+        "workflow_web_brief_to_file",
+    ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"
@@ -511,6 +567,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["observer_delivery_transport_audit"]["bundle_delivered_connections"] == 2
     assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_count"] == 0
     assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_error"] == "all_connections_failed"
+    assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_queue_retained"] is True
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"
     assert details_by_name["observer_daemon_ingest_audit"]["persist_failed_error"] == "db down"
     assert details_by_name["mcp_test_api_audit"]["auth_required_status"] == "auth_required"

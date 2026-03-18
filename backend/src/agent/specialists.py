@@ -15,11 +15,13 @@ from smolagents import ToolCallingAgent
 from config.settings import settings
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.plugins.loader import discover_tools
+from src.skills.manager import skill_manager
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
 from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
+from src.workflows.manager import workflow_manager
 
 # --- Tool → domain mapping ---
 
@@ -87,6 +89,15 @@ SPECIALIST_CONFIGS: dict[str, dict] = {
         "temperature": 0.3,
         "max_steps": 6,
     },
+}
+
+WORKFLOW_RUNNER_CONFIG = {
+    "description": (
+        "Executes reusable multi-step workflows that chain tools, skills, "
+        "and connected MCP capabilities for repeatable outcomes."
+    ),
+    "temperature": 0.2,
+    "max_steps": 6,
 }
 
 
@@ -198,6 +209,7 @@ def build_all_specialists() -> list[ToolCallingAgent]:
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []
+    executable_tools: list = list(all_tools)
 
     # Tier 1: built-in specialists
     for factory in (create_memory_keeper, create_goal_planner, create_web_researcher, create_file_worker):
@@ -236,6 +248,26 @@ def build_all_specialists() -> list[ToolCallingAgent]:
         if not server_tools:
             continue
         desc = server_info.get("description", "")
+        executable_tools.extend(server_tools)
         specialists.append(create_mcp_specialist(name, server_tools, desc))
+
+    active_skill_names = [
+        skill.name
+        for skill in skill_manager.get_active_skills([tool.name for tool in executable_tools])
+    ]
+    workflow_tools = workflow_manager.build_workflow_tools(
+        executable_tools,
+        active_skill_names,
+    )
+    if workflow_tools:
+        specialists.append(
+            create_specialist(
+                "workflow_runner",
+                WORKFLOW_RUNNER_CONFIG["description"],
+                workflow_tools,
+                WORKFLOW_RUNNER_CONFIG["temperature"],
+                WORKFLOW_RUNNER_CONFIG["max_steps"],
+            )
+        )
 
     return specialists

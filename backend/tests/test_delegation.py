@@ -106,10 +106,24 @@ class TestCreateOrchestrator:
         mock_get_model.return_value = MagicMock()
         mock_agent_cls.return_value = MagicMock()
 
-        create_orchestrator()
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            create_orchestrator()
 
         orch_kwargs = mock_agent_cls.call_args[1]
-        assert len(orch_kwargs["managed_agents"]) == 4
+        assert len(orch_kwargs["managed_agents"]) == 5
+        assert {agent.name for agent in orch_kwargs["managed_agents"]} == {
+            "memory_keeper",
+            "goal_planner",
+            "web_researcher",
+            "file_worker",
+            "workflow_runner",
+        }
 
     @patch("src.agent.factory.ToolCallingAgent")
     @patch("src.agent.factory.get_model")

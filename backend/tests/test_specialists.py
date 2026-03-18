@@ -305,10 +305,24 @@ class TestBuildAllSpecialists:
             tools.append(tool)
         mock_discover.return_value = tools
 
-        specialists = build_all_specialists()
-        assert len(specialists) == 4
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            specialists = build_all_specialists()
+
+        assert len(specialists) == 5
         names = {s.name for s in specialists}
-        assert names == {"memory_keeper", "goal_planner", "web_researcher", "file_worker"}
+        assert names == {
+            "memory_keeper",
+            "goal_planner",
+            "web_researcher",
+            "file_worker",
+            "workflow_runner",
+        }
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
@@ -345,10 +359,19 @@ class TestBuildAllSpecialists:
         mock_mcp.is_connected.return_value = True
         mock_mcp.get_server_tools.return_value = [mcp_tool]
 
-        specialists = build_all_specialists()
-        assert len(specialists) == 5
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            specialists = build_all_specialists()
+
+        assert len(specialists) == 6
         names = {s.name for s in specialists}
         assert "mcp_things3" in names
+        assert "workflow_runner" in names
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
@@ -380,5 +403,20 @@ class TestBuildAllSpecialists:
         ]
         mock_mcp.is_connected.return_value = False
 
-        specialists = build_all_specialists()
-        assert len(specialists) == 4  # only built-in
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            specialists = build_all_specialists()
+
+        assert len(specialists) == 5
+        assert {specialist.name for specialist in specialists} == {
+            "memory_keeper",
+            "goal_planner",
+            "web_researcher",
+            "file_worker",
+            "workflow_runner",
+        }

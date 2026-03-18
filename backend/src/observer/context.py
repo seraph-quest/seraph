@@ -49,6 +49,10 @@ class CurrentContext:
 
     # Data quality — "good" if all sources succeeded, "degraded" if some failed, "stale" if all failed
     data_quality: str = "good"
+    observer_confidence: str = "grounded"
+    salience_level: str = "low"
+    salience_reason: str = "background"
+    interruption_cost: str = "low"
 
     def to_dict(self) -> dict:
         """Serialize for API responses."""
@@ -98,6 +102,11 @@ class CurrentContext:
             f"{self.user_state} | Mode: {self.interruption_mode} | "
             f"Budget: {self.attention_budget_remaining} | Tools: {self.tool_policy_mode} | "
             f"MCP: {self.mcp_policy_mode} | Approvals: {self.approval_mode}"
+        )
+        lines.append(
+            "Observer model: "
+            f"confidence={self.observer_confidence} | salience={self.salience_level} ({self.salience_reason}) | "
+            f"interruption_cost={self.interruption_cost}"
         )
 
         return "\n".join(lines)

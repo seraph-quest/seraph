@@ -1,8 +1,12 @@
-# Workstream 07: Ecosystem And Leverage
+# Workstream 07: Ecosystem And Delegation
 
 ## Status On `develop`
 
 - [ ] Workstream 07 is only partially shipped on `develop`.
+
+## Paired Research
+
+- primary design doc: [08. Ecosystem And Delegation](/research/ecosystem-and-delegation)
 
 ## Shipped On `develop`
 
@@ -12,15 +16,16 @@
 - [x] catalog/install APIs for skills and MCP servers
 - [x] recursive delegation foundations behind a feature flag
 - [x] dynamic specialist generation for connected MCP servers
+- [x] reusable workflow definitions that can activate across native tools, skills, specialists, and connected MCP capabilities
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Runtime Reliability is still being hardened
-- [x] this workstream owns `workflow-composition-v1` in the master 10-PR queue
+- [ ] this workstream is not the repo-wide active focus after `workflow-composition-v1` shipped on this branch
+- [x] this workstream now owns the remaining workflow-control and extension-ergonomics gap after `workflow-composition-v1`
 
 ## Still To Do On `develop`
 
-- [ ] stronger workflow composition on top of current skills, tools, and delegation
+- [ ] clearer operator-facing workflow control and artifact round-tripping on top of the reusable workflow runtime
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 
@@ -33,4 +38,5 @@
 
 - [x] Seraph can load reusable skills and external MCP tool surfaces
 - [x] Seraph can expose a specialist/delegation shape beyond a single monolithic agent
+- [x] Seraph can expose reusable workflows across tools, skills, delegation, and connected MCP capabilities
 - [ ] Seraph compounds capability through extensions and workflows in a way that is simple to operate

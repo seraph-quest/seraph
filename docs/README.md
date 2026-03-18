@@ -6,6 +6,21 @@ Seraph now uses a three-part docs layout:
 - `docs/research/` is the canonical design and product-thesis surface
 - `docs/docs/` is retained as legacy/reference material
 
+The trees are meant to mirror each other:
+
+- research owns target shape, benchmark logic, and superiority logic
+- implementation owns shipped truth, benchmark-status translation, superiority delivery, and the live PR queue
+- `docs/implementation/01-07` are workstreams; `08-10` are cross-cutting mirror docs
+
+Start with:
+
+- `docs/implementation/00-master-roadmap.md`
+- `docs/implementation/STATUS.md`
+- `docs/implementation/08-docs-contract.md`
+- `docs/implementation/09-benchmark-status.md`
+- `docs/implementation/10-superiority-delivery.md`
+- `docs/research/00-synthesis.md`
+
 The Docusaurus site now serves:
 
 - `/` from `docs/implementation/`

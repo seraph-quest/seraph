@@ -39,6 +39,9 @@ class NativeNotificationResponse(BaseModel):
     body: str
     intervention_type: str | None = None
     urgency: int | None = None
+    surface: str = "notification"
+    session_id: str | None = None
+    resume_message: str | None = None
     created_at: str
 
 

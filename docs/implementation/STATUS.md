@@ -18,6 +18,7 @@ title: Seraph Development Status
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
 - [x] A first guardian cockpit shell now exists alongside the legacy village mode.
+- [x] The cockpit now exposes first-pass capability discovery, starter packs, workflow history, and reload continuity instead of leaving those as implicit operator knowledge.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -33,28 +34,23 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The repo-wide active delivery batch now builds on a cockpit-first live-ops shell with broader cross-surface continuity, denser workflow control, and stronger world modeling after the last operator/guardian batch completed.
-- [ ] That refreshed batch is not complete yet.
+- [x] The last delivery batch is now complete on this branch: capability discovery, continuity restore, starter packs, workflow history/replay context, extension recovery, world-model fusion, learning-policy expansion, native action-card reach, and richer layout composition all landed together.
+- [x] The roadmap has now refreshed to a new next-10 batch rather than leaving the just-shipped batch as future work.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now `execution-safety-hardening-v3` on top of the newly shipped cockpit-first shell, continuity, world-model, workflow-run, artifact-roundtrip, provider-safeguard, desktop-shell, and operator-surface foundations.
-- [x] The first three items in that refreshed batch, `execution-safety-hardening-v2`, `cockpit-workflow-views-v1`, and `guardian-learning-loop-v2`, are now shipped on this branch.
-- [x] `cross-surface-continuity-v2` is now shipped on this branch.
-- [x] `provider-policy-safeguards-v2` is now shipped on this branch.
-- [x] `artifact-evidence-roundtrip-v2` is now shipped on this branch.
-- [x] `human-world-model-v2` is now shipped on this branch.
-- [x] `native-desktop-shell-v2` is now shipped on this branch.
-- [x] `extension-operator-surface-v1` is now shipped on this branch.
-- [x] `guardian-behavioral-evals-v3` is now shipped on this branch.
+- [x] The next strategic focus is now `execution-safety-hardening-v4`, because the latest batch made capability activation, workflow replay, session continuity, native continuation, and cockpit operator control materially easier to use.
+- [x] `capability-discovery-and-activation-v1`, `session-restore-and-thread-continuity-v1`, `execution-safety-hardening-v3`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, `extension-debugging-and-recovery-v1`, `world-model-memory-fusion-v3`, `guardian-learning-policy-v3`, `native-channel-expansion-v1`, and `cockpit-layout-composition-v2` are now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
 
 - [x] dense guardian cockpit as the primary operator surface
+- [x] first clear capability discovery and activation for tools, skills, workflows, MCP surfaces, and starter packs from inside that cockpit
+- [x] first browser reload and reconnect continuity for the active thread, with explicit fresh-thread semantics and background-activity badges
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
-- [x] non-browser presence through a first coherent desktop surface, notifications, and native reach
+- [x] non-browser presence through a first coherent desktop surface, notifications, native reach, and action-card continuation payloads
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops
 
 ## Shipped On `develop`
@@ -79,16 +75,19 @@ title: Seraph Development Status
 ### Execution and integrations
 
 - [x] 17 built-in tool capabilities in the registry
+- [x] first capability-overview API that aggregates tools, skills, workflows, MCP servers, blocked-state reasons, and starter packs for one cockpit-readable surface
 - [x] shell execution via sandboxed tool path
 - [x] browser automation foundation
 - [x] filesystem, soul, goals, vault, and web-search tool foundations
 - [x] MCP server management and runtime-managed server configuration
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
+- [x] starter packs that bundle default skills and workflows into directly activatable operator-facing packages
 - [x] forced approval wrapping for high-risk and approval-mode MCP workflow paths
 - [x] first operator workflow-control layer with workflow list/toggle/reload plus draft-to-cockpit support
 - [x] workflow loader/runtime metadata now derive from actual step tools and reject underdeclared workflow definitions
 - [x] workflow audit now surfaces structured workflow-run details for cockpit/operator views, including artifact-path lineage and degraded-step visibility
+- [x] workflow history endpoint now exposes run arguments, risk level, execution boundaries, approval counts, secret-ref acceptance, and artifact lineage for replay and operator inspection
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability
@@ -111,11 +110,11 @@ title: Seraph Development Status
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
-- [x] guardian world model now includes active projects plus recent execution pressure from degraded workflow/tool outcomes, not only focus, commitments, open loops or pressure, alignment, and receptivity
+- [x] guardian world model now includes active projects, active constraints, recurring patterns, and recent execution pressure from degraded workflow/tool outcomes, not only focus, commitments, open loops or pressure, alignment, and receptivity
 - [x] observer salience, confidence, and interruption-cost scoring for observer refresh, guardian state, and proactive policy
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
-- [x] first multi-signal guardian learning loop that can reduce interruption eagerness after negative outcomes and also prefer direct delivery or native reroute after repeated positive/acknowledged outcomes
+- [x] first multi-signal guardian learning loop that can reduce interruption eagerness after negative outcomes and also prefer direct delivery, native reroute, and async-native escalation after repeated positive/acknowledged outcomes
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
 - [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] deterministic guardian behavioral proof that strategist tick can use learned direct/native-delivery bias and still surface the resulting intervention through continuity state
@@ -129,9 +128,10 @@ title: Seraph Development Status
 
 - [x] cockpit-first browser guardian shell with session rail, guardian-state panel, workflow-run views, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, a fixed composer, and live send fallback
 - [x] cockpit workflow and artifact inspectors can now draft compatible follow-on workflows directly from existing artifact paths instead of only inserting generic file-context commands
-- [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching now define the main cockpit workspace
+- [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching, per-layout save, and per-layout reset now define the main cockpit workspace
 - [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up, continue, and dismiss controls
-- [x] the cockpit now includes a first operator surface for tool/MCP policy state, workflow availability, skills, and MCP server visibility with direct reload controls
+- [x] the cockpit now includes a first operator surface for tool/MCP policy state, workflow availability, tools, skills, starter packs, and MCP server visibility with direct reload and activation controls
+- [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
 - [x] larger more readable settings and goals overlays now support the cockpit-first shell without removing the legacy Phaser village fallback
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
@@ -151,6 +151,7 @@ title: Seraph Development Status
 - [ ] richer provider selection policy beyond the shipped weighted scoring, required capability safeguards, tier guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
 - [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, strategist-learning continuity, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
 - [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
+- [ ] richer capability installation, recommendation, and recovery beyond the first cockpit discovery and starter-pack surface
 
 ### Guardian intelligence
 
@@ -161,19 +162,19 @@ title: Seraph Development Status
 ### Interface and presence
 
 - [ ] richer cockpit density and broader keyboard/operator control beyond the first dedicated workflow-run shell
-- [ ] richer cross-surface continuity and broader non-browser presence beyond the new continuity snapshot and first actionable desktop-shell/browser-native control layer
-- [ ] stronger cross-surface continuity between ambient observation and deliberate interaction beyond the new daemon/notification/bundle/intervention continuity bridge
+- [ ] richer cross-surface continuity and broader non-browser presence beyond the new continuity snapshot, action-card continuation model, and first actionable desktop-shell/browser-native control layer
+- [ ] stronger explicit threading between ambient observation, workflow runs, native notifications, and deliberate interaction beyond the new browser-session continuity bridge
 
 ### Workflow and leverage
 
-- [ ] deeper operator-facing workflow control and workflow history beyond the new dedicated cockpit workflow-run views plus direct artifact-to-workflow drafting
-- [ ] stronger extension ergonomics around reusable capabilities and workflows beyond the first cockpit operator surface
+- [ ] deeper operator-facing workflow control and workflow history beyond the new workflow-runs API, boundary-aware replay drafting, and cockpit workflow-run views
+- [ ] stronger extension ergonomics around reusable capabilities and workflows beyond the first cockpit operator surface, starter packs, and recovery inspector
 
 ## Practical Summary
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are deeper execution hardening, stronger intervention learning beyond the new world-model layer, native reach, and still-denser cockpit operation.
+- [ ] The biggest gaps against the reference systems are deeper execution hardening, richer capability installation and repair, stronger intervention learning beyond the new world-model layer, broader native threading, and still-denser cockpit operation.
 - [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
 
 ## Workstream View

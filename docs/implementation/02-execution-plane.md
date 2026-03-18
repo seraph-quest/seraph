@@ -20,10 +20,12 @@
 - [x] dynamic MCP tool loading and runtime-managed MCP server configuration
 - [x] visible tool execution in chat, WebSocket, onboarding, strategist, and specialist flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, with tool, skill, and MCP-aware gating
+- [x] starter packs that bundle useful default skills and workflows into operator-invocable capability sets
 - [x] explicit workflow metadata for policy modes, execution boundaries, approval behavior, and risk level exposed to operator-facing APIs
 - [x] first operator-facing workflow controls for enable/disable, reload, and draft-to-cockpit steering
 - [x] workflow loading now rejects underdeclared runtime step tools, and tool/workflow metadata now expose secret-reference acceptance explicitly for injection-safe paths
 - [x] workflow execution audit now carries structured workflow-run details, artifact-path lineage, and degraded-step visibility for cockpit/operator views
+- [x] workflow run history now exposes boundary-aware replay context, approval counts, risk level, step tools, and artifact lineage through the workflows API
 
 ## Working On Now
 
@@ -33,7 +35,7 @@
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] richer direct workflow execution, approval visibility, artifact round-tripping, and workflow history on top of the new cockpit workflow-run surface
+- [ ] richer direct workflow execution, approval visibility, artifact round-tripping, and workflow history on top of the new cockpit workflow-run surface and first boundary-aware replay model
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Non-Goals
@@ -52,3 +54,4 @@
 - [x] Seraph can browse, search, read/write local files, inspect goals, and use the shell
 - [x] Seraph can use connected MCP servers in the current runtime
 - [x] Seraph can execute richer cross-tool workflows than it could before the reusable workflow runtime
+- [x] Seraph can expose workflow replay and safety context back to the operator instead of treating runs as opaque

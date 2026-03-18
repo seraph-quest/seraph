@@ -19,6 +19,9 @@ class GuardianWorldModel:
     intervention_receptivity: str
     active_projects: tuple[str, ...] = ()
     execution_pressure: tuple[str, ...] = ()
+    active_constraints: tuple[str, ...] = ()
+    recurring_patterns: tuple[str, ...] = ()
+    project_state: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
         lines = [
@@ -35,6 +38,10 @@ class GuardianWorldModel:
             lines.append("Active projects:")
             lines.extend(f"- {item}" for item in self.active_projects)
 
+        if self.project_state:
+            lines.append("Project state:")
+            lines.extend(f"- {item}" for item in self.project_state)
+
         if self.open_loops_or_pressure:
             lines.append("Open loops and pressure:")
             lines.extend(f"- {item}" for item in self.open_loops_or_pressure)
@@ -42,6 +49,14 @@ class GuardianWorldModel:
         if self.execution_pressure:
             lines.append("Recent execution pressure:")
             lines.extend(f"- {item}" for item in self.execution_pressure)
+
+        if self.active_constraints:
+            lines.append("Active constraints:")
+            lines.extend(f"- {item}" for item in self.active_constraints)
+
+        if self.recurring_patterns:
+            lines.append("Recurring patterns:")
+            lines.extend(f"- {item}" for item in self.recurring_patterns)
 
         return "\n".join(lines)
 
@@ -63,6 +78,21 @@ def _extract_lines(block: str, *, limit: int = 2) -> list[str]:
         if not line:
             continue
         results.append(line)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _extract_tagged_memory(block: str, tag: str, *, limit: int = 2) -> list[str]:
+    prefix = f"[{tag}]"
+    results: list[str] = []
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line.lower().startswith(prefix):
+            continue
+        cleaned = _clean_line(line)
+        if cleaned:
+            results.append(cleaned)
         if len(results) >= limit:
             break
     return results
@@ -162,6 +192,18 @@ def build_guardian_world_model(
     for line in memory_lines[1:]:
         open_loops.append(line)
     execution_pressure = _extract_lines(recent_execution_summary, limit=3)
+    recurring_patterns = _extract_tagged_memory(memory_context, "pattern", limit=3)
+    preference_constraints = _extract_tagged_memory(memory_context, "preference", limit=2)
+    active_constraints: list[str] = []
+    if observer_context.interruption_mode == "focus":
+        active_constraints.append("User is in focus mode")
+    if observer_context.attention_budget_remaining <= 1:
+        active_constraints.append("Attention budget is nearly exhausted")
+    if observer_context.user_state in {"deep_work", "in_meeting", "away"}:
+        active_constraints.append(f"Current state is {observer_context.user_state}")
+    active_constraints.extend(preference_constraints)
+    project_state = list(active_projects[:3])
+    project_state.extend(execution_pressure[:2])
 
     return GuardianWorldModel(
         current_focus=current_focus,
@@ -171,4 +213,7 @@ def build_guardian_world_model(
         intervention_receptivity=_derive_intervention_receptivity(observer_context),
         active_projects=_dedupe(list(active_projects)),
         execution_pressure=_dedupe(execution_pressure),
+        active_constraints=_dedupe(active_constraints),
+        recurring_patterns=_dedupe(recurring_patterns),
+        project_state=_dedupe(project_state),
     )

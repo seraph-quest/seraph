@@ -6,6 +6,7 @@ import type {
   AgentVisualState,
   AmbientState,
   SessionInfo,
+  SessionContinuityState,
   ToolMeta,
 } from "../types";
 
@@ -15,6 +16,7 @@ interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
   sessions: SessionInfo[];
+  sessionContinuity: Record<string, SessionContinuityState>;
   connectionStatus: ConnectionStatus;
   isAgentBusy: boolean;
   agentVisual: AgentVisualState;
@@ -34,6 +36,8 @@ interface ChatStore {
   setMessages: (messages: ChatMessage[]) => void;
   setSessionId: (id: string) => void;
   setSessions: (sessions: SessionInfo[]) => void;
+  markSessionContinuity: (sessionId: string, state: SessionContinuityState) => void;
+  clearSessionContinuity: (sessionId: string) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   setAgentBusy: (busy: boolean) => void;
   setAgentVisual: (visual: Partial<AgentVisualState>) => void;
@@ -54,7 +58,8 @@ interface ChatStore {
   skipOnboarding: () => Promise<void>;
   restartOnboarding: () => Promise<void>;
   loadSessions: () => Promise<void>;
-  switchSession: (sessionId: string) => Promise<void>;
+  restoreLastSession: () => Promise<void>;
+  switchSession: (sessionId: string, continuityState?: SessionContinuityState) => Promise<void>;
   newSession: () => void;
   deleteSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
@@ -64,6 +69,7 @@ interface ChatStore {
 const LAST_SESSION_KEY = "seraph_last_session_id";
 const INTERFACE_MODE_KEY = "seraph_interface_mode";
 const MAX_MESSAGES = 500;
+let restoreLastSessionPromise: Promise<void> | null = null;
 
 function safeStorageGet(key: string): string | null {
   if (typeof localStorage === "undefined" || typeof localStorage.getItem !== "function") {
@@ -109,6 +115,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   sessionId: safeStorageGet(LAST_SESSION_KEY),
   sessions: [],
+  sessionContinuity: {},
   connectionStatus: "disconnected",
   isAgentBusy: false,
   agentVisual: { ...defaultVisual },
@@ -139,6 +146,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setSessions: (sessions) => set({ sessions }),
+
+  markSessionContinuity: (sessionId, state) =>
+    set((current) => ({
+      sessionContinuity: {
+        ...current.sessionContinuity,
+        [sessionId]: state,
+      },
+    })),
+
+  clearSessionContinuity: (sessionId) =>
+    set((current) => {
+      if (!(sessionId in current.sessionContinuity)) {
+        return current;
+      }
+      const next = { ...current.sessionContinuity };
+      delete next[sessionId];
+      return { sessionContinuity: next };
+    }),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
@@ -235,14 +260,51 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const res = await fetch(`${API_URL}/api/sessions`);
       if (res.ok) {
         const sessions = await res.json();
-        set({ sessions });
+        set((state) => {
+          const known = new Set((Array.isArray(sessions) ? sessions : []).map((item: SessionInfo) => item.id));
+          const nextContinuity = Object.fromEntries(
+            Object.entries(state.sessionContinuity).filter(([id]) => known.has(id)),
+          );
+          return {
+            sessions,
+            sessionContinuity: nextContinuity,
+          };
+        });
       }
     } catch (err) {
       console.error("Failed to load sessions:", err);
     }
   },
 
-  switchSession: async (sessionId: string) => {
+  restoreLastSession: async () => {
+    if (restoreLastSessionPromise) {
+      return restoreLastSessionPromise;
+    }
+
+    restoreLastSessionPromise = (async () => {
+      await get().loadSessions();
+
+      const storedSessionId = safeStorageGet(LAST_SESSION_KEY) ?? get().sessionId;
+      if (!storedSessionId) {
+        return;
+      }
+
+      const state = get();
+      if (state.sessionId === storedSessionId && state.messages.length > 0) {
+        return;
+      }
+
+      await get().switchSession(storedSessionId, "restored");
+    })();
+
+    try {
+      await restoreLastSessionPromise;
+    } finally {
+      restoreLastSessionPromise = null;
+    }
+  },
+
+  switchSession: async (sessionId: string, continuityState?: SessionContinuityState) => {
     try {
       const res = await fetch(`${API_URL}/api/sessions/${sessionId}/messages`);
       if (res.ok) {
@@ -252,11 +314,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           role: m.role === "assistant" ? "agent" : m.role as string,
           content: m.content as string,
           timestamp: new Date(m.created_at as string).getTime(),
+          sessionId,
           stepNumber: m.step_number as number | undefined,
           toolUsed: m.tool_used as string | undefined,
         }));
         safeStorageSet(LAST_SESSION_KEY, sessionId);
-        set({ sessionId, messages: chatMessages });
+        set((state) => {
+          const nextContinuity = { ...state.sessionContinuity };
+          if (continuityState) {
+            nextContinuity[sessionId] = continuityState;
+          } else {
+            delete nextContinuity[sessionId];
+          }
+          return { sessionId, messages: chatMessages, sessionContinuity: nextContinuity };
+        });
+      } else if (res.status === 404 && get().sessionId === sessionId) {
+        safeStorageRemove(LAST_SESSION_KEY);
+        set((state) => {
+          const nextContinuity = { ...state.sessionContinuity };
+          delete nextContinuity[sessionId];
+          return { sessionId: null, messages: [], sessionContinuity: nextContinuity };
+        });
       }
     } catch (err) {
       console.error("Failed to switch session:", err);

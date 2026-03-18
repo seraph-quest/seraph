@@ -17,6 +17,7 @@ from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+_LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://localhost:5173"],
+        allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

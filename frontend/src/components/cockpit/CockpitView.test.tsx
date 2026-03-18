@@ -60,9 +60,29 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/workflows")) {
+      if (url.includes("/api/capabilities/overview")) {
         return Promise.resolve(
           mockResponse({
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            approval_mode: "high_risk",
+            summary: {
+              native_tools_ready: 1,
+              native_tools_total: 3,
+              skills_ready: 1,
+              skills_total: 2,
+              workflows_ready: 1,
+              workflows_total: 2,
+              starter_packs_ready: 0,
+              starter_packs_total: 1,
+              mcp_servers_ready: 1,
+              mcp_servers_total: 2,
+            },
+            native_tools: [
+              { name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" },
+              { name: "shell_execute", description: "Shell", risk_level: "high", execution_boundaries: ["sandbox_execution"], availability: "blocked", blocked_reason: "tool_policy_balanced" },
+              { name: "mcp_browser_search", description: "Browser MCP", risk_level: "medium", execution_boundaries: ["external_mcp"], availability: "blocked", blocked_reason: "mcp_policy_approval" },
+            ],
             workflows: [
               {
                 name: "summarize-file",
@@ -110,17 +130,6 @@ describe("CockpitView", () => {
                 missing_skills: [],
               },
             ],
-          }),
-        );
-      }
-      if (url.includes("/api/skills/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
-      if (url.includes("/api/workflows/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
-      if (url.includes("/api/skills/goal-reflection")) {
-        return Promise.resolve(mockResponse({ status: "updated" }));
-      }
-      if (url.includes("/api/skills")) {
-        return Promise.resolve(
-          mockResponse({
             skills: [
               {
                 name: "goal-reflection",
@@ -128,6 +137,8 @@ describe("CockpitView", () => {
                 description: "Reflect on goals",
                 requires_tools: ["reflect_goal"],
                 user_invocable: true,
+                availability: "ready",
+                missing_tools: [],
               },
               {
                 name: "calendar-planning",
@@ -135,18 +146,11 @@ describe("CockpitView", () => {
                 description: "Plan from calendar",
                 requires_tools: ["calendar_events"],
                 user_invocable: false,
+                availability: "disabled",
+                missing_tools: [],
               },
             ],
-          }),
-        );
-      }
-      if (url.includes("/api/mcp/servers/browser/test")) {
-        return Promise.resolve(mockResponse({ status: "ok", tool_count: 4 }));
-      }
-      if (url.includes("/api/mcp/servers")) {
-        return Promise.resolve(
-          mockResponse({
-            servers: [
+            mcp_servers: [
               {
                 name: "browser",
                 enabled: true,
@@ -162,23 +166,67 @@ describe("CockpitView", () => {
                 status: "auth_required",
                 status_message: "Missing token",
                 has_headers: true,
+                availability: "blocked",
+                blocked_reason: "auth_required",
+              },
+            ],
+            starter_packs: [
+              {
+                name: "research-briefing",
+                label: "Research briefing",
+                description: "Enable a starter research pack.",
+                sample_prompt: "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+                skills: ["goal-reflection"],
+                workflows: ["web-brief-to-file"],
+                ready_skills: ["goal-reflection"],
+                ready_workflows: [],
+                blocked_skills: [],
+                blocked_workflows: [{ name: "web-brief-to-file", availability: "blocked", missing_tools: ["write_file"], missing_skills: [] }],
+                availability: "partial",
               },
             ],
           }),
         );
       }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(
+          mockResponse({
+            runs: [
+              {
+                id: "evt-call",
+                tool_name: "workflow_web_brief_to_file",
+                workflow_name: "web-brief-to-file",
+                session_id: "session-1",
+                status: "succeeded",
+                started_at: "2026-03-18T12:01:00Z",
+                updated_at: "2026-03-18T12:01:45Z",
+                summary: "workflow_web_brief_to_file succeeded (2 steps)",
+                step_tools: ["web_search", "write_file"],
+                artifact_paths: ["notes/brief.md"],
+                continued_error_steps: [],
+                arguments: { query: "seraph", file_path: "notes/brief.md" },
+                risk_level: "medium",
+                execution_boundaries: ["external_read", "workspace_write"],
+                accepts_secret_refs: false,
+                pending_approval_count: 0,
+                pending_approval_ids: [],
+              },
+            ],
+          }),
+        );
+      }
+      if (url.includes("/api/skills/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
+      if (url.includes("/api/workflows/reload")) return Promise.resolve(mockResponse({ status: "reloaded" }));
+      if (url.includes("/api/capabilities/starter-packs/research-briefing/activate")) return Promise.resolve(mockResponse({ status: "activated" }));
+      if (url.includes("/api/skills/goal-reflection")) {
+        return Promise.resolve(mockResponse({ status: "updated" }));
+      }
+      if (url.includes("/api/mcp/servers/browser/test")) {
+        return Promise.resolve(mockResponse({ status: "ok", tool_count: 4 }));
+      }
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
-      if (url.includes("/api/tools")) {
-        return Promise.resolve(
-          mockResponse([
-            { name: "read_file", risk_level: "low", execution_boundaries: ["workspace"] },
-            { name: "shell_execute", risk_level: "high", execution_boundaries: ["workspace"] },
-            { name: "mcp_browser_search", risk_level: "medium", execution_boundaries: ["external_mcp"] },
-          ]),
-        );
-      }
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(
           mockResponse({
@@ -191,6 +239,9 @@ describe("CockpitView", () => {
                 body: "Stand up and reset before the next block.",
                 intervention_type: "advisory",
                 urgency: 2,
+                surface: "notification",
+                session_id: "session-1",
+                resume_message: "Continue from this guardian intervention: Stand up and reset before the next block.",
                 created_at: "2026-03-18T12:03:00Z",
               },
             ],
@@ -281,14 +332,14 @@ describe("CockpitView", () => {
     expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Set MCP policy to approval" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Set approval mode to high_risk" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("browser")).toBeInTheDocument();
+    expect(screen.getByText("Research briefing")).toBeInTheDocument();
     expect(screen.getByText("4 tools live")).toBeInTheDocument();
     expect(screen.getByText("vault")).toBeInTheDocument();
     expect(screen.getByText("auth required")).toBeInTheDocument();
     expect(screen.getByText("goal-reflection")).toBeInTheDocument();
-    expect(screen.getByText("invocable · reflect_goal")).toBeInTheDocument();
+    expect(screen.getByText("ready · reflect_goal")).toBeInTheDocument();
     expect(screen.getByText("calendar-planning")).toBeInTheDocument();
-    expect(screen.getByText("runtime · calendar_events")).toBeInTheDocument();
+    expect(screen.getByText("disabled · calendar_events")).toBeInTheDocument();
     expect(screen.getByText("invocable 1/2 available")).toBeInTheDocument();
     expect(screen.getByText("approval 0 · blocked 1")).toBeInTheDocument();
     expect(screen.getByText("blocked web-brief-to-file · tools write_file")).toBeInTheDocument();
@@ -315,11 +366,11 @@ describe("CockpitView", () => {
         expect.objectContaining({ method: "PUT" }),
       ),
     );
-    fireEvent.click(screen.getAllByText("Draft Follow-up")[0]);
-    expect(screen.getByDisplayValue(/Follow up on this desktop alert:/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByText("Continue")[0]);
+    expect(screen.getByDisplayValue(/Continue from this guardian intervention:/)).toBeInTheDocument();
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
-    expect(screen.getByText("Draft Rerun")).toBeInTheDocument();
+    expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
     expect(screen.getByText("Use Output")).toBeInTheDocument();
     const runButton = screen.getByText("Run summarize-file");
     expect(runButton).toBeInTheDocument();
@@ -379,13 +430,23 @@ describe("CockpitView", () => {
           recent_interventions: [],
         }));
       }
-      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
-      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
-      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
-      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
       return Promise.resolve(mockResponse({}));
     });
 
@@ -397,8 +458,60 @@ describe("CockpitView", () => {
     ).toBeGreaterThan(1);
   });
 
+  it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "Summarize what I can do here.",
+          timestamp: Date.now() - 1000,
+        },
+      ],
+      sessionId: null,
+      sessions: [],
+      isAgentBusy: true,
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getAllByText("Seraph is responding").length).toBeGreaterThan(0));
+    expect(screen.getByRole("button", { name: "Working" })).toBeDisabled();
+    expect(screen.getAllByText(/fresh thread/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Start fresh" }).length).toBeGreaterThan(0);
+  });
+
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 11 }, () => {
+    const deferredResponses = Array.from({ length: 9 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -423,7 +536,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(11));
+    await waitFor(() => expect(cockpitFetchCount).toBe(9));
     view.unmount();
 
     await act(async () => {
@@ -461,13 +574,23 @@ describe("CockpitView", () => {
           recent_interventions: [],
         }));
       }
-      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
-      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
-      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
-      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
       return Promise.resolve(mockResponse({}));
     });
 

@@ -39,14 +39,14 @@ This file explains:
 
 ### 1. Guardian state and human model
 
-- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a project/execution-aware world-model layer for focus, commitments, active projects, recent execution pressure, and receptivity, and a first calibrated aligned-work/high-salience pass
-- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the new project/execution-aware world-model and calibration layers
+- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a structured world-model layer for focus, commitments, active projects, active constraints, recurring patterns, recent execution pressure, and receptivity, and a first calibrated aligned-work/high-salience pass
+- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the new project/constraint/pattern-aware world-model and calibration layers
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first multi-signal outcome-learning layer that can now quiet, accelerate, and reroute interventions, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate plus strategist-learning native-reroute continuity behavior
-- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment beyond the first delivery/channel adaptation layer
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first multi-signal outcome-learning layer that can now quiet, accelerate, reroute, and bias async-native escalation, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate plus strategist-learning native-reroute continuity behavior
+- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment beyond the first delivery/channel/escalation adaptation layer
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -57,46 +57,37 @@ This file explains:
 
 ### 4. Presence and reach
 
-- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, a shared continuity snapshot for daemon state, deferred bundles, pending native notifications, and recent interventions, plus a first actionable cockpit desktop-shell surface for follow-up and dismiss flows
+- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, a shared continuity snapshot for daemon state, deferred bundles, pending native notifications, and recent interventions, plus a first actionable cockpit desktop-shell surface for follow-up, dismiss, and continue flows
 - [ ] still missing: broader reach channels and continuity beyond the first browser/native continuity snapshot and desktop-shell control layer
 - owners: Workstream 04, Workstream 06
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, direct artifact-to-workflow draft handoff, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, a first actionable desktop shell, a first cockpit-native operator surface for policy/extension/workflow state, and legacy village fallback
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, direct artifact-to-workflow draft handoff, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, per-layout save/reset composition, first browser-session continuity restore, a first actionable desktop shell, a first cockpit-native capability/operator surface for policy/extension/workflow state, and legacy village fallback
 - [ ] still missing: deeper workflow history and more flexible workspace control beyond the first dedicated workflow-run layer plus the first operator surface
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, direct artifact-to-workflow draft handoff from cockpit inspectors, and a cockpit-native operator surface for workflow availability plus extension/runtime visibility
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, starter packs, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, first workflow-runs history with boundary-aware replay metadata, direct artifact-to-workflow draft handoff from cockpit inspectors, and a cockpit-native operator surface for workflow availability plus extension/runtime visibility
 - [ ] still missing: richer direct workflow control, deeper workflow history, and easier extension ergonomics beyond that first cockpit operator surface
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
 
-- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, forced approval wrapping for high-risk/approval-mode workflow paths, explicit secret-ref containment to injection-safe surfaces, and rejection of underdeclared workflow runtimes
-- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that first hardening pass
+- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, forced approval wrapping for high-risk/approval-mode workflow paths, explicit secret-ref containment to injection-safe surfaces, rejection of underdeclared workflow runtimes, and workflow-run replay metadata that keeps risk/approval/boundary context visible at the operator surface
+- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that operator-aware hardening pass
 - owners: Workstream 01, Workstream 02
 
 ## Queue Ownership
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
-- [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
-- [x] `execution-safety-hardening-v2` is now the first shipped item from the refreshed queue on this branch.
-- [x] `cockpit-workflow-views-v1` and `guardian-learning-loop-v2` are now the second and third shipped items from the refreshed queue on this branch.
-- [x] `cross-surface-continuity-v2` is now the fourth shipped item from the refreshed queue on this branch.
-- [x] `provider-policy-safeguards-v2` is now the fifth shipped item from the refreshed queue on this branch.
-- [x] `artifact-evidence-roundtrip-v2` is now the sixth shipped item from the refreshed queue on this branch.
-- [x] `human-world-model-v2` is now the seventh shipped item from the refreshed queue on this branch.
-- [x] `native-desktop-shell-v2` is now the eighth shipped item from the refreshed queue on this branch.
-- [x] `extension-operator-surface-v1` is now the ninth shipped item from the refreshed queue on this branch.
-- [x] `guardian-behavioral-evals-v3` is now the tenth shipped item from the refreshed queue on this branch.
-- [x] That queue is now fully shipped on this branch, so the roadmap refreshes back to `execution-safety-hardening-v3` as the next active item.
-- [x] The new queue starts with execution hardening, workflow history, and extension recovery because the latest batch made Seraph more operable, which raises the value of making that leverage safer and easier to inspect over time.
-- [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
+- [x] The previous 10-item queue is now fully shipped on this branch.
+- [x] `capability-discovery-and-activation-v1`, `session-restore-and-thread-continuity-v1`, `execution-safety-hardening-v3`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, `extension-debugging-and-recovery-v1`, `world-model-memory-fusion-v3`, `guardian-learning-policy-v3`, `native-channel-expansion-v1`, and `cockpit-layout-composition-v2` now move into the latest completed batch in the roadmap.
+- [x] The roadmap now refreshes to `execution-safety-hardening-v4` as the next active item because the latest batch made capability activation, workflow replay, thread continuity, native continuation, and operator control materially easier to use.
+- [x] The new queue starts with execution hardening, workflow timelines, and capability-pack install/recommendation because those are now the highest-value trust and operability gaps after the first visibility/continuity batch landed.
+- [x] The refreshed queue keeps world-model fusion, guardian-learning, native-channel expansion, layout composition, and behavioral eval depth in the top 10 because the new batch widened leverage and therefore raises the value of better judgment, richer threading, and proof.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

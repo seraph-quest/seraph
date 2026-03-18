@@ -9,20 +9,23 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
   if (tag === "INPUT" || tag === "TEXTAREA") return;
 
   const s = useChatStore.getState();
-  const { bringToFront } = usePanelLayoutStore.getState();
+  const { bringToFront, applyCockpitLayout } = usePanelLayoutStore.getState();
   const cockpitLayout = useCockpitLayoutStore.getState();
 
   if (s.interfaceMode === "cockpit") {
     if (event.shiftKey && code === "Digit1") {
       cockpitLayout.setLayout("default");
+      applyCockpitLayout("default", cockpitLayout.inspectorVisible);
       return;
     }
     if (event.shiftKey && code === "Digit2") {
       cockpitLayout.setLayout("focus");
+      applyCockpitLayout("focus", cockpitLayout.inspectorVisible);
       return;
     }
     if (event.shiftKey && code === "Digit3") {
       cockpitLayout.setLayout("review");
+      applyCockpitLayout("review", cockpitLayout.inspectorVisible);
       return;
     }
     if (event.shiftKey && code === "KeyI") {

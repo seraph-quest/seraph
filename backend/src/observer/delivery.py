@@ -160,6 +160,8 @@ async def deliver_or_queue(
             interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
             recent_feedback_bias=learning_signal.bias,
+            learning_channel_bias=learning_signal.channel_bias,
+            learning_escalation_bias=learning_signal.escalation_bias,
         )
 
         event_details = {
@@ -174,6 +176,7 @@ async def deliver_or_queue(
             "guardian_confidence": guardian_confidence,
             "learning_bias": learning_signal.bias,
             "learning_channel_bias": learning_signal.channel_bias,
+            "learning_escalation_bias": learning_signal.escalation_bias,
             "learning_helpful_count": learning_signal.helpful_count,
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,
@@ -219,6 +222,9 @@ async def deliver_or_queue(
                         body=message.content,
                         intervention_type=intervention_type,
                         urgency=urgency,
+                        surface="action_card" if learning_signal.escalation_bias == "prefer_async_native" else "notification",
+                        session_id=session_id,
+                        resume_message=f"Continue from this guardian intervention: {message.content}",
                     )
                     context_manager.record_native_notification(
                         title=notification.title,

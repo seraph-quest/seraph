@@ -1,10 +1,37 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getPackedCockpitPanels } from "./panelLayoutStore";
+const { localStorageMock } = vi.hoisted(() => {
+  let store: Record<string, string> = {};
+  const mock = {
+    getItem: vi.fn((key: string) => store[key] ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      store[key] = value;
+    }),
+    removeItem: vi.fn((key: string) => {
+      delete store[key];
+    }),
+    clear: vi.fn(() => {
+      store = {};
+    }),
+  };
+  Object.defineProperty(globalThis, "localStorage", { value: mock, configurable: true });
+  return { localStorageMock: mock };
+});
+
+import { getPackedCockpitPanels, usePanelLayoutStore } from "./panelLayoutStore";
+import { useCockpitLayoutStore } from "./cockpitLayoutStore";
 
 describe("panelLayoutStore packed cockpit layouts", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    localStorageMock.clear();
+    useCockpitLayoutStore.setState({ activeLayoutId: "default", inspectorVisible: true });
+    usePanelLayoutStore.setState({
+      panels: {
+        ...usePanelLayoutStore.getState().panels,
+        ...getPackedCockpitPanels("default", true),
+      },
+    });
   });
 
   it("packs the default layout across the workspace with no bottom gaps per column", () => {
@@ -59,5 +86,29 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     expect(focusPanels.response_pane.width).toBeGreaterThan(focusPanels.workflows_pane.width);
     expect(reviewPanels.audit_pane.width).toBeGreaterThan(reviewPanels.sessions_pane.width);
     expect(reviewPanels.trace_pane.width).toBeGreaterThan(reviewPanels.sessions_pane.width);
+  });
+
+  it("persists manual pane edits inside the active layout snapshot", () => {
+    vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
+    useCockpitLayoutStore.setState({ activeLayoutId: "focus", inspectorVisible: true });
+    usePanelLayoutStore.getState().applyCockpitLayout("focus", true);
+
+    usePanelLayoutStore.getState().setRect("response_pane", { x: 320, y: 160 });
+    usePanelLayoutStore.getState().applyCockpitLayout("default", true);
+    usePanelLayoutStore.getState().applyCockpitLayout("focus", true);
+
+    expect(usePanelLayoutStore.getState().panels.response_pane.x).toBe(320);
+    expect(usePanelLayoutStore.getState().panels.response_pane.y).toBe(160);
+  });
+
+  it("resetCockpitLayout restores the packed canonical layout for the active preset", () => {
+    vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
+    usePanelLayoutStore.getState().applyCockpitLayout("review", true);
+    const packed = getPackedCockpitPanels("review", true);
+
+    usePanelLayoutStore.getState().setRect("audit_pane", { x: 64 });
+    usePanelLayoutStore.getState().resetCockpitLayout("review", true);
+
+    expect(usePanelLayoutStore.getState().panels.audit_pane.x).toBe(packed.audit_pane.x);
   });
 });

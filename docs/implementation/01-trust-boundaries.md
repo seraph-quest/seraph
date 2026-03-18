@@ -20,8 +20,8 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
-- [x] this workstream owns `execution-safety-hardening-v1` in the master 10-PR queue
+- [x] this workstream now leads the repo-wide 10-PR horizon through `execution-safety-hardening-v1`
+- [x] this workstream owns the first batch item in the refreshed master 10-PR queue
 - [ ] reduce reliance on raw secret retrieval in favor of narrower secret-injection paths
 
 ## Still To Do On `develop`

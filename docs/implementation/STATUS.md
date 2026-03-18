@@ -33,11 +33,12 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] Guardian Intelligence is now the active implementation track.
-- [ ] Guardian Intelligence is not complete yet.
+- [x] The repo-wide active delivery batch is now led by execution hardening, cockpit depth, workflow control, and feedback-driven guardian learning.
+- [ ] That batch is not complete yet.
+- [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus after the cockpit and first salience foundation is cockpit depth, workflow control ergonomics, execution hardening, native reach, and deeper guardian learning.
+- [x] The next strategic focus is execution hardening, cockpit depth, workflow control, feedback-driven guardian learning, stronger native presence, and deeper cross-surface continuity.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape

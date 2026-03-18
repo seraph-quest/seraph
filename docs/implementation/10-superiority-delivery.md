@@ -83,7 +83,10 @@ This file explains:
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current next unchecked items are execution hardening, workflow control ergonomics, richer native reach, and deeper guardian learning after the cockpit and salience foundations land.
+- [x] The current queue starts with execution hardening because trust and privileged-path isolation are the most dangerous remaining gap.
+- [x] The next layer is cockpit depth plus workflow control because operator visibility and workflow leverage are where Seraph is still visibly behind the strongest reference systems.
+- [x] The next layer after that is feedback-driven guardian learning and salience calibration because proactive quality is now bottlenecked more by judgment than by missing primitives.
+- [x] The later items in the current queue deepen desktop presence, cross-surface continuity, and broader behavioral proof for the stronger guardian product shape.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

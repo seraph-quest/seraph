@@ -19,8 +19,8 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
-- [x] this workstream lands `native-presence-notifications` in the master 10-PR queue on this branch
+- [ ] this workstream is not the first queue item, but it now owns two later items in the refreshed horizon
+- [x] this workstream owns `native-desktop-shell-v1` and `cross-surface-continuity-and-notification-controls` in the master 10-PR queue
 
 ## Still To Do On `develop`
 

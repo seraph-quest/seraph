@@ -20,8 +20,8 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus after `workflow-composition-v1` shipped on this branch
-- [x] this workstream now owns the remaining workflow-control and extension-ergonomics gap after `workflow-composition-v1`
+- [ ] this workstream is not the first queue item, but it is back in the near-term horizon after the first workflow runtime shipped
+- [x] this workstream now shares `workflow-control-and-artifact-roundtrips-v1` after `workflow-composition-v1` shipped on `develop`
 
 ## Still To Do On `develop`
 

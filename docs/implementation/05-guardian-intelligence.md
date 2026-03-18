@@ -24,9 +24,9 @@
 
 ## Working On Now
 
-- [x] this workstream is now the repo-wide active focus after the first runtime baseline shipped
-- [x] this workstream has now shipped the `observer-salience-and-confidence-model` foundation on this branch
-- [x] the next major gap after this foundation is deeper feedback-driven learning rather than more missing observer fields
+- [x] this workstream remains central in the repo-wide horizon through outcome learning, salience calibration, and the deeper human/world model
+- [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
+- [x] the next major gap after that foundation is deeper feedback-driven learning rather than more missing observer fields
 
 ## Still To Do On `develop`
 

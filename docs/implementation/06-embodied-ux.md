@@ -20,8 +20,8 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
-- [x] this workstream ships `operator-cockpit-v1` in the master 10-PR queue
+- [x] this workstream is back near the front of the repo-wide horizon through cockpit-density and operator-control work
+- [x] this workstream owns `cockpit-linked-evidence-panels-v2` and `saved-layouts-and-keyboard-control-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`
 

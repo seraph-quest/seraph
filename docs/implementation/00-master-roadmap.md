@@ -64,26 +64,26 @@ Legend for the checklist column:
 
 This is the rolling execution queue. It should always show the next 10 most valuable PRs, and a checked item may remain visible until the next scheduled refresh.
 
-1. [x] `provider-policy-scoring`:
-   add weighted capability scoring on top of the current routing stack so target selection reflects value, not only explicit preference order
-2. [x] `behavioral-evals-guardian-flows`:
-   extend behavioral evals into observer refresh, consolidation, proactive delivery, and guardrail-sensitive guardian flows
-3. [x] `guardian-state-synthesis`:
-   merge observer signals, memory, goals, sessions, and confidence into one structured guardian-state input
-4. [x] `intervention-policy-v1`:
-   make intervene, defer, bundle, request-approval, and stay-silent decisions explicit and state-aware
-5. [x] `native-presence-notifications`:
-   add the first real non-browser presence path with desktop notifications and interrupt-aware reach
-6. [x] `workflow-composition-v1`:
-   add first-class reusable multi-step workflows across tools, specialists, skills, and MCP
-7. [x] `guardian-feedback-loop`:
-   capture intervention outcomes and explicit user feedback so timing and action quality can improve
-8. [x] `operator-cockpit-v1`:
-   ship the first cockpit-first browser shell with linked state, interventions, audit, trace, and a legacy village fallback
-9. [x] `observer-salience-and-confidence-model`:
-   score observer inputs by confidence, salience, and interruption cost before they reach strategy and delivery layers
-10. [ ] `execution-safety-hardening-v1`:
-   deepen isolation, policy visibility, and privileged execution boundaries to close the gap versus stronger execution-first systems
+1. [ ] `execution-safety-hardening-v1`:
+   deepen privileged execution isolation, policy visibility, and hardening boundaries before Seraph expands more leverage on top of the current action layer
+2. [ ] `cockpit-linked-evidence-panels-v2`:
+   make the guardian cockpit materially denser with linked evidence, trace, approval, and artifact panes so operator visibility becomes a real strength instead of just a first shell
+3. [ ] `workflow-control-and-artifact-roundtrips-v1`:
+   turn shipped workflow composition into something easy to steer by adding operator-facing workflow control, approval visibility, and artifact round-tripping
+4. [ ] `guardian-outcome-learning-v1`:
+   make stored intervention outcomes and explicit feedback change future guardian behavior instead of only being recorded
+5. [ ] `salience-calibration-v2`:
+   improve interruption timing and proactive judgment by calibrating confidence, salience, and interruption cost beyond the first heuristic layer
+6. [ ] `saved-layouts-and-keyboard-control-v1`:
+   make the cockpit feel like a real operator workspace with saved workspaces, stronger keyboard control, and denser navigation ergonomics
+7. [ ] `native-desktop-shell-v1`:
+   move beyond browser-plus-daemon by shipping a more coherent native desktop presence around the existing observer and notification foundations
+8. [ ] `cross-surface-continuity-and-notification-controls`:
+   connect ambient observation, proactive delivery, and deliberate interaction with clearer notification controls and stronger continuity between browser and native surfaces
+9. [ ] `guardian-behavioral-evals-v2`:
+   expand behavioral eval coverage from the first guardian baseline into deeper intervention-quality, workflow, and cockpit-adjacent contracts
+10. [ ] `human-world-model-v1`:
+   deepen guardian-state quality from retrieval-plus-heuristics into a stronger explicit human/world model that can support consistently better intervention quality
 
 ## Queue Maintenance Rule
 

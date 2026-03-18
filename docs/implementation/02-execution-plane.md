@@ -23,8 +23,8 @@
 
 ## Working On Now
 
-- [ ] this workstream is not the repo-wide active focus after `workflow-composition-v1` shipped on this branch
-- [x] this workstream now shares `execution-safety-hardening-v1` in the master 10-PR queue
+- [ ] this workstream is not the first queue item, but it is back near the front of the repo-wide horizon
+- [x] this workstream now shares `execution-safety-hardening-v1` and `workflow-control-and-artifact-roundtrips-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`
 

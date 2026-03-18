@@ -55,6 +55,9 @@ async def test_tools_api_marks_mcp_tools_as_approval_required_in_approval_mode(c
     mcp_entry = next(tool for tool in resp.json() if tool["name"] == "mcp_tasks")
     assert mcp_entry["requires_approval"] is True
     assert mcp_entry["policy_modes"] == ["approval"]
+    assert mcp_entry["approval_behavior"] == "always"
+    assert mcp_entry["risk_level"] == "high"
+    assert mcp_entry["execution_boundaries"] == ["external_mcp"]
 
 
 @pytest.mark.asyncio
@@ -70,3 +73,34 @@ async def test_tools_api_allows_mcp_tools_with_balanced_native_policy_when_mcp_a
     mcp_entry = next(tool for tool in resp.json() if tool["name"] == "mcp_tasks")
     assert mcp_entry["requires_approval"] is True
     assert mcp_entry["policy_modes"] == ["approval"]
+    assert mcp_entry["approval_behavior"] == "always"
+
+
+@pytest.mark.asyncio
+async def test_tools_api_surfaces_workflow_execution_boundaries(client):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="disabled")
+    workflow_tool = MagicMock()
+    workflow_tool.name = "workflow_web_brief_to_file"
+    workflow_tool.description = "fallback description"
+
+    with (
+        patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+        patch("src.api.tools.get_tools", return_value=[workflow_tool]),
+        patch("src.api.tools.workflow_manager.get_tool_metadata", return_value={
+            "description": "Search the web and save a note",
+            "policy_modes": ["balanced", "full"],
+            "risk_level": "medium",
+            "execution_boundaries": ["external_read", "workspace_write"],
+        }),
+    ):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    assert resp.json() == [{
+        "name": "workflow_web_brief_to_file",
+        "description": "Search the web and save a note",
+        "policy_modes": ["balanced", "full"],
+        "requires_approval": False,
+        "approval_behavior": "never",
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+    }]

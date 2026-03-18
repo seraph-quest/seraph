@@ -78,6 +78,21 @@ def get_tool_risk_level(tool_name: str, *, is_mcp: bool = False) -> str:
     return "low"
 
 
+def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False) -> list[str]:
+    """Return the execution-boundary tags for a tool."""
+    if is_mcp:
+        return ["external_mcp"]
+
+    metadata = get_tool_metadata(tool_name)
+    if metadata is None:
+        return ["unknown"]
+
+    boundaries = metadata.get("execution_boundaries")
+    if not isinstance(boundaries, list) or not boundaries:
+        return ["unknown"]
+    return [str(boundary) for boundary in boundaries]
+
+
 def get_current_tool_policy_mode() -> str:
     """Read the current tool policy mode from the shared observer context."""
     try:

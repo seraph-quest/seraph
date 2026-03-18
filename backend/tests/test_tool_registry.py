@@ -14,7 +14,7 @@ class TestToolRegistry:
 
     def test_all_entries_have_required_fields(self):
         all_meta = get_all_metadata()
-        required = {"description", "policy_modes"}
+        required = {"description", "policy_modes", "execution_boundaries"}
         for name, meta in all_meta.items():
             missing = required - set(meta.keys())
             assert not missing, f"Tool '{name}' missing fields: {missing}"

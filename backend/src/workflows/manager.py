@@ -10,6 +10,7 @@ from typing import Any
 
 from smolagents import Tool
 
+from src.plugins.registry import TOOL_METADATA
 from src.workflows.loader import Workflow, load_workflows
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,9 @@ class WorkflowManager:
                 "enabled": workflow.enabled,
                 "step_count": len(workflow.steps),
                 "file_path": workflow.file_path,
+                "policy_modes": self._infer_policy_modes(workflow),
+                "execution_boundaries": self._infer_execution_boundaries(workflow),
+                "risk_level": self._infer_risk_level(workflow),
             }
             for workflow in self._workflows
         ]
@@ -303,6 +307,8 @@ class WorkflowManager:
             "requires_tools": workflow.requires_tools,
             "requires_skills": workflow.requires_skills,
             "step_count": len(workflow.steps),
+            "execution_boundaries": self._infer_execution_boundaries(workflow),
+            "risk_level": self._infer_risk_level(workflow),
         }
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:
@@ -316,6 +322,26 @@ class WorkflowManager:
         if any(tool_name in {"shell_execute", "get_secret"} for tool_name in workflow.requires_tools):
             return ["full"]
         return ["safe", "balanced", "full"]
+
+    def _infer_execution_boundaries(self, workflow: Workflow) -> list[str]:
+        boundaries: list[str] = []
+        for tool_name in workflow.requires_tools:
+            if tool_name.startswith("mcp_"):
+                boundaries.append("external_mcp")
+                continue
+            tool_meta = TOOL_METADATA.get(tool_name, {})
+            for boundary in tool_meta.get("execution_boundaries", []):
+                if boundary not in boundaries:
+                    boundaries.append(boundary)
+        return boundaries or ["unknown"]
+
+    def _infer_risk_level(self, workflow: Workflow) -> str:
+        policy_modes = self._infer_policy_modes(workflow)
+        if policy_modes == ["full"]:
+            return "high"
+        if policy_modes == ["balanced", "full"]:
+            return "medium"
+        return "low"
 
 
 workflow_manager = WorkflowManager()

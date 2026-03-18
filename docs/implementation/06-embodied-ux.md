@@ -10,6 +10,8 @@
 
 ## Shipped On `develop`
 
+- [x] browser guardian cockpit shell with dense multi-pane layout, fixed composer, session rail, guardian-state panel, intervention feedback, audit surface, and live trace
+- [x] cockpit-first default browser mode with explicit fallback to the legacy village shell
 - [x] retro village UI with Phaser-based world rendering
 - [x] animated avatar states with visible casting behavior during tool use
 - [x] RPG-style dialog presentation for chat
@@ -19,13 +21,12 @@
 ## Working On Now
 
 - [ ] this workstream is not the repo-wide active focus while Guardian Intelligence leads the current 10-PR horizon
-- [x] this workstream owns `operator-cockpit-v1` in the master 10-PR queue
+- [x] this workstream ships `operator-cockpit-v1` in the master 10-PR queue
 
 ## Still To Do On `develop`
 
-- [ ] primary dense guardian cockpit instead of the current village as the default workflow surface
-- [ ] linked widgets for state, evidence, interventions, artifacts, and traceability
-- [ ] fixed command layer, status rail, and interrupt-safe operator controls
+- [ ] richer linked widgets for evidence, artifacts, workflow state, and approvals inside the cockpit
+- [ ] saved layouts, stronger keyboard workflow control, and denser operator ergonomics
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 
@@ -39,5 +40,6 @@
 
 - [x] the interface feels intentionally different from a generic chatbot shell
 - [x] tool use and agent activity are visible in the world
-- [ ] the primary workflow surface is a dense guardian cockpit
+- [x] the primary workflow surface is now a guardian cockpit instead of defaulting to the village
+- [ ] the cockpit has strong linked evidence, artifact, workflow, and approval density rather than only a first shell
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

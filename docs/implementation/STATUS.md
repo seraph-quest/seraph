@@ -17,6 +17,7 @@ title: Seraph Development Status
 - [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
+- [x] A first guardian cockpit shell now exists alongside the legacy village mode.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -36,7 +37,7 @@ title: Seraph Development Status
 - [ ] Guardian Intelligence is not complete yet.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus after the runtime baseline is operator cockpit quality, salience-aware intervention quality, workflow control ergonomics, execution hardening, and native reach.
+- [x] The next strategic focus after the first cockpit shell is salience-aware intervention quality, cockpit depth, workflow control ergonomics, execution hardening, and native reach.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -51,7 +52,7 @@ title: Seraph Development Status
 
 ### Core guardian platform
 
-- [x] browser-based Seraph village UI
+- [x] browser-based guardian cockpit with legacy village mode
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
 - [x] persistent soul, vector memory, sessions, and goal storage
@@ -104,7 +105,8 @@ title: Seraph Development Status
 
 ### Current interface surface
 
-- [x] browser-based village UI with chat, quest, and settings overlays
+- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, and fixed composer
+- [x] legacy Phaser village mode with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
 - [x] macOS daemon notification fallback for non-browser proactive reach
@@ -132,7 +134,7 @@ title: Seraph Development Status
 
 ### Interface and presence
 
-- [ ] primary dense guardian cockpit instead of the current village as the default workflow surface
+- [ ] richer cockpit density with linked evidence, artifact, workflow, and approval views beyond the first shell
 - [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
 - [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
 
@@ -145,8 +147,8 @@ title: Seraph Development Status
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are operator cockpit density, salience-aware intervention quality, workflow control ergonomics, native reach, and execution hardening.
-- [ ] The next major step is to turn the current prototype into a denser, more legible, more stateful guardian cockpit without losing the existing trust and memory foundations.
+- [ ] The biggest gaps against the reference systems are cockpit maturity and density, salience-aware intervention quality, workflow control ergonomics, native reach, and execution hardening.
+- [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
 
 ## Workstream View
 

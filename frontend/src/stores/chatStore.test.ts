@@ -26,12 +26,16 @@ function resetStore() {
     isAgentBusy: false,
     agentVisual: { animationState: "idle", positionX: 50, facing: "right", speechText: null },
     ambientState: "idle",
+    ambientTooltip: "",
     chatPanelOpen: true,
     chatMaximized: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
+    interfaceMode: "cockpit",
     onboardingCompleted: null,
     toolRegistry: [],
+    magicEffectPoolSize: 0,
+    debugWalkability: false,
   });
 }
 
@@ -53,6 +57,12 @@ describe("chatStore sync actions", () => {
     useChatStore.getState().setSessionId("abc123");
     expect(useChatStore.getState().sessionId).toBe("abc123");
     expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_last_session_id", "abc123");
+  });
+
+  it("setInterfaceMode writes to localStorage", () => {
+    useChatStore.getState().setInterfaceMode("village");
+    expect(useChatStore.getState().interfaceMode).toBe("village");
+    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_interface_mode", "village");
   });
 
   it("setAgentVisual merges partial state", () => {

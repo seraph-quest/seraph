@@ -40,7 +40,7 @@ Seraph already has a stronger deterministic runtime-eval story than the reviewed
 
 ### 1. Primary interface
 
-Seraph’s shipped village UI is distinctive but weak as the main operating surface for an information-heavy guardian product. OpenClaw, Hermes, and IronClaw all present denser operator-first surfaces today.
+Seraph’s first guardian cockpit shell is a better product direction than the old village-first default, but it is still thinner than the best reference surfaces. OpenClaw, Hermes, and IronClaw still present denser operator-first surfaces with stronger artifact, workflow, and trace control today.
 
 ### 2. Workflow composition
 
@@ -58,8 +58,8 @@ Seraph has a browser surface, WebSocket path, and native daemon foundation, but 
 
 ### Interface and control plane
 
-- replace the village as the primary workflow surface with a dense guardian cockpit
-- add linked widgets for state, evidence, artifacts, interventions, and traces
+- deepen the first guardian cockpit shell into the unquestioned primary workflow surface
+- add stronger linked widgets for state, evidence, artifacts, interventions, workflows, and traces
 - keep a fixed command/composer surface and explicit interrupt/approval controls
 
 ### Guardian intelligence

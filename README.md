@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a retro village browser UI, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The current research direction is a denser guardian cockpit for power users, not a village-first shell.
+  Seraph ships today with a guardian cockpit browser shell, a legacy village mode, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The live product direction is a denser guardian cockpit for power users, not a village-first shell.
 </p>
 
 ---
@@ -57,6 +57,7 @@ open http://localhost:8004/docs   # Swagger API docs
 
 ```
 frontend/src/
+  components/cockpit/ Guardian cockpit shell, state rails, intervention feed
   game/              Phaser 3 village scene, sprites, EventBus
   components/        React overlays — chat, quest panel, settings
   hooks/             useWebSocket, useAgentAnimation
@@ -81,7 +82,7 @@ docs/                Docusaurus docs site
 
 ---
 
-## Current Embodiment Surface
+## Current Legacy Embodiment Surface
 
 ```
 User sends message  -->  THINKING
@@ -89,7 +90,7 @@ User sends message  -->  THINKING
   Response ready    -->  SPEAKING  -->  IDLE  -->  WANDERING
 ```
 
-Tool use currently triggers a casting animation with a magic effect overlay at the agent's position. This is the shipped surface today, but the live docs now treat the dense guardian cockpit as the future primary interface direction.
+Tool use currently triggers a casting animation with a magic effect overlay at the agent's position inside the legacy village mode. The default browser shell is now the guardian cockpit; the village remains available as an alternate embodiment surface.
 
 ---
 
@@ -137,7 +138,7 @@ Current truth:
 
 - [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
-- [x] the source-of-truth docs now target a power-user guardian cockpit as the future primary UI
+- [x] the source-of-truth docs now target a power-user guardian cockpit and the browser app now defaults to that shell
 - [ ] no workstream is complete yet
 - [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
 

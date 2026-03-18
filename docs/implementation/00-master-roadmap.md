@@ -48,7 +48,7 @@ Legend for the checklist column:
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, and first native notifications are shipped; broader channel reach and a richer desktop shell are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, explicit guardian state, intervention policy, and feedback capture are shipped foundations; salience modeling and stronger learning loops are still left |
-| 06. Embodied Interface | `[ ]` | The current village UI is shipped, but the target interface is now a dense guardian cockpit rather than a village-first shell |
+| 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with legacy village fallback is shipped, but denser linked evidence, artifact, and operator-control surfaces are still left |
 | 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
 
 ## Progress Summary
@@ -56,7 +56,8 @@ Legend for the checklist column:
 - [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
-- [ ] Seraph is still behind the strongest reference systems on dense interface efficiency, salience-aware intervention quality, native reach, execution hardening, and operator workflow control.
+- [x] The first guardian cockpit shell is now shipped, with the village retained as a legacy mode rather than the default workflow.
+- [ ] Seraph is still behind the strongest reference systems on cockpit maturity and density, salience-aware intervention quality, native reach, execution hardening, and operator workflow control.
 - [ ] No workstream is complete yet.
 
 ## Next Recommended PR Sequence
@@ -77,8 +78,8 @@ This is the rolling execution queue. It should always show the next 10 most valu
    add first-class reusable multi-step workflows across tools, specialists, skills, and MCP
 7. [x] `guardian-feedback-loop`:
    capture intervention outcomes and explicit user feedback so timing and action quality can improve
-8. [ ] `operator-cockpit-v1`:
-   replace the village as the default workflow surface with a dense multi-pane guardian cockpit
+8. [x] `operator-cockpit-v1`:
+   ship the first cockpit-first browser shell with linked state, interventions, audit, trace, and a legacy village fallback
 9. [ ] `observer-salience-and-confidence-model`:
    score observer inputs by confidence, urgency, and interruption cost before they reach strategy and delivery layers
 10. [ ] `execution-safety-hardening-v1`:
@@ -114,6 +115,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 ## Current Shipped Slice On `develop`
 
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
+- [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
 - [x] first native desktop-notification fallback path when browser delivery is unavailable but the daemon is connected
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist

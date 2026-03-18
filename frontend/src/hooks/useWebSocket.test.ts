@@ -4,7 +4,7 @@
  * These tests verify the reconnection logic in useWebSocket.ts by testing
  * the backoff behavior and session restoration sequencing.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 // We test the constants and behavior rather than the hook directly
 // since hooks require a React rendering context.

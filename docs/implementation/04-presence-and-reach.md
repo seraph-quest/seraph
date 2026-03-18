@@ -10,7 +10,7 @@
 
 ## Shipped On `develop`
 
-- [x] browser-based village and chat surface
+- [x] browser-based guardian cockpit with legacy village fallback
 - [x] WebSocket conversation path
 - [x] native macOS observer daemon for screen and OCR ingest
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context

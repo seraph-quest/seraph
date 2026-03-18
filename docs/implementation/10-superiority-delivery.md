@@ -63,8 +63,8 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, visible tool/activity feedback
-- [ ] still missing: dense multi-pane guardian cockpit with linked evidence, traceability, and control surfaces
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, and legacy village fallback
+- [ ] still missing: denser linked evidence, artifact, workflow, approval, and saved-layout control surfaces
 - owners: Workstream 06
 
 ### 6. Workflow leverage
@@ -83,7 +83,7 @@ This file explains:
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current next unchecked items are operator cockpit, salience/confidence modeling, execution hardening, workflow control ergonomics, and richer native reach.
+- [x] The current next unchecked items are salience/confidence modeling, execution hardening, workflow control ergonomics, and richer native reach after the first cockpit shell lands.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

@@ -184,6 +184,7 @@ export function useWebSocket() {
             role: "proactive",
             content: data.content,
             timestamp: Date.now(),
+            interventionId: data.intervention_id,
             urgency: data.urgency ?? undefined,
             interventionType: data.intervention_type ?? undefined,
           };

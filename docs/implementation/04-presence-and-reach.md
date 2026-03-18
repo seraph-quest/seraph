@@ -15,18 +15,19 @@
 - [x] native macOS observer daemon for screen and OCR ingest
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product
-- [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, browser-side controls for pending native notifications, and a first learning-driven native-channel preference layer
+- [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, browser-side controls for pending native notifications, a first learning-driven native-channel preference layer, and one continuity snapshot that exposes daemon state, deferred bundle items, pending native notifications, and recent interventions together
 
 ## Working On Now
 
 - [x] this workstream shipped `native-desktop-shell-v1`
 - [x] this workstream shipped `cross-surface-continuity-and-notification-controls`
+- [x] this workstream now ships `cross-surface-continuity-v2`
 
 ## Still To Do On `develop`
 
 - [ ] richer notification controls and broader interruption channels outside the first browser/native continuity layer
 - [ ] broader external communication channels
-- [ ] better cross-surface continuity between ambient observation and deliberate interaction
+- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new continuity snapshot
 
 ## Non-Goals
 
@@ -40,3 +41,4 @@
 - [x] Seraph has at least one real non-browser presence path outside the browser tab
 - [x] Seraph now has a coherent first desktop presence surface rather than only a browser app plus hidden daemon fallback
 - [x] browser and native pending-notification state now have a first shared control surface
+- [x] browser and native continuity now share one operator-readable snapshot for daemon, notification, queued-bundle, and recent intervention state

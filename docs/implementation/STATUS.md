@@ -38,8 +38,9 @@ title: Seraph Development Status
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is cross-surface continuity, provider safeguards, and stronger adaptive guardian quality on top of the newly shipped world-model, workflow-run, and behavioral-proof foundations.
+- [x] The next strategic focus is provider safeguards, stronger artifact/evidence round-tripping, and stronger adaptive guardian quality on top of the newly shipped continuity, world-model, workflow-run, and behavioral-proof foundations.
 - [x] The first three items in that refreshed batch, `execution-safety-hardening-v2`, `cockpit-workflow-views-v1`, and `guardian-learning-loop-v2`, are now shipped on this branch.
+- [x] `cross-surface-continuity-v2` is now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -114,7 +115,7 @@ title: Seraph Development Status
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
-- [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, native-notification fallback delivery when browser sockets are unavailable but the daemon is connected, and browser-side inspect/dismiss controls for queued desktop notifications
+- [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, native-notification fallback delivery when browser sockets are unavailable but the daemon is connected, browser-side inspect/dismiss controls for queued desktop notifications, and a unified continuity snapshot for daemon state, queued bundle items, and recent interventions
 
 ### Current interface surface
 
@@ -148,8 +149,8 @@ title: Seraph Development Status
 ### Interface and presence
 
 - [ ] richer cockpit density and broader keyboard/operator control beyond the first dedicated workflow-run shell
-- [ ] richer cross-surface continuity and broader non-browser presence beyond the first desktop-presence and browser/native notification-control layer
-- [ ] stronger cross-surface continuity between ambient observation and deliberate interaction beyond the new pending-notification bridge
+- [ ] richer cross-surface continuity and broader non-browser presence beyond the new continuity snapshot and first desktop-presence/browser-native control layer
+- [ ] stronger cross-surface continuity between ambient observation and deliberate interaction beyond the new daemon/notification/bundle/intervention continuity bridge
 
 ### Workflow and leverage
 

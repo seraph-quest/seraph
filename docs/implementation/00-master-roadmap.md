@@ -46,7 +46,7 @@ Legend for the checklist column:
 | 01. Trust Boundaries | `[ ]` | Policy modes, approvals, audit logging, and secret handling are shipped; deeper isolation and narrower privileged execution paths are still left |
 | 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, web search, and first-class reusable workflows are shipped; stronger execution safety and richer workflow control are still left |
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
-| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, and a first coherent desktop presence surface are shipped; broader channel reach and stronger cross-surface continuity are still left |
+| 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, a first coherent desktop presence surface, and a unified browser/native continuity snapshot are shipped; broader channel reach and deeper cross-surface continuity are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
 | 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with linked evidence, saved layouts, keyboard workspace control, and legacy village fallback is shipped, but denser workflow-operating surfaces are still left |
 | 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
@@ -91,7 +91,7 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#4 cross-surface-continuity-v2`
+- the current active item is `#5 provider-policy-safeguards-v2`
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -99,7 +99,7 @@ It should always show the next 10 most valuable PRs, while the latest completed 
    add dedicated workflow-run, artifact-lineage, approval, and intervention views so the cockpit becomes a real operator console instead of a first generic shell
 3. [x] `guardian-learning-loop-v2`:
    make intervention outcomes and explicit feedback change timing, channel choice, and escalation, not just interruption bias
-4. [ ] `cross-surface-continuity-v2`:
+4. [x] `cross-surface-continuity-v2`:
    unify browser state, daemon state, queued notifications, and recent interventions into one consistent continuity model
 5. [ ] `provider-policy-safeguards-v2`:
    add capability constraints, cost and latency guardrails, and stronger routing safety beyond the current weighted scoring layer
@@ -148,6 +148,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, and desktop-notification fallback when browser delivery is unavailable
 - [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, and cockpit-to-settings linkage for queued desktop state
+- [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
 - [x] the cockpit now supports persisted `default` / `focus` / `review` workspace presets, inspector visibility persistence, and layout switching from both the header and keyboard shortcuts

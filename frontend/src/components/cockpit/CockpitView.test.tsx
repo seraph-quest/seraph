@@ -60,8 +60,42 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/observer/daemon-status")) {
-        return Promise.resolve(mockResponse({ connected: false, pending_notification_count: 0, capture_mode: "balanced" }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(
+          mockResponse({
+            daemon: { connected: false, pending_notification_count: 1, capture_mode: "balanced" },
+            notifications: [],
+            queued_insights: [
+              {
+                id: "queue-1",
+                intervention_id: "intervention-1",
+                content_excerpt: "Hold this until the browser is back.",
+                intervention_type: "advisory",
+                urgency: 3,
+                reasoning: "high_interruption_cost",
+                created_at: "2026-03-18T12:00:00Z",
+              },
+            ],
+            queued_insight_count: 1,
+            recent_interventions: [
+              {
+                id: "intervention-1",
+                session_id: "session-1",
+                intervention_type: "advisory",
+                content_excerpt: "Hold this until the browser is back.",
+                policy_action: "bundle",
+                policy_reason: "high_interruption_cost",
+                delivery_decision: "queue",
+                latest_outcome: "queued",
+                transport: null,
+                notification_id: null,
+                feedback_type: null,
+                updated_at: "2026-03-18T12:02:00Z",
+                continuity_surface: "bundle_queue",
+              },
+            ],
+          }),
+        );
       }
       if (url.includes("/api/audit/events")) {
         return Promise.resolve(
@@ -113,6 +147,8 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Workflow runs")).toBeInTheDocument());
+    expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
+    expect(screen.getByText("Hold this until the browser is back.")).toBeInTheDocument();
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
     expect(screen.getByText("Draft Rerun")).toBeInTheDocument();

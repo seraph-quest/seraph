@@ -52,10 +52,32 @@ interface DaemonPresenceState {
   last_native_notification_outcome?: string | null;
 }
 
+interface GuardianContinuityIntervention {
+  id: string;
+  session_id?: string | null;
+  intervention_type: string;
+  content_excerpt: string;
+  policy_action: string;
+  policy_reason: string;
+  delivery_decision?: string | null;
+  latest_outcome: string;
+  transport?: string | null;
+  notification_id?: string | null;
+  feedback_type?: string | null;
+  updated_at: string;
+  continuity_surface: string;
+}
+
+interface ObserverContinuitySnapshot {
+  daemon: DaemonPresenceState;
+  queued_insight_count: number;
+  recent_interventions: GuardianContinuityIntervention[];
+}
+
 type InspectorSelection =
   | { kind: "approval"; approval: PendingApproval }
   | { kind: "workflow"; workflow: WorkflowRunRecord }
-  | { kind: "intervention"; message: ChatMessage }
+  | { kind: "intervention"; intervention: GuardianContinuityIntervention }
   | { kind: "trace"; message: ChatMessage }
   | { kind: "audit"; event: CockpitAuditEvent }
   | { kind: "artifact"; artifact: ArtifactRecord };
@@ -75,6 +97,10 @@ function labelForRole(message: ChatMessage): string {
   if (message.role === "proactive") return message.interventionType ?? "proactive";
   if (message.role === "step") return message.toolUsed ?? "step";
   return message.role;
+}
+
+function formatContinuityLabel(value: string | null | undefined): string {
+  return (value || "unknown").replace(/_/g, " ");
 }
 
 function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
@@ -111,6 +137,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
   const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
+  const [queuedBundleCount, setQueuedBundleCount] = useState(0);
+  const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
   const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -146,11 +174,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     const refreshCockpit = async () => {
       try {
-        const [observerResponse, auditResponse, approvalsResponse, daemonResponse] = await Promise.all([
+        const [observerResponse, auditResponse, approvalsResponse, continuityResponse] = await Promise.all([
           fetch(`${API_URL}/api/observer/state`),
           fetch(`${API_URL}/api/audit/events?limit=12`),
           fetch(`${API_URL}/api/approvals/pending?limit=8`),
-          fetch(`${API_URL}/api/observer/daemon-status`),
+          fetch(`${API_URL}/api/observer/continuity`),
         ]);
 
         if (!cancelled && observerResponse.ok) {
@@ -168,15 +196,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
         }
 
-        if (!cancelled && daemonResponse.ok) {
-          const daemonPayload = await daemonResponse.json();
-          setDaemonPresence(daemonPayload);
+        if (!cancelled && continuityResponse.ok) {
+          const continuityPayload: ObserverContinuitySnapshot = await continuityResponse.json();
+          setDaemonPresence(continuityPayload.daemon);
+          setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
+          setRecentInterventions(continuityPayload.recent_interventions ?? []);
         }
       } catch {
         if (!cancelled) {
           setAuditEvents([]);
           setPendingApprovals([]);
           setDaemonPresence(null);
+          setQueuedBundleCount(0);
+          setRecentInterventions([]);
         }
       }
     };
@@ -220,10 +252,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .filter((message) => message.role === "step" || message.role === "error")
     .slice(-8)
     .reverse();
-  const recentInterventions = messages
-    .filter((message) => message.role === "proactive" || message.role === "approval")
-    .slice(-6)
-    .reverse();
   const topGoals = collectGoalTitles(goalTree, 5);
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
   const submitDisabled = connectionStatus !== "connected" || isAgentBusy || !composer.trim();
@@ -232,9 +260,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return pendingApprovals.find((approval) => approval.tool_name === workflow.toolName) ?? null;
   }
 
-  function interventionsForWorkflow(workflow: WorkflowRunRecord): ChatMessage[] {
+  function interventionsForWorkflow(workflow: WorkflowRunRecord): GuardianContinuityIntervention[] {
     if (!workflow.sessionId || workflow.sessionId !== sessionId) return [];
-    return messages.filter((message) => message.role === "proactive");
+    return recentInterventions.filter((intervention) => intervention.session_id === workflow.sessionId);
   }
 
   async function sendFeedback(interventionId: string, feedbackType: "helpful" | "not_helpful") {
@@ -341,14 +369,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         linked_interventions: linkedInterventions.length,
       };
     } else if (selectedInspector.kind === "intervention") {
-      const message = selectedInspector.message;
-      title = message.interventionType ?? "intervention";
-      meta = `${formatAge(message.timestamp)} ago`;
-      body = message.content;
+      const intervention = selectedInspector.intervention;
+      title = intervention.intervention_type;
+      meta = `${formatContinuityLabel(intervention.continuity_surface)} · ${formatAge(intervention.updated_at)}`;
+      body = intervention.content_excerpt;
       details = {
-        intervention_id: message.interventionId ?? "n/a",
-        feedback: message.interventionId ? feedbackState[message.interventionId] ?? "unrated" : "n/a",
-        urgency: message.urgency ?? "n/a",
+        intervention_id: intervention.id,
+        feedback: feedbackState[intervention.id] ?? intervention.feedback_type ?? "unrated",
+        policy_action: intervention.policy_action,
+        policy_reason: intervention.policy_reason,
+        delivery_decision: intervention.delivery_decision ?? "n/a",
+        latest_outcome: intervention.latest_outcome,
+        continuity_surface: intervention.continuity_surface,
+        transport: intervention.transport ?? "n/a",
       };
     } else if (selectedInspector.kind === "trace") {
       const message = selectedInspector.message;
@@ -460,6 +493,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 native {daemonPresence.pending_notification_count} queued
               </button>
             )}
+            <button
+              type="button"
+              className="cockpit-pill"
+              onClick={() => setSettingsPanelOpen(true)}
+              title="Open settings to inspect deferred bundle items and recent guardian continuity"
+            >
+              bundle {queuedBundleCount} queued
+            </button>
             <span className="cockpit-pill">
               budget {observerState?.attention_budget_remaining ?? "?"}
             </span>
@@ -760,34 +801,37 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 <div key={message.id} className="cockpit-row">
                   <button
                     className={`cockpit-row-button ${
-                      selectedInspector?.kind === "intervention" && selectedInspector.message.id === message.id
+                      selectedInspector?.kind === "intervention" && selectedInspector.intervention.id === message.id
                         ? "active"
                         : ""
                     }`}
-                    onClick={() => setSelectedInspector({ kind: "intervention", message })}
+                    onClick={() => setSelectedInspector({ kind: "intervention", intervention: message })}
                   >
                     <div className="cockpit-row-header">
-                      <span className="cockpit-role">{labelForRole(message)}</span>
-                      <span className="cockpit-row-age">{formatAge(message.timestamp)}</span>
+                      <span className="cockpit-role">{message.intervention_type}</span>
+                      <span className="cockpit-row-age">{formatAge(message.updated_at)}</span>
                     </div>
-                    <div className="cockpit-row-body">{message.content}</div>
+                    <div className="cockpit-row-body">{message.content_excerpt}</div>
+                    <div className="cockpit-row-meta">
+                      {formatContinuityLabel(message.continuity_surface)} · {formatContinuityLabel(message.latest_outcome)}
+                    </div>
                   </button>
-                  {message.interventionId && (
+                  {message.id && (
                     <div className="cockpit-feedback-row">
                       <button
                         className="cockpit-feedback-button"
-                        onClick={() => sendFeedback(message.interventionId!, "helpful")}
+                        onClick={() => sendFeedback(message.id, "helpful")}
                       >
                         Helpful
                       </button>
                       <button
                         className="cockpit-feedback-button"
-                        onClick={() => sendFeedback(message.interventionId!, "not_helpful")}
+                        onClick={() => sendFeedback(message.id, "not_helpful")}
                       >
                         Not helpful
                       </button>
                       <span className="cockpit-feedback-status">
-                        {feedbackState[message.interventionId] ?? "unrated"}
+                        {feedbackState[message.id] ?? message.feedback_type ?? "unrated"}
                       </span>
                     </div>
                   )}

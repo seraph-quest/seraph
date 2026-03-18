@@ -75,6 +75,40 @@ class DaemonStatusResponse(BaseModel):
     last_native_notification_outcome: str | None = None
 
 
+class QueuedInsightResponse(BaseModel):
+    id: str
+    intervention_id: str | None = None
+    content_excerpt: str
+    intervention_type: str
+    urgency: int
+    reasoning: str
+    created_at: str
+
+
+class RecentInterventionResponse(BaseModel):
+    id: str
+    session_id: str | None = None
+    intervention_type: str
+    content_excerpt: str
+    policy_action: str
+    policy_reason: str
+    delivery_decision: str | None = None
+    latest_outcome: str
+    transport: str | None = None
+    notification_id: str | None = None
+    feedback_type: str | None = None
+    updated_at: str
+    continuity_surface: str
+
+
+class ObserverContinuityResponse(BaseModel):
+    daemon: DaemonStatusResponse
+    notifications: list[NativeNotificationResponse]
+    queued_insights: list[QueuedInsightResponse]
+    queued_insight_count: int
+    recent_interventions: list[RecentInterventionResponse]
+
+
 class InterventionFeedbackRequest(BaseModel):
     feedback_type: str
     note: str | None = None
@@ -159,6 +193,20 @@ async def post_screen_context(body: ScreenContextRequest):
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)
 async def daemon_status():
     """Return daemon connectivity status based on heartbeat timestamp."""
+    return await _daemon_status_payload()
+
+
+def _continuity_surface(*, latest_outcome: str, transport: str | None, policy_action: str) -> str:
+    if transport == "native_notification" or latest_outcome.startswith("notification_"):
+        return "native_notification"
+    if policy_action == "bundle" or latest_outcome.startswith("bundle") or latest_outcome == "queued":
+        return "bundle_queue"
+    if latest_outcome == "failed":
+        return "delivery_failed"
+    return "browser"
+
+
+async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]:
     ctx = context_manager.get_context()
     connected = context_manager.is_daemon_connected()
     pending_notification_count = await native_notification_queue.count()
@@ -176,6 +224,57 @@ async def daemon_status():
         ),
         "last_native_notification_title": ctx.last_native_notification_title,
         "last_native_notification_outcome": ctx.last_native_notification_outcome,
+    }
+
+
+@router.get("/observer/continuity", response_model=ObserverContinuityResponse)
+async def get_observer_continuity():
+    """Return a single continuity snapshot for browser and daemon surfaces."""
+    from src.guardian.feedback import guardian_feedback_repository
+    from src.observer.insight_queue import insight_queue
+
+    notifications = [item.to_dict() for item in await native_notification_queue.list()]
+    queued_insights = await insight_queue.peek_all()
+    recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
+
+    return {
+        "daemon": await _daemon_status_payload(),
+        "notifications": notifications,
+        "queued_insights": [
+            {
+                "id": item.id,
+                "intervention_id": item.intervention_id,
+                "content_excerpt": item.content[:157] + "..." if len(item.content) > 160 else item.content,
+                "intervention_type": item.intervention_type,
+                "urgency": item.urgency,
+                "reasoning": item.reasoning,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in queued_insights
+        ],
+        "queued_insight_count": len(queued_insights),
+        "recent_interventions": [
+            {
+                "id": item.id,
+                "session_id": item.session_id,
+                "intervention_type": item.intervention_type,
+                "content_excerpt": item.content_excerpt,
+                "policy_action": item.policy_action,
+                "policy_reason": item.policy_reason,
+                "delivery_decision": item.delivery_decision,
+                "latest_outcome": item.latest_outcome,
+                "transport": item.transport,
+                "notification_id": item.notification_id,
+                "feedback_type": item.feedback_type,
+                "updated_at": item.updated_at.isoformat(),
+                "continuity_surface": _continuity_surface(
+                    latest_outcome=item.latest_outcome,
+                    transport=item.transport,
+                    policy_action=item.policy_action,
+                ),
+            }
+            for item in recent_interventions
+        ],
     }
 
 

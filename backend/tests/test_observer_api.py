@@ -338,6 +338,96 @@ class TestObserverAPI:
         await native_notification_queue.clear()
 
     @pytest.mark.asyncio
+    async def test_observer_continuity_snapshot(self, async_db, client):
+        await native_notification_queue.clear()
+        mgr = ContextManager()
+        mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing cross-surface continuity.")
+        mgr.update_capture_mode("balanced")
+        mgr.record_native_notification(title="Seraph alert", outcome="queued")
+
+        native_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-1",
+            message_type="proactive",
+            intervention_type="alert",
+            urgency=5,
+            content="Desktop fallback is active.",
+            reasoning="browser_unavailable",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        bundle_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-2",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Bundle this until the next browser check-in.",
+            reasoning="high_interruption_cost",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="bundle",
+            policy_reason="high_interruption_cost",
+            delivery_decision="queue",
+            latest_outcome="queued",
+        )
+        notification = await native_notification_queue.enqueue(
+            intervention_id=native_intervention.id,
+            title="Seraph alert",
+            body="Desktop fallback is active.",
+            intervention_type="alert",
+            urgency=5,
+        )
+        await guardian_feedback_repository.update_outcome(
+            native_intervention.id,
+            latest_outcome="notification_acked",
+            transport="native_notification",
+            notification_id=notification.id,
+        )
+        from src.observer.insight_queue import insight_queue
+
+        await insight_queue.enqueue(
+            content="Bundle this until the next browser check-in.",
+            intervention_type="advisory",
+            urgency=3,
+            reasoning="high_interruption_cost",
+            intervention_id=bundle_intervention.id,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["daemon"]["connected"] is True
+        assert payload["daemon"]["capture_mode"] == "balanced"
+        assert payload["daemon"]["pending_notification_count"] == 1
+        assert payload["notifications"][0]["id"] == notification.id
+        assert payload["notifications"][0]["intervention_id"] == native_intervention.id
+        assert payload["queued_insight_count"] == 1
+        assert payload["queued_insights"][0]["intervention_id"] == bundle_intervention.id
+        assert payload["queued_insights"][0]["content_excerpt"] == "Bundle this until the next browser check-in."
+        assert {item["continuity_surface"] for item in payload["recent_interventions"]} >= {
+            "native_notification",
+            "bundle_queue",
+        }
+        assert any(
+            item["id"] == native_intervention.id and item["notification_id"] == notification.id
+            for item in payload["recent_interventions"]
+        )
+
+        await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):
         await native_notification_queue.clear()
         intervention = await guardian_feedback_repository.create_intervention(

@@ -58,6 +58,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "native_presence_notification_behavior" in captured.out
     assert "native_desktop_shell_behavior" in captured.out
     assert "cross_surface_notification_controls_behavior" in captured.out
+    assert "cross_surface_continuity_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
     assert "salience_calibration_behavior" in captured.out
     assert "observer_delivery_salience_confidence_behavior" in captured.out
@@ -155,6 +156,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "native_presence_notification_behavior",
                 "native_desktop_shell_behavior",
                 "cross_surface_notification_controls_behavior",
+                "cross_surface_continuity_behavior",
                 "intervention_policy_behavior",
                 "salience_calibration_behavior",
                 "observer_delivery_salience_confidence_behavior",
@@ -322,6 +324,13 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_source"] == "browser_controls"
     assert details_by_name["cross_surface_notification_controls_behavior"]["dismiss_all_event_count"] == 1
     assert details_by_name["cross_surface_notification_controls_behavior"]["second_notification_preserved_until_bulk_clear"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["daemon_pending_notifications"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["notification_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["notification_intervention_matches"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["queued_insight_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["queued_bundle_matches"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["native_surface_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["bundle_surface_present"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"

@@ -35,14 +35,14 @@ This file owns three implementation questions:
 | Runtime reliability and eval rigor | `[ ]` | fallback chains, routing policy, structured runtime audit, and broad deterministic eval harness coverage | richer behavioral eval depth and broader provider-policy sophistication | 03 |
 | Workflow composition and delegation | `[ ]` | specialists, MCP, skills, delegation foundations, first-class reusable workflows, and first cockpit workflow-run/operator views | deeper operator-facing workflow history, richer artifact round-tripping, and easier extension ergonomics | 07, 02 |
 | Dense interface efficiency | `[ ]` | guardian cockpit default with linked state, workflow runs, interventions, audit, trace, fixed composer, persisted `default` / `focus` / `review` layouts, keyboard layout switching, and legacy village fallback | stronger workflow-operating density, richer artifact/workflow history, and more flexible operator workspace control | 06, 07 |
-| Presence and reach across surfaces | `[ ]` | browser delivery, proactive queue/bundle delivery, native daemon, a first desktop presence surface built on daemon status plus notification fallback, and browser-side controls for pending native notifications | broader channels and continuity beyond the first browser/native notification bridge | 04, 06 |
+| Presence and reach across surfaces | `[ ]` | browser delivery, proactive queue/bundle delivery, native daemon, a first desktop presence surface built on daemon status plus notification fallback, browser-side controls for pending native notifications, and a shared continuity snapshot for daemon state, bundle queue, native notifications, and recent interventions | broader channels and continuity beyond the first browser/native continuity snapshot | 04, 06 |
 
 ## What This Means On `develop`
 
 - [x] Seraph already has real foundations on every benchmark axis.
 - [x] Guardian memory, proactive scaffolding, and runtime legibility are stronger than a prototype-only baseline.
 - [ ] Seraph is not yet in a position to claim broad benchmark superiority from shipped implementation alone.
-- [ ] The biggest implementation gaps still cluster around execution hardening, workflow-operating density inside the cockpit, deeper intervention learning, richer world-model quality beyond the first layer, and stronger cross-surface continuity.
+- [ ] The biggest implementation gaps still cluster around execution hardening, workflow-operating density inside the cockpit, deeper intervention learning, richer world-model quality beyond the first layer, and stronger cross-surface continuity beyond the first shared continuity snapshot.
 
 ## Acceptance Checklist
 

@@ -13,7 +13,7 @@
 - [x] browser guardian cockpit shell with dense multi-pane layout, fixed composer, session rail, guardian-state panel, intervention feedback, audit surface, live trace, pending approvals, recent outputs, and an operations inspector
 - [x] dedicated cockpit workflow-run views with richer workflow inspector actions and artifact-lineage links
 - [x] persisted cockpit workspace presets for `default`, `focus`, and `review`, with inspector visibility persistence and keyboard switching
-- [x] cockpit-native bridge cues through live desktop status, pending native-notification state, and browser-side native-presence controls in the operator surfaces
+- [x] cockpit-native bridge cues through live desktop status, pending native-notification state, deferred bundle visibility, recent intervention continuity, and browser-side native-presence controls in the operator surfaces
 - [x] cockpit-first default browser mode with explicit fallback to the legacy village shell
 - [x] retro village UI with Phaser-based world rendering
 - [x] animated avatar states with visible casting behavior during tool use

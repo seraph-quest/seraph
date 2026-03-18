@@ -49,6 +49,7 @@ from src.api.observer import (
     dismiss_native_notification,
     enqueue_test_native_notification,
     get_next_native_notification,
+    get_observer_continuity,
     list_native_notifications,
     post_intervention_feedback,
     post_screen_context,
@@ -69,6 +70,7 @@ from src.memory.vector_store import _reset_vector_store_state, add_memory, searc
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
+from src.observer.insight_queue import insight_queue
 from src.observer.intervention_policy import decide_intervention
 from src.observer.native_notification_queue import native_notification_queue
 from src.observer.salience import derive_observer_assessment
@@ -3626,6 +3628,97 @@ async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]
     }
 
 
+async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    await native_notification_queue.clear()
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        mgr = ContextManager()
+        mgr.update_screen_context("Arc — Guardian Cockpit", "Reviewing continuity across browser and desktop.")
+        mgr.update_capture_mode("balanced")
+        mgr.record_native_notification(title="Seraph alert", outcome="queued")
+
+        native_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="continuity-session",
+            message_type="proactive",
+            intervention_type="alert",
+            urgency=5,
+            content="Desktop fallback is active.",
+            reasoning="browser_unavailable",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        notification = await native_notification_queue.enqueue(
+            intervention_id=native_intervention.id,
+            title="Seraph alert",
+            body="Desktop fallback is active.",
+            intervention_type="alert",
+            urgency=5,
+        )
+        await guardian_feedback_repository.update_outcome(
+            native_intervention.id,
+            latest_outcome="notification_acked",
+            transport="native_notification",
+            notification_id=notification.id,
+        )
+
+        bundle_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="continuity-session",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Bundle this until the browser reconnects.",
+            reasoning="high_interruption_cost",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="bundle",
+            policy_reason="high_interruption_cost",
+            delivery_decision="queue",
+            latest_outcome="queued",
+        )
+        await insight_queue.enqueue(
+            content="Bundle this until the browser reconnects.",
+            intervention_type="advisory",
+            urgency=3,
+            reasoning="high_interruption_cost",
+            intervention_id=bundle_intervention.id,
+        )
+
+        with patch("src.api.observer.context_manager", mgr):
+            continuity = await get_observer_continuity()
+
+        queued_ids = [item.id for item in await insight_queue.peek_all()]
+        if queued_ids:
+            await insight_queue.delete_many(queued_ids)
+        await native_notification_queue.clear()
+
+    surfaces = {item["continuity_surface"] for item in continuity["recent_interventions"]}
+    return {
+        "daemon_pending_notifications": continuity["daemon"]["pending_notification_count"],
+        "notification_count": len(continuity["notifications"]),
+        "notification_intervention_matches": continuity["notifications"][0]["intervention_id"] == native_intervention.id,
+        "queued_insight_count": continuity["queued_insight_count"],
+        "queued_bundle_matches": continuity["queued_insights"][0]["intervention_id"] == bundle_intervention.id,
+        "recent_surfaces": sorted(surfaces),
+        "native_surface_present": "native_notification" in surfaces,
+        "bundle_surface_present": "bundle_queue" in surfaces,
+    }
+
+
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -4815,6 +4908,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="Browser-side native notification controls can inspect, dismiss, and bulk-clear desktop notifications without losing continuity state.",
         runner=_eval_cross_surface_notification_controls_behavior,
+    ),
+    EvalScenario(
+        name="cross_surface_continuity_behavior",
+        category="presence",
+        description="Browser and native continuity surfaces read one composed snapshot for daemon state, pending notifications, queued bundles, and recent interventions.",
+        runner=_eval_cross_surface_continuity_behavior,
     ),
     EvalScenario(
         name="intervention_policy_behavior",

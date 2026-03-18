@@ -57,8 +57,8 @@ This file explains:
 
 ### 4. Presence and reach
 
-- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, and browser-side controls for pending native notifications
-- [ ] still missing: broader reach channels and continuity beyond the first browser/native notification bridge
+- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, and a shared continuity snapshot for daemon state, deferred bundles, pending native notifications, and recent interventions
+- [ ] still missing: broader reach channels and continuity beyond the first browser/native continuity snapshot
 - owners: Workstream 04, Workstream 06
 
 ### 5. Operator cockpit
@@ -87,8 +87,9 @@ This file explains:
 - [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
 - [x] `execution-safety-hardening-v2` is now the first shipped item from the refreshed queue on this branch.
 - [x] `cockpit-workflow-views-v1` and `guardian-learning-loop-v2` are now the second and third shipped items from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `cross-surface-continuity-v2` because the cockpit/workflow and first multi-signal learning slices are now in place, and the next bottleneck shifts to continuity across browser and native surfaces.
-- [x] The refreshed queue still keeps cross-surface continuity, provider safeguards, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
+- [x] `cross-surface-continuity-v2` is now the fourth shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `provider-policy-safeguards-v2` because the first continuity bridge is now in place and the next reliability bottleneck shifts back to routing safety.
+- [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

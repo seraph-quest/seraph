@@ -26,20 +26,17 @@ describe("DaemonStatus", () => {
   it("renders native presence status details from the daemon endpoint", async () => {
     fetchMock.mockResolvedValueOnce(
       mockResponse({
-        connected: true,
-        last_post: 123,
-        active_window: "VS Code — main.py",
-        has_screen_context: true,
-        capture_mode: "balanced",
-        pending_notification_count: 2,
-        last_native_notification_at: "2026-03-18T10:00:00Z",
-        last_native_notification_title: "Seraph desktop shell",
-        last_native_notification_outcome: "queued_test",
-      }),
-    );
-    fetchMock.mockResolvedValueOnce(
-      mockResponse({
-        pending_count: 1,
+        daemon: {
+          connected: true,
+          last_post: 123,
+          active_window: "VS Code — main.py",
+          has_screen_context: true,
+          capture_mode: "balanced",
+          pending_notification_count: 2,
+          last_native_notification_at: "2026-03-18T10:00:00Z",
+          last_native_notification_title: "Seraph desktop shell",
+          last_native_notification_outcome: "queued_test",
+        },
         notifications: [
           {
             id: "notif-1",
@@ -49,6 +46,35 @@ describe("DaemonStatus", () => {
             intervention_type: "test",
             urgency: 1,
             created_at: "2026-03-18T10:00:00Z",
+          },
+        ],
+        queued_insights: [
+          {
+            id: "queue-1",
+            intervention_id: "intervention-2",
+            content_excerpt: "Bundle this until the browser is back.",
+            intervention_type: "advisory",
+            urgency: 3,
+            reasoning: "high_interruption_cost",
+            created_at: "2026-03-18T10:01:00Z",
+          },
+        ],
+        queued_insight_count: 1,
+        recent_interventions: [
+          {
+            id: "intervention-1",
+            session_id: "session-1",
+            intervention_type: "alert",
+            content_excerpt: "Desktop fallback is active.",
+            policy_action: "act",
+            policy_reason: "available_capacity",
+            delivery_decision: "deliver",
+            latest_outcome: "notification_acked",
+            transport: "native_notification",
+            notification_id: "notif-1",
+            feedback_type: "acknowledged",
+            updated_at: "2026-03-18T10:02:00Z",
+            continuity_surface: "native_notification",
           },
         ],
       }),
@@ -62,6 +88,10 @@ describe("DaemonStatus", () => {
     expect(screen.getByText("Queued test notification")).toBeInTheDocument();
     expect(screen.getAllByText("Seraph desktop shell")).toHaveLength(2);
     expect(screen.getByText("Native presence is connected. This is a test notification.")).toBeInTheDocument();
+    expect(screen.getByText("Deferred bundle items")).toBeInTheDocument();
+    expect(screen.getByText("Bundle this until the browser is back.")).toBeInTheDocument();
+    expect(screen.getByText("Recent guardian continuity")).toBeInTheDocument();
+    expect(screen.getByText("Desktop fallback is active.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 
@@ -69,21 +99,21 @@ describe("DaemonStatus", () => {
     fetchMock
       .mockResolvedValueOnce(
         mockResponse({
-          connected: true,
-          last_post: 123,
-          active_window: "Cursor — notes.md",
-          has_screen_context: false,
-          capture_mode: "on_switch",
-          pending_notification_count: 0,
-          last_native_notification_at: null,
-          last_native_notification_title: null,
-          last_native_notification_outcome: null,
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockResponse({
-          pending_count: 0,
+          daemon: {
+            connected: true,
+            last_post: 123,
+            active_window: "Cursor — notes.md",
+            has_screen_context: false,
+            capture_mode: "on_switch",
+            pending_notification_count: 0,
+            last_native_notification_at: null,
+            last_native_notification_title: null,
+            last_native_notification_outcome: null,
+          },
           notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
         }),
       )
       .mockResolvedValueOnce(
@@ -98,33 +128,33 @@ describe("DaemonStatus", () => {
       )
       .mockResolvedValueOnce(
         mockResponse({
-          connected: true,
-          last_post: 123,
-          active_window: "Cursor — notes.md",
-          has_screen_context: false,
-          capture_mode: "on_switch",
-          pending_notification_count: 1,
-          last_native_notification_at: "2026-03-18T10:00:00Z",
-          last_native_notification_title: "Seraph desktop shell",
-          last_native_notification_outcome: "queued_test",
+          daemon: {
+            connected: true,
+            last_post: 123,
+            active_window: "Cursor — notes.md",
+            has_screen_context: false,
+            capture_mode: "on_switch",
+            pending_notification_count: 1,
+            last_native_notification_at: "2026-03-18T10:00:00Z",
+            last_native_notification_title: "Seraph desktop shell",
+            last_native_notification_outcome: "queued_test",
+          },
+          notifications: [
+            {
+              id: "notif-1",
+              intervention_id: null,
+              title: "Seraph desktop shell",
+              body: "Native presence is connected. This is a test notification.",
+              intervention_type: "test",
+              urgency: 1,
+              created_at: "2026-03-18T10:00:00Z",
+            },
+          ],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
         }),
       );
-    fetchMock.mockResolvedValueOnce(
-      mockResponse({
-        pending_count: 1,
-        notifications: [
-          {
-            id: "notif-1",
-            intervention_id: null,
-            title: "Seraph desktop shell",
-            body: "Native presence is connected. This is a test notification.",
-            intervention_type: "test",
-            urgency: 1,
-            created_at: "2026-03-18T10:00:00Z",
-          },
-        ],
-      }),
-    );
 
     render(<DaemonStatus />);
 
@@ -147,20 +177,17 @@ describe("DaemonStatus", () => {
     fetchMock
       .mockResolvedValueOnce(
         mockResponse({
-          connected: true,
-          last_post: 123,
-          active_window: "Arc — Guardian Cockpit",
-          has_screen_context: true,
-          capture_mode: "balanced",
-          pending_notification_count: 2,
-          last_native_notification_at: "2026-03-18T10:00:00Z",
-          last_native_notification_title: "Seraph desktop shell",
-          last_native_notification_outcome: "queued_test",
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockResponse({
-          pending_count: 2,
+          daemon: {
+            connected: true,
+            last_post: 123,
+            active_window: "Arc — Guardian Cockpit",
+            has_screen_context: true,
+            capture_mode: "balanced",
+            pending_notification_count: 2,
+            last_native_notification_at: "2026-03-18T10:00:00Z",
+            last_native_notification_title: "Seraph desktop shell",
+            last_native_notification_outcome: "queued_test",
+          },
           notifications: [
             {
               id: "notif-1",
@@ -181,25 +208,25 @@ describe("DaemonStatus", () => {
               created_at: "2026-03-18T10:01:00Z",
             },
           ],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
         }),
       )
       .mockResolvedValueOnce(mockResponse({ dismissed: true }))
       .mockResolvedValueOnce(
         mockResponse({
-          connected: true,
-          last_post: 123,
-          active_window: "Arc — Guardian Cockpit",
-          has_screen_context: true,
-          capture_mode: "balanced",
-          pending_notification_count: 1,
-          last_native_notification_at: "2026-03-18T10:02:00Z",
-          last_native_notification_title: "Seraph desktop shell",
-          last_native_notification_outcome: "dismissed",
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockResponse({
-          pending_count: 1,
+          daemon: {
+            connected: true,
+            last_post: 123,
+            active_window: "Arc — Guardian Cockpit",
+            has_screen_context: true,
+            capture_mode: "balanced",
+            pending_notification_count: 1,
+            last_native_notification_at: "2026-03-18T10:02:00Z",
+            last_native_notification_title: "Seraph desktop shell",
+            last_native_notification_outcome: "dismissed",
+          },
           notifications: [
             {
               id: "notif-2",
@@ -211,6 +238,9 @@ describe("DaemonStatus", () => {
               created_at: "2026-03-18T10:01:00Z",
             },
           ],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
         }),
       );
 

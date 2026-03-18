@@ -63,8 +63,8 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, artifact round-trip into the command bar, and legacy village fallback
-- [ ] still missing: stronger dedicated workflow-control density, saved-layout control surfaces, and broader keyboard/operator ergonomics
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, artifact round-trip into the command bar, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
+- [ ] still missing: stronger dedicated workflow-control density and more flexible workspace control beyond the first saved-layout layer
 - owners: Workstream 06
 
 ### 6. Workflow leverage
@@ -83,10 +83,9 @@ This file explains:
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current queue starts with execution hardening because trust and privileged-path isolation are the most dangerous remaining gap.
-- [x] The next layer is cockpit depth plus workflow control because operator visibility and workflow leverage are where Seraph is still visibly behind the strongest reference systems.
-- [x] The next layer after that is deeper learning and world-model quality because proactive quality is now bottlenecked more by judgment than by missing primitives.
-- [x] The later items in the current queue deepen desktop presence, cross-surface continuity, and broader behavioral proof for the stronger guardian product shape.
+- [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
+- [x] The first cockpit-depth tranche is now shipped through linked evidence plus saved layouts, so the next active queue pressure moves toward native desktop shell, cross-surface continuity, and deeper guardian proof.
+- [x] The later items in the current queue deepen behavioral evals and world-model quality because proactive quality is now bottlenecked more by judgment than by missing primitives.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

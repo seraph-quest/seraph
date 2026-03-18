@@ -110,6 +110,13 @@ body {
   gap: 8px;
 }
 
+.cockpit-layout-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .cockpit-pill {
   padding: 6px 10px;
   border: 1px solid var(--cockpit-border);
@@ -159,6 +166,12 @@ body {
   background: rgba(141, 226, 255, 0.06);
 }
 
+.cockpit-action--active {
+  color: var(--cockpit-text);
+  border-color: var(--cockpit-border-strong);
+  background: rgba(141, 226, 255, 0.1);
+}
+
 .cockpit-action--primary {
   color: #041119;
   background: linear-gradient(135deg, var(--cockpit-accent), var(--cockpit-accent-strong));
@@ -171,6 +184,14 @@ body {
   gap: 16px;
   padding: 16px 20px;
   min-height: calc(100vh - 184px);
+}
+
+.cockpit-grid--focus {
+  grid-template-columns: minmax(0, 1fr) 420px;
+}
+
+.cockpit-grid--review {
+  grid-template-columns: 240px minmax(0, 1fr) 420px;
 }
 
 .cockpit-rail,
@@ -186,6 +207,10 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+}
+
+.cockpit-center--single {
+  grid-template-columns: 1fr;
 }
 
 .cockpit-panel {
@@ -603,7 +628,8 @@ body {
   }
 
   .cockpit-pill-row,
-  .cockpit-action-row {
+  .cockpit-action-row,
+  .cockpit-layout-row {
     justify-content: flex-start;
   }
 

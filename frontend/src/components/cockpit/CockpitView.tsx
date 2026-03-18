@@ -4,6 +4,7 @@ import { EventBus } from "../../game/EventBus";
 import { API_URL } from "../../config/constants";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
+import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
 import {
   collectArtifacts,
@@ -11,6 +12,7 @@ import {
   type ArtifactRecord,
   type CockpitAuditEvent,
 } from "./inspector";
+import { COCKPIT_LAYOUTS, getCockpitLayout } from "./layouts";
 
 interface CockpitViewProps {
   onSend: (message: string) => void;
@@ -89,6 +91,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
+  const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
+  const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
+  const setLayout = useCockpitLayoutStore((s) => s.setLayout);
+  const resetLayout = useCockpitLayoutStore((s) => s.resetLayout);
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -179,6 +185,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, []);
 
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
+  const activeLayout = getCockpitLayout(activeLayoutId);
   const recentConversation = messages.slice(-18);
   const artifacts = useMemo(() => collectArtifacts(auditEvents), [auditEvents]);
   const recentTrace = messages
@@ -400,10 +407,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               Legacy village
             </button>
           </div>
+
+          <div className="cockpit-layout-row">
+            {Object.values(COCKPIT_LAYOUTS).map((layout) => (
+              <button
+                key={layout.id}
+                className={`cockpit-action cockpit-action--ghost ${
+                  activeLayoutId === layout.id ? "cockpit-action--active" : ""
+                }`}
+                onClick={() => setLayout(layout.id)}
+                title={layout.description}
+              >
+                {layout.label}
+              </button>
+            ))}
+            <button className="cockpit-action cockpit-action--ghost" onClick={() => resetLayout()}>
+              Reset view
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="cockpit-grid">
+      <div className={`cockpit-grid cockpit-grid--${activeLayoutId}`}>
+        {activeLayout.sections.rail && (
         <aside className="cockpit-rail">
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
@@ -538,8 +564,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </div>
           </section>
         </aside>
+        )}
 
-        <main className="cockpit-center">
+        <main className={`cockpit-center ${activeLayout.centerSingleColumn ? "cockpit-center--single" : ""}`}>
+          {activeLayout.sections.guardianState && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Guardian state</div>
@@ -591,7 +619,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </div>
             </div>
           </section>
+          )}
 
+          {activeLayout.sections.interventions && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Interventions</div>
@@ -640,7 +670,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               )}
             </div>
           </section>
+          )}
 
+          {activeLayout.sections.audit && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Audit surface</div>
@@ -672,7 +704,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               )}
             </div>
           </section>
+          )}
 
+          {activeLayout.sections.trace && (
           <section className="cockpit-panel">
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Live trace</div>
@@ -701,8 +735,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               )}
             </div>
           </section>
+          )}
 
-          <section className="cockpit-panel cockpit-panel--span-2">
+          {activeLayout.sections.inspector && inspectorVisible && (
+          <section
+            className={`cockpit-panel ${activeLayout.centerSingleColumn ? "" : "cockpit-panel--span-2"}`}
+          >
             <div className="cockpit-card-header">
               <div className="cockpit-card-title">Operations inspector</div>
               <div className="cockpit-card-meta">
@@ -711,8 +749,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </div>
             <div className="cockpit-feed">{renderInspector()}</div>
           </section>
+          )}
         </main>
 
+        {activeLayout.sections.conversation && (
         <aside className="cockpit-chatrail">
           <section className="cockpit-panel cockpit-chat-panel">
             <div className="cockpit-card-header">
@@ -737,11 +777,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </div>
           </section>
         </aside>
+        )}
       </div>
 
       <form className="cockpit-composer" onSubmit={handleSubmit}>
         <div className="cockpit-composer-meta">
           <span>command bar</span>
+          <span>
+            {activeLayout.label} · Shift+1/2/3 layouts · Shift+I inspector · Shift+C composer
+          </span>
           <span>{isAgentBusy ? "agent busy" : "ready"}</span>
         </div>
         <div className="cockpit-composer-row">

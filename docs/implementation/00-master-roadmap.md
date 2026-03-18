@@ -48,7 +48,7 @@ Legend for the checklist column:
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, and first native notifications are shipped; broader channel reach and a richer desktop shell are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
-| 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with legacy village fallback is shipped, but denser linked evidence, artifact, and operator-control surfaces are still left |
+| 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with linked evidence, saved layouts, keyboard workspace control, and legacy village fallback is shipped, but denser workflow-operating surfaces are still left |
 | 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
 
 ## Progress Summary
@@ -74,7 +74,7 @@ This is the rolling execution queue. It should always show the next 10 most valu
    make stored intervention outcomes and explicit feedback change future guardian behavior instead of only being recorded
 5. [x] `salience-calibration-v2`:
    improve interruption timing and proactive judgment by calibrating confidence, salience, and interruption cost beyond the first heuristic layer
-6. [ ] `saved-layouts-and-keyboard-control-v1`:
+6. [x] `saved-layouts-and-keyboard-control-v1`:
    make the cockpit feel like a real operator workspace with saved workspaces, stronger keyboard control, and denser navigation ergonomics
 7. [ ] `native-desktop-shell-v1`:
    move beyond browser-plus-daemon by shipping a more coherent native desktop presence around the existing observer and notification foundations
@@ -119,6 +119,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] first native desktop-notification fallback path when browser delivery is unavailable but the daemon is connected
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
+- [x] the cockpit now supports persisted `default` / `focus` / `review` workspace presets, inspector visibility persistence, and layout switching from both the header and keyboard shortcuts
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
 - [x] first privileged-workflow hardening pass, including explicit workflow/tool execution-boundary metadata, richer approval behavior in tools/workflows APIs, and forced approval wrapping for approval-mode MCP workflow execution
@@ -130,7 +131,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, guardian feedback loop behavior, intervention policy behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, workflow composition behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
-- [x] denser guardian cockpit evidence surfaces with pending approvals, recent outputs, selectable intervention/audit/trace rows, and an operations inspector that exposes linked details from the audit stream
+- [x] denser guardian cockpit evidence surfaces with pending approvals, recent outputs, selectable intervention/audit/trace rows, an operations inspector that exposes linked details from the audit stream, and persisted layout presets with keyboard switching
 
 ## Recommended Reading Order
 

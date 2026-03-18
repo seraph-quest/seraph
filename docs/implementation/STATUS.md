@@ -33,12 +33,12 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The repo-wide active delivery batch is now led by stronger native/operator continuity, deeper guardian-quality work, and the next cockpit-maturity layer after the first salience calibration pass shipped.
+- [x] The repo-wide active delivery batch is now led by stronger native/operator continuity, deeper guardian-quality work, and the remaining post-cockpit-baseline items after the first saved-layout pass shipped.
 - [ ] That batch is not complete yet.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is execution hardening, cockpit depth, workflow control, stronger native presence, deeper cross-surface continuity, and richer guardian quality beyond the first salience calibration pass.
+- [x] The next strategic focus is richer native presence, deeper cross-surface continuity, broader guardian behavioral proof, and stronger world-model quality on top of the newly shipped cockpit workspace ergonomics.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -112,7 +112,7 @@ title: Seraph Development Status
 
 ### Current interface surface
 
-- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, and fixed composer
+- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, fixed composer, and persisted layout presets with keyboard switching
 - [x] legacy Phaser village mode with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
@@ -141,7 +141,7 @@ title: Seraph Development Status
 
 ### Interface and presence
 
-- [ ] richer cockpit density with dedicated workflow operating views, saved layouts, and broader keyboard/operator control beyond the current linked evidence shell
+- [ ] richer cockpit density with dedicated workflow operating views and broader keyboard/operator control beyond the first linked-evidence plus saved-layout shell
 - [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
 - [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
 

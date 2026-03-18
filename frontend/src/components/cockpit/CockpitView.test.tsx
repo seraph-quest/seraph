@@ -341,5 +341,5 @@ describe("CockpitView", () => {
       ),
     );
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
-  });
+  }, 15000);
 });

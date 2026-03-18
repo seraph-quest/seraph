@@ -191,6 +191,8 @@ async def deliver_or_queue(
                         intervention_type=intervention_type,
                         urgency=urgency,
                     )
+                    if policy_decision.should_cost_budget:
+                        context_manager.decrement_attention_budget()
                     await _update_intervention_outcome(
                         intervention_id,
                         latest_outcome="delivered",
@@ -340,7 +342,7 @@ async def deliver_queued_bundle() -> int:
     from src.observer.insight_queue import insight_queue
     from src.scheduler.connection_manager import ws_manager
 
-    items = await insight_queue.drain()
+    items = await insight_queue.peek_all()
     if not items:
         return 0
 
@@ -367,12 +369,6 @@ async def deliver_queued_bundle() -> int:
         "delivery_decision": "deliver",
     }
     if broadcast_result.delivered_connections <= 0:
-        for item in items:
-            await _update_intervention_outcome(
-                item.intervention_id,
-                latest_outcome="bundle_delivery_failed",
-                transport="websocket_bundle",
-            )
         logger.warning(
             "Failed to deliver queued bundle over WebSocket transport (attempted=%d failed=%d)",
             broadcast_result.attempted_connections,
@@ -386,6 +382,7 @@ async def deliver_queued_bundle() -> int:
             is_scheduled=False,
             details={
                 **details,
+                "queue_retained": True,
                 "error": _transport_failure_reason(
                     attempted_connections=broadcast_result.attempted_connections,
                     failed_connections=broadcast_result.failed_connections,
@@ -394,6 +391,9 @@ async def deliver_queued_bundle() -> int:
         )
         return 0
 
+    await insight_queue.delete_many(
+        [item.id for item in items if getattr(item, "id", None)]
+    )
     for item in items:
         await _update_intervention_outcome(
             item.intervention_id,

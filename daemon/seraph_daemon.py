@@ -181,22 +181,33 @@ async def poll_loop(
     last_posted: str | None = None
     was_idle = False
     _blocklist = blocklist or set()
+    shown_notification_ids: set[str] = set()
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
                 notification = await fetch_next_notification(client, url)
                 if notification is not None:
-                    displayed = await asyncio.to_thread(
-                        show_notification,
-                        notification.get("title", "Seraph"),
-                        notification.get("body", ""),
-                    )
-                    if displayed:
-                        await ack_notification(client, url, notification["id"])
-                        if verbose:
-                            ts = time.strftime("%H:%M:%S")
-                            logger.info("[%s] notification \u2192 %s", ts, notification.get("title", "Seraph"))
+                    notification_id = notification.get("id")
+                    if notification_id in shown_notification_ids:
+                        acked = await ack_notification(client, url, notification_id)
+                        if acked:
+                            shown_notification_ids.discard(notification_id)
+                    else:
+                        displayed = await asyncio.to_thread(
+                            show_notification,
+                            notification.get("title", "Seraph"),
+                            notification.get("body", ""),
+                        )
+                        if displayed:
+                            if notification_id:
+                                shown_notification_ids.add(notification_id)
+                            acked = await ack_notification(client, url, notification["id"])
+                            if acked and notification_id:
+                                shown_notification_ids.discard(notification_id)
+                            if verbose:
+                                ts = time.strftime("%H:%M:%S")
+                                logger.info("[%s] notification \u2192 %s", ts, notification.get("title", "Seraph"))
 
                 # Check idle state
                 idle_secs = get_idle_seconds()

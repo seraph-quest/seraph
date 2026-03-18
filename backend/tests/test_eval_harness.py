@@ -567,6 +567,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["observer_delivery_transport_audit"]["bundle_delivered_connections"] == 2
     assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_count"] == 0
     assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_error"] == "all_connections_failed"
+    assert details_by_name["observer_delivery_transport_audit"]["bundle_failed_queue_retained"] is True
     assert details_by_name["observer_daemon_ingest_audit"]["persisted_app"] == "VS Code"
     assert details_by_name["observer_daemon_ingest_audit"]["persist_failed_error"] == "db down"
     assert details_by_name["mcp_test_api_audit"]["auth_required_status"] == "auth_required"

@@ -99,13 +99,11 @@ class TestNotificationPolling:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with (
-            patch("seraph_daemon.get_frontmost_app_name", return_value="VS Code"),
-            patch("seraph_daemon.get_window_title", return_value="main.py"),
-            patch("seraph_daemon.get_idle_seconds", return_value=0.0),
-            patch("seraph_daemon.show_notification", return_value=True) as mock_show,
-            patch("httpx.AsyncClient", return_value=mock_client),
-        ):
+        with patch("seraph_daemon.get_frontmost_app_name", return_value="VS Code"), \
+                patch("seraph_daemon.get_window_title", return_value="main.py"), \
+                patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+                patch("seraph_daemon.show_notification", return_value=True) as mock_show, \
+                patch("httpx.AsyncClient", return_value=mock_client):
             task = asyncio.create_task(
                 poll_loop("http://localhost:8004", interval=0.05, idle_timeout=300, verbose=False)
             )
@@ -119,3 +117,54 @@ class TestNotificationPolling:
         mock_show.assert_called_once_with("Seraph alert", "Native path online")
         assert len(ack_posts) == 1
         assert len(context_posts) >= 1
+
+    @pytest.mark.asyncio
+    async def test_poll_loop_does_not_redisplay_notification_when_ack_fails(self):
+        notification_payload = {
+            "id": "notif-1",
+            "title": "Seraph alert",
+            "body": "Native path online",
+        }
+        notifications = [notification_payload, notification_payload, notification_payload, None]
+        ack_posts: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {
+                "notification": notifications.pop(0) if notifications else None,
+            }
+            return response
+
+        async def mock_post(url, **kwargs):
+            if "/notifications/" in url:
+                ack_posts.append(url)
+                response = MagicMock()
+                response.status_code = 503
+                response.json.return_value = {"acked": False}
+                return response
+            return MagicMock(status_code=200)
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.post = mock_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("seraph_daemon.get_frontmost_app_name", return_value="VS Code"), \
+                patch("seraph_daemon.get_window_title", return_value="main.py"), \
+                patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+                patch("seraph_daemon.show_notification", return_value=True) as mock_show, \
+                patch("httpx.AsyncClient", return_value=mock_client):
+            task = asyncio.create_task(
+                poll_loop("http://localhost:8004", interval=0.05, idle_timeout=300, verbose=False)
+            )
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        mock_show.assert_called_once_with("Seraph alert", "Native path online")
+        assert len(ack_posts) >= 2

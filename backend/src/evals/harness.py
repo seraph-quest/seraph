@@ -3220,12 +3220,13 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
     )
     mock_insight_queue = MagicMock()
     mock_insight_queue.enqueue = AsyncMock()
-    mock_insight_queue.drain = AsyncMock(
+    mock_insight_queue.peek_all = AsyncMock(
         side_effect=[
-            [MagicMock(content="Calendar alert: standup")],
-            [MagicMock(content="Goal reminder: exercise")],
+            [MagicMock(id="bundle-1", content="Calendar alert: standup")],
+            [MagicMock(id="bundle-2", content="Goal reminder: exercise")],
         ]
     )
+    mock_insight_queue.delete_many = AsyncMock(return_value=1)
     mock_log_event = AsyncMock()
 
     with (
@@ -3269,6 +3270,7 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
         "bundle_delivered_connections": bundle_delivered["details"]["delivered_connections"],
         "bundle_failed_count": failed_bundle_count,
         "bundle_failed_error": bundle_failed["details"]["error"],
+        "bundle_failed_queue_retained": bundle_failed["details"]["queue_retained"],
     }
 
 

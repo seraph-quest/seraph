@@ -38,6 +38,8 @@ def _patch_deps(ctx):
     mock_iq = MagicMock()
     mock_iq.enqueue = AsyncMock()
     mock_iq.drain = AsyncMock(return_value=[])
+    mock_iq.peek_all = AsyncMock(return_value=[])
+    mock_iq.delete_many = AsyncMock(return_value=0)
 
     patches = [
         patch("src.observer.manager.context_manager", mock_cm),
@@ -297,13 +299,14 @@ async def test_delivery_reroutes_to_native_notification_when_daemon_connected(as
     for p in patches:
         p.start()
     try:
-        msg = WSResponse(type="proactive", content="Native fallback", intervention_type="alert", urgency=5)
+        msg = WSResponse(type="proactive", content="Native fallback", intervention_type="advisory", urgency=3)
         decision = await deliver_or_queue(msg)
         intervention = await guardian_feedback_repository.get(msg.intervention_id)
 
         assert decision.action == InterventionAction.act
         assert await native_notification_queue.count() == 1
         mock_iq.enqueue.assert_not_called()
+        mock_cm.decrement_attention_budget.assert_called_once()
         assert intervention is not None
         assert intervention.transport == "native_notification"
         assert intervention.latest_outcome == "delivered"
@@ -434,7 +437,8 @@ async def test_request_approval_policy_action_is_logged(async_db):
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_empty():
     mock_iq = MagicMock()
-    mock_iq.drain = AsyncMock(return_value=[])
+    mock_iq.peek_all = AsyncMock(return_value=[])
+    mock_iq.delete_many = AsyncMock(return_value=0)
     mock_ws = MagicMock()
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
@@ -454,11 +458,12 @@ async def test_deliver_queued_bundle_empty():
 
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_formats_correctly():
-    mock_item1 = MagicMock(content="Calendar alert: standup")
-    mock_item2 = MagicMock(content="Goal reminder: exercise")
+    mock_item1 = MagicMock(id="one", content="Calendar alert: standup")
+    mock_item2 = MagicMock(id="two", content="Goal reminder: exercise")
 
     mock_iq = MagicMock()
-    mock_iq.drain = AsyncMock(return_value=[mock_item1, mock_item2])
+    mock_iq.peek_all = AsyncMock(return_value=[mock_item1, mock_item2])
+    mock_iq.delete_many = AsyncMock(return_value=2)
     mock_ws = MagicMock()
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
@@ -474,6 +479,7 @@ async def test_deliver_queued_bundle_formats_correctly():
 
         assert count == 2
         mock_ws.broadcast.assert_called_once()
+        mock_iq.delete_many.assert_called_once_with(["one", "two"])
         call_args = mock_ws.broadcast.call_args[0][0]
         assert call_args.type == "proactive"
         assert call_args.intervention_type == "proactive_bundle"
@@ -484,10 +490,11 @@ async def test_deliver_queued_bundle_formats_correctly():
 
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_single_item():
-    mock_item = MagicMock(content="Single update")
+    mock_item = MagicMock(id="one", content="Single update")
 
     mock_iq = MagicMock()
-    mock_iq.drain = AsyncMock(return_value=[mock_item])
+    mock_iq.peek_all = AsyncMock(return_value=[mock_item])
+    mock_iq.delete_many = AsyncMock(return_value=1)
     mock_ws = MagicMock()
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
@@ -502,16 +509,18 @@ async def test_deliver_queued_bundle_single_item():
         count = await deliver_queued_bundle()
 
         assert count == 1
+        mock_iq.delete_many.assert_called_once_with(["one"])
         call_args = mock_ws.broadcast.call_args[0][0]
         assert "1 update)" in call_args.content
 
 
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_logs_delivery_runtime_audit(async_db):
-    mock_item = MagicMock(content="Bundle update")
+    mock_item = MagicMock(id="one", content="Bundle update")
     mock_item.intervention_id = None
     mock_iq = MagicMock()
-    mock_iq.drain = AsyncMock(return_value=[mock_item])
+    mock_iq.peek_all = AsyncMock(return_value=[mock_item])
+    mock_iq.delete_many = AsyncMock(return_value=1)
     mock_ws = MagicMock()
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=2,
@@ -539,10 +548,11 @@ async def test_deliver_queued_bundle_logs_delivery_runtime_audit(async_db):
 
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_logs_transport_failure(async_db):
-    mock_item = MagicMock(content="Bundle update")
+    mock_item = MagicMock(id="one", content="Bundle update")
     mock_item.intervention_id = None
     mock_iq = MagicMock()
-    mock_iq.drain = AsyncMock(return_value=[mock_item])
+    mock_iq.peek_all = AsyncMock(return_value=[mock_item])
+    mock_iq.delete_many = AsyncMock(return_value=0)
     mock_ws = MagicMock()
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
@@ -557,6 +567,7 @@ async def test_deliver_queued_bundle_logs_transport_failure(async_db):
         count = await deliver_queued_bundle()
 
     assert count == 0
+    mock_iq.delete_many.assert_not_called()
     events = await audit_repository.list_events(limit=10)
     assert any(
         event["event_type"] == "observer_delivery_failed"
@@ -564,5 +575,6 @@ async def test_deliver_queued_bundle_logs_transport_failure(async_db):
         and event["details"]["intervention_type"] == "proactive_bundle"
         and event["details"]["bundle_item_count"] == 1
         and event["details"]["error"] == "all_connections_failed"
+        and event["details"]["queue_retained"] is True
         for event in events
     )

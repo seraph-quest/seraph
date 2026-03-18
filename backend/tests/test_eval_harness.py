@@ -65,6 +65,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "delegation_local_runtime_profile" in captured.out
     assert "delegated_tool_workflow_behavior" in captured.out
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
+    assert "workflow_composition_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -150,6 +151,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
                 "delegated_tool_workflow_degraded_behavior",
+                "workflow_composition_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -324,6 +326,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["delegated_tool_workflow_degraded_behavior"]["final_mentions_fallback"] is True
     assert details_by_name["delegated_tool_workflow_degraded_behavior"]["saved_plan_mentions_incident_trace"] is True
     assert details_by_name["delegated_tool_workflow_degraded_behavior"]["tool_call_count"] == 5
+    assert details_by_name["workflow_composition_behavior"]["without_skill_tool_names"] == [
+        "workflow_web_brief_to_file",
+    ]
+    assert details_by_name["workflow_composition_behavior"]["with_skill_tool_names"] == [
+        "workflow_goal_snapshot_to_file",
+        "workflow_web_brief_to_file",
+    ]
+    assert details_by_name["workflow_composition_behavior"]["web_search_called_with"] == "workflow composition"
+    assert details_by_name["workflow_composition_behavior"]["saved_file_path"] == "notes/workflow.md"
+    assert details_by_name["workflow_composition_behavior"]["saved_content_contains_search"] is True
+    assert details_by_name["workflow_composition_behavior"]["result"] == (
+        "Saved search results for workflow composition to notes/workflow.md."
+    )
+    assert details_by_name["workflow_composition_behavior"]["workflow_runner_present"] is True
+    assert details_by_name["workflow_composition_behavior"]["workflow_runner_tool_names"] == [
+        "workflow_web_brief_to_file",
+    ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"

@@ -81,7 +81,15 @@ TOOL_METADATA: dict[str, dict] = {
 
 def get_tool_metadata(tool_name: str) -> dict | None:
     """Get metadata for a tool by name."""
-    return TOOL_METADATA.get(tool_name)
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is not None:
+        return metadata
+    try:
+        from src.workflows.manager import workflow_manager
+
+        return workflow_manager.get_tool_metadata(tool_name)
+    except Exception:
+        return None
 
 
 def get_all_metadata() -> dict[str, dict]:

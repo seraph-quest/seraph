@@ -35,7 +35,7 @@ from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_agent, create_orchestrator, get_model
 from src.agent.onboarding import create_onboarding_agent
-from src.agent.specialists import create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
+from src.agent.specialists import build_all_specialists, create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
 from src.api.mcp import test_server as test_mcp_server
@@ -76,6 +76,7 @@ from src.tools.browser_tool import browse_webpage
 from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
+from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
 from src.vault.repository import VaultRepository
 
@@ -977,6 +978,141 @@ def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
         stack.close()
         for item in patches:
             item.stop()
+
+
+def _eval_workflow_composition_behavior() -> dict[str, Any]:
+    class _FakeTool:
+        def __init__(self, name: str, responder: Callable[..., str]):
+            self.name = name
+            self.description = f"{name} tool"
+            self.inputs = {}
+            self.output_type = "string"
+            self.calls: list[dict[str, Any]] = []
+            self._responder = responder
+
+        def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+            self.calls.append(dict(kwargs))
+            return self._responder(**kwargs)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workflows_dir = os.path.join(tmpdir, "workflows")
+        os.makedirs(workflows_dir, exist_ok=True)
+
+        with open(os.path.join(workflows_dir, "web-brief.md"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "---\n"
+                "name: web-brief-to-file\n"
+                "description: Search the web and save a note\n"
+                "requires:\n"
+                "  tools: [web_search, write_file]\n"
+                "inputs:\n"
+                "  query:\n"
+                "    type: string\n"
+                "  file_path:\n"
+                "    type: string\n"
+                "steps:\n"
+                "  - id: search\n"
+                "    tool: web_search\n"
+                "    arguments:\n"
+                "      query: \"{{ query }}\"\n"
+                "  - id: save\n"
+                "    tool: write_file\n"
+                "    arguments:\n"
+                "      file_path: \"{{ file_path }}\"\n"
+                "      content: |\n"
+                "        Search results\n"
+                "\n"
+                "        {{ steps.search.result }}\n"
+                "result: Saved search results for {{ query }} to {{ file_path }}.\n"
+                "---\n"
+            )
+        with open(os.path.join(workflows_dir, "goal-snapshot.md"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "---\n"
+                "name: goal-snapshot-to-file\n"
+                "description: Export goals into a note\n"
+                "requires:\n"
+                "  tools: [get_goals, write_file]\n"
+                "  skills: [goal-reflection]\n"
+                "inputs:\n"
+                "  file_path:\n"
+                "    type: string\n"
+                "steps:\n"
+                "  - id: goals\n"
+                "    tool: get_goals\n"
+                "    arguments: {}\n"
+                "  - id: save\n"
+                "    tool: write_file\n"
+                "    arguments:\n"
+                "      file_path: \"{{ file_path }}\"\n"
+                "      content: \"{{ steps.goals.result }}\"\n"
+                "---\n"
+            )
+
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+        search_tool = _FakeTool("web_search", lambda query: f"SEARCH<{query}>")
+        goal_tool = _FakeTool("get_goals", lambda: "- Ship workflows")
+        write_calls: list[dict[str, Any]] = []
+
+        def _write(file_path: str, content: str) -> str:
+            write_calls.append({"file_path": file_path, "content": content})
+            return f"saved {file_path}"
+
+        write_tool_obj = _FakeTool("write_file", _write)
+
+        without_skill = mgr.build_workflow_tools(
+            [search_tool, goal_tool, write_tool_obj],
+            active_skill_names=[],
+        )
+        with_skill = mgr.build_workflow_tools(
+            [search_tool, goal_tool, write_tool_obj],
+            active_skill_names=["goal-reflection"],
+        )
+
+        web_workflow = next(
+            tool for tool in with_skill
+            if tool.name == "workflow_web_brief_to_file"
+        )
+        result = web_workflow(
+            query="workflow composition",
+            file_path="notes/workflow.md",
+        )
+
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+        native_tool = MagicMock()
+        native_tool.name = "read_file"
+        with patch("src.agent.specialists.create_specialist") as mock_create_specialist:
+            with (
+                patch("src.agent.specialists.discover_tools", return_value=[native_tool]),
+                patch("src.agent.specialists.filter_tools", side_effect=lambda tools, *_args, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_secret_refs", side_effect=lambda tools: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_audit", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_with_forced_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.mcp_manager.get_config", return_value=[]),
+                patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[types.SimpleNamespace(name="goal-reflection")]),
+                patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+            ):
+                mock_create_specialist.side_effect = lambda name, description, tools, temperature, max_steps: types.SimpleNamespace(
+                    name=name,
+                    description=description,
+                    tools=tools,
+                )
+                specialists = build_all_specialists()
+
+        workflow_runner = next(s for s in specialists if s.name == "workflow_runner")
+        return {
+            "without_skill_tool_names": sorted(tool.name for tool in without_skill),
+            "with_skill_tool_names": sorted(tool.name for tool in with_skill),
+            "web_search_called_with": search_tool.calls[0]["query"],
+            "saved_file_path": write_calls[0]["file_path"],
+            "saved_content_contains_search": "SEARCH<workflow composition>" in write_calls[0]["content"],
+            "result": result,
+            "workflow_runner_present": workflow_runner.name == "workflow_runner",
+            "workflow_runner_tool_names": [tool.name for tool in workflow_runner.tools],
+        }
 
 
 def _eval_provider_fallback_chain() -> dict[str, Any]:
@@ -3792,6 +3928,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="A delegated WebSocket workflow degrades after tool failure but still saves a fallback plan and surfaces the failure audit.",
         runner=_eval_delegated_tool_workflow_degraded_behavior,
+    ),
+    EvalScenario(
+        name="workflow_composition_behavior",
+        category="behavior",
+        description="Workflow composition builds reusable multi-step tools, skill-gates them, executes sequential steps, and exposes them through the workflow_runner specialist.",
+        runner=_eval_workflow_composition_behavior,
     ),
     EvalScenario(
         name="mcp_specialist_local_runtime_profile",

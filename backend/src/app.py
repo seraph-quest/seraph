@@ -14,6 +14,7 @@ from src.memory.soul import ensure_soul_exists
 from src.scheduler.engine import init_scheduler, shutdown_scheduler
 from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
+from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -30,6 +31,21 @@ def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
         dst = os.path.join(skills_dir, filename)
         if not os.path.exists(dst):
             shutil.copy2(os.path.join(bundled_skills, filename), dst)
+
+
+def _seed_default_workflows(defaults_dir: str, workflows_dir: str) -> None:
+    """Copy bundled default workflows to workspace if they don't already exist."""
+    import shutil
+
+    bundled_workflows = os.path.join(defaults_dir, "workflows")
+    if not os.path.isdir(bundled_workflows):
+        return
+    for filename in os.listdir(bundled_workflows):
+        if not filename.endswith(".md"):
+            continue
+        dst = os.path.join(workflows_dir, filename)
+        if not os.path.exists(dst):
+            shutil.copy2(os.path.join(bundled_workflows, filename), dst)
 
 
 @asynccontextmanager
@@ -82,6 +98,10 @@ async def lifespan(app: FastAPI):
     os.makedirs(skills_dir, exist_ok=True)
     _seed_default_skills(defaults_dir, skills_dir)
     skill_manager.init(skills_dir)
+    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
+    os.makedirs(workflows_dir, exist_ok=True)
+    _seed_default_workflows(defaults_dir, workflows_dir)
+    workflow_manager.init(workflows_dir)
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()

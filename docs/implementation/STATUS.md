@@ -36,7 +36,7 @@ title: Seraph Development Status
 - [ ] Guardian Intelligence is not complete yet.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus after the runtime baseline is guardian-state quality, intervention quality, operator cockpit quality, workflow composition, and native reach.
+- [x] The next strategic focus after the runtime baseline is guardian feedback quality, operator cockpit quality, workflow control ergonomics, execution hardening, and native reach.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -45,7 +45,7 @@ title: Seraph Development Status
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
 - [x] non-browser presence through notifications and native reach
-- [x] stronger workflow composition and feedback-driven improvement
+- [x] reusable workflow composition plus feedback-driven improvement
 
 ## Shipped On `develop`
 
@@ -72,6 +72,7 @@ title: Seraph Development Status
 - [x] filesystem, soul, goals, vault, and web-search tool foundations
 - [x] MCP server management and runtime-managed server configuration
 - [x] visible tool execution streaming in chat and agent flows
+- [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability
@@ -85,7 +86,7 @@ title: Seraph Development Status
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
 - [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search flows
-- [x] deterministic runtime eval harness for fallback, routing, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, storage, observer, and integration seam contracts, including vault repository, the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
+- [x] deterministic runtime eval harness for fallback, routing, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, workflow composition behavior, storage, observer, and integration seam contracts, including vault repository, the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
 
 ### Guardian intelligence and proactive behavior
 
@@ -112,13 +113,14 @@ title: Seraph Development Status
 - [x] `SKILL.md` support and runtime skill loading
 - [x] MCP-powered extension surface
 - [x] recursive delegation foundations behind a flag
+- [x] reusable workflow runtime with tool, skill, specialist, and MCP-aware gating
 
 ## Still To Do On `develop`
 
 ### Runtime and execution
 
 - [ ] richer provider selection policy beyond weighted scoring, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool/MCP guardrail, and delegated behavioral contracts
+- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
 - [ ] stronger execution isolation and privileged-path hardening
 
 ### Guardian intelligence
@@ -135,14 +137,14 @@ title: Seraph Development Status
 
 ### Workflow and leverage
 
-- [ ] stronger workflow composition and extension ergonomics
-- [ ] clearer operator-facing workflow control and artifact round-tripping
+- [ ] clearer operator-facing workflow control and artifact round-tripping on top of the shipped workflow runtime
+- [ ] stronger extension ergonomics around reusable capabilities and workflows
 
 ## Practical Summary
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are operator cockpit density, workflow composition, native reach, and execution hardening.
+- [ ] The biggest gaps against the reference systems are operator cockpit density, guardian feedback quality, workflow control ergonomics, native reach, and execution hardening.
 - [ ] The next major step is to turn the current prototype into a denser, more legible, more stateful guardian cockpit without losing the existing trust and memory foundations.
 
 ## Workstream View

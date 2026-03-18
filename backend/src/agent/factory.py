@@ -12,6 +12,7 @@ from src.tools.audit import wrap_tools_for_audit
 from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
 from src.tools.mcp_manager import mcp_manager
 from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
+from src.workflows.manager import workflow_manager
 
 
 def get_model(*, runtime_path: str = "chat_agent") -> LiteLLMModel:
@@ -54,7 +55,15 @@ def get_tools() -> list:
             ),
             treat_all_as_mcp=True,
         )
-    return native_tools + mcp_tools
+    base_tools = native_tools + mcp_tools
+    active_skill_names = [
+        skill.name
+        for skill in skill_manager.get_active_skills([tool.name for tool in base_tools])
+    ]
+    workflow_tools = wrap_tools_for_audit(
+        workflow_manager.build_workflow_tools(base_tools, active_skill_names)
+    )
+    return base_tools + workflow_tools
 
 
 def create_agent(

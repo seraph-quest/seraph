@@ -1,0 +1,340 @@
+"""Tests for reusable workflow composition."""
+
+from __future__ import annotations
+
+import json
+import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.workflows.loader import Workflow, _parse_workflow_file, load_workflows
+from src.workflows.manager import WorkflowManager
+
+
+class DummyTool:
+    def __init__(self, name: str, responder):
+        self.name = name
+        self.description = f"{name} description"
+        self.inputs = {}
+        self.output_type = "string"
+        self.calls: list[dict] = []
+        self._responder = responder
+
+    def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        self.calls.append(kwargs)
+        return self._responder(**kwargs)
+
+
+@pytest.fixture
+def workflows_dir(tmp_path):
+    d = tmp_path / "workflows"
+    d.mkdir()
+
+    (d / "web-brief.md").write_text(
+        "---\n"
+        "name: web-brief-to-file\n"
+        "description: Search the web and save a note\n"
+        "requires:\n"
+        "  tools: [web_search, write_file]\n"
+        "inputs:\n"
+        "  query:\n"
+        "    type: string\n"
+        "    description: Query to search\n"
+        "  file_path:\n"
+        "    type: string\n"
+        "    description: Output path\n"
+        "steps:\n"
+        "  - id: search\n"
+        "    tool: web_search\n"
+        "    arguments:\n"
+        "      query: \"{{ query }}\"\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: \"{{ file_path }}\"\n"
+        "      content: |\n"
+        "        Search results\n"
+        "\n"
+        "        {{ steps.search.result }}\n"
+        "result: Saved search results for {{ query }} to {{ file_path }}.\n"
+        "---\n\n"
+        "Search and save.\n"
+    )
+
+    (d / "goal-snapshot.md").write_text(
+        "---\n"
+        "name: goal-snapshot-to-file\n"
+        "description: Export goals into a note\n"
+        "requires:\n"
+        "  tools: [get_goals, write_file]\n"
+        "  skills: [goal-reflection]\n"
+        "inputs:\n"
+        "  file_path:\n"
+        "    type: string\n"
+        "    description: Output path\n"
+        "steps:\n"
+        "  - id: goals\n"
+        "    tool: get_goals\n"
+        "    arguments: {}\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: \"{{ file_path }}\"\n"
+        "      content: \"{{ steps.goals.result }}\"\n"
+        "---\n\n"
+        "Export current goals.\n"
+    )
+
+    return str(d)
+
+
+@pytest.fixture
+def invalid_workflows_dir(tmp_path):
+    d = tmp_path / "bad_workflows"
+    d.mkdir()
+    (d / "no-frontmatter.md").write_text("missing yaml")
+    (d / "missing-steps.md").write_text(
+        "---\n"
+        "name: broken\n"
+        "description: missing steps\n"
+        "---\n\n"
+        "No steps.\n"
+    )
+    return str(d)
+
+
+class TestWorkflowLoader:
+    def test_parse_valid_workflow(self, workflows_dir):
+        workflow = _parse_workflow_file(os.path.join(workflows_dir, "web-brief.md"))
+        assert isinstance(workflow, Workflow)
+        assert workflow.name == "web-brief-to-file"
+        assert workflow.tool_name == "workflow_web_brief_to_file"
+        assert workflow.requires_tools == ["web_search", "write_file"]
+        assert workflow.inputs["query"]["type"] == "string"
+        assert len(workflow.steps) == 2
+
+    def test_load_workflows(self, workflows_dir):
+        workflows = load_workflows(workflows_dir)
+        assert {workflow.name for workflow in workflows} == {
+            "web-brief-to-file",
+            "goal-snapshot-to-file",
+        }
+
+    def test_invalid_workflows_are_skipped(self, invalid_workflows_dir):
+        assert load_workflows(invalid_workflows_dir) == []
+
+
+class TestWorkflowManager:
+    def test_active_workflow_gating_uses_tools_and_skills(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+
+        active = mgr.get_active_workflows(
+            ["web_search", "write_file", "get_goals"],
+            [],
+        )
+        assert [workflow.name for workflow in active] == ["web-brief-to-file"]
+
+        active = mgr.get_active_workflows(
+            ["web_search", "write_file", "get_goals"],
+            ["goal-reflection"],
+        )
+        assert {workflow.name for workflow in active} == {
+            "web-brief-to-file",
+            "goal-snapshot-to-file",
+        }
+
+    def test_enable_disable_persists(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+        assert mgr.disable("web-brief-to-file") is True
+        assert mgr.get_workflow("web-brief-to-file").enabled is False
+
+        config_path = os.path.join(os.path.dirname(workflows_dir), "workflows-config.json")
+        with open(config_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["disabled"] == ["web-brief-to-file"]
+
+        mgr2 = WorkflowManager()
+        mgr2.init(workflows_dir)
+        assert mgr2.get_workflow("web-brief-to-file").enabled is False
+        assert mgr2.enable("web-brief-to-file") is True
+        assert mgr2.get_workflow("web-brief-to-file").enabled is True
+
+    def test_build_tools_executes_steps_sequentially(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+        search = DummyTool("web_search", lambda query: f"SEARCH<{query}>")
+        writes: list[dict] = []
+
+        def _write_file(file_path: str, content: str):
+            writes.append({"file_path": file_path, "content": content})
+            return f"WROTE<{file_path}>"
+
+        write = DummyTool("write_file", _write_file)
+        workflow_tools = mgr.build_workflow_tools([search, write], active_skill_names=[])
+        workflow_tool = next(tool for tool in workflow_tools if tool.name == "workflow_web_brief_to_file")
+
+        result = workflow_tool(query="seraph", file_path="notes/brief.md")
+
+        assert search.calls == [{"query": "seraph"}]
+        assert writes == [{
+            "file_path": "notes/brief.md",
+            "content": "Search results\n\nSEARCH<seraph>\n",
+        }]
+        assert result == "Saved search results for seraph to notes/brief.md."
+
+    def test_build_tools_supports_mcp_requirements(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "mcp.md").write_text(
+            "---\n"
+            "name: mcp-export\n"
+            "description: Use MCP and save output\n"
+            "requires:\n"
+            "  tools: [mcp_list_tasks, write_file]\n"
+            "inputs:\n"
+            "  file_path:\n"
+            "    type: string\n"
+            "steps:\n"
+            "  - id: fetch\n"
+            "    tool: mcp_list_tasks\n"
+            "    arguments: {}\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: \"{{ file_path }}\"\n"
+            "      content: \"{{ steps.fetch.result }}\"\n"
+            "---\n"
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir))
+        mcp_tool = DummyTool("mcp_list_tasks", lambda: "task-a\ntask-b")
+        write = DummyTool("write_file", lambda file_path, content: f"saved {file_path}: {content}")
+        workflow_tools = mgr.build_workflow_tools([mcp_tool, write], active_skill_names=[])
+        tool = workflow_tools[0]
+
+        result = tool(file_path="tasks.md")
+
+        assert tool.name == "workflow_mcp_export"
+        assert "saved tasks.md: task-a" in result
+        assert mgr.get_tool_metadata(tool.name)["policy_modes"] == ["full"]
+
+
+class TestWorkflowApi:
+    @pytest.mark.asyncio
+    async def test_list_workflows(self, client):
+        mock_mgr = MagicMock()
+        mock_mgr.list_workflows.return_value = [
+            {
+                "name": "web-brief-to-file",
+                "tool_name": "workflow_web_brief_to_file",
+                "description": "Search and save",
+                "requires_tools": ["web_search", "write_file"],
+                "requires_skills": [],
+                "user_invocable": True,
+                "enabled": True,
+                "step_count": 2,
+                "file_path": "/tmp/web-brief.md",
+            }
+        ]
+        with patch("src.api.workflows.workflow_manager", mock_mgr):
+            resp = await client.get("/api/workflows")
+        assert resp.status_code == 200
+        assert resp.json()["workflows"][0]["tool_name"] == "workflow_web_brief_to_file"
+
+    @pytest.mark.asyncio
+    async def test_update_workflow_logs(self, client):
+        mock_mgr = MagicMock()
+        mock_mgr.disable.return_value = True
+        mock_log = AsyncMock()
+        with (
+            patch("src.api.workflows.workflow_manager", mock_mgr),
+            patch("src.api.workflows.log_integration_event", mock_log),
+        ):
+            resp = await client.put("/api/workflows/web-brief-to-file", json={"enabled": False})
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "status": "updated",
+            "name": "web-brief-to-file",
+            "enabled": False,
+        }
+        mock_log.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reload_workflows_logs(self, client):
+        mock_mgr = MagicMock()
+        mock_mgr.reload.return_value = [
+            {"name": "web-brief-to-file", "enabled": True},
+            {"name": "goal-snapshot-to-file", "enabled": False},
+        ]
+        mock_log = AsyncMock()
+        with (
+            patch("src.api.workflows.workflow_manager", mock_mgr),
+            patch("src.api.workflows.log_integration_event", mock_log),
+        ):
+            resp = await client.post("/api/workflows/reload")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["status"] == "reloaded"
+        assert payload["count"] == 2
+        mock_log.assert_awaited_once()
+
+
+class TestWorkflowSurfaces:
+    @pytest.mark.asyncio
+    async def test_tools_api_includes_workflow_metadata(self, client):
+        ctx = SimpleNamespace(tool_policy_mode="balanced", mcp_policy_mode="disabled")
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+        workflow_tool.description = "fallback description"
+
+        with (
+            patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+            patch("src.api.tools.get_tools", return_value=[workflow_tool]),
+            patch("src.api.tools.workflow_manager.get_tool_metadata", return_value={
+                "description": "Search the web and save a note",
+                "policy_modes": ["balanced", "full"],
+            }),
+        ):
+            resp = await client.get("/api/tools")
+        assert resp.status_code == 200
+        assert resp.json() == [{
+            "name": "workflow_web_brief_to_file",
+            "description": "Search the web and save a note",
+            "policy_modes": ["balanced", "full"],
+            "requires_approval": False,
+        }]
+
+    def test_build_all_specialists_adds_workflow_runner(self):
+        native_tool = MagicMock()
+        native_tool.name = "read_file"
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_goal_snapshot_to_file"
+
+        with patch("src.agent.specialists.create_specialist") as mock_create_specialist:
+            with (
+                patch("src.agent.specialists.discover_tools", return_value=[native_tool]),
+                patch("src.agent.specialists.filter_tools", side_effect=lambda tools, *_args, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_secret_refs", side_effect=lambda tools: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_audit", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_for_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.wrap_tools_with_forced_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+                patch("src.agent.specialists.mcp_manager.get_config", return_value=[]),
+                patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+                patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+            ):
+                mock_create_specialist.side_effect = lambda name, description, tools, temperature, max_steps: SimpleNamespace(
+                    name=name,
+                    description=description,
+                    tools=tools,
+                )
+                from src.agent.specialists import build_all_specialists
+
+                specialists = build_all_specialists()
+
+        workflow_runner = next(s for s in specialists if s.name == "workflow_runner")
+        assert workflow_runner.tools == [workflow_tool]

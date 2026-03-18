@@ -56,6 +56,7 @@ uv run python -m src.evals.harness --scenario agent_local_runtime_profile
 uv run python -m src.evals.harness --scenario delegation_local_runtime_profile
 uv run python -m src.evals.harness --scenario delegated_tool_workflow_behavior
 uv run python -m src.evals.harness --scenario delegated_tool_workflow_degraded_behavior
+uv run python -m src.evals.harness --scenario workflow_composition_behavior
 uv run python -m src.evals.harness --scenario mcp_specialist_local_runtime_profile
 uv run python -m src.evals.harness --scenario embedding_runtime_audit
 uv run python -m src.evals.harness --scenario vector_store_runtime_audit
@@ -96,7 +97,7 @@ uv run python -m src.evals.harness --scenario evening_review_degraded_delivery_b
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, intervention policy behavior, observer refresh and delivery behavior, native notification fallback behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, intervention policy behavior, observer refresh and delivery behavior, native notification fallback behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, reusable workflow composition behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -163,6 +164,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_timeouts.py` | 5 | Execution timeouts — agent, briefing, consolidation timeouts |
 | `test_tool_registry.py` | 4 | Tool metadata registry — lookup, required fields, copy safety |
 | `test_tools.py` | 20 | Filesystem tools, template tool, web search, and filesystem/web-search runtime audit logging |
+| `test_workflows.py` | 12 | Workflow composition — loader, gating, sequential execution, API, metadata, and delegation exposure |
 | `test_user_state.py` | 57 | User state machine — derive_state, IDE deep work, should_deliver, budget, interruption modes |
 | `test_vault_api.py` | 4 | Vault API — list keys, delete keys |
 | `test_vault_crypto.py` | 4 | Vault crypto — Fernet encrypt/decrypt, key generation |

@@ -46,7 +46,7 @@ open http://localhost:8004/docs   # Swagger API docs
 | **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90 |
 | **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
 | **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
-| **Tools** | 17 built-in tool capabilities (auto-discovered) + plug-and-play MCP servers |
+| **Tools** | 17 built-in tool capabilities (auto-discovered) + reusable workflows + plug-and-play MCP servers |
 | **Scheduler** | APScheduler — 9 jobs across briefings, reviews, strategist, observer cleanup, and memory/goal maintenance |
 | **Daemon** | Native macOS — window tracking, optional OCR (Apple Vision / OpenRouter) |
 | **Infra** | Docker Compose (backend + frontend + snekbox sandbox + http-mcp), uv |
@@ -65,9 +65,10 @@ frontend/src/
   config/            Constants, default positions, waypoints
 
 backend/src/
-  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, mcp)
+  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, workflows, mcp)
   agent/             smolagents factory, onboarding, strategist, session manager
   tools/             @tool implementations + MCP manager
+  workflows/         Reusable multi-step workflow loader, runtime, and gating
   memory/            Soul file, LanceDB vector store, embedder, consolidator
   goals/             Hierarchical goal CRUD
   plugins/           Tool auto-discovery + registry

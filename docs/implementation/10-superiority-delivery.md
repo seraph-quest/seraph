@@ -69,8 +69,8 @@ This file explains:
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, and delegation primitives
-- [ ] still missing: first-class workflows, reusable multi-step compositions, and stronger artifact round-tripping
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, and first-class reusable workflows
+- [ ] still missing: clearer operator-facing workflow control, stronger artifact round-tripping, and easier extension ergonomics
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
@@ -83,7 +83,7 @@ This file explains:
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current next unchecked items are workflow composition, guardian feedback loop, operator cockpit, salience/confidence modeling, and execution hardening.
+- [x] The current next unchecked items are guardian feedback loop, operator cockpit, salience/confidence modeling, execution hardening, and workflow control ergonomics.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

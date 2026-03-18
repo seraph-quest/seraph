@@ -33,12 +33,12 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The repo-wide active delivery batch now returns to safer leverage, deeper workflow control, stronger world modeling, and broader cross-surface continuity after the last operator/guardian batch completed.
+- [x] The repo-wide active delivery batch now builds on a cockpit-first live-ops shell with broader cross-surface continuity, denser workflow control, and stronger world modeling after the last operator/guardian batch completed.
 - [ ] That refreshed batch is not complete yet.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now `execution-safety-hardening-v3` on top of the newly shipped continuity, world-model, workflow-run, artifact-roundtrip, provider-safeguard, desktop-shell, and operator-surface foundations.
+- [x] The next strategic focus is now `execution-safety-hardening-v3` on top of the newly shipped cockpit-first shell, continuity, world-model, workflow-run, artifact-roundtrip, provider-safeguard, desktop-shell, and operator-surface foundations.
 - [x] The first three items in that refreshed batch, `execution-safety-hardening-v2`, `cockpit-workflow-views-v1`, and `guardian-learning-loop-v2`, are now shipped on this branch.
 - [x] `cross-surface-continuity-v2` is now shipped on this branch.
 - [x] `provider-policy-safeguards-v2` is now shipped on this branch.
@@ -127,11 +127,12 @@ title: Seraph Development Status
 
 ### Current interface surface
 
-- [x] browser-based guardian cockpit with session rail, guardian-state panel, dedicated workflow-run views, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, fixed composer, and persisted layout presets with keyboard switching
+- [x] cockpit-first browser guardian shell with session rail, guardian-state panel, workflow-run views, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, a fixed composer, and live send fallback
 - [x] cockpit workflow and artifact inspectors can now draft compatible follow-on workflows directly from existing artifact paths instead of only inserting generic file-context commands
-- [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up and dismiss controls
+- [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching now define the main cockpit workspace
+- [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up, continue, and dismiss controls
 - [x] the cockpit now includes a first operator surface for tool/MCP policy state, workflow availability, skills, and MCP server visibility with direct reload controls
-- [x] legacy Phaser village mode with chat, quest, and settings overlays
+- [x] larger more readable settings and goals overlays now support the cockpit-first shell without removing the legacy Phaser village fallback
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
 - [x] macOS daemon-backed desktop presence card plus browser-side inspect/dismiss controls for native notifications and notification fallback for non-browser proactive reach

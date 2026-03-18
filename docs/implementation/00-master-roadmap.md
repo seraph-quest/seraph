@@ -48,7 +48,7 @@ Legend for the checklist column:
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, a first coherent desktop presence surface, and a unified browser/native continuity snapshot are shipped; broader channel reach and deeper cross-surface continuity are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
-| 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with linked evidence, saved layouts, keyboard workspace control, and legacy village fallback is shipped, but denser workflow-operating surfaces are still left |
+| 06. Embodied Interface | `[ ]` | The guardian cockpit is now the active browser shell, with a pane workspace, drag/resize plus grid snap, packed layout presets, linked evidence, and keyboard workspace control shipped; denser workflow-operating surfaces are still left |
 | 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
 
 ## Progress Summary
@@ -56,7 +56,7 @@ Legend for the checklist column:
 - [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
-- [x] The first guardian cockpit shell is now shipped, with the village retained as a legacy mode rather than the default workflow.
+- [x] The guardian cockpit is now the active interface path, with the village retained only as a legacy fallback rather than a parallel active shell.
 - [ ] Seraph is still behind the strongest reference systems on workflow-operating density, deeper salience/intervention quality, native reach, deeper execution hardening, and operator workflow control.
 - [ ] No workstream is complete yet.
 
@@ -171,13 +171,13 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 ## Current Shipped Slice On `develop`
 
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
-- [x] guardian cockpit as the default browser shell, with the Phaser village kept as an explicit legacy mode
+- [x] guardian cockpit as the active browser shell, with the Phaser village kept only as an explicit legacy fallback path
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and a first actionable desktop control shell inside the cockpit
 - [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, cockpit-to-settings linkage for queued desktop state, and desktop-shell draft/continue actions over pending notifications, queued bundle items, and recent interventions
 - [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
-- [x] the cockpit now supports persisted `default` / `focus` / `review` workspace presets, inspector visibility persistence, and layout switching from both the header and keyboard shortcuts
+- [x] the cockpit now supports a pane workspace with drag/resize, grid snap, packed `default` / `focus` / `review` layout presets, inspector visibility persistence, and layout switching from both the header and keyboard shortcuts
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
 - [x] first privileged-workflow hardening pass, including explicit workflow/tool execution-boundary metadata, richer approval behavior in tools/workflows APIs, and forced approval wrapping for approval-mode MCP workflow execution
@@ -198,7 +198,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] deeper guardian behavioral proof now also covers strategist tick learning its way into native-notification delivery and continuity-surface presence when high-signal learned nudges should bypass the browser
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, guardian world-model behavior, guardian feedback loop behavior, calibrated salience/confidence delivery behavior, intervention policy behavior, observer refresh and delivery behavior, native desktop presence status plus the test-notification path, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, workflow composition behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts
-- [x] denser guardian cockpit evidence surfaces with pending approvals, recent outputs, selectable intervention/audit/trace rows, an operations inspector that exposes linked details from the audit stream, and persisted layout presets with keyboard switching
+- [x] denser guardian cockpit evidence surfaces with pending approvals, recent outputs, selectable intervention/audit/trace rows, an operations inspector that exposes linked details from the audit stream, and a pane workspace with packed layout presets, drag/resize, grid snap, and keyboard switching
 
 ## Recommended Reading Order
 

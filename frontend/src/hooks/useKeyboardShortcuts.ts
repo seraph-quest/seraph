@@ -5,6 +5,7 @@ import { usePanelLayoutStore } from "../stores/panelLayoutStore";
 
 export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
   const tag = (event.target as HTMLElement)?.tagName;
+  const code = event.code;
   if (tag === "INPUT" || tag === "TEXTAREA") return;
 
   const s = useChatStore.getState();
@@ -12,26 +13,27 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
   const cockpitLayout = useCockpitLayoutStore.getState();
 
   if (s.interfaceMode === "cockpit") {
+    if (event.shiftKey && code === "Digit1") {
+      cockpitLayout.setLayout("default");
+      return;
+    }
+    if (event.shiftKey && code === "Digit2") {
+      cockpitLayout.setLayout("focus");
+      return;
+    }
+    if (event.shiftKey && code === "Digit3") {
+      cockpitLayout.setLayout("review");
+      return;
+    }
+    if (event.shiftKey && code === "KeyI") {
+      cockpitLayout.toggleInspector();
+      return;
+    }
+
     switch (event.key.toLowerCase()) {
       case "c":
         if (!event.shiftKey) return;
         window.dispatchEvent(new CustomEvent("seraph-cockpit-focus-composer"));
-        return;
-      case "1":
-        if (!event.shiftKey) return;
-        cockpitLayout.setLayout("default");
-        return;
-      case "2":
-        if (!event.shiftKey) return;
-        cockpitLayout.setLayout("focus");
-        return;
-      case "3":
-        if (!event.shiftKey) return;
-        cockpitLayout.setLayout("review");
-        return;
-      case "i":
-        if (!event.shiftKey) return;
-        cockpitLayout.toggleInspector();
         return;
       default:
         break;

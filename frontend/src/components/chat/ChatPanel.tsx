@@ -8,7 +8,7 @@ import { ThinkingIndicator } from "./ThinkingIndicator";
 import { ChatSidebar } from "./ChatSidebar";
 
 interface ChatPanelProps {
-  onSend: (message: string) => void;
+  onSend: (message: string) => boolean | void | Promise<boolean | void>;
   onSkipOnboarding?: () => void;
 }
 
@@ -20,8 +20,6 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
   const toggleChatMaximized = useChatStore((s) => s.toggleChatMaximized);
   const setChatPanelOpen = useChatStore((s) => s.setChatPanelOpen);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
-  const isConnected = connectionStatus === "connected";
-
   const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("chat", {
     minWidth: 400,
     minHeight: 200,
@@ -59,9 +57,9 @@ export function ChatPanel({ onSend, onSkipOnboarding }: ChatPanelProps) {
             <MessageList />
             {isAgentBusy && <ThinkingIndicator />}
           </div>
-          <ChatInput onSend={onSend} disabled={!isConnected || isAgentBusy} />
+          <ChatInput onSend={onSend} disabled={isAgentBusy} />
         </div>
-        {!isConnected && (
+        {connectionStatus !== "connected" && (
           <div className="absolute top-2 right-4 text-[9px] text-retro-error uppercase animate-blink">
             Disconnected
           </div>

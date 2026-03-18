@@ -339,3 +339,9 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")
+    except RuntimeError as exc:
+        ws_manager.disconnect(websocket)
+        if "WebSocket is not connected" in str(exc):
+            logger.info("WebSocket client disconnected before next receive")
+            return
+        raise

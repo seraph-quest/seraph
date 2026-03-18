@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import { WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
+import { API_URL, WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { useAgentAnimation } from "./useAgentAnimation";
@@ -35,6 +35,20 @@ export function useWebSocket() {
   onToolDetectedRef.current = onToolDetected;
   onFinalAnswerRef.current = onFinalAnswer;
 
+  const buildUserMessage = useCallback((message: string): ChatMessage => ({
+    id: makeId(),
+    role: "user",
+    content: message,
+    timestamp: Date.now(),
+  }), []);
+
+  const buildErrorMessage = useCallback((message: string): ChatMessage => ({
+    id: makeId(),
+    role: "error",
+    content: message,
+    timestamp: Date.now(),
+  }), []);
+
   const sendSocketMessage = useCallback(
     (
       message: string,
@@ -44,30 +58,105 @@ export function useWebSocket() {
     ) => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
 
-      setAgentBusy(true);
-      onThinking();
+      try {
+        setAgentBusy(true);
+        onThinking();
 
-      if (echoUser) {
-        const userMsg: ChatMessage = {
-          id: makeId(),
-          role: "user",
-          content: message,
-          timestamp: Date.now(),
-        };
-        addMessage(userMsg);
+        if (echoUser) {
+          addMessage(buildUserMessage(message));
+        }
+
+        wsRef.current.send(
+          JSON.stringify({
+            type: messageType,
+            message,
+            session_id: sessionId,
+          })
+        );
+        return true;
+      } catch {
+        setAgentBusy(false);
+        addMessage(buildErrorMessage("Message delivery failed."));
+        return false;
       }
+    },
+    [addMessage, buildErrorMessage, buildUserMessage, setAgentBusy, onThinking]
+  );
 
-      wsRef.current.send(
-        JSON.stringify({
-          type: messageType,
+  const sendRestMessage = useCallback(async (message: string, sessionId: string | null) => {
+    setAgentBusy(true);
+    onThinking();
+    addMessage(buildUserMessage(message));
+
+    try {
+      const response = await fetch(`${API_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
           message,
           session_id: sessionId,
-        })
-      );
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload?.detail ?? payload;
+
+        if (response.status === 409 && detail?.type === "approval_required") {
+          const approvalMsg: ChatMessage = {
+            id: makeId(),
+            role: "approval",
+            content: detail.message ?? "Approval required before continuing.",
+            timestamp: Date.now(),
+            approvalId: detail.approval_id,
+            toolUsed: detail.tool_name,
+            riskLevel: detail.risk_level,
+            approvalStatus: "pending",
+          };
+          addMessage(approvalMsg);
+          return false;
+        }
+
+        const messageText =
+          (typeof detail === "string" && detail)
+          || detail?.message
+          || "Message delivery failed.";
+        addMessage(buildErrorMessage(messageText));
+        return false;
+      }
+
+      const nextSessionId = typeof payload?.session_id === "string" ? payload.session_id : sessionId;
+      if (nextSessionId) {
+        setSessionId(nextSessionId);
+      }
+
+      const responseText = typeof payload?.response === "string" ? payload.response : "";
+      onFinalAnswerRef.current(responseText);
+      addMessage({
+        id: makeId(),
+        role: "agent",
+        content: responseText,
+        timestamp: Date.now(),
+      });
+
+      await useChatStore.getState().fetchProfile();
+      await useChatStore.getState().loadSessions();
+      if (nextSessionId) {
+        const updated = useChatStore.getState();
+        const session = updated.sessions.find((item) => item.id === nextSessionId);
+        if (session && session.title === "New Conversation") {
+          await updated.generateSessionTitle(nextSessionId);
+        }
+      }
+
       return true;
-    },
-    [addMessage, setAgentBusy, onThinking]
-  );
+    } catch {
+      addMessage(buildErrorMessage("Message delivery failed."));
+      return false;
+    } finally {
+      setAgentBusy(false);
+    }
+  }, [addMessage, buildErrorMessage, buildUserMessage, onThinking, setAgentBusy, setSessionId]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -217,6 +306,7 @@ export function useWebSocket() {
     };
 
     ws.onclose = () => {
+      setAgentBusy(false);
       setConnectionStatus("disconnected");
       if (pingRef.current) clearInterval(pingRef.current);
       reconnectRef.current = setTimeout(connect, backoffRef.current);
@@ -224,6 +314,7 @@ export function useWebSocket() {
     };
 
     ws.onerror = () => {
+      setAgentBusy(false);
       setConnectionStatus("error");
       ws.close();
     };
@@ -236,11 +327,15 @@ export function useWebSocket() {
   }, []);
 
   const sendMessage = useCallback(
-    (message: string) => {
+    async (message: string) => {
       const sessionId = useChatStore.getState().sessionId;
-      sendSocketMessage(message, sessionId, true);
+      if (sendSocketMessage(message, sessionId, true)) {
+        return true;
+      }
+
+      return sendRestMessage(message, sessionId);
     },
-    [sendSocketMessage]
+    [sendRestMessage, sendSocketMessage]
   );
 
   useEffect(() => {

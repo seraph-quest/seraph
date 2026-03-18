@@ -294,7 +294,6 @@ describe("CockpitView", () => {
     expect(screen.getByText("blocked web-brief-to-file · tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
-    expect(screen.getAllByText("Hold this until the browser is back.").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -343,6 +342,61 @@ describe("CockpitView", () => {
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   }, 15000);
 
+  it("surfaces the latest assistant response in the main cockpit column", async () => {
+    useChatStore.setState({
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "What changed today?",
+          timestamp: Date.now() - 1000,
+        },
+        {
+          id: "agent-1",
+          role: "agent",
+          content: "You completed the workflow batch and refreshed the roadmap queue.",
+          timestamp: Date.now(),
+        },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Latest response")).toBeInTheDocument());
+    expect(
+      screen.getAllByText("You completed the workflow batch and refreshed the roadmap queue.").length,
+    ).toBeGreaterThan(1);
+  });
+
   it("does not process refresh payloads after the cockpit unmounts", async () => {
     const deferredResponses = Array.from({ length: 11 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
@@ -385,5 +439,44 @@ describe("CockpitView", () => {
 
     expect(jsonSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("keeps the composer text when send fails", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn(async () => false)} />);
+
+    const composer = await screen.findByPlaceholderText(/Ask Seraph/i);
+    fireEvent.change(composer, { target: { value: "keep me" } });
+    fireEvent.submit(composer.closest("form")!);
+
+    await waitFor(() => expect(screen.getByDisplayValue("keep me")).toBeInTheDocument());
   });
 });

@@ -91,7 +91,7 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#7 human-world-model-v2`
+- the current active item is `#8 native-desktop-shell-v2`
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -105,7 +105,7 @@ It should always show the next 10 most valuable PRs, while the latest completed 
    add capability constraints, cost and latency guardrails, and stronger routing safety beyond the current weighted scoring layer
 6. [x] `artifact-evidence-roundtrip-v2`:
    deepen round-tripping between workflow outputs, evidence panes, file artifacts, and the command surface
-7. [ ] `human-world-model-v2`:
+7. [x] `human-world-model-v2`:
    grow the first explicit working-state and commitments model into stronger project, pressure, and recent-execution understanding
 8. [ ] `native-desktop-shell-v2`:
    move from a presence card plus notifications to a more coherent desktop control shell with actionable recents and controls
@@ -163,7 +163,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
 - [x] first strict provider-policy safeguard layer for runtime paths, including required capability intents plus cost/latency guardrails that reroute only when compliant targets exist and otherwise fail open with explicit audit visibility
 - [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, salience/confidence signals, memory recall, session history, recent sessions, recent intervention feedback, and confidence into one structured downstream input
-- [x] first explicit human/world model layered into guardian state, with current focus, active commitments, open loops or pressure, focus alignment, and intervention receptivity
+- [x] explicit guardian world model now also carries recent active projects and recent execution pressure from workflow/tool outcomes, not only focus, commitments, and receptivity
 - [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus salience-aware policy reasons
 - [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state
 - [x] second outcome-learning layer that now lets recent positive and acknowledged outcomes change direct-delivery timing and native-channel preference, not only interruption reduction

@@ -34,11 +34,14 @@ def _make_guardian_state() -> GuardianState:
             open_loops_or_pressure=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
             focus_alignment="medium",
             intervention_receptivity="high",
+            active_projects=("Guardian cockpit",),
+            execution_pressure=("Workflow brief-sync degraded at write_file",),
         ),
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
         recent_intervention_feedback="- advisory delivered, feedback=helpful, reason=available_capacity: Stretch and refocus.",
+        recent_execution_summary="- Workflow brief-sync degraded at write_file",
         confidence=GuardianStateConfidence(
             overall="grounded",
             observer="grounded",
@@ -79,6 +82,23 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
         patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
         patch(
+            "src.audit.repository.audit_repository.list_events",
+            return_value=[
+                {
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_brief_sync",
+                    "details": {
+                        "workflow_name": "brief-sync",
+                        "continued_error_steps": ["write_file"],
+                    },
+                }
+            ],
+        ),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Guardian cockpit", "Docs parity"],
+        ),
+        patch(
             "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
             return_value="- advisory delivered, feedback=helpful: Stretch and refocus.",
         ),
@@ -95,12 +115,18 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert state.confidence.recent_sessions == "grounded"
     assert state.world_model.current_focus == "Ship guardian state while in VS Code"
     assert "Ship guardian state" in state.world_model.active_commitments
+    assert "Guardian cockpit" in state.world_model.active_projects
+    assert any(
+        "brief-sync degraded" in item
+        for item in state.world_model.execution_pressure
+    )
     assert state.world_model.focus_alignment == "medium"
     assert state.world_model.intervention_receptivity == "high"
     assert "Build explicit guardian state." in state.current_session_history
     assert "Prior roadmap" in state.recent_sessions_summary
     assert "Ship guardian state" in state.memory_context
     assert "feedback=helpful" in state.recent_intervention_feedback
+    assert "brief-sync degraded" in state.recent_execution_summary
 
 
 def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
@@ -111,14 +137,18 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "World model:" in block
     assert "Current focus: Ship guardian state while in VS Code" in block
     assert "Intervention receptivity: high" in block
+    assert "Active projects:" in block
+    assert "Recent execution pressure:" in block
     assert "Observer model: confidence=grounded | salience=high (active_goals) | interruption_cost=low" in block
     assert "Observer snapshot:" in block
     assert "Relevant memories:" in block
     assert "Recent sessions:" in block
     assert "Recent intervention feedback:" in block
+    assert "Recent execution:" in block
     assert "Ship guardian state" in block
     assert "Prior roadmap" in block
     assert "feedback=helpful" in block
+    assert "brief-sync degraded" in block
 
 
 @patch("src.agent.factory.ToolCallingAgent")

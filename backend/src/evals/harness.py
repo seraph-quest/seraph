@@ -3260,6 +3260,23 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
                 return_value="- [goal] Prepare investor brief\n- [loop] Follow up on investor questions",
             ),
             patch(
+                "src.audit.repository.audit_repository.list_events",
+                return_value=[
+                    {
+                        "event_type": "tool_result",
+                        "tool_name": "workflow_investor_brief",
+                        "details": {
+                            "workflow_name": "investor-brief",
+                            "continued_error_steps": ["write_file"],
+                        },
+                    }
+                ],
+            ),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Investor brief", "Fundraising follow-up"],
+            ),
+            patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
                 return_value="- advisory delivered, feedback=not_helpful: Too many nudges during prep.",
             ),
@@ -3281,7 +3298,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
             "active_commitments_count": len(state.world_model.active_commitments),
+            "active_projects_count": len(state.world_model.active_projects),
             "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
+            "includes_investor_project": "Investor brief" in state.world_model.active_projects,
             "includes_attention_pressure": any(
                 "Attention budget is nearly exhausted" in item
                 for item in state.world_model.open_loops_or_pressure
@@ -3290,8 +3309,13 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
                 "Recent intervention friction" in item
                 for item in state.world_model.open_loops_or_pressure
             ),
+            "includes_execution_pressure": any(
+                "investor-brief degraded" in item
+                for item in state.world_model.execution_pressure
+            ),
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
+            "agent_instructions_include_projects": "Active projects:" in instructions,
             "strategist_instructions_include_receptivity": (
                 "Intervention receptivity: low" in strategist_agent.instructions
             ),

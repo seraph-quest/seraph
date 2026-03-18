@@ -39,8 +39,8 @@ This file explains:
 
 ### 1. Guardian state and human model
 
-- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a first explicit world-model layer for focus, commitments, pressure, and receptivity, and a first calibrated aligned-work/high-salience pass
-- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the first explicit world-model and calibration layers
+- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a project/execution-aware world-model layer for focus, commitments, active projects, recent execution pressure, and receptivity, and a first calibrated aligned-work/high-salience pass
+- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the new project/execution-aware world-model and calibration layers
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
@@ -90,7 +90,8 @@ This file explains:
 - [x] `cross-surface-continuity-v2` is now the fourth shipped item from the refreshed queue on this branch.
 - [x] `provider-policy-safeguards-v2` is now the fifth shipped item from the refreshed queue on this branch.
 - [x] `artifact-evidence-roundtrip-v2` is now the sixth shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `human-world-model-v2` because direct artifact/workflow handoff is now in place and the next leverage gap shifts back to adaptive guardian quality.
+- [x] `human-world-model-v2` is now the seventh shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `native-desktop-shell-v2` because the world model is now project/execution-aware and the next leverage gap shifts back to operator presence and reach.
 - [x] The refreshed queue still keeps provider safeguards, richer artifact/evidence round-tripping, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

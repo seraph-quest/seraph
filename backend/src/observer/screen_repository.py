@@ -269,6 +269,40 @@ class ScreenObservationRepository:
             )
         return len(old)
 
+    async def get_recent_projects(
+        self,
+        *,
+        days: int = 7,
+        limit: int = 3,
+    ) -> list[str]:
+        """Return the most active recent non-blocked project labels."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+
+        async with get_session() as db:
+            tracked_duration = func.sum(func.coalesce(ScreenObservation.duration_s, 0))
+            last_seen = func.max(ScreenObservation.timestamp)
+            result = await db.execute(
+                select(
+                    ScreenObservation.project,
+                    tracked_duration.label("tracked_duration"),
+                    last_seen.label("last_seen"),
+                )
+                .where(col(ScreenObservation.timestamp) >= cutoff)
+                .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+                .where(col(ScreenObservation.project).is_not(None))
+                .group_by(ScreenObservation.project)
+                .order_by(tracked_duration.desc(), last_seen.desc())
+                .limit(max(limit, 1))
+            )
+            rows = result.all()
+
+        projects: list[str] = []
+        for row in rows:
+            project = row[0]
+            if isinstance(project, str) and project.strip() and project not in projects:
+                projects.append(project)
+        return projects
+
     @staticmethod
     def _compute_streaks(observations: list[ScreenObservation]) -> list[dict]:
         """Find longest consecutive same-activity streaks."""

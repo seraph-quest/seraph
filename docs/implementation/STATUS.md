@@ -38,11 +38,12 @@ title: Seraph Development Status
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now stronger adaptive guardian quality on top of the newly shipped continuity, world-model, workflow-run, artifact-roundtrip, behavioral-proof, and provider-safeguard foundations.
+- [x] The next strategic focus is now native shell maturity on top of the newly shipped continuity, world-model, workflow-run, artifact-roundtrip, behavioral-proof, and provider-safeguard foundations.
 - [x] The first three items in that refreshed batch, `execution-safety-hardening-v2`, `cockpit-workflow-views-v1`, and `guardian-learning-loop-v2`, are now shipped on this branch.
 - [x] `cross-surface-continuity-v2` is now shipped on this branch.
 - [x] `provider-policy-safeguards-v2` is now shipped on this branch.
 - [x] `artifact-evidence-roundtrip-v2` is now shipped on this branch.
+- [x] `human-world-model-v2` is now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -107,7 +108,7 @@ title: Seraph Development Status
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
-- [x] first explicit guardian world model for focus, commitments, open loops or pressure, focus alignment, and intervention receptivity
+- [x] guardian world model now includes active projects plus recent execution pressure from degraded workflow/tool outcomes, not only focus, commitments, open loops or pressure, alignment, and receptivity
 - [x] observer salience, confidence, and interruption-cost scoring for observer refresh, guardian state, and proactive policy
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
@@ -147,7 +148,7 @@ title: Seraph Development Status
 ### Guardian intelligence
 
 - [ ] stronger learning and feedback loops beyond the first multi-signal delivery/channel bias layer
-- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the first explicit focus or commitments layer
+- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/execution-aware world-model layer
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 
 ### Interface and presence
@@ -165,7 +166,7 @@ title: Seraph Development Status
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are deeper execution hardening, stronger intervention learning and world modeling, native reach, provider-policy safeguards, and still-denser cockpit operation.
+- [ ] The biggest gaps against the reference systems are deeper execution hardening, stronger intervention learning beyond the new world-model layer, native reach, and still-denser cockpit operation.
 - [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
 
 ## Workstream View

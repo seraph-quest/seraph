@@ -289,11 +289,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
     assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
     assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["active_projects_count"] >= 1
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_investor_project"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_execution_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True
     assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"

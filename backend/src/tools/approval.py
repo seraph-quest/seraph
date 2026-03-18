@@ -21,11 +21,19 @@ class ApprovalTool(Tool):
 
     skip_forward_signature_validation = True
 
-    def __init__(self, wrapped_tool: Tool, *, force_approval: bool = False, is_mcp: bool = False):
+    def __init__(
+        self,
+        wrapped_tool: Tool,
+        *,
+        force_approval: bool = False,
+        is_mcp: bool = False,
+        risk_level_override: str | None = None,
+    ):
         super().__init__()
         self.wrapped_tool = wrapped_tool
         self.force_approval = force_approval
         self.is_mcp = is_mcp
+        self.risk_level_override = risk_level_override if isinstance(risk_level_override, str) else None
         self.name = str(getattr(wrapped_tool, "name", "wrapped_tool"))
         description = getattr(wrapped_tool, "description", "")
         self.description = description if isinstance(description, str) else ""
@@ -61,11 +69,12 @@ class ApprovalTool(Tool):
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
         summary = format_tool_call_summary(self.name, arguments, set())
+        risk_level = self.risk_level_override or get_tool_risk_level(self.name, is_mcp=self.is_mcp)
         request = _run_async(
             approval_repository.get_or_create_pending(
                 session_id=session_id,
                 tool_name=self.name,
-                risk_level=get_tool_risk_level(self.name, is_mcp=self.is_mcp),
+                risk_level=risk_level,
                 summary=summary,
                 fingerprint=fingerprint,
                 details={"arguments": redact_for_audit(arguments)},
@@ -92,23 +101,33 @@ class ApprovalTool(Tool):
         }
 
 
-def wrap_tools_for_approval(tools: list[Tool], *, treat_all_as_mcp: bool = False) -> list[Tool]:
+def wrap_tools_for_approval(
+    tools: list[Tool],
+    *,
+    treat_all_as_mcp: bool = False,
+    risk_overrides: dict[str, str] | None = None,
+) -> list[Tool]:
     """Wrap high-risk tools with approval checkpoints."""
     wrapped: list[Tool] = []
     for tool in tools:
         is_mcp = treat_all_as_mcp or tool.name.startswith("mcp_")
-        risk_level = get_tool_risk_level(
+        risk_level = (risk_overrides or {}).get(
             tool.name,
-            is_mcp=is_mcp,
+            get_tool_risk_level(tool.name, is_mcp=is_mcp),
         )
         if risk_level == "high":
-            wrapped.append(ApprovalTool(tool, is_mcp=is_mcp))
+            wrapped.append(ApprovalTool(tool, is_mcp=is_mcp, risk_level_override=risk_level))
         else:
             wrapped.append(tool)
     return wrapped
 
 
-def wrap_tools_with_forced_approval(tools: list[Tool], *, treat_all_as_mcp: bool = False) -> list[Tool]:
+def wrap_tools_with_forced_approval(
+    tools: list[Tool],
+    *,
+    treat_all_as_mcp: bool = False,
+    risk_overrides: dict[str, str] | None = None,
+) -> list[Tool]:
     """Wrap a tool collection so every invocation pauses for approval."""
     wrapped: list[Tool] = []
     for tool in tools:
@@ -117,6 +136,7 @@ def wrap_tools_with_forced_approval(tools: list[Tool], *, treat_all_as_mcp: bool
                 tool,
                 force_approval=True,
                 is_mcp=treat_all_as_mcp or tool.name.startswith("mcp_"),
+                risk_level_override=(risk_overrides or {}).get(tool.name),
             )
         )
     return wrapped

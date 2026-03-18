@@ -261,16 +261,26 @@ def build_all_specialists() -> list[ToolCallingAgent]:
     )
     forced_approval_workflows: list = []
     normal_workflows: list = []
+    workflow_risk_overrides: dict[str, str] = {}
     for tool in workflow_tools:
         metadata = workflow_manager.get_tool_metadata(tool.name) or {}
         boundaries = metadata.get("execution_boundaries", [])
+        risk_level = metadata.get("risk_level")
+        if isinstance(risk_level, str):
+            workflow_risk_overrides[tool.name] = risk_level
         if mcp_mode == "approval" and "external_mcp" in boundaries:
             forced_approval_workflows.append(tool)
         else:
             normal_workflows.append(tool)
-    workflow_tools = wrap_tools_for_approval(normal_workflows)
+    workflow_tools = wrap_tools_for_approval(
+        normal_workflows,
+        risk_overrides=workflow_risk_overrides,
+    )
     if forced_approval_workflows:
-        workflow_tools += wrap_tools_with_forced_approval(forced_approval_workflows)
+        workflow_tools += wrap_tools_with_forced_approval(
+            forced_approval_workflows,
+            risk_overrides=workflow_risk_overrides,
+        )
     if workflow_tools:
         specialists.append(
             create_specialist(

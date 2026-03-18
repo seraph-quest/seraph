@@ -21,6 +21,9 @@ export interface WorkflowInfo {
   risk_level: string;
   requires_approval: boolean;
   approval_behavior: string;
+  is_available?: boolean;
+  missing_tools?: string[];
+  missing_skills?: string[];
 }
 
 function inputPlaceholder(

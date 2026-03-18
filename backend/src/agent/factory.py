@@ -24,8 +24,8 @@ def get_model(*, runtime_path: str = "chat_agent") -> LiteLLMModel:
     ))
 
 
-def get_tools() -> list:
-    """Return all auto-discovered tools + MCP tools."""
+def get_base_tools_and_active_skills() -> tuple[list, list[str], str]:
+    """Return the executable non-workflow tools plus the active skill names."""
     tool_mode = get_current_tool_policy_mode()
     mcp_mode = get_current_mcp_policy_mode()
     native_tools = wrap_tools_for_approval(
@@ -60,22 +60,43 @@ def get_tools() -> list:
         skill.name
         for skill in skill_manager.get_active_skills([tool.name for tool in base_tools])
     ]
+    return base_tools, active_skill_names, mcp_mode
+
+
+def _append_workflow_tools(base_tools: list, active_skill_names: list[str], mcp_mode: str) -> list:
+    """Build workflow tools against the executable base tool surface."""
     workflow_tools = wrap_tools_for_audit(
         workflow_manager.build_workflow_tools(base_tools, active_skill_names)
     )
     forced_approval_workflows: list = []
     normal_workflows: list = []
+    workflow_risk_overrides: dict[str, str] = {}
     for tool in workflow_tools:
         metadata = workflow_manager.get_tool_metadata(tool.name) or {}
         boundaries = metadata.get("execution_boundaries", [])
+        risk_level = metadata.get("risk_level")
+        if isinstance(risk_level, str):
+            workflow_risk_overrides[tool.name] = risk_level
         if mcp_mode == "approval" and "external_mcp" in boundaries:
             forced_approval_workflows.append(tool)
         else:
             normal_workflows.append(tool)
-    workflow_tools = wrap_tools_for_approval(normal_workflows)
+    workflow_tools = wrap_tools_for_approval(
+        normal_workflows,
+        risk_overrides=workflow_risk_overrides,
+    )
     if forced_approval_workflows:
-        workflow_tools += wrap_tools_with_forced_approval(forced_approval_workflows)
+        workflow_tools += wrap_tools_with_forced_approval(
+            forced_approval_workflows,
+            risk_overrides=workflow_risk_overrides,
+        )
     return base_tools + workflow_tools
+
+
+def get_tools() -> list:
+    """Return all auto-discovered tools + MCP tools."""
+    base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
+    return _append_workflow_tools(base_tools, active_skill_names, mcp_mode)
 
 
 def create_agent(

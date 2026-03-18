@@ -204,9 +204,15 @@ class WorkflowManager:
             if workflow.name in self._disabled:
                 workflow.enabled = False
 
-    def list_workflows(self) -> list[dict[str, Any]]:
-        return [
-            {
+    def list_workflows(
+        self,
+        *,
+        available_tool_names: list[str] | None = None,
+        active_skill_names: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        workflows: list[dict[str, Any]] = []
+        for workflow in self._workflows:
+            item = {
                 "name": workflow.name,
                 "tool_name": workflow.tool_name,
                 "description": workflow.description,
@@ -221,8 +227,16 @@ class WorkflowManager:
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
             }
-            for workflow in self._workflows
-        ]
+            if available_tool_names is not None and active_skill_names is not None:
+                item.update(
+                    self._get_runtime_availability(
+                        workflow,
+                        available_tool_names,
+                        active_skill_names,
+                    )
+                )
+            workflows.append(item)
+        return workflows
 
     def get_workflow(self, name: str) -> Workflow | None:
         for workflow in self._workflows:
@@ -311,6 +325,28 @@ class WorkflowManager:
             "step_count": len(workflow.steps),
             "execution_boundaries": self._infer_execution_boundaries(workflow),
             "risk_level": self._infer_risk_level(workflow),
+        }
+
+    def _get_runtime_availability(
+        self,
+        workflow: Workflow,
+        available_tool_names: list[str],
+        active_skill_names: list[str],
+    ) -> dict[str, Any]:
+        tool_set = set(available_tool_names)
+        skill_set = set(active_skill_names)
+        missing_tools = [
+            tool_name for tool_name in workflow.requires_tools
+            if tool_name not in tool_set
+        ]
+        missing_skills = [
+            skill_name for skill_name in workflow.requires_skills
+            if skill_name not in skill_set
+        ]
+        return {
+            "is_available": not missing_tools and not missing_skills,
+            "missing_tools": missing_tools,
+            "missing_skills": missing_skills,
         }
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:

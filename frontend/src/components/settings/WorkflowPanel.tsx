@@ -15,6 +15,17 @@ function WorkflowRow({
 }) {
   const statusColor = workflow.enabled ? "bg-green-400" : "bg-retro-text/30";
   const approvalLabel = workflow.requires_approval ? workflow.approval_behavior : "direct";
+  const isDraftable = workflow.user_invocable && workflow.enabled && workflow.is_available !== false;
+  const availabilityHint = workflow.is_available === false
+    ? [
+        workflow.missing_tools && workflow.missing_tools.length > 0
+          ? `missing tools: ${workflow.missing_tools.join(", ")}`
+          : "",
+        workflow.missing_skills && workflow.missing_skills.length > 0
+          ? `missing skills: ${workflow.missing_skills.join(", ")}`
+          : "",
+      ].filter(Boolean).join(" · ")
+    : "";
 
   return (
     <div className="flex items-start gap-1 px-1 py-0.5 border-b border-retro-text/10 last:border-b-0">
@@ -36,9 +47,14 @@ function WorkflowRow({
           tools: {workflow.requires_tools.join(", ") || "none"}
           {workflow.requires_skills.length > 0 && ` · skills: ${workflow.requires_skills.join(", ")}`}
         </div>
+        {availabilityHint && (
+          <div className="text-[9px] text-amber-300/70">
+            unavailable now · {availabilityHint}
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-1">
-        {workflow.user_invocable && workflow.enabled && (
+        {isDraftable && (
           <button
             onClick={() => onDraft(workflow)}
             className="text-[9px] text-retro-highlight hover:text-retro-text px-0.5"

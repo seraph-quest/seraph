@@ -8,9 +8,11 @@ import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
 import {
   collectArtifacts,
+  collectWorkflowRuns,
   formatInspectorValue,
   type ArtifactRecord,
   type CockpitAuditEvent,
+  type WorkflowRunRecord,
 } from "./inspector";
 import { COCKPIT_LAYOUTS, getCockpitLayout } from "./layouts";
 
@@ -52,6 +54,7 @@ interface DaemonPresenceState {
 
 type InspectorSelection =
   | { kind: "approval"; approval: PendingApproval }
+  | { kind: "workflow"; workflow: WorkflowRunRecord }
   | { kind: "intervention"; message: ChatMessage }
   | { kind: "trace"; message: ChatMessage }
   | { kind: "audit"; event: CockpitAuditEvent }
@@ -87,6 +90,15 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
 
   visit(goals);
   return titles;
+}
+
+function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
+  const inputs = workflow.arguments
+    ? Object.entries(workflow.arguments).map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+    : [];
+  return inputs.length
+    ? `Run workflow "${workflow.workflowName}" with ${inputs.join(", ")}.`
+    : `Run workflow "${workflow.workflowName}".`;
 }
 
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
@@ -203,6 +215,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const activeLayout = getCockpitLayout(activeLayoutId);
   const recentConversation = messages.slice(-18);
   const artifacts = useMemo(() => collectArtifacts(auditEvents), [auditEvents]);
+  const workflowRuns = useMemo(() => collectWorkflowRuns(auditEvents).slice(0, 6), [auditEvents]);
   const recentTrace = messages
     .filter((message) => message.role === "step" || message.role === "error")
     .slice(-8)
@@ -214,6 +227,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const topGoals = collectGoalTitles(goalTree, 5);
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
   const submitDisabled = connectionStatus !== "connected" || isAgentBusy || !composer.trim();
+
+  function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
+    return pendingApprovals.find((approval) => approval.tool_name === workflow.toolName) ?? null;
+  }
+
+  function interventionsForWorkflow(workflow: WorkflowRunRecord): ChatMessage[] {
+    if (!workflow.sessionId || workflow.sessionId !== sessionId) return [];
+    return messages.filter((message) => message.role === "proactive");
+  }
 
   async function sendFeedback(interventionId: string, feedbackType: "helpful" | "not_helpful") {
     setFeedbackState((current) => ({ ...current, [interventionId]: "saving" }));
@@ -280,7 +302,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!selectedInspector) {
       return (
         <div className="cockpit-empty">
-          Select an approval, intervention, trace row, audit event, or recent output to inspect it here.
+          Select a workflow run, approval, intervention, trace row, audit event, or recent output to inspect it here.
         </div>
       );
     }
@@ -300,6 +322,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         session_id: approval.session_id ?? "n/a",
         status: approval.status,
         resolution: approvalState[approval.id] ?? "pending",
+      };
+    } else if (selectedInspector.kind === "workflow") {
+      const workflow = selectedInspector.workflow;
+      const approval = approvalForWorkflow(workflow);
+      const linkedInterventions = interventionsForWorkflow(workflow);
+      title = workflow.workflowName;
+      meta = `${workflow.status} · ${workflow.artifacts.length} artifacts`;
+      body = workflow.summary;
+      details = {
+        tool_name: workflow.toolName,
+        session_id: workflow.sessionId ?? "n/a",
+        status: workflow.status,
+        step_tools: workflow.stepTools,
+        continued_error_steps: workflow.continuedErrorSteps,
+        artifact_paths: workflow.artifactPaths,
+        pending_approval: approval ? approval.id : "none",
+        linked_interventions: linkedInterventions.length,
       };
     } else if (selectedInspector.kind === "intervention") {
       const message = selectedInspector.message;
@@ -345,6 +384,28 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <div className="cockpit-inspector-title">{title}</div>
         <div className="cockpit-inspector-meta">{meta}</div>
         <div className="cockpit-inspector-body">{body}</div>
+        {selectedInspector.kind === "workflow" && (
+          <div className="cockpit-feedback-row">
+            <button
+              className="cockpit-feedback-button"
+              onClick={() => queueComposerDraft(buildWorkflowReplayDraft(selectedInspector.workflow))}
+            >
+              Draft Rerun
+            </button>
+            {selectedInspector.workflow.artifactPaths[0] && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() =>
+                  queueComposerDraft(
+                    `Use the workspace file "${selectedInspector.workflow.artifactPaths[0]}" as context for the next action.`,
+                  )
+                }
+              >
+                Use Output
+              </button>
+            )}
+          </div>
+        )}
         {selectedInspector.kind === "artifact" && (
           <div className="cockpit-feedback-row">
             <button
@@ -645,6 +706,45 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     .join(" • ")
                   : "No upcoming events loaded."}
               </div>
+            </div>
+          </section>
+          )}
+
+          {activeLayout.sections.workflows && (
+          <section className="cockpit-panel">
+            <div className="cockpit-card-header">
+              <div className="cockpit-card-title">Workflow runs</div>
+              <div className="cockpit-card-meta">{workflowRuns.length} recent</div>
+            </div>
+            <div className="cockpit-list">
+              {workflowRuns.map((workflow) => {
+                const approval = approvalForWorkflow(workflow);
+                const linkedInterventions = interventionsForWorkflow(workflow);
+                return (
+                  <button
+                    key={workflow.id}
+                    className={`cockpit-row-button ${
+                      selectedInspector?.kind === "workflow" && selectedInspector.workflow.id === workflow.id
+                        ? "active"
+                        : ""
+                    }`}
+                    onClick={() => setSelectedInspector({ kind: "workflow", workflow })}
+                  >
+                    <div className="cockpit-row-header">
+                      <span className="cockpit-role">{workflow.workflowName}</span>
+                      <span className="cockpit-row-age">{formatAge(workflow.updatedAt)}</span>
+                    </div>
+                    <div className="cockpit-row-body">{workflow.summary}</div>
+                    <div className="cockpit-row-meta">
+                      {workflow.status} · {workflow.artifactPaths.length} artifacts ·{" "}
+                      {approval ? "approval waiting" : "no approval"} · {linkedInterventions.length} interventions
+                    </div>
+                  </button>
+                );
+              })}
+              {workflowRuns.length === 0 && (
+                <div className="cockpit-empty">No recent workflow executions in the current audit window.</div>
+              )}
             </div>
           </section>
           )}

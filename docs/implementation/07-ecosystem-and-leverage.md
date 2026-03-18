@@ -21,11 +21,12 @@
 ## Working On Now
 
 - [x] this workstream shipped the first operator workflow-control slice through `workflow-control-and-artifact-roundtrips-v1`
+- [x] this workstream partnered on `cockpit-workflow-views-v1`
 - [x] this workstream now hands the queue forward to guardian learning and salience work
 
 ## Still To Do On `develop`
 
-- [ ] deeper workflow operating surfaces and stronger artifact round-tripping beyond the first settings/cockpit loop
+- [ ] deeper workflow operating surfaces, richer workflow history, and stronger artifact round-tripping beyond the first settings/cockpit loop
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

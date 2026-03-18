@@ -11,6 +11,7 @@
 ## Shipped On `develop`
 
 - [x] browser guardian cockpit shell with dense multi-pane layout, fixed composer, session rail, guardian-state panel, intervention feedback, audit surface, live trace, pending approvals, recent outputs, and an operations inspector
+- [x] dedicated cockpit workflow-run views with richer workflow inspector actions and artifact-lineage links
 - [x] persisted cockpit workspace presets for `default`, `focus`, and `review`, with inspector visibility persistence and keyboard switching
 - [x] cockpit-native bridge cues through live desktop status, pending native-notification state, and browser-side native-presence controls in the operator surfaces
 - [x] cockpit-first default browser mode with explicit fallback to the legacy village shell
@@ -26,10 +27,11 @@
 - [x] this workstream shipped `cockpit-linked-evidence-panels-v2` and `saved-layouts-and-keyboard-control-v1`
 - [x] this workstream partnered on `native-desktop-shell-v1`
 - [x] this workstream partnered on `cross-surface-continuity-and-notification-controls`
+- [x] this workstream now ships `cockpit-workflow-views-v1`
 
 ## Still To Do On `develop`
 
-- [ ] richer dedicated workflow-state widgets and broader keyboard/operator control inside the cockpit beyond the first saved-layout layer
+- [ ] richer workflow history, broader keyboard/operator control, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 
@@ -47,5 +49,5 @@
 - [x] the cockpit now has linked evidence, artifact, and approval density beyond the first shell
 - [x] cockpit artifacts can now round-trip back into the command bar for the next operator step
 - [x] the cockpit now supports persisted workspace presets and keyboard switching for core navigation
-- [ ] the cockpit still needs stronger workflow control density and more flexible workspace ergonomics
+- [ ] the cockpit still needs broader workflow history, denser workflow control, and more flexible workspace ergonomics
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

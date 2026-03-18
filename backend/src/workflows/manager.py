@@ -68,6 +68,30 @@ def _summarize_workflow_result(workflow: Workflow, step_results: dict[str, dict[
     return "\n".join(lines)
 
 
+def _collect_artifact_paths(value: Any) -> list[str]:
+    paths: list[str] = []
+
+    def _visit(current: Any, key_hint: str | None = None) -> None:
+        if isinstance(current, dict):
+            for key, inner in current.items():
+                _visit(inner, str(key))
+            return
+        if isinstance(current, list):
+            for item in current:
+                _visit(item, key_hint)
+            return
+        if (
+            key_hint == "file_path"
+            and isinstance(current, str)
+            and current.strip()
+            and current not in paths
+        ):
+            paths.append(current)
+
+    _visit(value)
+    return paths
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -89,6 +113,7 @@ class WorkflowTool(Tool):
         }
         self.output_type = "string"
         self.is_initialized = True
+        self._last_audit_payload: tuple[str, dict[str, Any]] | None = None
 
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
@@ -101,6 +126,8 @@ class WorkflowTool(Tool):
             "last_result": "",
         }
         context.update(workflow_inputs)
+        continued_error_steps: list[str] = []
+        artifact_paths = _collect_artifact_paths(workflow_inputs)
 
         for step in self.workflow.steps:
             tool = self.tools_by_name.get(step.tool)
@@ -118,17 +145,49 @@ class WorkflowTool(Tool):
                 if not step.continue_on_error:
                     raise
                 result = f"Error: {exc}"
+                continued_error_steps.append(step.id)
             context["steps"][step.id] = {
                 "tool": step.tool,
                 "arguments": rendered_arguments,
                 "result": result,
             }
             context["last_result"] = result
+            for path in _collect_artifact_paths(rendered_arguments):
+                if path not in artifact_paths:
+                    artifact_paths.append(path)
 
+        result_text = ""
         if self.workflow.result_template:
             rendered = _render_value(self.workflow.result_template, context)
-            return str(rendered)
-        return _summarize_workflow_result(self.workflow, context["steps"])
+            result_text = str(rendered)
+        else:
+            result_text = _summarize_workflow_result(self.workflow, context["steps"])
+
+        status = "degraded" if continued_error_steps else "succeeded"
+        summary = f"{self.name} {status} ({len(self.workflow.steps)} steps)"
+        if continued_error_steps:
+            summary += f" with {len(continued_error_steps)} continued error step"
+            if len(continued_error_steps) != 1:
+                summary += "s"
+        self._last_audit_payload = (
+            summary,
+            {
+                "workflow_name": self.workflow.name,
+                "step_count": len(self.workflow.steps),
+                "step_tools": [step.tool for step in self.workflow.steps],
+                "artifact_paths": artifact_paths,
+                "continued_error_steps": continued_error_steps,
+                "content_redacted": True,
+            },
+        )
+        return result_text
+
+    def get_audit_result_payload(
+        self,
+        _arguments: dict[str, Any],
+        _result: Any,
+    ) -> tuple[str, dict[str, Any]] | None:
+        return self._last_audit_payload
 
     def _normalize_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):

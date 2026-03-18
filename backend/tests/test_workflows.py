@@ -209,6 +209,18 @@ class TestWorkflowManager:
             "content": "Search results\n\nSEARCH<seraph>\n",
         }]
         assert result == "Saved search results for seraph to notes/brief.md."
+        audit_payload = workflow_tool.get_audit_result_payload({}, result)
+        assert audit_payload == (
+            "workflow_web_brief_to_file succeeded (2 steps)",
+            {
+                "workflow_name": "web-brief-to-file",
+                "step_count": 2,
+                "step_tools": ["web_search", "write_file"],
+                "artifact_paths": ["notes/brief.md"],
+                "continued_error_steps": [],
+                "content_redacted": True,
+            },
+        )
 
     def test_build_tools_supports_mcp_requirements(self, tmp_path):
         workflows_dir = tmp_path / "workflows"

@@ -63,14 +63,14 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, artifact round-trip into the command bar, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
-- [ ] still missing: stronger dedicated workflow-control density and more flexible workspace control beyond the first saved-layout layer
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, and legacy village fallback
+- [ ] still missing: deeper workflow history and more flexible workspace control beyond the first dedicated workflow-run layer
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
-- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, and a first operator-facing workflow-control layer with draft-to-cockpit steering
-- [ ] still missing: richer direct workflow control, stronger artifact round-tripping, and easier extension ergonomics
+- [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, a first operator-facing workflow-control layer with draft-to-cockpit steering, and a first cockpit workflow-run/operator surface
+- [ ] still missing: richer direct workflow control, deeper workflow history, stronger artifact round-tripping, and easier extension ergonomics
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
@@ -86,7 +86,8 @@ This file explains:
 - [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
 - [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
 - [x] `execution-safety-hardening-v2` is now the first shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `cockpit-workflow-views-v1` because privileged-path secret containment and workflow declaration safety have been tightened enough for the next bottleneck to be operator workflow density.
+- [x] `cockpit-workflow-views-v1` is now the second shipped item from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `guardian-learning-loop-v2` because the cockpit now has a first dedicated workflow-run surface and the next bottleneck shifts back to adaptive guardian quality.
 - [x] The refreshed queue still keeps cross-surface continuity, provider safeguards, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

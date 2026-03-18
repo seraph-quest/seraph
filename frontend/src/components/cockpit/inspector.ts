@@ -20,6 +20,22 @@ export interface ArtifactRecord {
   summary: string;
 }
 
+export interface WorkflowRunRecord {
+  id: string;
+  toolName: string;
+  workflowName: string;
+  sessionId?: string | null;
+  status: "succeeded" | "failed" | "running";
+  startedAt: string;
+  updatedAt: string;
+  summary: string;
+  stepTools: string[];
+  artifactPaths: string[];
+  continuedErrorSteps: string[];
+  arguments?: Record<string, unknown>;
+  artifacts: ArtifactRecord[];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
@@ -94,6 +110,139 @@ export function collectArtifacts(events: CockpitAuditEvent[]): ArtifactRecord[] 
   }
 
   return artifacts;
+}
+
+function workflowNameFromTool(toolName: string): string {
+  return toolName.startsWith("workflow_")
+    ? toolName.slice("workflow_".length).replace(/_/g, "-")
+    : toolName;
+}
+
+function extractArtifactPaths(value: unknown): string[] {
+  const paths: string[] = [];
+
+  function visit(current: unknown, keyHint?: string): void {
+    if (Array.isArray(current)) {
+      current.forEach((item) => visit(item, keyHint));
+      return;
+    }
+    const record = asRecord(current);
+    if (record) {
+      Object.entries(record).forEach(([key, inner]) => visit(inner, key));
+      return;
+    }
+    if (
+      keyHint === "file_path"
+      && typeof current === "string"
+      && current.trim().length > 0
+      && !paths.includes(current)
+    ) {
+      paths.push(current);
+    }
+  }
+
+  visit(value);
+  return paths;
+}
+
+function workflowKey(event: CockpitAuditEvent): string {
+  return `${event.session_id ?? "global"}:${event.tool_name ?? "workflow"}`;
+}
+
+export function collectWorkflowRuns(events: CockpitAuditEvent[]): WorkflowRunRecord[] {
+  const artifacts = collectArtifacts(events);
+  const artifactMap = new Map(artifacts.map((artifact) => [`${artifact.sessionId ?? "global"}:${artifact.filePath}`, artifact]));
+  const ordered = [...events]
+    .filter((event) => event.tool_name?.startsWith("workflow_"))
+    .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+  const pending = new Map<string, WorkflowRunRecord[]>();
+  const completed: WorkflowRunRecord[] = [];
+
+  for (const event of ordered) {
+    const details = asRecord(event.details);
+    const key = workflowKey(event);
+    const toolName = event.tool_name ?? "workflow";
+    if (event.event_type === "tool_call") {
+      const args = asRecord(details?.arguments) ?? undefined;
+      const artifactPaths = extractArtifactPaths(args);
+      const run: WorkflowRunRecord = {
+        id: event.id,
+        toolName,
+        workflowName: readDetailsString(details, "workflow_name") ?? workflowNameFromTool(toolName),
+        sessionId: event.session_id ?? null,
+        status: "running",
+        startedAt: event.created_at,
+        updatedAt: event.created_at,
+        summary: event.summary,
+        stepTools: [],
+        artifactPaths,
+        continuedErrorSteps: [],
+        arguments: args ?? undefined,
+        artifacts: [],
+      };
+      const queue = pending.get(key) ?? [];
+      queue.push(run);
+      pending.set(key, queue);
+      continue;
+    }
+
+    const queue = pending.get(key) ?? [];
+    const run = queue.pop() ?? {
+      id: event.id,
+      toolName,
+      workflowName: readDetailsString(details, "workflow_name") ?? workflowNameFromTool(toolName),
+      sessionId: event.session_id ?? null,
+      status: "running" as const,
+      startedAt: event.created_at,
+      updatedAt: event.created_at,
+      summary: event.summary,
+      stepTools: [],
+      artifactPaths: [],
+      continuedErrorSteps: [],
+      arguments: asRecord(details?.arguments) ?? undefined,
+      artifacts: [],
+    };
+    if (queue.length > 0) {
+      pending.set(key, queue);
+    } else {
+      pending.delete(key);
+    }
+
+    const artifactPaths = [
+      ...run.artifactPaths,
+      ...(Array.isArray(details?.artifact_paths)
+        ? details.artifact_paths.filter(
+            (value): value is string => typeof value === "string" && value.trim().length > 0,
+          )
+        : []),
+      ...extractArtifactPaths(details?.arguments),
+    ].filter((value, index, list) => list.indexOf(value) === index);
+
+    const linkedArtifacts = artifactPaths
+      .map((filePath) => artifactMap.get(`${run.sessionId ?? "global"}:${filePath}`))
+      .filter((artifact): artifact is ArtifactRecord => artifact != null);
+
+    run.status = event.event_type === "tool_failed" ? "failed" : "succeeded";
+    run.updatedAt = event.created_at;
+    run.summary = event.summary;
+    run.stepTools = Array.isArray(details?.step_tools)
+      ? details.step_tools.filter((value): value is string => typeof value === "string")
+      : run.stepTools;
+    run.artifactPaths = artifactPaths;
+    run.continuedErrorSteps = Array.isArray(details?.continued_error_steps)
+      ? details.continued_error_steps.filter((value): value is string => typeof value === "string")
+      : run.continuedErrorSteps;
+    run.artifacts = linkedArtifacts;
+    completed.push(run);
+  }
+
+  for (const queue of pending.values()) {
+    completed.push(...queue);
+  }
+
+  return completed.sort(
+    (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+  );
 }
 
 export function formatInspectorValue(value: unknown): string {

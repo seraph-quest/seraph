@@ -23,16 +23,17 @@
 - [x] explicit workflow metadata for policy modes, execution boundaries, approval behavior, and risk level exposed to operator-facing APIs
 - [x] first operator-facing workflow controls for enable/disable, reload, and draft-to-cockpit steering
 - [x] workflow loading now rejects underdeclared runtime step tools, and tool/workflow metadata now expose secret-reference acceptance explicitly for injection-safe paths
+- [x] workflow execution audit now carries structured workflow-run details, artifact-path lineage, and degraded-step visibility for cockpit/operator views
 
 ## Working On Now
 
 - [x] this workstream has now shipped both workflow-facing hardening slices through `execution-safety-hardening-v1` and `execution-safety-hardening-v2`
-- [x] this workstream now hands the queue lead to `cockpit-workflow-views-v1`
+- [x] this workstream partnered on `cockpit-workflow-views-v1`
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] richer direct workflow execution, approval visibility, and artifact round-tripping on top of the hardened workflow runtime
+- [ ] richer direct workflow execution, approval visibility, artifact round-tripping, and workflow history on top of the new cockpit workflow-run surface
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Non-Goals

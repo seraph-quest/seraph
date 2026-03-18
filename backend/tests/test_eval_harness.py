@@ -52,6 +52,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "websocket_chat_timeout_contract" in captured.out
     assert "strategist_tick_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
+    assert "guardian_world_model_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
@@ -148,6 +149,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
                 "guardian_state_synthesis",
+                "guardian_world_model_behavior",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
@@ -266,8 +268,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["world_model_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_salience"] == "high"
     assert details_by_name["guardian_state_synthesis"]["observer_interruption_cost"] == "low"
+    assert details_by_name["guardian_state_synthesis"]["world_model_focus"] == "Ship guardian state while in VS Code"
+    assert details_by_name["guardian_state_synthesis"]["world_model_alignment"] == "medium"
     assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
@@ -275,6 +280,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
     assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
+    assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "grounded"
+    assert details_by_name["guardian_world_model_behavior"]["current_focus"] == "Prepare investor brief while in Arc"
+    assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
+    assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
+    assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
+    assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
     assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"

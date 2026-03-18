@@ -24,16 +24,17 @@
 - [x] first outcome-learning loop that uses recent negative feedback on the same intervention type to reduce future interruption eagerness for similar low-urgency nudges
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to bypass generic high-interruption bundling outside focus mode
 - [x] deeper guardian behavioral eval coverage that proves grounded high-salience delivery versus degraded-confidence defer behavior at the delivery gate
+- [x] first explicit human/world model that carries current focus, active commitments, open loops or pressure, focus alignment, and intervention receptivity inside guardian state
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through deeper human/world modeling and stronger learning quality after the first salience calibration and behavioral-proof passes
+- [x] this workstream remains central in the repo-wide horizon through stronger learning quality and a deeper second world-model pass after the first explicit focus or commitments layer shipped
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
 - [x] the first feedback-driven learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer multi-signal learning rather than more missing observer fields
 
 ## Still To Do On `develop`
 
-- [ ] richer human world modeling that goes beyond current retrieval plus heuristics
+- [ ] richer human world modeling that goes beyond the first explicit focus, commitments, pressure, and receptivity layer
 - [ ] stronger learning loops based on intervention outcomes beyond the first negative-feedback interruption bias
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
@@ -54,5 +55,6 @@
 - [x] Seraph scores observer state by salience, confidence, and interruption cost before guardian strategy and delivery
 - [x] Seraph uses calibrated high-salience observer signals to change real delivery outcomes instead of only logging them
 - [x] Seraph has deterministic behavioral proof that the calibrated high-salience deliver path and degraded-confidence defer path stay distinct at the delivery gate
+- [x] Seraph has a first explicit world model inside guardian state instead of relying only on retrieval plus prompt prose
 - [ ] Seraph reliably learns from intervention outcomes in a way that improves future policy quality beyond the first bias layer
 - [ ] Seraph reliably models the human well enough to intervene at consistently high quality

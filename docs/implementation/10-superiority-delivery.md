@@ -39,8 +39,8 @@ This file explains:
 
 ### 1. Guardian state and human model
 
-- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, and a first calibrated aligned-work/high-salience pass
-- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the first calibration layer
+- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a first explicit world-model layer for focus, commitments, pressure, and receptivity, and a first calibrated aligned-work/high-salience pass
+- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the first explicit world-model and calibration layers
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
@@ -84,8 +84,10 @@ This file explains:
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
 - [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
-- [x] The first cockpit-depth tranche, first desktop-presence tranche, and first browser/native continuity tranche are now shipped through linked evidence, saved layouts, native desktop presence, browser-side notification controls, and a stronger guardian behavioral proof layer, so the next active queue pressure moves toward deeper world modeling.
-- [x] The last items in the current queue now deepen world-model quality because proactive quality is bottlenecked more by judgment and modeling than by missing primitives.
+- [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
+- [x] The new queue starts with `execution-safety-hardening-v2` because privileged execution risk is still the highest-cost failure mode once leverage grows further.
+- [x] The next queue pressure then moves into cockpit workflow density and richer learning because Seraph now has enough foundations that usability and adaptive intervention quality matter more than missing primitives.
+- [x] The refreshed queue still keeps cross-surface continuity, provider safeguards, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

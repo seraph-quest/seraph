@@ -8,6 +8,7 @@ from src.agent.factory import create_agent
 from src.agent.session import SessionManager
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import GuardianState, GuardianStateConfidence, build_guardian_state
+from src.guardian.world_model import GuardianWorldModel
 from src.observer.context import CurrentContext
 
 
@@ -27,6 +28,13 @@ def _make_guardian_state() -> GuardianState:
             salience_reason="active_goals",
             interruption_cost="low",
         ),
+        world_model=GuardianWorldModel(
+            current_focus="Ship guardian state while in VS Code",
+            active_commitments=("Ship guardian state",),
+            open_loops_or_pressure=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
+            focus_alignment="medium",
+            intervention_receptivity="high",
+        ),
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
@@ -34,6 +42,7 @@ def _make_guardian_state() -> GuardianState:
         confidence=GuardianStateConfidence(
             overall="grounded",
             observer="grounded",
+            world_model="grounded",
             memory="grounded",
             current_session="grounded",
             recent_sessions="grounded",
@@ -80,9 +89,14 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert state.active_goals_summary == "Ship guardian state"
     assert state.confidence.overall == "grounded"
     assert state.confidence.observer == "grounded"
+    assert state.confidence.world_model == "grounded"
     assert state.confidence.memory == "grounded"
     assert state.confidence.current_session == "grounded"
     assert state.confidence.recent_sessions == "grounded"
+    assert state.world_model.current_focus == "Ship guardian state while in VS Code"
+    assert "Ship guardian state" in state.world_model.active_commitments
+    assert state.world_model.focus_alignment == "medium"
+    assert state.world_model.intervention_receptivity == "high"
     assert "Build explicit guardian state." in state.current_session_history
     assert "Prior roadmap" in state.recent_sessions_summary
     assert "Ship guardian state" in state.memory_context
@@ -93,6 +107,10 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     block = _make_guardian_state().to_prompt_block()
 
     assert "Overall confidence: grounded" in block
+    assert "World-model confidence: grounded" in block
+    assert "World model:" in block
+    assert "Current focus: Ship guardian state while in VS Code" in block
+    assert "Intervention receptivity: high" in block
     assert "Observer model: confidence=grounded | salience=high (active_goals) | interruption_cost=low" in block
     assert "Observer snapshot:" in block
     assert "Relevant memories:" in block
@@ -114,6 +132,8 @@ def test_create_agent_injects_guardian_state(mock_get_model, mock_agent_cls):
     instructions = mock_agent_cls.call_args[1]["instructions"]
     assert "GUARDIAN STATE" in instructions
     assert "Overall confidence: grounded" in instructions
+    assert "Current focus: Ship guardian state while in VS Code" in instructions
+    assert "Intervention receptivity: high" in instructions
     assert "USER IDENTITY" in instructions
     assert "RELEVANT MEMORIES" in instructions
     assert "CONVERSATION HISTORY" in instructions
@@ -127,5 +147,7 @@ def test_create_strategist_agent_accepts_guardian_state(mock_model_cls):
     agent = create_strategist_agent(guardian_state=_make_guardian_state())
 
     assert "Overall confidence: grounded" in agent.instructions
+    assert "Current focus: Ship guardian state while in VS Code" in agent.instructions
+    assert "Focus alignment: medium" in agent.instructions
     assert "Recent sessions:" in agent.instructions
     assert "Recent intervention feedback:" in agent.instructions

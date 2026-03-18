@@ -3148,8 +3148,11 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
         return {
             "overall_confidence": state.confidence.overall,
             "observer_confidence": state.confidence.observer,
+            "world_model_confidence": state.confidence.world_model,
             "observer_salience": state.observer_context.salience_level,
             "observer_interruption_cost": state.observer_context.interruption_cost,
+            "world_model_focus": state.world_model.current_focus,
+            "world_model_alignment": state.world_model.focus_alignment,
             "memory_confidence": state.confidence.memory,
             "current_session_confidence": state.confidence.current_session,
             "recent_sessions_confidence": state.confidence.recent_sessions,
@@ -3158,6 +3161,74 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             "current_history_mentions_guardian_state": "Build explicit guardian state." in state.current_session_history,
             "instructions_include_guardian_state": "--- GUARDIAN STATE ---" in instructions,
             "instructions_include_recent_sessions": "Recent sessions:" in instructions,
+        }
+
+
+async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
+    async with _patched_async_db("src.agent.session.get_session"):
+        await session_manager.get_or_create("current")
+        await session_manager.add_message("current", "user", "What needs attention today?")
+        await session_manager.add_message("current", "assistant", "Protect meeting prep and ship the brief.")
+        await session_manager.get_or_create("prior")
+        await session_manager.update_title("prior", "Investor follow-up")
+        await session_manager.add_message("prior", "assistant", "Close the investor loop before tomorrow.")
+
+        ctx = _make_context(
+            active_goals_summary="Prepare investor brief",
+            active_window="Arc",
+            screen_context="Reviewing investor meeting notes",
+            upcoming_events=[{"summary": "Investor sync", "start": "2026-03-18T14:00:00Z"}],
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="high",
+            attention_budget_remaining=1,
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+            patch(
+                "src.memory.vector_store.search_formatted",
+                return_value="- [goal] Prepare investor brief\n- [loop] Follow up on investor questions",
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="- advisory delivered, feedback=not_helpful: Too many nudges during prep.",
+            ),
+            patch("src.agent.factory.get_model", return_value=MagicMock()),
+            patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
+            patch("src.agent.strategist.LiteLLMModel", return_value=MagicMock()),
+        ):
+            state = await build_guardian_state(
+                session_id="current",
+                user_message="What needs attention today?",
+            )
+            create_agent(guardian_state=state)
+            strategist_agent = create_strategist_agent(guardian_state=state)
+
+        instructions = mock_agent_cls.call_args.kwargs["instructions"]
+        return {
+            "world_model_confidence": state.confidence.world_model,
+            "current_focus": state.world_model.current_focus,
+            "focus_alignment": state.world_model.focus_alignment,
+            "intervention_receptivity": state.world_model.intervention_receptivity,
+            "active_commitments_count": len(state.world_model.active_commitments),
+            "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
+            "includes_attention_pressure": any(
+                "Attention budget is nearly exhausted" in item
+                for item in state.world_model.open_loops_or_pressure
+            ),
+            "includes_feedback_pressure": any(
+                "Recent intervention friction" in item
+                for item in state.world_model.open_loops_or_pressure
+            ),
+            "agent_instructions_include_world_model": "World model:" in instructions,
+            "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
+            "strategist_instructions_include_receptivity": (
+                "Intervention receptivity: low" in strategist_agent.instructions
+            ),
         }
 
 
@@ -4625,6 +4696,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Guardian state synthesis unifies observer context, memories, recent sessions, and confidence into one downstream state object.",
         runner=_eval_guardian_state_synthesis,
+    ),
+    EvalScenario(
+        name="guardian_world_model_behavior",
+        category="guardian",
+        description="Guardian state now carries a first explicit world model for focus, commitments, pressure, and intervention receptivity.",
+        runner=_eval_guardian_world_model_behavior,
     ),
     EvalScenario(
         name="observer_refresh_behavior",

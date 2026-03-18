@@ -39,10 +39,11 @@ function resetStores() {
 
 function makeEvent(
   key: string,
-  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean },
+  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean; code?: string },
 ): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     key,
+    code: options?.code,
     shiftKey: options?.shiftKey ?? false,
     bubbles: true,
   });
@@ -73,23 +74,23 @@ describe("handleGlobalKeyboardShortcut", () => {
   it("Shift+1/2/3 switch cockpit layouts", () => {
     useChatStore.setState({ interfaceMode: "cockpit" });
 
-    handleGlobalKeyboardShortcut(makeEvent("2", { shiftKey: true }));
+    handleGlobalKeyboardShortcut(makeEvent("@", { shiftKey: true, code: "Digit2" }));
     expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("focus");
 
-    handleGlobalKeyboardShortcut(makeEvent("3", { shiftKey: true }));
+    handleGlobalKeyboardShortcut(makeEvent("#", { shiftKey: true, code: "Digit3" }));
     expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("review");
 
-    handleGlobalKeyboardShortcut(makeEvent("1", { shiftKey: true }));
+    handleGlobalKeyboardShortcut(makeEvent("!", { shiftKey: true, code: "Digit1" }));
     expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("default");
   });
 
   it("Shift+I toggles inspector visibility in cockpit mode", () => {
     useChatStore.setState({ interfaceMode: "cockpit" });
 
-    handleGlobalKeyboardShortcut(makeEvent("i", { shiftKey: true }));
+    handleGlobalKeyboardShortcut(makeEvent("I", { shiftKey: true, code: "KeyI" }));
     expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(false);
 
-    handleGlobalKeyboardShortcut(makeEvent("i", { shiftKey: true }));
+    handleGlobalKeyboardShortcut(makeEvent("I", { shiftKey: true, code: "KeyI" }));
     expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(true);
   });
 

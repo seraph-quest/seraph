@@ -4,6 +4,7 @@ import { usePanelLayoutStore, PANEL_MIN_SIZES } from "../stores/panelLayoutStore
 export type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
 const VISIBLE_MIN = 80;
+export const PANEL_GRID_SIZE = 16;
 
 interface Rect {
   x: number;
@@ -12,7 +13,20 @@ interface Rect {
   height: number;
 }
 
-function clampRect(
+function snapToGrid(value: number): number {
+  return Math.round(value / PANEL_GRID_SIZE) * PANEL_GRID_SIZE;
+}
+
+export function snapRectToGrid(rect: Rect, minW: number, minH: number): Rect {
+  return {
+    x: snapToGrid(rect.x),
+    y: snapToGrid(rect.y),
+    width: Math.max(minW, snapToGrid(rect.width)),
+    height: Math.max(minH, snapToGrid(rect.height)),
+  };
+}
+
+export function clampRect(
   x: number,
   y: number,
   width: number,
@@ -22,11 +36,14 @@ function clampRect(
 ): Rect {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const w = Math.max(width, minW);
-  const h = Math.max(height, minH);
-  const cx = Math.max(-(w - VISIBLE_MIN), Math.min(x, vw - VISIBLE_MIN));
+  const snapped = snapRectToGrid({ x, y, width, height }, minW, minH);
+  const w = snapped.width;
+  const h = snapped.height;
+  const sx = snapped.x;
+  const sy = snapped.y;
+  const cx = Math.max(-(w - VISIBLE_MIN), Math.min(sx, vw - VISIBLE_MIN));
   // Top: keep drag bar on screen (y >= 0); bottom/sides: keep 80px visible
-  const cy = Math.max(0, Math.min(y, vh - VISIBLE_MIN));
+  const cy = Math.max(0, Math.min(sy, vh - VISIBLE_MIN));
   return { x: cx, y: cy, width: w, height: h };
 }
 

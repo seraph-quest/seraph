@@ -6,9 +6,9 @@ Seraph should feel like a living guardian system with legible state, not a chat 
 
 ## Locked Direction
 
-The current village and avatar shell is **not** the future primary interface direction.
+The primary interface direction is a cockpit/terminal operator surface.
 
-It is a shipped surface on `develop`, but it is the wrong default operating surface for an information-heavy guardian product. The future primary interface is a dense guardian cockpit with a command layer, linked evidence views, and explicit intervention controls.
+The village and avatar shell can remain as a secondary or optional presence surface, but it is not the active shell for the current product direction. The main surface should optimize for command throughput, operator visibility, auditability, and fast intervention across multiple live threads.
 
 ## Why The Village Direction Falls Short
 
@@ -21,7 +21,9 @@ The village can be emotionally distinctive, but distinctiveness is not enough. T
 
 ## Primary Interface Shape
 
-### Top rail
+The near-term shape is a packed pane workspace, not a scenic dashboard. It should behave more like a dense operator desk: snap-aligned panes, a persistent command layer, and enough visible state that the user can steer the guardian without opening stacks of overlays.
+
+### Workspace frame
 
 A persistent guardian status rail showing:
 
@@ -30,49 +32,40 @@ A persistent guardian status rail showing:
 - queue size, urgent alerts, and degraded-state warnings
 - tool activity and intervention mode
 
-### Left rail
+### Packed panes
 
-Navigation and triage:
+The core workspace should support snap-aligned panes for:
 
-- sessions
-- today / timeline
-- goals and projects
-- proactive queue
-- alerts and pending approvals
-- saved workspaces
-
-### Center canvas
-
-A linked widget grid that can show:
-
-- current plan
-- observer signals
-- guardian-state summary
+- sessions and active threads
+- command/composer
+- workflow runs and operator controls
+- approvals and intervention queues
+- audit and live trace
+- artifacts, notes, and files
 - memory evidence
-- artifacts and notes
-- files, web findings, and workflow state
+- goals, projects, and saved workspaces
 
-### Right rail
+These panes should stay useful in compact form, be easy to rearrange, and hold a denser working set than the village-overlay model.
 
-Copilot and trace:
+### Command layer
 
-- conversation
-- current task/workflow trace
-- tool feed
-- citations and rationale
-- approval and interrupt controls
+A persistent command surface should stay available for:
 
-### Bottom composer
-
-A fixed command bar for chat, slash commands, structured actions, and quick redirection.
+- chat and redirection
+- slash-style operator commands
+- workflow launch and replay
+- artifact round-tripping
+- quick approvals and interrupt handling
 
 ## Interface Principles
 
 - keyboard-first by default
-- dense but legible
+- dense enough for continuous operator use
+- legible under high information load
 - provenance visible near every important claim
 - urgent interrupts clearly separated from queued suggestions
-- saved layouts and linked widgets instead of one giant scene
+- snap-aligned panes and saved layouts instead of one giant scene
+- controls should favor fast steering over decorative motion
 - human override and mixed-initiative control must stay explicit
 
 ## Embodiment After The Pivot
@@ -82,6 +75,7 @@ If any embodiment remains, it should be subordinate to the cockpit:
 - ambient status and mood cues
 - optional motivational reflection
 - lightweight ritual or home-state affordances
+- an occasional distinct village or presence surface when the user explicitly wants it
 
 It should not gate core workflows or consume the main screen real estate.
 
@@ -97,7 +91,8 @@ The strongest verified interface references for this direction are:
 
 ## Research Questions
 
-- which widgets belong in the default cockpit versus saved secondary layouts?
-- how much of the guardian trace should stay visible by default?
+- which panes belong in the default operator workspace versus saved secondary layouts?
+- what is the right snapping model for dense panes without creating layout thrash?
+- how much of the guardian trace should stay visible by default in a packed workspace?
 - what is the right split between urgent interrupts, queued suggestions, and ambient state?
 - which parts of the current embodiment survive as optional secondary surfaces?

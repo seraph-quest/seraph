@@ -38,8 +38,8 @@ title: Seraph Development Status
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is deeper execution hardening, cockpit workflow density, and stronger adaptive guardian quality on top of the newly shipped world-model and behavioral-proof foundations.
-- [x] The first two items in that refreshed batch, `execution-safety-hardening-v2` and `cockpit-workflow-views-v1`, are now shipped on this branch.
+- [x] The next strategic focus is cross-surface continuity, provider safeguards, and stronger adaptive guardian quality on top of the newly shipped world-model, workflow-run, and behavioral-proof foundations.
+- [x] The first three items in that refreshed batch, `execution-safety-hardening-v2`, `cockpit-workflow-views-v1`, and `guardian-learning-loop-v2`, are now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -107,7 +107,7 @@ title: Seraph Development Status
 - [x] observer salience, confidence, and interruption-cost scoring for observer refresh, guardian state, and proactive policy
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
-- [x] first feedback-driven guardian learning loop that reduces interruption eagerness for similar low-urgency interventions after recent negative outcomes
+- [x] first multi-signal guardian learning loop that can reduce interruption eagerness after negative outcomes and also prefer direct delivery or native reroute after repeated positive/acknowledged outcomes
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
 - [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] strategist agent and strategist scheduler tick
@@ -141,7 +141,7 @@ title: Seraph Development Status
 
 ### Guardian intelligence
 
-- [ ] stronger learning and feedback loops beyond the first negative-feedback interruption bias
+- [ ] stronger learning and feedback loops beyond the first multi-signal delivery/channel bias layer
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the first explicit focus or commitments layer
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 

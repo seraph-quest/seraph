@@ -91,13 +91,13 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#3 guardian-learning-loop-v2`
+- the current active item is `#4 cross-surface-continuity-v2`
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
 2. [x] `cockpit-workflow-views-v1`:
    add dedicated workflow-run, artifact-lineage, approval, and intervention views so the cockpit becomes a real operator console instead of a first generic shell
-3. [ ] `guardian-learning-loop-v2`:
+3. [x] `guardian-learning-loop-v2`:
    make intervention outcomes and explicit feedback change timing, channel choice, and escalation, not just interruption bias
 4. [ ] `cross-surface-continuity-v2`:
    unify browser state, daemon state, queued notifications, and recent interventions into one consistent continuity model
@@ -163,6 +163,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] first explicit human/world model layered into guardian state, with current focus, active commitments, open loops or pressure, focus alignment, and intervention receptivity
 - [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus salience-aware policy reasons
 - [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state
+- [x] second outcome-learning layer that now lets recent positive and acknowledged outcomes change direct-delivery timing and native-channel preference, not only interruption reduction
 - [x] guardian behavioral proof now explicitly covers the calibrated high-salience deliver path versus degraded-confidence defer path at the proactive delivery gate
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, guardian world-model behavior, guardian feedback loop behavior, calibrated salience/confidence delivery behavior, intervention policy behavior, observer refresh and delivery behavior, native desktop presence status plus the test-notification path, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, workflow composition behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts

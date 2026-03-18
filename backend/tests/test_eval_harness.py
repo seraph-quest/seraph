@@ -414,6 +414,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_outcome_learning"]["broadcast_skipped"] is True
     assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "reduce_interruptions"
     assert details_by_name["guardian_outcome_learning"]["learning_not_helpful_count"] == 2
+    assert details_by_name["guardian_outcome_learning"]["positive_action"] == "act"
+    assert details_by_name["guardian_outcome_learning"]["positive_reason"] == "learned_direct_delivery"
+    assert details_by_name["guardian_outcome_learning"]["positive_transport"] == "native_notification"
+    assert details_by_name["guardian_outcome_learning"]["positive_learning_bias"] == "prefer_direct_delivery"
+    assert (
+        details_by_name["guardian_outcome_learning"]["positive_learning_channel_bias"]
+        == "prefer_native_notification"
+    )
+    assert details_by_name["guardian_outcome_learning"]["positive_helpful_count"] == 2
+    assert details_by_name["guardian_outcome_learning"]["positive_acknowledged_count"] == 2
+    assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 1
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"

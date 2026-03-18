@@ -18,13 +18,20 @@ def _transport_failure_reason(*, attempted_connections: int, failed_connections:
     return "unknown_transport_failure"
 
 
-def _should_offer_native_notification(message: WSResponse, *, is_scheduled: bool) -> bool:
+def _should_offer_native_notification(
+    message: WSResponse,
+    *,
+    is_scheduled: bool,
+    channel_bias: str = "neutral",
+) -> bool:
     if message.type != "proactive":
         return False
     if bool(message.requires_approval):
         return False
     if not message.content.strip():
         return False
+    if channel_bias == "prefer_native_notification":
+        return True
     if is_scheduled:
         return True
     if message.intervention_type == "alert":
@@ -166,6 +173,7 @@ async def deliver_or_queue(
             "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
             "learning_bias": learning_signal.bias,
+            "learning_channel_bias": learning_signal.channel_bias,
             "learning_helpful_count": learning_signal.helpful_count,
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,
@@ -199,7 +207,11 @@ async def deliver_or_queue(
             if broadcast_result.delivered_connections <= 0:
                 if (
                     context_manager.is_daemon_connected()
-                    and _should_offer_native_notification(message, is_scheduled=is_scheduled)
+                    and _should_offer_native_notification(
+                        message,
+                        is_scheduled=is_scheduled,
+                        channel_bias=learning_signal.channel_bias,
+                    )
                 ):
                     notification = await native_notification_queue.enqueue(
                         intervention_id=intervention_id,

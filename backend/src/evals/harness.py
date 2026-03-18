@@ -3827,6 +3827,81 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
             tool_name="observer_delivery_gate",
         )
 
+        for content, feedback_type in (
+            ("This direct nudge landed well.", "helpful"),
+            ("Another high-signal nudge landed well.", "helpful"),
+            ("Acked from native delivery.", "acknowledged"),
+            ("Acked from native delivery again.", "acknowledged"),
+        ):
+            intervention = await guardian_feedback_repository.create_intervention(
+                session_id=None,
+                message_type="proactive",
+                intervention_type="nudge",
+                urgency=2,
+                content=content,
+                reasoning="aligned_work_activity",
+                is_scheduled=False,
+                guardian_confidence="grounded",
+                data_quality="good",
+                user_state="available",
+                interruption_mode="balanced",
+                policy_action="act",
+                policy_reason="available_capacity",
+                delivery_decision="deliver",
+                latest_outcome="delivered",
+            )
+            await guardian_feedback_repository.record_feedback(
+                intervention.id,
+                feedback_type=feedback_type,
+            )
+
+        positive_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=2,
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="high",
+            last_daemon_post=time.time(),
+        )
+        positive_context_manager = MagicMock()
+        positive_context_manager.get_context.return_value = positive_ctx
+        positive_context_manager.decrement_attention_budget = MagicMock()
+        positive_context_manager.is_daemon_connected.return_value = True
+        positive_ws_manager = MagicMock()
+        positive_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+        positive_log_event = AsyncMock()
+
+        with (
+            patch("src.observer.manager.context_manager", positive_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", positive_ws_manager),
+            patch.object(audit_repository, "log_event", positive_log_event),
+        ):
+            positive_decision = await deliver_or_queue(
+                WSResponse(
+                    type="proactive",
+                    content="This is aligned, time-sensitive, and has landed well before.",
+                    intervention_type="nudge",
+                    urgency=2,
+                    reasoning="aligned_work_activity",
+                ),
+                guardian_confidence="grounded",
+            )
+
+        delivered_event = _find_audit_call(
+            positive_log_event,
+            event_type="observer_delivery_delivered",
+            tool_name="observer_delivery_gate",
+        )
+        positive_signal = await guardian_feedback_repository.get_learning_signal(
+            intervention_type="nudge",
+            limit=12,
+        )
+        remaining_notifications = await native_notification_queue.count()
+        await native_notification_queue.clear()
+
     return {
         "action": decision.action.value,
         "reason": decision.reason,
@@ -3834,6 +3909,14 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
         "broadcast_skipped": mock_ws_manager.broadcast.await_count == 0,
         "learning_bias": queued_event["details"]["learning_bias"],
         "learning_not_helpful_count": queued_event["details"]["learning_not_helpful_count"],
+        "positive_action": positive_decision.action.value,
+        "positive_reason": positive_decision.reason,
+        "positive_transport": delivered_event["details"]["transport"],
+        "positive_learning_bias": delivered_event["details"]["learning_bias"],
+        "positive_learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
+        "positive_helpful_count": positive_signal.helpful_count,
+        "positive_acknowledged_count": positive_signal.acknowledged_count,
+        "remaining_native_notifications": remaining_notifications,
     }
 
 

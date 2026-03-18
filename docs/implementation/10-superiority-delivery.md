@@ -45,8 +45,8 @@ This file explains:
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first feedback-driven interruption bias from recent negative outcomes, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate
-- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first multi-signal outcome-learning layer that can now quiet, accelerate, and reroute interventions, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate
+- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment beyond the first delivery/channel adaptation layer
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -86,8 +86,8 @@ This file explains:
 - [x] The current queue still starts with execution hardening because trust and privileged-path isolation remain the most dangerous gap until that whole batch lands on `develop`.
 - [x] The previous 10-item queue is now exhausted on this branch, so the roadmap has been refreshed to the next highest-value 10-PR horizon.
 - [x] `execution-safety-hardening-v2` is now the first shipped item from the refreshed queue on this branch.
-- [x] `cockpit-workflow-views-v1` is now the second shipped item from the refreshed queue on this branch.
-- [x] The active queue lead now moves to `guardian-learning-loop-v2` because the cockpit now has a first dedicated workflow-run surface and the next bottleneck shifts back to adaptive guardian quality.
+- [x] `cockpit-workflow-views-v1` and `guardian-learning-loop-v2` are now the second and third shipped items from the refreshed queue on this branch.
+- [x] The active queue lead now moves to `cross-surface-continuity-v2` because the cockpit/workflow and first multi-signal learning slices are now in place, and the next bottleneck shifts to continuity across browser and native surfaces.
 - [x] The refreshed queue still keeps cross-surface continuity, provider safeguards, and native shell maturity in the top 10 because those are the remaining benchmark-facing leverage gaps outside guardian intelligence.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 

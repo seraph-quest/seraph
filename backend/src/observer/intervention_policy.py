@@ -158,7 +158,7 @@ def decide_intervention(
 
     if (
         interruption_cost == "high"
-        and urgency >= 3
+        and urgency >= (2 if recent_feedback_bias == "prefer_direct_delivery" else 3)
         and salience_level == "high"
         and salience_reason in {"current_event", "upcoming_event", "aligned_work_activity"}
         and observer_confidence == "grounded"
@@ -169,7 +169,11 @@ def decide_intervention(
     ):
         return InterventionDecision(
             action=InterventionAction.act,
-            reason="calibrated_high_salience",
+            reason=(
+                "learned_direct_delivery"
+                if recent_feedback_bias == "prefer_direct_delivery" and urgency < 3
+                else "calibrated_high_salience"
+            ),
             delivery_decision=DeliveryDecision.deliver,
             should_cost_budget=should_cost_budget,
         )

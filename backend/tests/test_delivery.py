@@ -272,6 +272,109 @@ async def test_queue_when_recent_negative_feedback(async_db):
 
 
 @pytest.mark.asyncio
+async def test_learned_direct_delivery_overrides_high_interrupt_bundle(async_db):
+    for content in ("That nudge helped.", "That timing was right again."):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
+
+    ctx = _make_context(
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+    )
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(type="proactive", content="Ship this while the context is fresh.", intervention_type="advisory", urgency=2)
+        decision = await deliver_or_queue(msg, guardian_confidence="grounded")
+
+        assert decision.action == InterventionAction.act
+        assert decision.reason == "learned_direct_delivery"
+        mock_ws.broadcast.assert_called_once_with(msg)
+        mock_iq.enqueue.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["details"]["learning_bias"] == "prefer_direct_delivery"
+            and event["details"]["policy_reason"] == "learned_direct_delivery"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_native_feedback_can_lower_notification_threshold(async_db):
+    for content in ("Acked from desktop once.", "Acked from desktop twice."):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="acknowledged")
+
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Medium urgency desktop hint.", intervention_type="advisory", urgency=2)
+        decision = await deliver_or_queue(msg, guardian_confidence="grounded")
+
+        assert decision.action == InterventionAction.act
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Medium urgency desktop hint."
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["details"]["transport"] == "native_notification"
+            and event["details"]["learning_channel_bias"] == "prefer_native_notification"
+            for event in events
+        )
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_high_salience_calibration_delivers_despite_high_interruption_cost(async_db):
     ctx = _make_context(
         attention_budget_remaining=1,

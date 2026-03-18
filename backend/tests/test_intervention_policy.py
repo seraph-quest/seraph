@@ -147,6 +147,29 @@ def test_decide_intervention_bundles_on_recent_negative_feedback():
     assert decision.delivery_decision.value == "queue"
 
 
+def test_decide_intervention_can_learn_direct_delivery_on_high_salience():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This is directly aligned and usually lands well.",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+        recent_feedback_bias="prefer_direct_delivery",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "learned_direct_delivery"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "deliver"
+
+
 def test_decide_intervention_acts_on_calibrated_high_salience():
     decision = decide_intervention(
         message_type="proactive",

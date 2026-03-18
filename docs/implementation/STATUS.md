@@ -33,7 +33,7 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The repo-wide active delivery batch is now led by execution hardening, cockpit depth, workflow control, and feedback-driven guardian learning.
+- [x] The repo-wide active delivery batch is now led by workflow control, feedback-driven guardian learning, salience calibration, and stronger native/operator continuity.
 - [ ] That batch is not complete yet.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
@@ -63,6 +63,7 @@ title: Seraph Development Status
 - [x] tool policy modes for `safe`, `balanced`, and `full`
 - [x] MCP policy modes for `disabled`, `approval`, and `full`
 - [x] approval-gated high-risk actions in chat and WebSocket flows
+- [x] explicit execution-boundary metadata and approval behavior surfaced for tools and reusable workflows
 - [x] structured audit logging for approval, tool, and runtime events
 - [x] secret redaction and scoped secret-reference handling
 
@@ -75,6 +76,7 @@ title: Seraph Development Status
 - [x] MCP server management and runtime-managed server configuration
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
+- [x] forced approval wrapping for high-risk and approval-mode MCP workflow paths
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability
@@ -107,7 +109,7 @@ title: Seraph Development Status
 
 ### Current interface surface
 
-- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, and fixed composer
+- [x] browser-based guardian cockpit with session rail, guardian-state panel, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, and fixed composer
 - [x] legacy Phaser village mode with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
@@ -126,7 +128,7 @@ title: Seraph Development Status
 
 - [ ] richer provider selection policy beyond weighted scoring, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
 - [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
-- [ ] stronger execution isolation and privileged-path hardening
+- [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
 
 ### Guardian intelligence
 
@@ -136,7 +138,7 @@ title: Seraph Development Status
 
 ### Interface and presence
 
-- [ ] richer cockpit density with linked evidence, artifact, workflow, and approval views beyond the first shell
+- [ ] richer cockpit density with workflow operating views, saved layouts, and broader keyboard/operator control beyond the new linked evidence shell
 - [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
 - [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
 
@@ -149,7 +151,7 @@ title: Seraph Development Status
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are cockpit maturity and density, feedback-driven intervention quality, workflow control ergonomics, native reach, and execution hardening.
+- [ ] The biggest gaps against the reference systems are workflow-control ergonomics, feedback-driven intervention quality, native reach, deeper execution hardening, and still-denser cockpit operation.
 - [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
 
 ## Workstream View

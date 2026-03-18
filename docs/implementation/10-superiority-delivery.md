@@ -63,8 +63,8 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, and legacy village fallback
-- [ ] still missing: denser linked evidence, artifact, workflow, approval, and saved-layout control surfaces
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, operations inspector details, and legacy village fallback
+- [ ] still missing: stronger workflow-control density, saved-layout control surfaces, and broader keyboard/operator ergonomics
 - owners: Workstream 06
 
 ### 6. Workflow leverage
@@ -75,8 +75,8 @@ This file explains:
 
 ### 7. Execution hardening
 
-- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, and audit logging
-- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries
+- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, and forced approval wrapping for high-risk/approval-mode workflow paths
+- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that first hardening pass
 - owners: Workstream 01, Workstream 02
 
 ## Queue Ownership

@@ -23,9 +23,11 @@ class InsightQueue:
         intervention_type: str = "advisory",
         urgency: int = 3,
         reasoning: str = "",
+        intervention_id: str | None = None,
     ) -> QueuedInsight:
         """Add an insight to the queue."""
         insight = QueuedInsight(
+            intervention_id=intervention_id,
             content=content,
             intervention_type=intervention_type,
             urgency=urgency,

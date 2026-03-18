@@ -25,6 +25,7 @@ class GuardianState:
     memory_context: str
     current_session_history: str
     recent_sessions_summary: str
+    recent_intervention_feedback: str
     confidence: GuardianStateConfidence
 
     @property
@@ -52,6 +53,9 @@ class GuardianState:
 
         if self.recent_sessions_summary:
             lines.extend(["", "Recent sessions:", self.recent_sessions_summary])
+
+        if self.recent_intervention_feedback:
+            lines.extend(["", "Recent intervention feedback:", self.recent_intervention_feedback])
 
         return "\n".join(lines)
 
@@ -93,6 +97,7 @@ async def build_guardian_state(
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import read_soul
     from src.memory.vector_store import search_formatted
+    from src.guardian.feedback import guardian_feedback_repository
     from src.observer.manager import context_manager
 
     observer_context = (
@@ -108,6 +113,7 @@ async def build_guardian_state(
     recent_sessions_summary = await session_manager.get_recent_sessions_summary(
         exclude_session_id=session_id
     )
+    recent_intervention_feedback = await guardian_feedback_repository.summarize_recent(limit=5)
 
     query = user_message or memory_query or ""
     memory_requested = bool(query.strip())
@@ -142,5 +148,6 @@ async def build_guardian_state(
         memory_context=memory_context,
         current_session_history=current_session_history,
         recent_sessions_summary=recent_sessions_summary,
+        recent_intervention_feedback=recent_intervention_feedback,
         confidence=confidence,
     )

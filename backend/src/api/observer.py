@@ -34,6 +34,7 @@ class ScreenContextRequest(BaseModel):
 
 class NativeNotificationResponse(BaseModel):
     id: str
+    intervention_id: str | None = None
     title: str
     body: str
     intervention_type: str | None = None
@@ -47,6 +48,15 @@ class NativeNotificationPollResponse(BaseModel):
 
 class NotificationAckResponse(BaseModel):
     acked: bool
+
+
+class InterventionFeedbackRequest(BaseModel):
+    feedback_type: str
+    note: str | None = None
+
+
+class InterventionFeedbackResponse(BaseModel):
+    recorded: bool
 
 
 @router.get("/observer/state")
@@ -165,14 +175,56 @@ async def get_next_native_notification():
 @router.post("/observer/notifications/{notification_id}/ack", response_model=NotificationAckResponse)
 async def ack_native_notification(notification_id: str):
     """Acknowledge and remove a native notification after the daemon displays it."""
+    from src.guardian.feedback import guardian_feedback_repository
+
+    notification = await native_notification_queue.get(notification_id)
     acked = await native_notification_queue.ack(notification_id)
+    intervention_id = notification.intervention_id if notification is not None else None
+    if acked and intervention_id:
+        try:
+            await guardian_feedback_repository.record_feedback(
+                intervention_id,
+                feedback_type="acknowledged",
+                latest_outcome="notification_acked",
+            )
+        except Exception:
+            logger.debug("Failed to persist native notification acknowledgement", exc_info=True)
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
         outcome="acked" if acked else "ack_missing",
-        details={"notification_id": notification_id},
+        details={
+            "notification_id": notification_id,
+            "intervention_id": intervention_id,
+        },
     )
     return {"acked": acked}
+
+
+@router.post(
+    "/observer/interventions/{intervention_id}/feedback",
+    response_model=InterventionFeedbackResponse,
+)
+async def post_intervention_feedback(intervention_id: str, body: InterventionFeedbackRequest):
+    """Record explicit user feedback for a proactive intervention."""
+    from src.guardian.feedback import guardian_feedback_repository
+
+    updated = await guardian_feedback_repository.record_feedback(
+        intervention_id,
+        feedback_type=body.feedback_type,
+        feedback_note=body.note,
+    )
+    await log_integration_event(
+        integration_type="observer_feedback",
+        name="intervention",
+        outcome="succeeded" if updated is not None else "empty_result",
+        details={
+            "intervention_id": intervention_id,
+            "feedback_type": body.feedback_type,
+            "has_note": bool((body.note or "").strip()),
+        },
+    )
+    return {"recorded": updated is not None}
 
 
 @router.get("/observer/activity/today")

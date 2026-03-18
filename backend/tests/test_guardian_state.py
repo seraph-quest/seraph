@@ -26,6 +26,7 @@ def _make_guardian_state() -> GuardianState:
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
+        recent_intervention_feedback="- advisory delivered, feedback=helpful, reason=available_capacity: Stretch and refocus.",
         confidence=GuardianStateConfidence(
             overall="grounded",
             observer="good",
@@ -60,6 +61,10 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
         patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="- advisory delivered, feedback=helpful: Stretch and refocus.",
+        ),
     ):
         state = await build_guardian_state(session_id="current", user_message="What should Seraph improve next?")
 
@@ -73,6 +78,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert "Build explicit guardian state." in state.current_session_history
     assert "Prior roadmap" in state.recent_sessions_summary
     assert "Ship guardian state" in state.memory_context
+    assert "feedback=helpful" in state.recent_intervention_feedback
 
 
 def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
@@ -82,8 +88,10 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Observer snapshot:" in block
     assert "Relevant memories:" in block
     assert "Recent sessions:" in block
+    assert "Recent intervention feedback:" in block
     assert "Ship guardian state" in block
     assert "Prior roadmap" in block
+    assert "feedback=helpful" in block
 
 
 @patch("src.agent.factory.ToolCallingAgent")
@@ -100,6 +108,7 @@ def test_create_agent_injects_guardian_state(mock_get_model, mock_agent_cls):
     assert "USER IDENTITY" in instructions
     assert "RELEVANT MEMORIES" in instructions
     assert "CONVERSATION HISTORY" in instructions
+    assert "Recent intervention feedback:" in instructions
 
 
 @patch("src.agent.strategist.LiteLLMModel")
@@ -110,3 +119,4 @@ def test_create_strategist_agent_accepts_guardian_state(mock_model_cls):
 
     assert "Overall confidence: grounded" in agent.instructions
     assert "Recent sessions:" in agent.instructions
+    assert "Recent intervention feedback:" in agent.instructions

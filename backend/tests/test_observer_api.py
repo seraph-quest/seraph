@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 
 from src.audit.repository import audit_repository
+from src.guardian.feedback import guardian_feedback_repository
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 from src.observer.native_notification_queue import native_notification_queue
@@ -243,6 +244,7 @@ class TestObserverAPI:
     async def test_get_next_native_notification(self, async_db, client):
         await native_notification_queue.clear()
         notification = await native_notification_queue.enqueue(
+            intervention_id=None,
             title="Seraph alert",
             body="Browser is closed; use the daemon path.",
             intervention_type="alert",
@@ -254,6 +256,7 @@ class TestObserverAPI:
         assert resp.status_code == 200
         payload = resp.json()["notification"]
         assert payload["id"] == notification.id
+        assert payload["intervention_id"] is None
         assert payload["title"] == "Seraph alert"
         assert await native_notification_queue.count() == 1
 
@@ -286,7 +289,26 @@ class TestObserverAPI:
     @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):
         await native_notification_queue.clear()
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Ack me",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
         notification = await native_notification_queue.enqueue(
+            intervention_id=intervention.id,
             title="Seraph",
             body="Ack me",
             intervention_type="advisory",
@@ -298,14 +320,63 @@ class TestObserverAPI:
         assert resp.status_code == 200
         assert resp.json() == {"acked": True}
         assert await native_notification_queue.count() == 0
+        updated = await guardian_feedback_repository.get(intervention.id)
+        assert updated is not None
+        assert updated.latest_outcome == "notification_acked"
+        assert updated.feedback_type == "acknowledged"
 
         events = await audit_repository.list_events(limit=10)
         assert any(
             event["event_type"] == "integration_acked"
             and event["tool_name"] == "observer_daemon:notifications"
             and event["details"]["notification_id"] == notification.id
+            and event["details"]["intervention_id"] == intervention.id
             for event in events
         )
+
+    @pytest.mark.asyncio
+    async def test_post_intervention_feedback(self, async_db, client):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Stretch and refocus.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+
+        resp = await client.post(
+            f"/api/observer/interventions/{intervention.id}/feedback",
+            json={"feedback_type": "helpful", "note": "Good timing"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"recorded": True}
+        updated = await guardian_feedback_repository.get(intervention.id)
+        assert updated is not None
+        assert updated.feedback_type == "helpful"
+        assert updated.feedback_note == "Good timing"
+        assert updated.latest_outcome == "feedback_received"
+
+    @pytest.mark.asyncio
+    async def test_post_intervention_feedback_missing_returns_false(self, async_db, client):
+        resp = await client.post(
+            "/api/observer/interventions/missing-id/feedback",
+            json={"feedback_type": "not_helpful"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"recorded": False}
 
     @pytest.mark.asyncio
     async def test_get_activity_today(self, async_db, client):

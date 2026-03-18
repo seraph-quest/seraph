@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
 
 from src.audit.repository import audit_repository
+from src.guardian.feedback import guardian_feedback_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
@@ -75,8 +76,12 @@ async def test_deliver_logs_runtime_audit(async_db):
     try:
         msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
         await deliver_or_queue(msg)
+        intervention = await guardian_feedback_repository.get(msg.intervention_id)
 
         events = await audit_repository.list_events(limit=10)
+        assert intervention is not None
+        assert intervention.latest_outcome == "delivered"
+        assert intervention.transport == "websocket"
         assert any(
             event["event_type"] == "observer_delivery_delivered"
             and event["tool_name"] == "observer_delivery_gate"
@@ -85,6 +90,7 @@ async def test_deliver_logs_runtime_audit(async_db):
             and event["details"]["policy_action"] == "act"
             and event["details"]["policy_reason"] == "available_capacity"
             and event["details"]["delivered_connections"] == 1
+            and event["details"]["intervention_id"] == msg.intervention_id
             for event in events
         )
     finally:
@@ -144,6 +150,7 @@ async def test_queue_when_blocked():
             intervention_type="advisory",
             urgency=3,
             reasoning="",
+            intervention_id=msg.intervention_id,
         )
     finally:
         for p in patches:
@@ -159,8 +166,11 @@ async def test_queue_logs_runtime_audit(async_db):
     try:
         msg = WSResponse(type="proactive", content="Queued msg", intervention_type="advisory", urgency=3)
         await deliver_or_queue(msg)
+        intervention = await guardian_feedback_repository.get(msg.intervention_id)
 
         events = await audit_repository.list_events(limit=10)
+        assert intervention is not None
+        assert intervention.latest_outcome == "queued"
         assert any(
             event["event_type"] == "observer_delivery_queued"
             and event["tool_name"] == "observer_delivery_gate"
@@ -168,6 +178,7 @@ async def test_queue_logs_runtime_audit(async_db):
             and event["details"]["interruption_mode"] == "balanced"
             and event["details"]["policy_action"] == "bundle"
             and event["details"]["policy_reason"] == "blocked_state"
+            and event["details"]["intervention_id"] == msg.intervention_id
             for event in events
         )
     finally:
@@ -250,9 +261,12 @@ async def test_delivery_transport_failure_logs_runtime_audit(async_db):
     try:
         msg = WSResponse(type="proactive", content="Test", intervention_type="advisory", urgency=3)
         decision = await deliver_or_queue(msg)
+        intervention = await guardian_feedback_repository.get(msg.intervention_id)
 
         assert decision.action == InterventionAction.act
         mock_cm.decrement_attention_budget.assert_not_called()
+        assert intervention is not None
+        assert intervention.latest_outcome == "failed"
 
         events = await audit_repository.list_events(limit=10)
         assert any(
@@ -285,10 +299,15 @@ async def test_delivery_reroutes_to_native_notification_when_daemon_connected(as
     try:
         msg = WSResponse(type="proactive", content="Native fallback", intervention_type="alert", urgency=5)
         decision = await deliver_or_queue(msg)
+        intervention = await guardian_feedback_repository.get(msg.intervention_id)
 
         assert decision.action == InterventionAction.act
         assert await native_notification_queue.count() == 1
         mock_iq.enqueue.assert_not_called()
+        assert intervention is not None
+        assert intervention.transport == "native_notification"
+        assert intervention.latest_outcome == "delivered"
+        assert intervention.notification_id is not None
 
         events = await audit_repository.list_events(limit=10)
         assert any(
@@ -296,6 +315,7 @@ async def test_delivery_reroutes_to_native_notification_when_daemon_connected(as
             and event["tool_name"] == "observer_delivery_gate"
             and event["details"]["transport"] == "native_notification"
             and event["details"]["notification_id"] is not None
+            and event["details"]["intervention_id"] == msg.intervention_id
             for event in events
         )
     finally:
@@ -489,6 +509,7 @@ async def test_deliver_queued_bundle_single_item():
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_logs_delivery_runtime_audit(async_db):
     mock_item = MagicMock(content="Bundle update")
+    mock_item.intervention_id = None
     mock_iq = MagicMock()
     mock_iq.drain = AsyncMock(return_value=[mock_item])
     mock_ws = MagicMock()
@@ -519,6 +540,7 @@ async def test_deliver_queued_bundle_logs_delivery_runtime_audit(async_db):
 @pytest.mark.asyncio
 async def test_deliver_queued_bundle_logs_transport_failure(async_db):
     mock_item = MagicMock(content="Bundle update")
+    mock_item.intervention_id = None
     mock_iq = MagicMock()
     mock_iq.drain = AsyncMock(return_value=[mock_item])
     mock_ws = MagicMock()

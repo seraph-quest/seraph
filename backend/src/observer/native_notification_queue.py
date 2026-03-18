@@ -11,6 +11,7 @@ from uuid import uuid4
 @dataclass
 class NativeNotification:
     id: str
+    intervention_id: str | None
     title: str
     body: str
     intervention_type: str | None
@@ -31,6 +32,7 @@ class NativeNotificationQueue:
     async def enqueue(
         self,
         *,
+        intervention_id: str | None,
         title: str,
         body: str,
         intervention_type: str | None,
@@ -38,6 +40,7 @@ class NativeNotificationQueue:
     ) -> NativeNotification:
         notification = NativeNotification(
             id=str(uuid4()),
+            intervention_id=intervention_id,
             title=title,
             body=body,
             intervention_type=intervention_type,
@@ -53,6 +56,13 @@ class NativeNotificationQueue:
             if not self._items:
                 return None
             return self._items[0]
+
+    async def get(self, notification_id: str) -> NativeNotification | None:
+        async with self._lock:
+            for item in self._items:
+                if item.id == notification_id:
+                    return item
+        return None
 
     async def ack(self, notification_id: str) -> bool:
         async with self._lock:

@@ -36,7 +36,7 @@ title: Seraph Development Status
 - [ ] Guardian Intelligence is not complete yet.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus after the runtime baseline is guardian feedback quality, operator cockpit quality, workflow control ergonomics, execution hardening, and native reach.
+- [x] The next strategic focus after the runtime baseline is operator cockpit quality, salience-aware intervention quality, workflow control ergonomics, execution hardening, and native reach.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -45,7 +45,7 @@ title: Seraph Development Status
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
 - [x] non-browser presence through notifications and native reach
-- [x] reusable workflow composition plus feedback-driven improvement
+- [x] reusable workflow composition plus explicit feedback capture and future improvement loops
 
 ## Shipped On `develop`
 
@@ -95,6 +95,7 @@ title: Seraph Development Status
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
+- [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
 - [x] strategist agent and strategist scheduler tick
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
@@ -125,7 +126,7 @@ title: Seraph Development Status
 
 ### Guardian intelligence
 
-- [ ] stronger learning and feedback loops so proactive behavior improves over time instead of staying policy-only
+- [ ] stronger learning and feedback loops so proactive behavior improves over time instead of staying policy-only and outcome-capture-only
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality
 - [ ] observer salience and confidence modeling for better strategy and delivery
 
@@ -144,7 +145,7 @@ title: Seraph Development Status
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are operator cockpit density, guardian feedback quality, workflow control ergonomics, native reach, and execution hardening.
+- [ ] The biggest gaps against the reference systems are operator cockpit density, salience-aware intervention quality, workflow control ergonomics, native reach, and execution hardening.
 - [ ] The next major step is to turn the current prototype into a denser, more legible, more stateful guardian cockpit without losing the existing trust and memory foundations.
 
 ## Workstream View

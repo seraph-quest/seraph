@@ -44,7 +44,7 @@ Seraph’s shipped village UI is distinctive but weak as the main operating surf
 
 ### 2. Workflow composition
 
-Seraph has delegation and specialist foundations, but the current docs are already honest that meaningful reusable workflow composition is still missing.
+Seraph now has delegation and specialist foundations plus first-class reusable workflow composition. It is still behind on operator-facing workflow control, artifact round-tripping, and broader composition breadth.
 
 ### 3. Execution hardening
 
@@ -77,7 +77,7 @@ Seraph has a browser surface, WebSocket path, and native daemon foundation, but 
 ### Presence and leverage
 
 - extend the first native-notification baseline into broader non-browser reach
-- add first-class workflow composition on top of tools, skills, MCP, and specialists
+- deepen first-class workflow composition into clearer operator-facing workflow control, artifact round-tripping, and broader leverage on top of tools, skills, MCP, and specialists
 
 ## Proof Of Superiority
 

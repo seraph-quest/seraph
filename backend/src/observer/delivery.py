@@ -40,11 +40,76 @@ def _native_notification_title(message: WSResponse, *, is_scheduled: bool) -> st
     return "Seraph"
 
 
+async def _create_intervention_record(
+    *,
+    session_id: str | None,
+    message: WSResponse,
+    is_scheduled: bool,
+    guardian_confidence: str | None,
+    user_state: str,
+    interruption_mode: str,
+    data_quality: str,
+    policy_decision: InterventionDecision,
+) -> str | None:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    initial_outcome = "pending" if policy_decision.action.value == "act" else policy_decision.audit_decision
+    try:
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=session_id,
+            message_type=message.type,
+            intervention_type=message.intervention_type,
+            urgency=message.urgency,
+            content=message.content,
+            reasoning=message.reasoning,
+            is_scheduled=is_scheduled,
+            guardian_confidence=guardian_confidence,
+            data_quality=data_quality,
+            user_state=user_state,
+            interruption_mode=interruption_mode,
+            policy_action=policy_decision.action.value,
+            policy_reason=policy_decision.reason,
+            delivery_decision=(
+                policy_decision.delivery_decision.value
+                if policy_decision.delivery_decision is not None
+                else None
+            ),
+            latest_outcome=initial_outcome,
+        )
+        return intervention.id
+    except Exception:
+        logger.debug("Failed to persist guardian intervention record", exc_info=True)
+        return None
+
+
+async def _update_intervention_outcome(
+    intervention_id: str | None,
+    *,
+    latest_outcome: str,
+    transport: str | None = None,
+    notification_id: str | None = None,
+) -> None:
+    if not intervention_id:
+        return
+    from src.guardian.feedback import guardian_feedback_repository
+
+    try:
+        await guardian_feedback_repository.update_outcome(
+            intervention_id,
+            latest_outcome=latest_outcome,
+            transport=transport,
+            notification_id=notification_id,
+        )
+    except Exception:
+        logger.debug("Failed to update guardian intervention outcome", exc_info=True)
+
+
 async def deliver_or_queue(
     message: WSResponse,
     is_scheduled: bool = False,
     *,
     guardian_confidence: str | None = None,
+    session_id: str | None = None,
 ) -> InterventionDecision:
     """Route a proactive message through the delivery gate.
 
@@ -84,6 +149,19 @@ async def deliver_or_queue(
             "policy_action": policy_decision.action.value,
             "policy_reason": policy_decision.reason,
         }
+        intervention_id = await _create_intervention_record(
+            session_id=session_id,
+            message=message,
+            is_scheduled=is_scheduled,
+            guardian_confidence=guardian_confidence,
+            user_state=ctx.user_state,
+            interruption_mode=ctx.interruption_mode,
+            data_quality=ctx.data_quality,
+            policy_decision=policy_decision,
+        )
+        message.intervention_id = intervention_id
+        if intervention_id is not None:
+            event_details["intervention_id"] = intervention_id
 
         if policy_decision.action.value == "act":
             broadcast_result = await ws_manager.broadcast(message)
@@ -100,10 +178,17 @@ async def deliver_or_queue(
                     and _should_offer_native_notification(message, is_scheduled=is_scheduled)
                 ):
                     notification = await native_notification_queue.enqueue(
+                        intervention_id=intervention_id,
                         title=_native_notification_title(message, is_scheduled=is_scheduled),
                         body=message.content,
                         intervention_type=intervention_type,
                         urgency=urgency,
+                    )
+                    await _update_intervention_outcome(
+                        intervention_id,
+                        latest_outcome="delivered",
+                        transport="native_notification",
+                        notification_id=notification.id,
                     )
                     logger.info(
                         "Rerouted proactive message to native notification (type=%s, notification_id=%s)",
@@ -132,6 +217,11 @@ async def deliver_or_queue(
                     broadcast_result.attempted_connections,
                     broadcast_result.failed_connections,
                 )
+                await _update_intervention_outcome(
+                    intervention_id,
+                    latest_outcome="failed",
+                    transport="websocket",
+                )
                 await log_observer_delivery_event(
                     decision="failed",
                     message_type=message.type,
@@ -155,6 +245,11 @@ async def deliver_or_queue(
             if policy_decision.should_cost_budget:
                 context_manager.decrement_attention_budget()
             logger.info("Delivered proactive message (type=%s)", message.type)
+            await _update_intervention_outcome(
+                intervention_id,
+                latest_outcome="delivered",
+                transport="websocket",
+            )
             await log_observer_delivery_event(
                 decision="delivered",
                 message_type=message.type,
@@ -170,6 +265,7 @@ async def deliver_or_queue(
                 intervention_type=intervention_type,
                 urgency=urgency,
                 reasoning=message.reasoning or "",
+                intervention_id=intervention_id,
             )
             logger.info("Queued proactive message (state=%s, mode=%s)", ctx.user_state, ctx.interruption_mode)
             await log_observer_delivery_event(
@@ -199,6 +295,10 @@ async def deliver_or_queue(
 
         return policy_decision
     except Exception as exc:
+        await _update_intervention_outcome(
+            locals().get("intervention_id"),
+            latest_outcome="failed",
+        )
         await log_observer_delivery_event(
             decision="failed",
             message_type=message.type,
@@ -253,12 +353,19 @@ async def deliver_queued_bundle() -> int:
     broadcast_result = await ws_manager.broadcast(message)
     details = {
         "bundle_item_count": len(items),
+        "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
         "attempted_connections": broadcast_result.attempted_connections,
         "delivered_connections": broadcast_result.delivered_connections,
         "failed_connections": broadcast_result.failed_connections,
         "delivery_decision": "deliver",
     }
     if broadcast_result.delivered_connections <= 0:
+        for item in items:
+            await _update_intervention_outcome(
+                item.intervention_id,
+                latest_outcome="bundle_delivery_failed",
+                transport="websocket_bundle",
+            )
         logger.warning(
             "Failed to deliver queued bundle over WebSocket transport (attempted=%d failed=%d)",
             broadcast_result.attempted_connections,
@@ -280,6 +387,12 @@ async def deliver_queued_bundle() -> int:
         )
         return 0
 
+    for item in items:
+        await _update_intervention_outcome(
+            item.intervention_id,
+            latest_outcome="bundle_delivered",
+            transport="websocket_bundle",
+        )
     logger.info("Delivered bundle of %d queued insight(s)", len(items))
     await log_observer_delivery_event(
         decision="delivered",

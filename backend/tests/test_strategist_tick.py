@@ -41,6 +41,7 @@ def _make_guardian_state() -> GuardianState:
         memory_context="- [goal] Ship guardian state",
         current_session_history="",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
+        recent_intervention_feedback="- advisory delivered, feedback=helpful: Stretch and refocus.",
         confidence=GuardianStateConfidence(
             overall="grounded",
             observer="good",

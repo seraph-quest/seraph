@@ -45,8 +45,8 @@ This file explains:
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, and first native notification fallback
-- [ ] still missing: feedback loops, outcome learning, and stronger timing quality
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, persisted intervention outcomes, explicit feedback capture, and first native notification fallback
+- [ ] still missing: closed-loop learning from outcomes and stronger timing quality
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -83,7 +83,7 @@ This file explains:
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current next unchecked items are guardian feedback loop, operator cockpit, salience/confidence modeling, execution hardening, and workflow control ergonomics.
+- [x] The current next unchecked items are operator cockpit, salience/confidence modeling, execution hardening, workflow control ergonomics, and richer native reach.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

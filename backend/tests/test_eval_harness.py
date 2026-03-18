@@ -56,6 +56,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
     assert "intervention_policy_behavior" in captured.out
+    assert "guardian_feedback_loop" in captured.out
     assert "provider_fallback_chain" in captured.out
     assert "provider_health_reroute" in captured.out
     assert "local_runtime_profile" in captured.out
@@ -147,6 +148,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
                 "intervention_policy_behavior",
+                "guardian_feedback_loop",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
@@ -296,6 +298,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["intervention_policy_behavior"]["approval_reason"] == "requires_approval"
     assert details_by_name["intervention_policy_behavior"]["silent_action"] == "stay_silent"
     assert details_by_name["intervention_policy_behavior"]["silent_reason"] == "empty_content"
+    assert details_by_name["guardian_feedback_loop"]["action"] == "act"
+    assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
+    assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"
+    assert details_by_name["guardian_feedback_loop"]["intervention_id_present"] is True
+    assert details_by_name["guardian_feedback_loop"]["notification_intervention_matches"] is True
+    assert details_by_name["guardian_feedback_loop"]["acked"] is True
+    assert details_by_name["guardian_feedback_loop"]["feedback_recorded"] is True
+    assert details_by_name["guardian_feedback_loop"]["ack_event_matches"] is True
+    assert details_by_name["guardian_feedback_loop"]["feedback_type"] == "helpful"
+    assert details_by_name["guardian_feedback_loop"]["latest_outcome"] == "feedback_received"
+    assert details_by_name["guardian_feedback_loop"]["stored_feedback_type"] == "helpful"
+    assert details_by_name["guardian_feedback_loop"]["summary_contains_feedback"] is True
+    assert details_by_name["guardian_feedback_loop"]["summary_mentions_excerpt"] is True
+    assert details_by_name["guardian_feedback_loop"]["prompt_contains_feedback_section"] is True
+    assert details_by_name["guardian_feedback_loop"]["instructions_include_feedback"] is True
+    assert details_by_name["guardian_feedback_loop"]["remaining_notifications"] == 0
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"

@@ -40,10 +40,12 @@ from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import (
+    InterventionFeedbackRequest,
     ScreenContextRequest,
     ScreenObservationData,
     ack_native_notification,
     get_next_native_notification,
+    post_intervention_feedback,
     post_screen_context,
 )
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
@@ -394,6 +396,8 @@ def _make_sync_client_with_db():
         "src.approval.repository.get_session",
         "src.audit.repository.get_session",
         "src.goals.repository.get_session",
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
         "src.vault.repository.get_session",
         "src.api.profile.get_db",
         "src.api.settings.get_db",
@@ -3117,6 +3121,10 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="- advisory delivered, feedback=helpful: Stretch and refocus.",
+            ),
             patch("src.agent.factory.get_model", return_value=MagicMock()),
             patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
         ):
@@ -3433,6 +3441,123 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
         "integration_pending_count": integration_event["details"]["pending_count"],
         "acked": acked["acked"],
         "ack_event_matches": ack_event["details"]["notification_id"] == notification["id"],
+        "remaining_notifications": remaining,
+    }
+
+
+async def _eval_guardian_feedback_loop() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    await native_notification_queue.clear()
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        await session_manager.get_or_create("feedback-current")
+        await session_manager.add_message("feedback-current", "user", "How should Seraph intervene better?")
+        await session_manager.add_message("feedback-current", "assistant", "Track intervention outcomes explicitly.")
+        await session_manager.get_or_create("feedback-prior")
+        await session_manager.update_title("feedback-prior", "Guardian feedback retrospective")
+        await session_manager.add_message(
+            "feedback-prior",
+            "assistant",
+            "The last proactive reminder landed at a good time.",
+        )
+
+        available_ctx = _make_context(
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=3,
+            data_quality="good",
+            active_goals_summary="Improve guardian intervention quality",
+            last_daemon_post=time.time(),
+        )
+        mock_context_manager = MagicMock()
+        mock_context_manager.get_context.return_value = available_ctx
+        mock_context_manager.decrement_attention_budget = MagicMock()
+        mock_context_manager.is_daemon_connected.return_value = True
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
+        mock_log_event = AsyncMock()
+        message = WSResponse(
+            type="proactive",
+            content="Guardian note: take a short stretch before the next deep-work block.",
+            intervention_type="advisory",
+            urgency=4,
+            reasoning="recent_interruptions",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager", mock_context_manager),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nSeraph"),
+            patch("src.memory.vector_store.search_formatted", return_value="- [pattern] Stretch breaks improve focus"),
+            patch("src.agent.factory.get_model", return_value=MagicMock()),
+            patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            decision = await deliver_or_queue(
+                message,
+                guardian_confidence="grounded",
+                session_id="feedback-current",
+            )
+            polled = await get_next_native_notification()
+            notification = polled["notification"]
+            acked = await ack_native_notification(notification["id"])
+            feedback = await post_intervention_feedback(
+                message.intervention_id or "",
+                InterventionFeedbackRequest(
+                    feedback_type="helpful",
+                    note="Good timing.",
+                ),
+            )
+            state = await build_guardian_state(
+                session_id="feedback-current",
+                user_message="How should Seraph intervene better?",
+            )
+            create_agent(guardian_state=state)
+
+        assert notification is not None
+        assert message.intervention_id is not None
+
+        delivery_event = _find_audit_call(
+            mock_log_event,
+            event_type="observer_delivery_delivered",
+            tool_name="observer_delivery_gate",
+        )
+        ack_event = _find_audit_call(
+            mock_log_event,
+            event_type="integration_acked",
+            tool_name="observer_daemon:notifications",
+        )
+        feedback_event = _find_audit_call(
+            mock_log_event,
+            event_type="integration_succeeded",
+            tool_name="observer_feedback:intervention",
+        )
+        intervention = await guardian_feedback_repository.get(message.intervention_id)
+        assert intervention is not None
+        instructions = mock_agent_cls.call_args.kwargs["instructions"]
+        remaining = await native_notification_queue.count()
+
+    await native_notification_queue.clear()
+    return {
+        "action": decision.action.value,
+        "delivery_decision": decision.delivery_decision.value if decision.delivery_decision else None,
+        "delivery_transport": delivery_event["details"]["transport"],
+        "intervention_id_present": bool(message.intervention_id),
+        "notification_intervention_matches": notification["intervention_id"] == message.intervention_id,
+        "acked": acked["acked"],
+        "feedback_recorded": feedback["recorded"],
+        "ack_event_matches": ack_event["details"]["intervention_id"] == message.intervention_id,
+        "feedback_type": feedback_event["details"]["feedback_type"],
+        "latest_outcome": intervention.latest_outcome,
+        "stored_feedback_type": intervention.feedback_type,
+        "summary_contains_feedback": "feedback=helpful" in state.recent_intervention_feedback,
+        "summary_mentions_excerpt": "take a short stretch" in state.recent_intervention_feedback.lower(),
+        "prompt_contains_feedback_section": "Recent intervention feedback:" in state.to_prompt_block(),
+        "instructions_include_feedback": "Recent intervention feedback:" in instructions,
         "remaining_notifications": remaining,
     }
 
@@ -4066,6 +4191,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Intervention policy explicitly distinguishes act, bundle, defer, request_approval, and stay_silent outcomes.",
         runner=_eval_intervention_policy_behavior,
+    ),
+    EvalScenario(
+        name="guardian_feedback_loop",
+        category="guardian",
+        description="Proactive interventions persist outcomes and user feedback, and that summary flows back into guardian-state synthesis.",
+        runner=_eval_guardian_feedback_loop,
     ),
     EvalScenario(
         name="daily_briefing_fallback",

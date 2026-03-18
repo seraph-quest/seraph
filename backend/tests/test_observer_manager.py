@@ -1,6 +1,6 @@
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -74,6 +74,33 @@ class TestContextManagerRefresh:
         assert ctx.screen_context == "Editing Python"
 
     @pytest.mark.asyncio
+    async def test_refresh_derives_salience_confidence_and_interruption_cost(self):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing roadmap")
+
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+
+        with patch("src.observer.sources.time_source.gather_time", return_value={
+            "time_of_day": "afternoon", "day_of_week": "Tuesday", "is_working_hours": True,
+        }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [{"summary": "Design review", "start": soon}], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value={
+                 "recent_git_activity": [{"msg": "ship salience model"}]
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship observer salience"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="available"):
+            ctx = await mgr.refresh()
+
+        assert ctx.observer_confidence == "grounded"
+        assert ctx.salience_level == "high"
+        assert ctx.salience_reason == "upcoming_event"
+        assert ctx.interruption_cost == "high"
+
+    @pytest.mark.asyncio
     async def test_refresh_preserves_heartbeat(self):
         mgr = ContextManager()
         mgr.update_screen_context("VS Code", None)
@@ -135,6 +162,10 @@ class TestContextManagerRefresh:
             and event["tool_name"] == "observer_context_refresh"
             and event["details"]["data_quality"] == "good"
             and event["details"]["sources_ok"] == 4
+            and event["details"]["observer_confidence"] == "grounded"
+            and event["details"]["salience_level"] == "low"
+            and event["details"]["salience_reason"] == "background"
+            and event["details"]["interruption_cost"] == "low"
             and event["details"]["triggered_bundle_delivery"] is False
             for event in events
         )

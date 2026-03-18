@@ -29,8 +29,8 @@ This file owns three implementation questions:
 | Axis | Checklist | Shipped On `develop` | Biggest Missing Piece | Owning Workstreams |
 |---|---|---|---|---|
 | Operator visibility and legibility | `[ ]` | audit trails, visible tool streaming, session traces, guardian cockpit shell, and current settings/state surfaces | denser linked state, evidence, trace, artifact, and approval views with saved layouts | 06, 03 |
-| Longitudinal memory and human modeling | `[ ]` | soul, vector memory, consolidation, goals, observer context, and explicit guardian state | better salience, confidence, and world-model quality over time | 05 |
-| Intervention quality and timing | `[ ]` | strategist, proactive scheduler surfaces, explicit intervention policy, persisted intervention outcomes, explicit user feedback capture, and native-notification fallback | learning from outcomes plus stronger salience/confidence-aware timing | 05, 04 |
+| Longitudinal memory and human modeling | `[ ]` | soul, vector memory, consolidation, goals, observer context, explicit guardian state, and first observer salience/confidence scoring | better world-model quality and better-calibrated salience/confidence over time | 05 |
+| Intervention quality and timing | `[ ]` | strategist, proactive scheduler surfaces, explicit intervention policy, observer salience/confidence/interruption-cost scoring, persisted intervention outcomes, explicit user feedback capture, and native-notification fallback | learning from outcomes plus stronger salience-aware timing quality | 05, 04 |
 | Safe real-world execution | `[ ]` | approvals, policy modes, sandboxed shell path, audit logging, and secret handling | stronger privileged-path isolation and clearer execution-hardening boundaries | 01, 02 |
 | Runtime reliability and eval rigor | `[ ]` | fallback chains, routing policy, structured runtime audit, and broad deterministic eval harness coverage | richer behavioral eval depth and broader provider-policy sophistication | 03 |
 | Workflow composition and delegation | `[ ]` | specialists, MCP, skills, delegation foundations, and first-class reusable workflows | clearer operator-facing workflow control, artifact round-tripping, and easier extension ergonomics | 07, 02 |
@@ -42,7 +42,7 @@ This file owns three implementation questions:
 - [x] Seraph already has real foundations on every benchmark axis.
 - [x] Guardian memory, proactive scaffolding, and runtime legibility are stronger than a prototype-only baseline.
 - [ ] Seraph is not yet in a position to claim broad benchmark superiority from shipped implementation alone.
-- [ ] The biggest implementation gaps still cluster around cockpit maturity and density, salience-aware intervention quality, workflow control ergonomics, execution hardening, and richer native reach.
+- [ ] The biggest implementation gaps still cluster around cockpit maturity and density, feedback-driven intervention quality, workflow control ergonomics, execution hardening, and richer native reach.
 
 ## Acceptance Checklist
 

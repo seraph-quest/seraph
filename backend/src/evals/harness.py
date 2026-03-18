@@ -15,7 +15,7 @@ import threading
 import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3115,6 +3115,10 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             active_window="VS Code",
             screen_context="Editing roadmap",
             data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
         )
 
         with (
@@ -3138,6 +3142,8 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
         return {
             "overall_confidence": state.confidence.overall,
             "observer_confidence": state.confidence.observer,
+            "observer_salience": state.observer_context.salience_level,
+            "observer_interruption_cost": state.observer_context.interruption_cost,
             "memory_confidence": state.confidence.memory,
             "current_session_confidence": state.confidence.current_session,
             "recent_sessions_confidence": state.confidence.recent_sessions,
@@ -3285,7 +3291,10 @@ async def _eval_observer_refresh_behavior() -> dict[str, Any]:
             "src.observer.sources.calendar_source.gather_calendar",
             new_callable=AsyncMock,
             return_value={
-                "upcoming_events": [{"summary": "Design review", "start": "10:00"}],
+                "upcoming_events": [{
+                    "summary": "Design review",
+                    "start": (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat(),
+                }],
                 "current_event": None,
             },
         ),
@@ -3313,6 +3322,10 @@ async def _eval_observer_refresh_behavior() -> dict[str, Any]:
     return {
         "new_user_state": ctx.user_state,
         "data_quality": ctx.data_quality,
+        "observer_confidence": ctx.observer_confidence,
+        "salience_level": ctx.salience_level,
+        "salience_reason": ctx.salience_reason,
+        "interruption_cost": ctx.interruption_cost,
         "screen_context_preserved": ctx.screen_context == "Editing guardian eval contracts",
         "active_window_preserved": ctx.active_window == "VS Code",
         "goal_summary": ctx.active_goals_summary,
@@ -3610,6 +3623,30 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         interruption_mode="balanced",
         attention_budget_remaining=2,
     )
+    high_interrupt = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Interrupt later",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        observer_confidence="grounded",
+        salience_level="high",
+        interruption_cost="high",
+    )
+    low_salience = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Background nudge",
+        urgency=1,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        observer_confidence="grounded",
+        salience_level="low",
+        interruption_cost="low",
+    )
     return {
         "act_action": act.action.value,
         "act_reason": act.reason,
@@ -3621,6 +3658,10 @@ def _eval_intervention_policy_behavior() -> dict[str, Any]:
         "approval_reason": request_approval.reason,
         "silent_action": stay_silent.action.value,
         "silent_reason": stay_silent.reason,
+        "high_interrupt_action": high_interrupt.action.value,
+        "high_interrupt_reason": high_interrupt.reason,
+        "low_salience_action": low_salience.action.value,
+        "low_salience_reason": low_salience.reason,
     }
 
 

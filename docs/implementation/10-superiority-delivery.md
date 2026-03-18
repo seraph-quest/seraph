@@ -39,14 +39,14 @@ This file explains:
 
 ### 1. Guardian state and human model
 
-- [x] shipped foundations: soul, vector memory, goals, observer context, and explicit guardian-state synthesis
-- [ ] still missing: stronger human/world modeling quality, salience, and confidence modeling
+- [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, and explicit guardian-state synthesis
+- [ ] still missing: stronger human/world modeling quality and better-calibrated salience/confidence beyond the first heuristic layer
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, persisted intervention outcomes, explicit feedback capture, and first native notification fallback
-- [ ] still missing: closed-loop learning from outcomes and stronger timing quality
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, and first native notification fallback
+- [ ] still missing: closed-loop learning from outcomes and stronger timing quality beyond the first salience model
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility
@@ -83,7 +83,7 @@ This file explains:
 
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
-- [x] The current next unchecked items are salience/confidence modeling, execution hardening, workflow control ergonomics, and richer native reach after the first cockpit shell lands.
+- [x] The current next unchecked items are execution hardening, workflow control ergonomics, richer native reach, and deeper guardian learning after the cockpit and salience foundations land.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

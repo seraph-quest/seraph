@@ -256,7 +256,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["delivery"] == "deliver"
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
-    assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "good"
+    assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["observer_salience"] == "high"
+    assert details_by_name["guardian_state_synthesis"]["observer_interruption_cost"] == "low"
     assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
@@ -274,6 +276,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
+    assert details_by_name["observer_refresh_behavior"]["observer_confidence"] == "grounded"
+    assert details_by_name["observer_refresh_behavior"]["salience_level"] == "high"
+    assert details_by_name["observer_refresh_behavior"]["salience_reason"] == "upcoming_event"
+    assert details_by_name["observer_refresh_behavior"]["interruption_cost"] == "high"
     assert details_by_name["observer_refresh_behavior"]["screen_context_preserved"] is True
     assert details_by_name["observer_refresh_behavior"]["active_window_preserved"] is True
     assert details_by_name["observer_refresh_behavior"]["goal_summary"] == "Ship guardian behavioral evals"
@@ -298,6 +304,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["intervention_policy_behavior"]["approval_reason"] == "requires_approval"
     assert details_by_name["intervention_policy_behavior"]["silent_action"] == "stay_silent"
     assert details_by_name["intervention_policy_behavior"]["silent_reason"] == "empty_content"
+    assert details_by_name["intervention_policy_behavior"]["high_interrupt_action"] == "bundle"
+    assert details_by_name["intervention_policy_behavior"]["high_interrupt_reason"] == "high_interruption_cost"
+    assert details_by_name["intervention_policy_behavior"]["low_salience_action"] == "stay_silent"
+    assert details_by_name["intervention_policy_behavior"]["low_salience_reason"] == "low_observer_salience"
     assert details_by_name["guardian_feedback_loop"]["action"] == "act"
     assert details_by_name["guardian_feedback_loop"]["delivery_decision"] == "deliver"
     assert details_by_name["guardian_feedback_loop"]["delivery_transport"] == "native_notification"

@@ -22,6 +22,10 @@ def _make_guardian_state() -> GuardianState:
             active_window="VS Code",
             screen_context="Editing roadmap",
             data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
         ),
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
@@ -29,7 +33,7 @@ def _make_guardian_state() -> GuardianState:
         recent_intervention_feedback="- advisory delivered, feedback=helpful, reason=available_capacity: Stretch and refocus.",
         confidence=GuardianStateConfidence(
             overall="grounded",
-            observer="good",
+            observer="grounded",
             memory="grounded",
             current_session="grounded",
             recent_sessions="grounded",
@@ -55,6 +59,10 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
         active_window="VS Code",
         screen_context="Editing roadmap",
         data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
     )
 
     with (
@@ -71,7 +79,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert state.soul_context == "# Soul\n\n## Identity\nBuilder"
     assert state.active_goals_summary == "Ship guardian state"
     assert state.confidence.overall == "grounded"
-    assert state.confidence.observer == "good"
+    assert state.confidence.observer == "grounded"
     assert state.confidence.memory == "grounded"
     assert state.confidence.current_session == "grounded"
     assert state.confidence.recent_sessions == "grounded"
@@ -85,6 +93,7 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     block = _make_guardian_state().to_prompt_block()
 
     assert "Overall confidence: grounded" in block
+    assert "Observer model: confidence=grounded | salience=high (active_goals) | interruption_cost=low" in block
     assert "Observer snapshot:" in block
     assert "Relevant memories:" in block
     assert "Recent sessions:" in block

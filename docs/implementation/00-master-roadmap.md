@@ -47,7 +47,7 @@ Legend for the checklist column:
 | 02. Execution Plane | `[ ]` | Real tools, MCP, browser, shell, filesystem, goals, vault, web search, and first-class reusable workflows are shipped; stronger execution safety and richer workflow control are still left |
 | 03. Runtime Reliability | `[ ]` | Fallback chains, routing rules, local runtime paths, provider scoring, broad audit visibility, and guardian-behavior runtime evals are shipped; richer provider policy and still broader eval depth are still left |
 | 04. Presence And Reach | `[ ]` | Browser UI, WebSocket chat, proactive delivery, observer refresh, native daemon foundations, and first native notifications are shipped; broader channel reach and a richer desktop shell are still left |
-| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, explicit guardian state, intervention policy, and feedback capture are shipped foundations; salience modeling and stronger learning loops are still left |
+| 05. Guardian Intelligence | `[ ]` | Soul, memory, goals, strategist, briefings, reviews, observer-driven state, observer salience/confidence scoring, explicit guardian state, intervention policy, and feedback capture are shipped foundations; stronger learning loops are still left |
 | 06. Embodied Interface | `[ ]` | A first guardian cockpit shell with legacy village fallback is shipped, but denser linked evidence, artifact, and operator-control surfaces are still left |
 | 07. Ecosystem And Delegation | `[ ]` | Skills, MCP, catalog/install surfaces, delegation foundations, and reusable workflow composition are shipped; stronger extension ergonomics and clearer workflow control are still left |
 
@@ -57,7 +57,7 @@ Legend for the checklist column:
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
 - [x] The first guardian cockpit shell is now shipped, with the village retained as a legacy mode rather than the default workflow.
-- [ ] Seraph is still behind the strongest reference systems on cockpit maturity and density, salience-aware intervention quality, native reach, execution hardening, and operator workflow control.
+- [ ] Seraph is still behind the strongest reference systems on cockpit maturity and density, feedback-driven intervention quality, native reach, execution hardening, and operator workflow control.
 - [ ] No workstream is complete yet.
 
 ## Next Recommended PR Sequence
@@ -80,8 +80,8 @@ This is the rolling execution queue. It should always show the next 10 most valu
    capture intervention outcomes and explicit user feedback so timing and action quality can improve
 8. [x] `operator-cockpit-v1`:
    ship the first cockpit-first browser shell with linked state, interventions, audit, trace, and a legacy village fallback
-9. [ ] `observer-salience-and-confidence-model`:
-   score observer inputs by confidence, urgency, and interruption cost before they reach strategy and delivery layers
+9. [x] `observer-salience-and-confidence-model`:
+   score observer inputs by confidence, salience, and interruption cost before they reach strategy and delivery layers
 10. [ ] `execution-safety-hardening-v1`:
    deepen isolation, policy visibility, and privileged execution boundaries to close the gap versus stronger execution-first systems
 
@@ -121,8 +121,8 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
 - [x] 9 scheduler jobs and 5 observer source boundaries wired into the current product
 - [x] provider-agnostic LLM runtime with ordered fallback chains, health-aware rerouting, runtime-path profile preferences, wildcard path rules, runtime-path model overrides, runtime-path fallback overrides, and local-runtime routing across helper, scheduled, agent, delegation, and MCP-specialist paths
-- [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, memory recall, session history, recent sessions, recent intervention feedback, and confidence into one structured downstream input
-- [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus policy audit reasons
+- [x] explicit guardian-state synthesis across chat, WebSocket, and strategist paths, combining observer context, salience/confidence signals, memory recall, session history, recent sessions, recent intervention feedback, and confidence into one structured downstream input
+- [x] explicit intervention policy at the proactive delivery boundary, with first-class act, bundle, defer, request-approval, and stay-silent classifications plus salience-aware policy reasons
 - [x] persisted guardian intervention records with delivery outcomes, native-notification acknowledgements, and explicit feedback capture exposed back through guardian state
 - [x] runtime audit visibility across chat, session-bound helper and agent LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, observer, screen observation summary/cleanup, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
 - [x] deterministic eval harness coverage for core runtime, audit, REST and WebSocket chat behavior, guardian-state synthesis, guardian feedback loop behavior, intervention policy behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP guardrail behavior, proactive flow behavior, delegated workflow behavior, workflow composition behavior, observer, storage, tool-boundary, vault repository, MCP test API, skills API, screen repository, and daily-briefing, activity-digest, plus evening-review degraded-input contracts

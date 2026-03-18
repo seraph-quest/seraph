@@ -30,7 +30,7 @@ Seraph already has the right foundations: soul, goals, vector memory, observer i
 
 ### 2. Intervention quality, not just proactive activity
 
-Seraph already ships an explicit intervention-policy baseline. The product should win by deciding better when to act, defer, bundle, or stay silent through stronger confidence, interruption cost, outcome learning, and a real feedback loop.
+Seraph already ships an explicit intervention-policy baseline plus a first observer salience/confidence/interruption-cost model. The product should win by deciding better when to act, defer, bundle, or stay silent through stronger calibration, outcome learning, and a real feedback loop.
 
 ### 3. Reliability that is visible and testable
 
@@ -64,10 +64,10 @@ Seraph has a browser surface, WebSocket path, and native daemon foundation, but 
 
 ### Guardian intelligence
 
-- deepen guardian-state synthesis into a richer salience- and confidence-aware backbone
+- deepen guardian-state synthesis from the first shipped salience/confidence layer into a richer calibrated backbone
 - evolve intervention policy from a first shipped baseline into a stronger adaptive decision layer
 - capture intervention outcomes and user feedback
-- add observer salience and confidence modeling
+- deepen observer salience and confidence modeling into a stronger learning loop
 
 ### Runtime and execution
 

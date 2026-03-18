@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from src.audit.runtime import log_background_task_event
 from src.observer.context import CurrentContext
+from src.observer.salience import derive_observer_assessment
 from src.observer.user_state import UserState, user_state_machine
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,19 @@ class ContextManager:
                     old.interruption_mode, budget, last_reset,
                 )
 
+                assessment = derive_observer_assessment(
+                    current_event=calendar_data.get("current_event"),
+                    upcoming_events=calendar_data.get("upcoming_events", []),
+                    recent_git_activity=git_data.get("recent_git_activity"),
+                    active_goals_summary=goal_data.get("active_goals_summary", ""),
+                    active_window=old.active_window,
+                    screen_context=old.screen_context,
+                    data_quality=data_quality,
+                    user_state=new_user_state,
+                    interruption_mode=old.interruption_mode,
+                    attention_budget_remaining=budget,
+                )
+
                 self._context = CurrentContext(
                     time_of_day=time_data.get("time_of_day", "unknown"),
                     day_of_week=time_data.get("day_of_week", "unknown"),
@@ -135,6 +149,10 @@ class ContextManager:
                     previous_user_state=old.user_state,
                     attention_budget_last_reset=last_reset,
                     data_quality=data_quality,
+                    observer_confidence=assessment.observer_confidence,
+                    salience_level=assessment.salience_level,
+                    salience_reason=assessment.salience_reason,
+                    interruption_cost=assessment.interruption_cost,
                 )
 
                 triggered_bundle_delivery = False
@@ -157,6 +175,10 @@ class ContextManager:
                         "sources_ok": sources_ok,
                         "sources_total": sources_total,
                         "data_quality": data_quality,
+                        "observer_confidence": assessment.observer_confidence,
+                        "salience_level": assessment.salience_level,
+                        "salience_reason": assessment.salience_reason,
+                        "interruption_cost": assessment.interruption_cost,
                         "previous_user_state": old.user_state,
                         "new_user_state": new_user_state,
                         "triggered_bundle_delivery": triggered_bundle_delivery,

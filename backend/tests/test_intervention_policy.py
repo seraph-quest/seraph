@@ -74,6 +74,45 @@ def test_decide_intervention_requests_approval_when_flagged():
     assert decision.delivery_decision is None
 
 
+def test_decide_intervention_bundles_on_high_interruption_cost():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Not urgent enough to interrupt",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=1,
+        observer_confidence="grounded",
+        salience_level="high",
+        interruption_cost="high",
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "high_interruption_cost"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "queue"
+
+
+def test_decide_intervention_stays_silent_on_low_salience_noise():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Low-value ambient nudge",
+        urgency=1,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=3,
+        observer_confidence="grounded",
+        salience_level="low",
+        interruption_cost="low",
+    )
+
+    assert decision.action == InterventionAction.stay_silent
+    assert decision.reason == "low_observer_salience"
+    assert decision.delivery_decision is None
+
+
 def test_decide_intervention_stays_silent_for_empty_non_ambient_payload():
     decision = decide_intervention(
         message_type="proactive",

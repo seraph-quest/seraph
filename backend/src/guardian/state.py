@@ -68,7 +68,7 @@ def _status_for_text(text: str, *, requested: bool = True) -> str:
 
 def _overall_confidence(
     *,
-    observer_quality: str,
+    observer_confidence: str,
     memory_status: str,
     current_session_status: str,
     recent_sessions_status: str,
@@ -78,9 +78,9 @@ def _overall_confidence(
         for status in (memory_status, current_session_status, recent_sessions_status)
         if status == "grounded"
     )
-    if observer_quality == "stale":
+    if observer_confidence == "degraded":
         return "degraded"
-    if observer_quality == "degraded":
+    if observer_confidence == "partial":
         return "partial" if grounded_signals else "degraded"
     if grounded_signals >= 2:
         return "grounded"
@@ -125,7 +125,7 @@ async def build_guardian_state(
 
     confidence = GuardianStateConfidence(
         overall=_overall_confidence(
-            observer_quality=observer_context.data_quality,
+            observer_confidence=observer_context.observer_confidence,
             memory_status=_status_for_text(memory_context, requested=memory_requested),
             current_session_status=_status_for_text(
                 current_session_history,
@@ -133,7 +133,7 @@ async def build_guardian_state(
             ),
             recent_sessions_status=_status_for_text(recent_sessions_summary),
         ),
-        observer=observer_context.data_quality,
+        observer=observer_context.observer_confidence,
         memory=_status_for_text(memory_context, requested=memory_requested),
         current_session=_status_for_text(
             current_session_history,

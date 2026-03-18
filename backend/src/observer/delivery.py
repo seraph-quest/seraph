@@ -137,6 +137,9 @@ async def deliver_or_queue(
             is_scheduled=is_scheduled,
             data_quality=ctx.data_quality,
             guardian_confidence=guardian_confidence,
+            observer_confidence=ctx.observer_confidence,
+            salience_level=ctx.salience_level,
+            interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
         )
 
@@ -145,6 +148,10 @@ async def deliver_or_queue(
             "interruption_mode": ctx.interruption_mode,
             "attention_budget_remaining": ctx.attention_budget_remaining,
             "data_quality": ctx.data_quality,
+            "observer_confidence": ctx.observer_confidence,
+            "salience_level": ctx.salience_level,
+            "salience_reason": ctx.salience_reason,
+            "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
             "policy_action": policy_decision.action.value,
             "policy_reason": policy_decision.reason,

@@ -39,12 +39,14 @@ function resetStores() {
 
 function makeEvent(
   key: string,
-  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean; code?: string },
+  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; code?: string },
 ): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     key,
     code: options?.code,
     shiftKey: options?.shiftKey ?? false,
+    ctrlKey: options?.ctrlKey ?? false,
+    metaKey: options?.metaKey ?? false,
     bubbles: true,
   });
   if (options?.target) {
@@ -92,6 +94,18 @@ describe("handleGlobalKeyboardShortcut", () => {
 
     handleGlobalKeyboardShortcut(makeEvent("I", { shiftKey: true, code: "KeyI" }));
     expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(true);
+  });
+
+  it("Shift+K and Ctrl+K open the cockpit palette", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    handleGlobalKeyboardShortcut(makeEvent("K", { shiftKey: true, code: "KeyK" }));
+    handleGlobalKeyboardShortcut(makeEvent("k", { ctrlKey: true, code: "KeyK" }));
+
+    expect(dispatchSpy).toHaveBeenCalledTimes(2);
+    expect((dispatchSpy.mock.calls[0]?.[0] as CustomEvent).type).toBe("seraph-cockpit-open-palette");
+    expect((dispatchSpy.mock.calls[1]?.[0] as CustomEvent).type).toBe("seraph-cockpit-open-palette");
   });
 
   it("Shift+C toggles legacy chat panel outside cockpit mode", () => {

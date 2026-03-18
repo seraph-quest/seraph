@@ -34,6 +34,7 @@ class GuardianState:
     recent_intervention_feedback: str
     confidence: GuardianStateConfidence
     recent_execution_summary: str = ""
+    learning_guidance: str = ""
 
     @property
     def active_goals_summary(self) -> str:
@@ -67,6 +68,9 @@ class GuardianState:
 
         if self.recent_intervention_feedback:
             lines.extend(["", "Recent intervention feedback:", self.recent_intervention_feedback])
+
+        if self.learning_guidance:
+            lines.extend(["", "Learned communication guidance:", self.learning_guidance])
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -151,6 +155,33 @@ def _world_model_status(world_model: GuardianWorldModel) -> str:
     return "empty"
 
 
+def _learning_guidance_text(
+    *,
+    phrasing_bias: str,
+    cadence_bias: str,
+    channel_bias: str,
+    escalation_bias: str,
+) -> str:
+    guidance: list[str] = []
+    if phrasing_bias == "be_brief_and_literal":
+        guidance.append("Prefer brief, literal wording over flourish when interrupting.")
+    elif phrasing_bias == "be_more_direct":
+        guidance.append("Prefer direct wording when a nudge is worth sending.")
+
+    if cadence_bias == "bundle_more":
+        guidance.append("Prefer bundling lower-urgency nudges instead of interrupting immediately.")
+    elif cadence_bias == "check_in_sooner":
+        guidance.append("If confidence is good, allow slightly faster check-ins on aligned work.")
+
+    if channel_bias == "prefer_native_notification":
+        guidance.append("Async native delivery is usually tolerated better than browser interruption.")
+
+    if escalation_bias == "prefer_async_native":
+        guidance.append("Escalate through async native continuation before direct interruption when possible.")
+
+    return "\n".join(f"- {line}" for line in guidance)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -180,6 +211,10 @@ async def build_guardian_state(
         exclude_session_id=session_id
     )
     recent_intervention_feedback = await guardian_feedback_repository.summarize_recent(limit=5)
+    advisory_learning_signal = await guardian_feedback_repository.get_learning_signal(
+        intervention_type="advisory",
+        limit=12,
+    )
     try:
         recent_execution_summary = _summarize_recent_execution(
             await audit_repository.list_events(limit=20, session_id=session_id)
@@ -242,5 +277,11 @@ async def build_guardian_state(
         recent_sessions_summary=recent_sessions_summary,
         recent_intervention_feedback=recent_intervention_feedback,
         recent_execution_summary=recent_execution_summary,
+        learning_guidance=_learning_guidance_text(
+            phrasing_bias=advisory_learning_signal.phrasing_bias,
+            cadence_bias=advisory_learning_signal.cadence_bias,
+            channel_bias=advisory_learning_signal.channel_bias,
+            escalation_bias=advisory_learning_signal.escalation_bias,
+        ),
         confidence=confidence,
     )

@@ -114,22 +114,30 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
     shell_tool = next(tool for tool in payload["native_tools"] if tool["name"] == "shell_execute")
     assert shell_tool["availability"] == "blocked"
     assert shell_tool["blocked_reason"] == "tool_policy_balanced"
+    assert shell_tool["recommended_actions"][0]["type"] == "set_tool_policy"
 
     web_briefing = next(skill for skill in payload["skills"] if skill["name"] == "web-briefing")
     assert web_briefing["availability"] == "blocked"
     assert web_briefing["missing_tools"] == ["write_file"]
+    assert web_briefing["recommended_actions"][0]["type"] == "set_tool_policy"
 
     goal_snapshot = next(workflow for workflow in payload["workflows"] if workflow["name"] == "goal-snapshot-to-file")
     assert goal_snapshot["availability"] == "blocked"
     assert goal_snapshot["missing_tools"] == ["write_file"]
+    assert goal_snapshot["recommended_actions"][0]["type"] == "set_tool_policy"
 
     github = payload["mcp_servers"][0]
     assert github["availability"] == "blocked"
     assert github["blocked_reason"] == "auth_required"
+    assert github["recommended_actions"][0]["type"] == "test_mcp_server"
 
     research_pack = next(pack for pack in payload["starter_packs"] if pack["name"] == "research-briefing")
     assert research_pack["availability"] == "blocked"
     assert research_pack["blocked_skills"][0]["name"] == "web-briefing"
+    assert any(item["type"] == "skill" and item["name"] == "daily-standup" for item in payload["catalog_items"])
+    assert any(item["type"] == "mcp_server" and item["name"] == "github" for item in payload["catalog_items"])
+    assert payload["recommendations"]
+    assert payload["runbooks"]
 
 
 @pytest.mark.asyncio

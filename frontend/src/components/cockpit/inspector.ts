@@ -39,6 +39,14 @@ export interface WorkflowRunRecord {
   acceptsSecretRefs?: boolean;
   pendingApprovalCount?: number;
   pendingApprovalIds?: string[];
+  threadId?: string | null;
+  threadLabel?: string | null;
+  threadSource?: string | null;
+  replayAllowed?: boolean;
+  replayBlockReason?: string | null;
+  replayDraft?: string | null;
+  approvalRecoveryMessage?: string | null;
+  timeline?: Array<{ kind: string; at: string; summary: string }>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

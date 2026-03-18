@@ -21,6 +21,7 @@ class GuardianWorldModel:
     execution_pressure: tuple[str, ...] = ()
     active_constraints: tuple[str, ...] = ()
     recurring_patterns: tuple[str, ...] = ()
+    active_routines: tuple[str, ...] = ()
     project_state: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
@@ -57,6 +58,10 @@ class GuardianWorldModel:
         if self.recurring_patterns:
             lines.append("Recurring patterns:")
             lines.extend(f"- {item}" for item in self.recurring_patterns)
+
+        if self.active_routines:
+            lines.append("Active routines:")
+            lines.extend(f"- {item}" for item in self.active_routines)
 
         return "\n".join(lines)
 
@@ -193,6 +198,7 @@ def build_guardian_world_model(
         open_loops.append(line)
     execution_pressure = _extract_lines(recent_execution_summary, limit=3)
     recurring_patterns = _extract_tagged_memory(memory_context, "pattern", limit=3)
+    active_routines = _extract_tagged_memory(memory_context, "routine", limit=3)
     preference_constraints = _extract_tagged_memory(memory_context, "preference", limit=2)
     active_constraints: list[str] = []
     if observer_context.interruption_mode == "focus":
@@ -215,5 +221,6 @@ def build_guardian_world_model(
         execution_pressure=_dedupe(execution_pressure),
         active_constraints=_dedupe(active_constraints),
         recurring_patterns=_dedupe(recurring_patterns),
+        active_routines=_dedupe(active_routines),
         project_state=_dedupe(project_state),
     )

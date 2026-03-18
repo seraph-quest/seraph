@@ -62,6 +62,8 @@ def decide_intervention(
     interruption_cost: str = "medium",
     requires_approval: bool = False,
     recent_feedback_bias: str = "neutral",
+    learning_phrasing_bias: str = "neutral",
+    learning_cadence_bias: str = "neutral",
     learning_channel_bias: str = "neutral",
     learning_escalation_bias: str = "neutral",
 ) -> InterventionDecision:
@@ -150,6 +152,14 @@ def decide_intervention(
             should_cost_budget=should_cost_budget,
         )
 
+    if learning_cadence_bias == "bundle_more" and urgency < 4 and intervention_type != "alert":
+        return InterventionDecision(
+            action=InterventionAction.bundle,
+            reason="learned_low_cadence",
+            delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
     if (
         learning_escalation_bias == "prefer_async_native"
         and learning_channel_bias == "prefer_native_notification"
@@ -207,6 +217,21 @@ def decide_intervention(
             action=InterventionAction.bundle,
             reason="focus_mode",
             delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if (
+        learning_cadence_bias == "check_in_sooner"
+        and urgency >= 2
+        and interruption_cost != "high"
+        and attention_budget_remaining > 0
+        and intervention_type != "alert"
+        and learning_phrasing_bias in {"be_brief_and_literal", "be_more_direct"}
+    ):
+        return InterventionDecision(
+            action=InterventionAction.act,
+            reason="learned_quicker_followup",
+            delivery_decision=DeliveryDecision.deliver,
             should_cost_budget=should_cost_budget,
         )
 

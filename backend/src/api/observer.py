@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from src.audit.runtime import log_integration_event
+from src.agent.session import session_manager
 from src.observer.manager import context_manager
 from src.observer.native_notification_queue import native_notification_queue
 
@@ -41,6 +42,8 @@ class NativeNotificationResponse(BaseModel):
     urgency: int | None = None
     surface: str = "notification"
     session_id: str | None = None
+    thread_id: str | None = None
+    thread_label: str | None = None
     resume_message: str | None = None
     created_at: str
 
@@ -85,6 +88,8 @@ class QueuedInsightResponse(BaseModel):
     intervention_type: str
     urgency: int
     reasoning: str
+    thread_id: str | None = None
+    thread_label: str | None = None
     created_at: str
 
 
@@ -100,6 +105,8 @@ class RecentInterventionResponse(BaseModel):
     transport: str | None = None
     notification_id: str | None = None
     feedback_type: str | None = None
+    thread_id: str | None = None
+    thread_label: str | None = None
     updated_at: str
     continuity_surface: str
 
@@ -239,10 +246,33 @@ async def get_observer_continuity():
     notifications = [item.to_dict() for item in await native_notification_queue.list()]
     queued_insights = await insight_queue.peek_all()
     recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
+    session_titles = {
+        str(session["id"]): str(session.get("title") or "Untitled session")
+        for session in await session_manager.list_sessions()
+        if isinstance(session, dict) and session.get("id")
+    }
+    intervention_thread_map: dict[str, tuple[str | None, str | None]] = {}
+    for item in recent_interventions:
+        thread_id = item.session_id
+        intervention_thread_map[item.id] = (
+            thread_id,
+            session_titles.get(thread_id) if thread_id else None,
+        )
 
     return {
         "daemon": await _daemon_status_payload(),
-        "notifications": notifications,
+        "notifications": [
+            {
+                **item,
+                "thread_id": item.get("session_id"),
+                "thread_label": (
+                    session_titles.get(str(item["session_id"]))
+                    if item.get("session_id")
+                    else None
+                ),
+            }
+            for item in notifications
+        ],
         "queued_insights": [
             {
                 "id": item.id,
@@ -251,6 +281,16 @@ async def get_observer_continuity():
                 "intervention_type": item.intervention_type,
                 "urgency": item.urgency,
                 "reasoning": item.reasoning,
+                "thread_id": (
+                    intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
+                    if item.intervention_id
+                    else None
+                ),
+                "thread_label": (
+                    intervention_thread_map.get(item.intervention_id or "", (None, None))[1]
+                    if item.intervention_id
+                    else None
+                ),
                 "created_at": item.created_at.isoformat(),
             }
             for item in queued_insights
@@ -269,6 +309,8 @@ async def get_observer_continuity():
                 "transport": item.transport,
                 "notification_id": item.notification_id,
                 "feedback_type": item.feedback_type,
+                "thread_id": item.session_id,
+                "thread_label": session_titles.get(item.session_id) if item.session_id else None,
                 "updated_at": item.updated_at.isoformat(),
                 "continuity_surface": _continuity_surface(
                     latest_outcome=item.latest_outcome,

@@ -58,6 +58,8 @@ interface DaemonPresenceState {
 interface GuardianContinuityIntervention {
   id: string;
   session_id?: string | null;
+  thread_id?: string | null;
+  thread_label?: string | null;
   intervention_type: string;
   content_excerpt: string;
   policy_action: string;
@@ -83,6 +85,8 @@ interface ObserverContinuitySnapshot {
     created_at: string;
     surface?: string | null;
     session_id?: string | null;
+    thread_id?: string | null;
+    thread_label?: string | null;
     resume_message?: string | null;
   }>;
   queued_insights: Array<{
@@ -92,6 +96,8 @@ interface ObserverContinuitySnapshot {
     intervention_type: string;
     urgency: number;
     reasoning: string;
+    thread_id?: string | null;
+    thread_label?: string | null;
     created_at: string;
   }>;
   queued_insight_count: number;
@@ -106,6 +112,7 @@ interface SkillInfo {
   user_invocable?: boolean;
   availability?: "ready" | "blocked" | "disabled";
   missing_tools?: string[];
+  recommended_actions?: CapabilityAction[];
 }
 
 interface McpServerInfo {
@@ -121,6 +128,7 @@ interface McpServerInfo {
   auth_hint?: string;
   availability?: "ready" | "blocked" | "disabled";
   blocked_reason?: string | null;
+  recommended_actions?: CapabilityAction[];
 }
 
 interface ToolInfo {
@@ -131,6 +139,7 @@ interface ToolInfo {
   accepts_secret_refs?: boolean;
   availability?: "ready" | "blocked";
   blocked_reason?: string | null;
+  recommended_actions?: CapabilityAction[];
 }
 
 interface OperatorEntity {
@@ -160,6 +169,52 @@ interface StarterPackInfo {
   availability: "ready" | "partial" | "blocked";
 }
 
+interface CapabilityAction {
+  type:
+    | "toggle_skill"
+    | "toggle_workflow"
+    | "toggle_mcp_server"
+    | "test_mcp_server"
+    | "set_tool_policy"
+    | "set_mcp_policy"
+    | "install_catalog_item"
+    | "activate_starter_pack"
+    | "draft_workflow"
+    | "open_settings";
+  label: string;
+  name?: string;
+  mode?: string;
+  enabled?: boolean;
+  target?: string;
+}
+
+interface CatalogItemInfo {
+  name: string;
+  type: "skill" | "mcp_server";
+  description: string;
+  category?: string;
+  bundled?: boolean;
+  installed: boolean;
+  missing_tools?: string[];
+  recommended_actions?: CapabilityAction[];
+}
+
+interface CapabilityRecommendation {
+  id: string;
+  label: string;
+  description: string;
+  action?: CapabilityAction | null;
+}
+
+interface RunbookInfo {
+  id: string;
+  label: string;
+  description: string;
+  source: "starter_pack" | "workflow";
+  command: string;
+  action?: CapabilityAction | null;
+}
+
 interface CapabilityOverview {
   tool_policy_mode: ToolPolicyMode;
   mcp_policy_mode: McpPolicyMode;
@@ -181,6 +236,9 @@ interface CapabilityOverview {
   workflows: WorkflowInfo[];
   mcp_servers: McpServerInfo[];
   starter_packs: StarterPackInfo[];
+  catalog_items: CatalogItemInfo[];
+  recommendations: CapabilityRecommendation[];
+  runbooks: RunbookInfo[];
 }
 
 type ToolPolicyMode = "safe" | "balanced" | "full";
@@ -249,6 +307,28 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     pendingApprovalIds: Array.isArray(value.pending_approval_ids)
       ? value.pending_approval_ids.filter((item): item is string => typeof item === "string")
       : undefined,
+    threadId: typeof value.thread_id === "string" ? value.thread_id : null,
+    threadLabel: typeof value.thread_label === "string" ? value.thread_label : null,
+    threadSource: typeof value.thread_source === "string" ? value.thread_source : null,
+    replayAllowed: typeof value.replay_allowed === "boolean" ? value.replay_allowed : undefined,
+    replayBlockReason: typeof value.replay_block_reason === "string" ? value.replay_block_reason : null,
+    replayDraft: typeof value.replay_draft === "string" ? value.replay_draft : null,
+    approvalRecoveryMessage:
+      typeof value.approval_recovery_message === "string"
+        ? value.approval_recovery_message
+        : null,
+    timeline: Array.isArray(value.timeline)
+      ? value.timeline
+        .map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+          const record = entry as Record<string, unknown>;
+          if (typeof record.kind !== "string" || typeof record.at !== "string" || typeof record.summary !== "string") {
+            return null;
+          }
+          return { kind: record.kind, at: record.at, summary: record.summary };
+        })
+        .filter((entry): entry is { kind: string; at: string; summary: string } => entry != null)
+      : undefined,
   };
 }
 
@@ -268,6 +348,9 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
 }
 
 function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
+  if (workflow.replayDraft) {
+    return workflow.replayDraft;
+  }
   const inputs = workflow.arguments
     ? Object.entries(workflow.arguments).map(([name, value]) => `${name}=${JSON.stringify(value)}`)
     : [];
@@ -288,6 +371,21 @@ function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
     warnings.push("This workflow can cross secret-reference injection boundaries.");
   }
   return [base, ...warnings].join("\n");
+}
+
+function replayBlockCopy(reason: string | null | undefined): string {
+  switch (reason) {
+    case "pending_approval":
+      return "pending approval";
+    case "secret_ref_surface":
+      return "secret-ref surface";
+    case "secret_bearing_boundary":
+      return "secret-bearing boundary";
+    case "high_risk_requires_manual_reentry":
+      return "high-risk replay";
+    default:
+      return "manual review required";
+  }
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
@@ -354,10 +452,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [starterPacks, setStarterPacks] = useState<StarterPackInfo[]>([]);
+  const [catalogItems, setCatalogItems] = useState<CatalogItemInfo[]>([]);
+  const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
+  const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
   const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -462,6 +565,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
         setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
         setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
+        setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
+        setCapabilityRecommendations(
+          Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
+        );
+        setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
       }
       if (!isCancelled() && workflowRunsResponse.ok) {
         const workflowRunsPayload = await workflowRunsResponse.json();
@@ -498,6 +606,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setMcpServers([]);
         setTools([]);
         setStarterPacks([]);
+        setCatalogItems([]);
+        setCapabilityRecommendations([]);
+        setRunbooks([]);
         setToolPolicyMode("unknown");
         setMcpPolicyMode("unknown");
         setApprovalMode("unknown");
@@ -545,6 +656,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       window.removeEventListener("seraph-cockpit-compose", handleCompose as EventListener);
     };
   }, []);
+
+  useEffect(() => {
+    const openPalette = () => setPaletteOpen(true);
+    window.addEventListener("seraph-cockpit-open-palette", openPalette as EventListener);
+    return () => {
+      window.removeEventListener("seraph-cockpit-open-palette", openPalette as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!paletteOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPaletteOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [paletteOpen]);
 
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
@@ -625,6 +755,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .filter((message) => message.role === "step" || message.role === "error")
     .slice(-8)
     .reverse();
+  const sessionTitleById = useMemo(
+    () => Object.fromEntries(sessions.map((item) => [item.id, item.title])),
+    [sessions],
+  );
   const topGoals = collectGoalTitles(goalTree, 5);
   const readyStarterPacks = useMemo(
     () => starterPacks.filter((pack) => pack.availability === "ready"),
@@ -632,6 +766,114 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   );
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
   const submitDisabled = isAgentBusy || !composer.trim();
+  const operatorRunbooks = useMemo(
+    () => runbooks.slice(0, 6),
+    [runbooks],
+  );
+  const paletteItems = useMemo(() => {
+    const query = paletteQuery.trim().toLowerCase();
+    const items: Array<{
+      id: string;
+      kind: string;
+      label: string;
+      detail: string;
+      action?: CapabilityAction | null;
+      draft?: string | null;
+      entity?: OperatorEntity | null;
+    }> = [];
+
+    capabilityRecommendations.forEach((item) => {
+      items.push({
+        id: `recommendation:${item.id}`,
+        kind: "recommendation",
+        label: item.label,
+        detail: item.description,
+        action: item.action ?? null,
+      });
+    });
+    operatorRunbooks.forEach((item) => {
+      items.push({
+        id: `runbook:${item.id}`,
+        kind: "runbook",
+        label: item.label,
+        detail: item.description,
+        action: item.action ?? null,
+        draft: item.command,
+      });
+    });
+    starterPacks.forEach((pack) => {
+      items.push({
+        id: `starter-pack:${pack.name}`,
+        kind: "starter pack",
+        label: pack.label,
+        detail: `${pack.availability} · ${pack.description}`,
+        action: { type: "activate_starter_pack", label: "Activate pack", name: pack.name },
+      });
+    });
+    workflows.forEach((workflow) => {
+      items.push({
+        id: `workflow:${workflow.name}`,
+        kind: "workflow",
+        label: workflow.name,
+        detail: `${workflow.is_available === false ? "blocked" : "ready"} · ${workflow.description}`,
+        action: workflow.is_available === false
+          ? workflow.missing_skills?.[0]
+            ? { type: "open_settings", label: "Open settings", target: "workflows" }
+            : null
+          : { type: "draft_workflow", label: "Draft workflow", name: workflow.name },
+      });
+    });
+    skills.forEach((skill) => {
+      items.push({
+        id: `skill:${skill.name}`,
+        kind: "skill",
+        label: skill.name,
+        detail: `${skill.availability ?? (skill.enabled ? "ready" : "disabled")} · ${skill.description ?? ""}`.trim(),
+        action: skill.recommended_actions?.[0] ?? null,
+      });
+    });
+    mcpServers.forEach((server) => {
+      items.push({
+        id: `mcp:${server.name}`,
+        kind: "mcp",
+        label: server.name,
+        detail: `${server.availability ?? "unknown"} · ${server.status ?? "unknown"}`,
+        action: server.recommended_actions?.[0] ?? { type: "test_mcp_server", label: "Test connection", name: server.name },
+      });
+    });
+    tools.forEach((tool) => {
+      items.push({
+        id: `tool:${tool.name}`,
+        kind: "tool",
+        label: tool.name,
+        detail: `${tool.availability ?? "unknown"} · ${tool.description ?? ""}`.trim(),
+        action: tool.recommended_actions?.[0] ?? null,
+      });
+    });
+    catalogItems.forEach((item) => {
+      if (item.installed) return;
+      items.push({
+        id: `catalog:${item.type}:${item.name}`,
+        kind: `install ${item.type}`,
+        label: item.name,
+        detail: item.description,
+        action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: "Install", name: item.name },
+      });
+    });
+
+    if (!query) return items.slice(0, 24);
+    return items.filter((item) => `${item.kind} ${item.label} ${item.detail}`.toLowerCase().includes(query)).slice(0, 24);
+  }, [
+    capabilityRecommendations,
+    operatorRunbooks,
+    starterPacks,
+    workflows,
+    skills,
+    mcpServers,
+    tools,
+    catalogItems,
+    paletteQuery,
+  ]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     return pendingApprovals.find((approval) => approval.tool_name === workflow.toolName) ?? null;
@@ -680,6 +922,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setPendingApprovals((current) => current.filter((item) => item.id !== approval.id));
 
       if (decision === "approve" && payload?.resume_message) {
+        if (payload.session_id) {
+          await openThread(payload.session_id);
+        }
         EventBus.emit("approval-resume", {
           sessionId: payload.session_id ?? approval.session_id ?? null,
           message: payload.resume_message,
@@ -770,6 +1015,111 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
     } catch {
       setOperatorStatus(`Failed to activate ${pack.label}`);
+    }
+  }
+
+  async function openThread(sessionIdToOpen: string | null | undefined) {
+    if (!sessionIdToOpen) return;
+    await switchSession(sessionIdToOpen, "restored");
+  }
+
+  async function queueThreadDraft(message: string, sessionIdToOpen?: string | null) {
+    if (sessionIdToOpen) {
+      await openThread(sessionIdToOpen);
+    }
+    queueComposerDraft(message);
+  }
+
+  async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
+    setOperatorStatus(`${enabled ? "Enabling" : "Disabling"} ${workflow.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/workflows/${workflow.name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!response.ok) {
+        setOperatorStatus(`Failed to update ${workflow.name}`);
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${workflow.name} ${enabled ? "enabled" : "disabled"}`);
+    } catch {
+      setOperatorStatus(`Failed to update ${workflow.name}`);
+    }
+  }
+
+  async function installCatalogItem(item: CatalogItemInfo) {
+    setOperatorStatus(`Installing ${item.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/catalog/install/${item.name}`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setOperatorStatus(payload?.detail || `Failed to install ${item.name}`);
+        return;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${item.name} installed`);
+    } catch {
+      setOperatorStatus(`Failed to install ${item.name}`);
+    }
+  }
+
+  async function runCapabilityAction(action: CapabilityAction | null | undefined) {
+    if (!action) return;
+    switch (action.type) {
+      case "toggle_skill": {
+        const skill = skills.find((item) => item.name === action.name);
+        if (skill) await toggleSkill(skill);
+        return;
+      }
+      case "toggle_workflow": {
+        const workflow = workflows.find((item) => item.name === action.name);
+        if (workflow) await toggleWorkflow(workflow, Boolean(action.enabled));
+        return;
+      }
+      case "toggle_mcp_server": {
+        const server = mcpServers.find((item) => item.name === action.name);
+        if (server) await toggleMcpServer(server);
+        return;
+      }
+      case "test_mcp_server": {
+        const server = mcpServers.find((item) => item.name === action.name);
+        if (server) await testMcpServer(server);
+        return;
+      }
+      case "set_tool_policy":
+        if (action.mode === "safe" || action.mode === "balanced" || action.mode === "full") {
+          await updateToolPolicy(action.mode);
+        }
+        return;
+      case "set_mcp_policy":
+        if (action.mode === "disabled" || action.mode === "approval" || action.mode === "full") {
+          await updateMcpPolicy(action.mode);
+        }
+        return;
+      case "install_catalog_item": {
+        const item = catalogItems.find((entry) => entry.name === action.name);
+        if (item) await installCatalogItem(item);
+        return;
+      }
+      case "activate_starter_pack": {
+        const pack = starterPacks.find((entry) => entry.name === action.name);
+        if (pack) await activateStarterPack(pack);
+        return;
+      }
+      case "draft_workflow": {
+        const workflow = workflows.find((entry) => entry.name === action.name);
+        if (workflow) queueComposerDraft(buildWorkflowDraft(workflow));
+        return;
+      }
+      case "open_settings":
+        setSettingsPanelOpen(true);
+        return;
+      default:
+        return;
     }
   }
 
@@ -926,6 +1276,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       details = {
         tool_name: workflow.toolName,
         session_id: workflow.sessionId ?? "n/a",
+        thread: workflow.threadLabel ?? workflow.threadId ?? "ambient",
         status: workflow.status,
         risk_level: workflow.riskLevel ?? "unknown",
         execution_boundaries: workflow.executionBoundaries ?? [],
@@ -935,6 +1286,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         artifact_paths: workflow.artifactPaths,
         pending_approval: approval ? approval.id : "none",
         pending_approval_count: workflow.pendingApprovalCount ?? 0,
+        replay_allowed: workflow.replayAllowed ?? false,
+        replay_block_reason: workflow.replayBlockReason ?? "none",
+        timeline: workflow.timeline ?? [],
         linked_interventions: linkedInterventions.length,
       };
     } else if (selectedInspector.kind === "intervention") {
@@ -994,14 +1348,28 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <div className="cockpit-inspector-body">{body}</div>
         {selectedInspector.kind === "workflow" && (
           <div className="cockpit-feedback-row">
-            <button
-              className="cockpit-feedback-button"
-              onClick={() => queueComposerDraft(buildWorkflowReplayDraft(selectedInspector.workflow))}
-            >
-              {selectedInspector.workflow.executionBoundaries?.length
-                ? "Draft Boundary-Aware Rerun"
-                : "Draft Rerun"}
-            </button>
+            {selectedInspector.workflow.replayAllowed !== false ? (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => queueComposerDraft(buildWorkflowReplayDraft(selectedInspector.workflow))}
+              >
+                {selectedInspector.workflow.executionBoundaries?.length
+                  ? "Draft Boundary-Aware Rerun"
+                  : "Draft Rerun"}
+              </button>
+            ) : (
+              <span className="cockpit-feedback-status">
+                Replay blocked: {replayBlockCopy(selectedInspector.workflow.replayBlockReason)}
+              </span>
+            )}
+            {selectedInspector.workflow.threadId && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => void openThread(selectedInspector.workflow.threadId)}
+              >
+                Open Thread
+              </button>
+            )}
             {selectedInspector.workflow.artifactPaths[0] && (
               <button
                 className="cockpit-feedback-button"
@@ -1029,6 +1397,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     Run {workflow.name}
                   </button>
                 ))}
+            {selectedInspector.workflow.approvalRecoveryMessage && (
+              <span className="cockpit-feedback-status">
+                {selectedInspector.workflow.approvalRecoveryMessage}
+              </span>
+            )}
           </div>
         )}
         {selectedInspector.kind === "artifact" && (
@@ -1129,6 +1502,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               onClick={() => setQuestPanelOpen(true)}
             >
               Goals overlay
+            </button>
+            <button
+              className="cockpit-action cockpit-action--ghost"
+              onClick={() => setPaletteOpen(true)}
+              title="Open the capability command palette"
+            >
+              Capability palette
             </button>
             <button
               className="cockpit-action cockpit-action--ghost"
@@ -1437,7 +1817,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         {activeLayout.sections.workflows && (
           <CockpitWorkspaceWindow
             panelId="workflows_pane"
-            title="Workflow runs"
+            title="Workflow timeline"
             meta={`${workflowRunsWithArtifacts.length} recent`}
             minWidth={380}
             minHeight={220}
@@ -1466,7 +1846,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {workflow.status} · {workflow.artifactPaths.length} artifacts ·{" "}
                         {workflow.riskLevel ?? "unknown"} risk ·{" "}
                         {approval ? "approval waiting" : "no approval"} · {linkedInterventions.length} interventions
+                        {(workflow.threadLabel ?? (workflow.threadId ? sessionTitleById[workflow.threadId] : null))
+                          ? ` · ${workflow.threadLabel ?? sessionTitleById[workflow.threadId ?? ""]}`
+                          : ""}
+                        {workflow.replayAllowed === false ? ` · replay blocked` : ""}
                       </div>
+                      {workflow.timeline?.length ? (
+                        <div className="cockpit-row-meta">
+                          {workflow.timeline.map((entry) => `${entry.kind.replace(/_/g, " ")}: ${entry.summary}`).join(" · ")}
+                        </div>
+                      ) : null}
                     </button>
                   );
                 })}
@@ -1505,10 +1894,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{message.content_excerpt}</div>
                       <div className="cockpit-row-meta">
                         {formatContinuityLabel(message.continuity_surface)} · {formatContinuityLabel(message.latest_outcome)}
+                        {message.thread_label
+                          ? ` · ${message.thread_label}`
+                          : message.thread_id
+                            ? ` · thread ${message.thread_id.slice(0, 6)}`
+                            : ""}
                       </div>
                     </button>
                     {message.id && (
                       <div className="cockpit-feedback-row">
+                        {(message.thread_id || message.session_id) && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(message.thread_id ?? message.session_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
                         <button
                           className="cockpit-feedback-button"
                           onClick={() => sendFeedback(message.id, "helpful")}
@@ -1691,20 +2093,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{notification.body}</div>
                       <div className="cockpit-row-meta">
                         {notification.surface ?? "notification"}
-                        {notification.session_id ? ` · thread ${notification.session_id.slice(0, 6)}` : ""}
+                        {(notification.thread_label ?? (notification.thread_id ? sessionTitleById[notification.thread_id] : null))
+                          ? ` · ${notification.thread_label ?? sessionTitleById[notification.thread_id ?? ""]}`
+                          : notification.thread_id
+                            ? ` · thread ${notification.thread_id.slice(0, 6)}`
+                            : ""}
                       </div>
                       <div className="cockpit-feedback-row">
                         <button
                           className="cockpit-feedback-button"
                           onClick={() =>
-                            queueComposerDraft(
+                            void queueThreadDraft(
                               notification.resume_message
                               || `Follow up on this desktop alert: ${notification.body}`,
+                              notification.thread_id ?? notification.session_id,
                             )
                           }
                         >
                           Continue
                         </button>
+                        {(notification.thread_id || notification.session_id) && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(notification.thread_id ?? notification.session_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
                         <button
                           className="cockpit-feedback-button"
                           onClick={() => void dismissDesktopNotification(notification.id)}
@@ -1726,13 +2141,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <span className="cockpit-row-age">{formatAge(item.created_at)}</span>
                       </div>
                       <div className="cockpit-row-body">{item.content_excerpt}</div>
+                      <div className="cockpit-row-meta">
+                        {item.thread_label
+                          ?? (item.thread_id ? sessionTitleById[item.thread_id] ?? `thread ${item.thread_id.slice(0, 6)}` : "ambient queue")}
+                      </div>
                       <div className="cockpit-feedback-row">
                         <button
                           className="cockpit-feedback-button"
-                          onClick={() => queueComposerDraft(`Follow up on this deferred guardian item: ${item.content_excerpt}`)}
+                          onClick={() =>
+                            void queueThreadDraft(
+                              `Follow up on this deferred guardian item: ${item.content_excerpt}`,
+                              item.thread_id,
+                            )
+                          }
                         >
                           Draft Follow-up
                         </button>
+                        {item.thread_id && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(item.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -1749,10 +2181,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-feedback-row">
                         <button
                           className="cockpit-feedback-button"
-                          onClick={() => queueComposerDraft(`Continue from this guardian intervention: ${item.content_excerpt}`)}
+                          onClick={() =>
+                            void queueThreadDraft(
+                              `Continue from this guardian intervention: ${item.content_excerpt}`,
+                              item.thread_id ?? item.session_id,
+                            )
+                          }
                         >
                           Continue
                         </button>
+                        {(item.thread_id || item.session_id) && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(item.thread_id ?? item.session_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
                         <button
                           className="cockpit-feedback-button"
                           onClick={() => sendFeedback(item.id, "helpful")}
@@ -1771,7 +2216,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
             <CockpitWorkspaceWindow
               panelId="operator_surface_pane"
-              title="Operator surface"
+              title="Operator terminal"
               meta={`tool ${toolPolicyMode} · mcp ${mcpPolicyMode}`}
               minWidth={360}
               minHeight={260}
@@ -1814,6 +2259,71 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   </div>
                 </div>
                 <div className="cockpit-sublist">
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">quick actions</span>
+                      <button
+                        type="button"
+                        className="cockpit-operator-link"
+                        onClick={() => setPaletteOpen(true)}
+                      >
+                        open palette
+                      </button>
+                    </div>
+                    {operatorStatus && (
+                      <div className="cockpit-sublist-item">{operatorStatus}</div>
+                    )}
+                    {!operatorStatus && (
+                      <div className="cockpit-sublist-item">
+                        Search commands, install missing capabilities, and run starter packs from one place.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">recommendations</span>
+                      <span className="cockpit-operator-link">{capabilityRecommendations.length} queued</span>
+                    </div>
+                    {capabilityRecommendations.slice(0, 3).map((item) => (
+                      <div key={item.id} className="cockpit-operator-row">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: "starter_pack",
+                                name: item.label,
+                                meta: "recommended next action",
+                                summary: item.description,
+                                details: { action: item.action ?? null },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{item.label}</div>
+                          <div className="cockpit-operator-note">{item.description}</div>
+                        </button>
+                        {item.action && (
+                          <div className="cockpit-operator-actions">
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityAction(item.action)}
+                            >
+                              {item.action.label}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {capabilityRecommendations.length === 0 && (
+                      <div className="cockpit-empty">No queued recommendations.</div>
+                    )}
+                  </div>
+
                   <div className="cockpit-operator-section">
                     <div className="cockpit-key">policy state</div>
                     <div className="cockpit-operator-row">
@@ -1874,6 +2384,46 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         ))}
                       </div>
                     </div>
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">runbooks</span>
+                      <span className="cockpit-operator-link">{operatorRunbooks.length} ready</span>
+                    </div>
+                    {operatorRunbooks.map((runbook) => (
+                      <div key={runbook.id} className="cockpit-operator-row">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() => queueComposerDraft(runbook.command)}
+                        >
+                          <div className="cockpit-value">{runbook.label}</div>
+                          <div className="cockpit-operator-note">{runbook.description}</div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => queueComposerDraft(runbook.command)}
+                          >
+                            draft
+                          </button>
+                          {runbook.action && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityAction(runbook.action)}
+                            >
+                              {runbook.action.label}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {operatorRunbooks.length === 0 && (
+                      <div className="cockpit-empty">No runbooks published.</div>
+                    )}
                   </div>
 
                   <div className="cockpit-operator-section">
@@ -1944,6 +2494,51 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     {starterPacks.length === 0 && (
                       <div className="cockpit-empty">No starter packs published.</div>
                     )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">installable now</span>
+                      <span className="cockpit-operator-link">
+                        {catalogItems.filter((item) => !item.installed).length} missing
+                      </span>
+                    </div>
+                    {catalogItems.filter((item) => !item.installed).slice(0, 3).map((item) => (
+                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: item.type === "skill" ? "skill" : "mcp",
+                                name: item.name,
+                                meta: `install ${item.type.replace("_", " ")}`,
+                                summary: item.description,
+                                details: {
+                                  category: item.category ?? "",
+                                  bundled: item.bundled ?? false,
+                                  missing_tools: item.missing_tools ?? [],
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{item.name}</div>
+                          <div className="cockpit-operator-note">{item.description}</div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => void installCatalogItem(item)}
+                          >
+                            install
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
 
                   <div className="cockpit-operator-section">
@@ -2180,15 +2775,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-empty">No workflows available.</div>
                     )}
                   </div>
-                  {operatorStatus && (
-                    <div className="cockpit-sublist-item">{operatorStatus}</div>
-                  )}
                   <div className="cockpit-feedback-row">
                     <button
                       className="cockpit-feedback-button"
                       onClick={() => setSettingsPanelOpen(true)}
                     >
                       Open Settings
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => setPaletteOpen(true)}
+                    >
+                      Capability Palette
                     </button>
                   </div>
                   {workflows.length === 0 && skills.length === 0 && mcpServers.length === 0 && tools.length === 0 && (
@@ -2201,11 +2799,76 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         )}
       </div>
 
+      {paletteOpen && (
+        <div className="cockpit-overlay-backdrop" onClick={() => setPaletteOpen(false)}>
+          <section
+            className="cockpit-palette"
+            onClick={(event) => event.stopPropagation()}
+            aria-label="Capability palette"
+          >
+            <div className="cockpit-window-header">
+              <div>
+                <div className="cockpit-window-title">Capability palette</div>
+                <div className="cockpit-window-meta">
+                  keyboard-first launcher for capabilities, installs, repairs, and runbooks
+                </div>
+              </div>
+              <div className="cockpit-window-grip">Shift+K / Ctrl+K</div>
+            </div>
+            <div className="cockpit-palette-body">
+              <input
+                type="text"
+                value={paletteQuery}
+                onChange={(event) => setPaletteQuery(event.target.value)}
+                className="cockpit-input"
+                placeholder="Search commands, workflows, starter packs, installs, repairs..."
+                autoFocus
+              />
+              <div className="cockpit-list cockpit-list--palette">
+                {paletteItems.map((item) => (
+                  <div key={item.id} className="cockpit-row">
+                    <div className="cockpit-row-header">
+                      <span className="cockpit-role">{item.label}</span>
+                      <span className="cockpit-row-age">{item.kind}</span>
+                    </div>
+                    <div className="cockpit-row-body">{item.detail}</div>
+                    <div className="cockpit-feedback-row">
+                      {item.draft && (
+                        <button
+                          className="cockpit-feedback-button"
+                          onClick={() => {
+                            queueComposerDraft(item.draft!);
+                            setPaletteOpen(false);
+                          }}
+                        >
+                          Draft
+                        </button>
+                      )}
+                      {item.action && (
+                        <button
+                          className="cockpit-feedback-button"
+                          onClick={() => void runCapabilityAction(item.action)}
+                        >
+                          {item.action.label}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {paletteItems.length === 0 && (
+                  <div className="cockpit-empty">No matching capabilities or repair actions.</div>
+                )}
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+
       <form className="cockpit-composer" onSubmit={handleSubmit}>
         <div className="cockpit-composer-meta">
           <span>command bar</span>
           <span className="cockpit-composer-meta-center">
-            {activeLayout.label} · drag panes on 16px grid · resize edges · Shift+1/2/3 when not typing
+            {activeLayout.label} · drag panes on 16px grid · resize edges · Shift+1/2/3 layouts · Shift+K palette
           </span>
           <span>{isAgentBusy ? "Seraph is responding" : `thread ${activeSessionLabel}`}</span>
         </div>

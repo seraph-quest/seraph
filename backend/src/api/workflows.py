@@ -2,11 +2,13 @@
 
 from collections import defaultdict
 from datetime import datetime
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from src.agent.session import session_manager
 from src.agent.factory import get_base_tools_and_active_skills
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
@@ -60,6 +62,64 @@ def _workflow_projection_key(event: dict[str, Any]) -> str:
     return f"{event.get('session_id') or 'global'}:{event.get('tool_name') or 'workflow'}"
 
 
+def _workflow_replay_draft(workflow_name: str, arguments: dict[str, Any] | None) -> str:
+    if not arguments:
+        return f'Run workflow "{workflow_name}".'
+    rendered = ", ".join(
+        f"{key}={json.dumps(value, ensure_ascii=False)}"
+        for key, value in arguments.items()
+    )
+    return f'Run workflow "{workflow_name}" with {rendered}.'
+
+
+def _workflow_replay_policy(
+    *,
+    risk_level: str,
+    execution_boundaries: list[str],
+    accepts_secret_refs: bool,
+    pending_approval_count: int,
+) -> tuple[bool, str | None]:
+    if pending_approval_count > 0:
+        return False, "pending_approval"
+    if accepts_secret_refs:
+        return False, "secret_ref_surface"
+    if any(
+        boundary in {"secret_management", "secret_read", "secret_injection"}
+        for boundary in execution_boundaries
+    ):
+        return False, "secret_bearing_boundary"
+    if risk_level == "high":
+        return False, "high_risk_requires_manual_reentry"
+    return True, None
+
+
+def _timeline_entries_for_run(
+    run: dict[str, Any],
+    *,
+    pending_approval_count: int,
+) -> list[dict[str, Any]]:
+    entries = [
+        {
+            "kind": "workflow_started",
+            "at": run["started_at"],
+            "summary": "Workflow started",
+        }
+    ]
+    if pending_approval_count > 0:
+        entries.append({
+            "kind": "approval_pending",
+            "at": run["updated_at"],
+            "summary": f"{pending_approval_count} approval request(s) still pending",
+        })
+    status = str(run["status"])
+    entries.append({
+        "kind": f"workflow_{status}",
+        "at": run["updated_at"],
+        "summary": run["summary"],
+    })
+    return entries
+
+
 async def _list_workflow_runs(
     *,
     limit: int,
@@ -77,6 +137,11 @@ async def _list_workflow_runs(
     pending_by_tool: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for approval in pending_approvals:
         pending_by_tool[str(approval.get("tool_name") or "")].append(approval)
+    session_titles = {
+        str(session["id"]): str(session.get("title") or "Untitled session")
+        for session in await session_manager.list_sessions()
+        if isinstance(session, dict) and session.get("id")
+    }
 
     for event in workflow_events:
         details = _as_record(event.get("details"))
@@ -148,6 +213,34 @@ async def _list_workflow_runs(
             "pending_approval_count": len(approvals),
             "pending_approval_ids": [approval["id"] for approval in approvals],
         })
+        replay_allowed, replay_block_reason = _workflow_replay_policy(
+            risk_level=str(run["risk_level"]),
+            execution_boundaries=list(run["execution_boundaries"]),
+            accepts_secret_refs=bool(run["accepts_secret_refs"]),
+            pending_approval_count=len(approvals),
+        )
+        run.update({
+            "thread_id": run.get("session_id"),
+            "thread_label": (
+                session_titles.get(str(run["session_id"]))
+                if run.get("session_id")
+                else None
+            ),
+            "thread_source": "session" if run.get("session_id") else "ambient",
+            "replay_allowed": replay_allowed,
+            "replay_block_reason": replay_block_reason,
+            "replay_draft": (
+                _workflow_replay_draft(str(run["workflow_name"]), run.get("arguments"))
+                if replay_allowed
+                else None
+            ),
+            "approval_recovery_message": (
+                f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
+                if len(approvals) > 0
+                else None
+            ),
+            "timeline": _timeline_entries_for_run(run, pending_approval_count=len(approvals)),
+        })
         completed.append(run)
 
     for run_queue in pending_by_key.values():
@@ -160,6 +253,34 @@ async def _list_workflow_runs(
                 "accepts_secret_refs": bool(workflow_meta.get("accepts_secret_refs", False)),
                 "pending_approval_count": len(approvals),
                 "pending_approval_ids": [approval["id"] for approval in approvals],
+            })
+            replay_allowed, replay_block_reason = _workflow_replay_policy(
+                risk_level=str(run["risk_level"]),
+                execution_boundaries=list(run["execution_boundaries"]),
+                accepts_secret_refs=bool(run["accepts_secret_refs"]),
+                pending_approval_count=len(approvals),
+            )
+            run.update({
+                "thread_id": run.get("session_id"),
+                "thread_label": (
+                    session_titles.get(str(run["session_id"]))
+                    if run.get("session_id")
+                    else None
+                ),
+                "thread_source": "session" if run.get("session_id") else "ambient",
+                "replay_allowed": replay_allowed,
+                "replay_block_reason": replay_block_reason,
+                "replay_draft": (
+                    _workflow_replay_draft(str(run["workflow_name"]), run.get("arguments"))
+                    if replay_allowed
+                    else None
+                ),
+                "approval_recovery_message": (
+                    f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
+                    if len(approvals) > 0
+                    else None
+                ),
+                "timeline": _timeline_entries_for_run(run, pending_approval_count=len(approvals)),
             })
             completed.append(run)
 

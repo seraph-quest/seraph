@@ -160,6 +160,8 @@ async def deliver_or_queue(
             interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
             recent_feedback_bias=learning_signal.bias,
+            learning_phrasing_bias=learning_signal.phrasing_bias,
+            learning_cadence_bias=learning_signal.cadence_bias,
             learning_channel_bias=learning_signal.channel_bias,
             learning_escalation_bias=learning_signal.escalation_bias,
         )
@@ -175,6 +177,8 @@ async def deliver_or_queue(
             "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
             "learning_bias": learning_signal.bias,
+            "learning_phrasing_bias": learning_signal.phrasing_bias,
+            "learning_cadence_bias": learning_signal.cadence_bias,
             "learning_channel_bias": learning_signal.channel_bias,
             "learning_escalation_bias": learning_signal.escalation_bias,
             "learning_helpful_count": learning_signal.helpful_count,

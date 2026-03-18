@@ -185,6 +185,36 @@ describe("CockpitView", () => {
                 availability: "partial",
               },
             ],
+            catalog_items: [
+              {
+                name: "daily-standup",
+                type: "skill",
+                description: "Generate a standup report",
+                category: "productivity",
+                bundled: true,
+                installed: false,
+                missing_tools: [],
+                recommended_actions: [{ type: "install_catalog_item", label: "Install skill", name: "daily-standup" }],
+              },
+            ],
+            recommendations: [
+              {
+                id: "starter-pack:research-briefing",
+                label: "Activate Research briefing",
+                description: "Enable the starter briefing pack.",
+                action: { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
+              },
+            ],
+            runbooks: [
+              {
+                id: "workflow:summarize-file",
+                label: "Run summarize-file",
+                description: "Summarize a workspace file",
+                source: "workflow",
+                command: "Run workflow \"summarize-file\" with file_path=\"notes/brief.md\".",
+                action: { type: "draft_workflow", label: "Draft workflow", name: "summarize-file" },
+              },
+            ],
           }),
         );
       }
@@ -210,6 +240,17 @@ describe("CockpitView", () => {
                 accepts_secret_refs: false,
                 pending_approval_count: 0,
                 pending_approval_ids: [],
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                thread_source: "session",
+                replay_allowed: true,
+                replay_block_reason: null,
+                replay_draft: "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+                approval_recovery_message: null,
+                timeline: [
+                  { kind: "workflow_started", at: "2026-03-18T12:01:00Z", summary: "Workflow started" },
+                  { kind: "workflow_succeeded", at: "2026-03-18T12:01:45Z", summary: "workflow_web_brief_to_file succeeded (2 steps)" },
+                ],
               },
             ],
           }),
@@ -326,13 +367,14 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
-    await waitFor(() => expect(screen.getByText("Workflow runs")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
     expect(screen.getByText("Desktop shell")).toBeInTheDocument();
-    expect(screen.getByText("Operator surface")).toBeInTheDocument();
+    expect(screen.getByText("Operator terminal")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Set MCP policy to approval" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Set approval mode to high_risk" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Research briefing")).toBeInTheDocument();
+    expect(screen.getByText("Activate Research briefing")).toBeInTheDocument();
     expect(screen.getByText("4 tools live")).toBeInTheDocument();
     expect(screen.getByText("vault")).toBeInTheDocument();
     expect(screen.getByText("auth required")).toBeInTheDocument();
@@ -345,6 +387,7 @@ describe("CockpitView", () => {
     expect(screen.getByText("blocked web-brief-to-file · tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
+    expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -367,15 +410,21 @@ describe("CockpitView", () => {
       ),
     );
     fireEvent.click(screen.getAllByText("Continue")[0]);
-    expect(screen.getByDisplayValue(/Continue from this guardian intervention:/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Continue from this guardian intervention:/)).toBeInTheDocument(),
+    );
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
     expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
     expect(screen.getByText("Use Output")).toBeInTheDocument();
-    const runButton = screen.getByText("Run summarize-file");
+    const runButton = screen.getByRole("button", { name: "Run summarize-file" });
     expect(runButton).toBeInTheDocument();
     fireEvent.click(runButton);
-    expect(screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/brief.md"\./)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/brief.md"\./),
+      ).toBeInTheDocument(),
+    );
     fireEvent.click(screen.getByText("Dismiss"));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

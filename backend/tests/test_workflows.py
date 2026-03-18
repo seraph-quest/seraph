@@ -311,6 +311,10 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
                 "accepts_secret_refs": False,
             },
         ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
     ):
         response = await client.get("/api/workflows/runs?session_id=session-1")
 
@@ -324,6 +328,12 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert run["artifact_paths"] == ["notes/brief.md"]
     assert run["pending_approval_count"] == 1
     assert run["pending_approval_ids"] == ["approval-1"]
+    assert run["thread_id"] == "session-1"
+    assert run["thread_label"] == "Research thread"
+    assert run["replay_allowed"] is False
+    assert run["replay_block_reason"] == "pending_approval"
+    assert run["approval_recovery_message"]
+    assert run["timeline"][0]["kind"] == "workflow_started"
 
     def test_list_workflows_includes_policy_metadata(self, workflows_dir):
         mgr = WorkflowManager()

@@ -35,14 +35,14 @@ This file owns three implementation questions:
 | Runtime reliability and eval rigor | `[ ]` | fallback chains, routing policy, structured runtime audit, and broad deterministic eval harness coverage | richer behavioral eval depth and broader provider-policy sophistication | 03 |
 | Workflow composition and delegation | `[ ]` | specialists, MCP, skills, delegation foundations, and first-class reusable workflows | clearer operator-facing workflow control, artifact round-tripping, and easier extension ergonomics | 07, 02 |
 | Dense interface efficiency | `[ ]` | guardian cockpit default with linked state, interventions, audit, trace, fixed composer, persisted `default` / `focus` / `review` layouts, keyboard layout switching, and legacy village fallback | stronger workflow-operating density, richer artifact/workflow views, and more flexible operator workspace control | 06, 07 |
-| Presence and reach across surfaces | `[ ]` | browser delivery, proactive queue/bundle delivery, native daemon, and first desktop-notification fallback | richer desktop shell, stronger cross-surface continuity, and broader channels | 04, 06 |
+| Presence and reach across surfaces | `[ ]` | browser delivery, proactive queue/bundle delivery, native daemon, and a first desktop presence surface built on daemon status plus notification fallback | stronger cross-surface continuity and broader channels | 04, 06 |
 
 ## What This Means On `develop`
 
 - [x] Seraph already has real foundations on every benchmark axis.
 - [x] Guardian memory, proactive scaffolding, and runtime legibility are stronger than a prototype-only baseline.
 - [ ] Seraph is not yet in a position to claim broad benchmark superiority from shipped implementation alone.
-- [ ] The biggest implementation gaps still cluster around workflow-operating density inside the cockpit, deeper intervention quality and world modeling, execution hardening, and richer native reach.
+- [ ] The biggest implementation gaps still cluster around workflow-operating density inside the cockpit, deeper intervention quality and world modeling, execution hardening, and stronger cross-surface continuity.
 
 ## Acceptance Checklist
 

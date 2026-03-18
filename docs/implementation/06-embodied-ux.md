@@ -12,6 +12,7 @@
 
 - [x] browser guardian cockpit shell with dense multi-pane layout, fixed composer, session rail, guardian-state panel, intervention feedback, audit surface, live trace, pending approvals, recent outputs, and an operations inspector
 - [x] persisted cockpit workspace presets for `default`, `focus`, and `review`, with inspector visibility persistence and keyboard switching
+- [x] cockpit-native bridge cues through live desktop status and native-presence controls in the operator surfaces
 - [x] cockpit-first default browser mode with explicit fallback to the legacy village shell
 - [x] retro village UI with Phaser-based world rendering
 - [x] animated avatar states with visible casting behavior during tool use
@@ -23,7 +24,8 @@
 
 - [x] this workstream is back near the front of the repo-wide horizon through cockpit-density and operator-control work
 - [x] this workstream shipped `cockpit-linked-evidence-panels-v2` and `saved-layouts-and-keyboard-control-v1`
-- [x] this workstream now partners on `native-desktop-shell-v1` and `cross-surface-continuity-and-notification-controls` in the master 10-PR queue
+- [x] this workstream partnered on `native-desktop-shell-v1`
+- [x] this workstream now partners on `cross-surface-continuity-and-notification-controls` in the master 10-PR queue
 
 ## Still To Do On `develop`
 

@@ -50,6 +50,18 @@ class NotificationAckResponse(BaseModel):
     acked: bool
 
 
+class DaemonStatusResponse(BaseModel):
+    connected: bool
+    last_post: float | None
+    active_window: str | None
+    has_screen_context: bool
+    capture_mode: str
+    pending_notification_count: int
+    last_native_notification_at: str | None = None
+    last_native_notification_title: str | None = None
+    last_native_notification_outcome: str | None = None
+
+
 class InterventionFeedbackRequest(BaseModel):
     feedback_type: str
     note: str | None = None
@@ -131,16 +143,26 @@ async def post_screen_context(body: ScreenContextRequest):
     return {"status": "ok"}
 
 
-@router.get("/observer/daemon-status")
+@router.get("/observer/daemon-status", response_model=DaemonStatusResponse)
 async def daemon_status():
     """Return daemon connectivity status based on heartbeat timestamp."""
     ctx = context_manager.get_context()
     connected = context_manager.is_daemon_connected()
+    pending_notification_count = await native_notification_queue.count()
     return {
         "connected": connected,
         "last_post": ctx.last_daemon_post,
         "active_window": ctx.active_window,
         "has_screen_context": bool(ctx.screen_context),
+        "capture_mode": ctx.capture_mode,
+        "pending_notification_count": pending_notification_count,
+        "last_native_notification_at": (
+            ctx.last_native_notification_at.isoformat()
+            if ctx.last_native_notification_at is not None
+            else None
+        ),
+        "last_native_notification_title": ctx.last_native_notification_title,
+        "last_native_notification_outcome": ctx.last_native_notification_outcome,
     }
 
 
@@ -189,6 +211,11 @@ async def ack_native_notification(notification_id: str):
             )
         except Exception:
             logger.debug("Failed to persist native notification acknowledgement", exc_info=True)
+    if acked:
+        context_manager.record_native_notification(
+            title=notification.title if notification is not None else None,
+            outcome="acked",
+        )
     await log_integration_event(
         integration_type="observer_daemon",
         name="notifications",
@@ -199,6 +226,36 @@ async def ack_native_notification(notification_id: str):
         },
     )
     return {"acked": acked}
+
+
+@router.post("/observer/notifications/test", response_model=NativeNotificationResponse)
+async def enqueue_test_native_notification():
+    """Queue a sample native notification so the operator can verify the desktop path."""
+    notification = await native_notification_queue.enqueue(
+        intervention_id=None,
+        title="Seraph desktop shell",
+        body="Native presence is connected. This is a test notification.",
+        intervention_type="test",
+        urgency=1,
+    )
+    context_manager.record_native_notification(
+        title=notification.title,
+        outcome="queued_test",
+    )
+    pending_count = await native_notification_queue.count()
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="notifications",
+        outcome="queued",
+        details={
+            "notification_id": notification.id,
+            "pending_count": pending_count,
+            "intervention_type": notification.intervention_type,
+            "urgency": notification.urgency,
+            "source": "test_endpoint",
+        },
+    )
+    return notification.to_dict()
 
 
 @router.post(

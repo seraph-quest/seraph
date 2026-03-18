@@ -44,6 +44,8 @@ from src.api.observer import (
     ScreenContextRequest,
     ScreenObservationData,
     ack_native_notification,
+    daemon_status,
+    enqueue_test_native_notification,
     get_next_native_notification,
     post_intervention_feedback,
     post_screen_context,
@@ -3461,6 +3463,49 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_native_desktop_shell_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    mgr = ContextManager()
+    mgr.update_screen_context("VS Code — shell.py", "Editing native presence shell state.")
+    mgr.update_capture_mode("balanced")
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.api.observer.context_manager", mgr),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        initial_status = await daemon_status()
+        queued = await enqueue_test_native_notification()
+        queued_status = await daemon_status()
+        acked = await ack_native_notification(queued["id"])
+        acked_status = await daemon_status()
+
+    queued_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_queued",
+        tool_name="observer_daemon:notifications",
+    )
+    ack_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_acked",
+        tool_name="observer_daemon:notifications",
+    )
+    await native_notification_queue.clear()
+
+    return {
+        "initial_capture_mode": initial_status["capture_mode"],
+        "initial_pending_notifications": initial_status["pending_notification_count"],
+        "queued_title": queued["title"],
+        "queued_pending_notifications": queued_status["pending_notification_count"],
+        "queued_outcome": queued_status["last_native_notification_outcome"],
+        "acked": acked["acked"],
+        "acked_pending_notifications": acked_status["pending_notification_count"],
+        "acked_outcome": acked_status["last_native_notification_outcome"],
+        "queued_event_source": queued_event["details"]["source"],
+        "ack_event_matches": ack_event["details"]["notification_id"] == queued["id"],
+    }
+
+
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -4458,6 +4503,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="When browser delivery is unavailable but the daemon is connected, proactive messages reroute through native notifications.",
         runner=_eval_native_presence_notification_behavior,
+    ),
+    EvalScenario(
+        name="native_desktop_shell_behavior",
+        category="presence",
+        description="Native presence exposes daemon status, pending-notification state, and a safe test desktop-notification path.",
+        runner=_eval_native_desktop_shell_behavior,
     ),
     EvalScenario(
         name="intervention_policy_behavior",

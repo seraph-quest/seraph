@@ -208,6 +208,10 @@ async def deliver_or_queue(
                         intervention_type=intervention_type,
                         urgency=urgency,
                     )
+                    context_manager.record_native_notification(
+                        title=notification.title,
+                        outcome="queued",
+                    )
                     if policy_decision.should_cost_budget:
                         context_manager.decrement_attention_budget()
                     await _update_intervention_outcome(

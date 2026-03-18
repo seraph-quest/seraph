@@ -38,7 +38,7 @@ title: Seraph Development Status
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is richer native presence, deeper cross-surface continuity, broader guardian behavioral proof, and stronger world-model quality on top of the newly shipped cockpit workspace ergonomics.
+- [x] The next strategic focus is deeper cross-surface continuity, broader guardian behavioral proof, and stronger world-model quality on top of the newly shipped cockpit workspace ergonomics and first desktop presence surface.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
@@ -46,7 +46,7 @@ title: Seraph Development Status
 - [x] dense guardian cockpit as the primary operator surface
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
-- [x] non-browser presence through notifications and native reach
+- [x] non-browser presence through a first coherent desktop surface, notifications, and native reach
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops
 
 ## Shipped On `develop`
@@ -108,7 +108,7 @@ title: Seraph Development Status
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
-- [x] native-notification fallback delivery when browser sockets are unavailable but the daemon is connected
+- [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, and native-notification fallback delivery when browser sockets are unavailable but the daemon is connected
 
 ### Current interface surface
 
@@ -116,7 +116,7 @@ title: Seraph Development Status
 - [x] legacy Phaser village mode with chat, quest, and settings overlays
 - [x] visible tool use and agent activity in the current world surface
 - [x] settings and management surfaces for tools, MCP, and system state
-- [x] macOS daemon notification fallback for non-browser proactive reach
+- [x] macOS daemon-backed desktop presence card plus notification fallback for non-browser proactive reach
 
 ### Ecosystem foundations
 
@@ -142,7 +142,7 @@ title: Seraph Development Status
 ### Interface and presence
 
 - [ ] richer cockpit density with dedicated workflow operating views and broader keyboard/operator control beyond the first linked-evidence plus saved-layout shell
-- [ ] richer native desktop shell and broader non-browser presence beyond the first notification fallback path
+- [ ] richer cross-surface continuity and broader non-browser presence beyond the first desktop presence surface
 - [ ] stronger cross-surface continuity between ambient observation and deliberate interaction
 
 ### Workflow and leverage

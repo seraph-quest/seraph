@@ -141,6 +141,9 @@ class ContextManager:
                     active_window=old.active_window,
                     screen_context=old.screen_context,
                     last_daemon_post=old.last_daemon_post,
+                    last_native_notification_at=old.last_native_notification_at,
+                    last_native_notification_title=old.last_native_notification_title,
+                    last_native_notification_outcome=old.last_native_notification_outcome,
                     capture_mode=old.capture_mode,
                     tool_policy_mode=old.tool_policy_mode,
                     mcp_policy_mode=old.mcp_policy_mode,
@@ -282,6 +285,18 @@ class ContextManager:
         if screen_context is not None:
             self._context.screen_context = screen_context
         self._context.last_daemon_post = time.time()
+
+    def record_native_notification(
+        self,
+        *,
+        title: str | None,
+        outcome: str,
+        recorded_at: datetime | None = None,
+    ) -> None:
+        """Record the latest native-notification state for operator surfaces."""
+        self._context.last_native_notification_title = title
+        self._context.last_native_notification_outcome = outcome
+        self._context.last_native_notification_at = recorded_at or datetime.now(timezone.utc)
 
     def decrement_attention_budget(self) -> None:
         """Reduce attention budget by 1 (minimum 0)."""

@@ -43,6 +43,13 @@ interface PendingApproval {
   created_at: string;
 }
 
+interface DaemonPresenceState {
+  connected: boolean;
+  pending_notification_count: number;
+  capture_mode: string;
+  last_native_notification_outcome?: string | null;
+}
+
 type InspectorSelection =
   | { kind: "approval"; approval: PendingApproval }
   | { kind: "intervention"; message: ChatMessage }
@@ -91,6 +98,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [feedbackState, setFeedbackState] = useState<Record<string, string>>({});
   const [approvalState, setApprovalState] = useState<Record<string, string>>({});
   const [selectedInspector, setSelectedInspector] = useState<InspectorSelection | null>(null);
+  const [daemonPresence, setDaemonPresence] = useState<DaemonPresenceState | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
   const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
@@ -126,10 +134,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     const refreshCockpit = async () => {
       try {
-        const [observerResponse, auditResponse, approvalsResponse] = await Promise.all([
+        const [observerResponse, auditResponse, approvalsResponse, daemonResponse] = await Promise.all([
           fetch(`${API_URL}/api/observer/state`),
           fetch(`${API_URL}/api/audit/events?limit=12`),
           fetch(`${API_URL}/api/approvals/pending?limit=8`),
+          fetch(`${API_URL}/api/observer/daemon-status`),
         ]);
 
         if (!cancelled && observerResponse.ok) {
@@ -146,10 +155,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const approvalsPayload = await approvalsResponse.json();
           setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
         }
+
+        if (!cancelled && daemonResponse.ok) {
+          const daemonPayload = await daemonResponse.json();
+          setDaemonPresence(daemonPayload);
+        }
       } catch {
         if (!cancelled) {
           setAuditEvents([]);
           setPendingApprovals([]);
+          setDaemonPresence(null);
         }
       }
     };
@@ -371,6 +386,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <div className="cockpit-pill-row">
             <span className={`cockpit-pill cockpit-pill--${connectionStatus}`}>{connectionLabel}</span>
             <span className="cockpit-pill">{ambientState.replace("_", " ")}</span>
+            <span className="cockpit-pill">
+              desktop {daemonPresence?.connected ? "live" : "offline"}
+            </span>
+            {daemonPresence && (
+              <span className="cockpit-pill">
+                native {daemonPresence.pending_notification_count} queued
+              </span>
+            )}
             <span className="cockpit-pill">
               budget {observerState?.attention_budget_remaining ?? "?"}
             </span>

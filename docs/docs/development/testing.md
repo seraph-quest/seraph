@@ -46,6 +46,7 @@ uv run python -m src.evals.harness --scenario guardian_state_synthesis
 uv run python -m src.evals.harness --scenario observer_refresh_behavior
 uv run python -m src.evals.harness --scenario observer_delivery_decision_behavior
 uv run python -m src.evals.harness --scenario native_presence_notification_behavior
+uv run python -m src.evals.harness --scenario native_desktop_shell_behavior
 uv run python -m src.evals.harness --scenario intervention_policy_behavior
 uv run python -m src.evals.harness --scenario guardian_feedback_loop
 uv run python -m src.evals.harness --scenario provider_fallback_chain
@@ -98,7 +99,7 @@ uv run python -m src.evals.harness --scenario evening_review_degraded_delivery_b
 uv run python -m src.evals.harness --scenario evening_review_degraded_inputs_audit
 ```
 
-This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, guardian feedback loop behavior, intervention policy behavior, observer salience/confidence/interruption-cost behavior, observer refresh and delivery behavior, native notification fallback behavior, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, reusable workflow composition behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
+This runner does not call external providers. It exercises core seams with controlled mocks so REST and WebSocket chat behavior, guardian-state synthesis, guardian feedback loop behavior, intervention policy behavior, observer salience/confidence/interruption-cost behavior, observer refresh and delivery behavior, native notification fallback behavior, native desktop presence status plus the safe test-notification path, session consolidation behavior, strategist and scheduled proactive flow behavior, delegated tool-heavy workflow behavior, reusable workflow composition behavior, ordered fallback routing, health-aware provider rerouting, runtime-path profile preferences, wildcard runtime-path rules, capability-aware runtime policy intents, weighted provider policy scoring, structured routing decision auditing, session-bound helper LLM trace visibility, runtime-path primary and fallback overrides, local helper/agent/all current scheduled-job/delegation/MCP-specialist profile routing, embedding-model, vector-store, soul-file, vault-repository, and filesystem boundary failures, context-window degradation, daily-briefing, activity-digest, and evening-review degraded-input fallback auditing, tool/MCP policy guardrails, proactive delivery transport, daemon ingest, manual MCP test API auth-required/success/failure behavior, skills toggle/reload audit behavior, screen observation summary/cleanup boundary behavior, observer source availability and time/goal summaries, sandbox, browser, filesystem, and web-search timeout/empty-result auditing, tool degradation behavior, and audit visibility for strategist/helper paths stay easy to verify after reliability changes.
 
 ### Frontend
 
@@ -143,7 +144,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_insight_queue_expiry.py` | 8 | Insight queue expiry — TTL, cleanup, edge cases |
 | `test_mcp_api.py` | 7 | MCP HTTP API endpoints — token update, manual server test auth/success/failure flows, and runtime audit logging |
 | `test_mcp_manager.py` | 31 | MCP server integration — connect, disconnect, failure handling, token auth, env var resolution |
-| `test_observer_api.py` | 18 | Observer API endpoints — state, context POST, daemon status, native notification poll/ack, and explicit intervention feedback |
+| `test_observer_api.py` | 19 | Observer API endpoints — state, context POST, daemon status, safe native test notification enqueue, native notification poll/ack, and explicit intervention feedback |
 | `test_observer_calendar.py` | 4 | Calendar observer source — event parsing, empty/failure handling, runtime audit logging |
 | `test_observer_git.py` | 7 | Git observer source — commit parsing, missing repo/reflog handling, runtime audit logging |
 | `test_observer_goals.py` | 4 | Goals observer source — active goals summary and runtime audit logging |
@@ -182,7 +183,10 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `game/objects/SpeechBubble.test.ts` | 25 | Speech bubble — show/hide, positioning, text wrapping, timeout, animation |
 | `stores/chatStore.test.ts` | 16 | Zustand chat store — sync actions (messages, panels, visual state) + async actions (profile, sessions, onboarding) |
 | `game/lib/mapParsers.test.ts` | 15 | Map parsers — magic effect pool building, animation parsing, custom properties |
-| `hooks/useKeyboardShortcuts.test.ts` | 14 | Keyboard shortcuts — Shift+C/Q/S, Escape, input focus exclusion |
+| `components/settings/DaemonStatus.test.tsx` | 2 | Native Presence card — daemon status rendering plus safe desktop test-notification enqueue/refresh |
+| `components/cockpit/layouts.test.ts` | 4 | Cockpit layout presets — default/focus/review density expectations |
+| `stores/cockpitLayoutStore.test.ts` | 4 | Cockpit layout store — preset switching, inspector visibility, reset behavior |
+| `hooks/useKeyboardShortcuts.test.ts` | 6 | Keyboard shortcuts — cockpit composer focus, layout switching, inspector toggle, legacy panel handling, input focus exclusion |
 | `lib/toolParser.test.ts` | 12 | Tool detection — regex patterns, fallback substring match, Phase 1/2/MCP tools |
 | `game/objects/MagicEffect.test.ts` | 12 | Magic effects — pool cycling, spawn, fade, destroy lifecycle |
 | `stores/questStore.test.ts` | 10 | Zustand quest store — goal CRUD, tree, dashboard, filters, refresh |

@@ -36,6 +36,9 @@ class CurrentContext:
 
     # Daemon heartbeat — Unix timestamp of last POST from daemon
     last_daemon_post: Optional[float] = None
+    last_native_notification_at: Optional[datetime] = None
+    last_native_notification_title: Optional[str] = None
+    last_native_notification_outcome: Optional[str] = None
 
     # Capture mode — controls screenshot frequency (on_switch | balanced | detailed)
     capture_mode: str = "on_switch"
@@ -61,6 +64,8 @@ class CurrentContext:
             data["last_interaction"] = data["last_interaction"].isoformat()
         if data["attention_budget_last_reset"]:
             data["attention_budget_last_reset"] = data["attention_budget_last_reset"].isoformat()
+        if data["last_native_notification_at"]:
+            data["last_native_notification_at"] = data["last_native_notification_at"].isoformat()
         return data
 
     def to_prompt_block(self) -> str:

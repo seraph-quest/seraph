@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 import json
 
 from src.approval.repository import approval_repository
+from src.agent.session import session_manager
 from src.audit.repository import audit_repository
 from src.tools.policy import get_current_tool_policy_mode
 
@@ -14,7 +15,24 @@ async def list_pending_approvals(
     limit: int = Query(default=20, ge=1, le=100),
 ):
     """List pending approval requests."""
-    return await approval_repository.list_pending(session_id=session_id, limit=limit)
+    approvals = await approval_repository.list_pending(session_id=session_id, limit=limit)
+    session_titles = {
+        str(session["id"]): str(session.get("title") or "Untitled session")
+        for session in await session_manager.list_sessions()
+        if isinstance(session, dict) and session.get("id")
+    }
+    return [
+        {
+            **approval,
+            "thread_id": approval.get("session_id"),
+            "thread_label": (
+                session_titles.get(str(approval["session_id"]))
+                if approval.get("session_id")
+                else None
+            ),
+        }
+        for approval in approvals
+    ]
 
 
 @router.post("/approvals/{approval_id}/approve")

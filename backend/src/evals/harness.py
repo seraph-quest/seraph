@@ -3312,7 +3312,10 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-            patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
+            patch(
+                "src.memory.vector_store.search_with_status",
+                return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
+            ),
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
                 return_value="- advisory delivered, feedback=helpful: Stretch and refocus.",
@@ -3335,6 +3338,7 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             "observer_interruption_cost": state.observer_context.interruption_cost,
             "world_model_focus": state.world_model.current_focus,
             "world_model_alignment": state.world_model.focus_alignment,
+            "world_model_memory_signals": len(state.world_model.memory_signals),
             "memory_confidence": state.confidence.memory,
             "current_session_confidence": state.confidence.current_session,
             "recent_sessions_confidence": state.confidence.recent_sessions,
@@ -3375,8 +3379,14 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch(
-                "src.memory.vector_store.search_formatted",
-                return_value="- [goal] Prepare investor brief\n- [loop] Follow up on investor questions",
+                "src.memory.vector_store.search_with_status",
+                return_value=(
+                    [
+                        {"category": "goal", "text": "Prepare investor brief"},
+                        {"category": "pattern", "text": "Protect prep time during meeting blocks"},
+                    ],
+                    False,
+                ),
             ),
             patch(
                 "src.audit.repository.audit_repository.list_events",
@@ -3420,6 +3430,10 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "active_projects_count": len(state.world_model.active_projects),
             "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
             "includes_investor_project": "Investor brief" in state.world_model.active_projects,
+            "includes_memory_signal": any(
+                "Prepare investor brief" in item
+                for item in state.world_model.memory_signals
+            ),
             "includes_attention_pressure": any(
                 "Attention budget is nearly exhausted" in item
                 for item in state.world_model.open_loops_or_pressure
@@ -3435,6 +3449,7 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
             "agent_instructions_include_projects": "Active projects:" in instructions,
+            "agent_instructions_include_memory_signals": "Memory signals:" in instructions,
             "strategist_instructions_include_receptivity": (
                 "Intervention receptivity: low" in strategist_agent.instructions
             ),
@@ -3976,7 +3991,10 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
             patch("src.observer.manager.context_manager", mock_context_manager),
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nSeraph"),
-            patch("src.memory.vector_store.search_formatted", return_value="- [pattern] Stretch breaks improve focus"),
+            patch(
+                "src.memory.vector_store.search_with_status",
+                return_value=([{"category": "pattern", "text": "Stretch breaks improve focus"}], False),
+            ),
             patch("src.agent.factory.get_model", return_value=MagicMock()),
             patch("src.agent.factory.ToolCallingAgent") as mock_agent_cls,
             patch.object(audit_repository, "log_event", mock_log_event),
@@ -4220,6 +4238,201 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
         "positive_helpful_count": positive_signal.helpful_count,
         "positive_acknowledged_count": positive_signal.acknowledged_count,
         "remaining_native_notifications": remaining_notifications,
+    }
+
+
+async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
+    from src.api.workflows import _list_workflow_runs
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-call",
+                    "session_id": "thread-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                },
+            ],
+        ),
+        patch(
+            "src.api.workflows.approval_repository.list_pending",
+            return_value=[
+                {
+                    "id": "approval-1",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "session_id": "thread-1",
+                    "fingerprint": "missing-match",
+                    "summary": "Approval pending for workflow_web_brief_to_file",
+                    "risk_level": "medium",
+                    "created_at": "2026-03-18T12:01:10Z",
+                    "resume_message": "Continue once the web brief is approved",
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+    ):
+        run = (await _list_workflow_runs(limit=4, session_id="thread-1"))[0]
+
+    return {
+        "status": run["status"],
+        "thread_label": run["thread_label"],
+        "pending_approval_count": run["pending_approval_count"],
+        "pending_resume_message": run["pending_approvals"][0]["resume_message"],
+        "timeline_has_approval": any(
+            entry["kind"] == "approval_pending" for entry in run["timeline"]
+        ),
+        "replay_block_reason": run["replay_block_reason"],
+    }
+
+
+def _eval_capability_repair_behavior() -> dict[str, Any]:
+    from src.api.capabilities import _build_capability_overview
+
+    ctx = _make_context(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=([types.SimpleNamespace(name="web_search")], ["web-briefing"], "approval"),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.api.capabilities.skill_manager.list_skills",
+            return_value=[
+                {
+                    "name": "web-briefing",
+                    "description": "Web briefing",
+                    "requires_tools": ["web_search", "write_file"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "file_path": "/tmp/web-briefing.md",
+                },
+            ],
+        ),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "description": "Research and save",
+                    "requires_tools": ["web_search", "write_file"],
+                    "requires_skills": ["web-briefing"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "step_count": 2,
+                    "file_path": "/tmp/web-brief-to-file.md",
+                    "policy_modes": ["balanced", "full"],
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "risk_level": "medium",
+                    "accepts_secret_refs": False,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+    ):
+        overview = _build_capability_overview()
+
+    starter_pack = next(item for item in overview["starter_packs"] if item["name"] == "research-briefing")
+    workflow = next(item for item in overview["workflows"] if item["name"] == "web-brief-to-file")
+    return {
+        "starter_pack_availability": starter_pack["availability"],
+        "starter_pack_repair_actions": [item["type"] for item in starter_pack["recommended_actions"]],
+        "workflow_repair_actions": [item["type"] for item in workflow["recommended_actions"]],
+        "recommendation_labels": [item["label"] for item in overview["recommendations"]],
+        "runbooks_ready": len(overview["runbooks"]),
+    }
+
+
+async def _eval_guardian_learning_policy_v2_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    async with _patched_async_db("src.guardian.feedback.get_session"):
+        for feedback_type, user_state, transport in (
+            ("not_helpful", "deep_work", "websocket"),
+            ("not_helpful", "in_meeting", "websocket"),
+            ("helpful", "away", "native_notification"),
+            ("acknowledged", "deep_work", "native_notification"),
+        ):
+            intervention = await guardian_feedback_repository.create_intervention(
+                session_id=None,
+                message_type="proactive",
+                intervention_type="advisory",
+                urgency=3,
+                content="Respect the current focus block.",
+                reasoning="available_capacity",
+                is_scheduled=False,
+                guardian_confidence="grounded",
+                data_quality="good",
+                user_state=user_state,
+                interruption_mode="focus" if user_state != "away" else "balanced",
+                policy_action="act",
+                policy_reason="available_capacity",
+                delivery_decision="deliver",
+                latest_outcome="delivered",
+                transport=transport,
+            )
+            await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+        signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+        blocked_decision = decide_intervention(
+            message_type="proactive",
+            intervention_type="advisory",
+            content="This can wait until the user is out of deep work.",
+            urgency=3,
+            user_state="deep_work",
+            interruption_mode="balanced",
+            attention_budget_remaining=2,
+            guardian_confidence="grounded",
+            observer_confidence="grounded",
+            salience_level="medium",
+            salience_reason="active_goals",
+            interruption_cost="medium",
+            learning_timing_bias=signal.timing_bias,
+            learning_blocked_state_bias=signal.blocked_state_bias,
+        )
+        available_decision = decide_intervention(
+            message_type="proactive",
+            intervention_type="advisory",
+            content="Now is a good time for this nudge.",
+            urgency=2,
+            user_state="available",
+            interruption_mode="balanced",
+            attention_budget_remaining=2,
+            guardian_confidence="grounded",
+            observer_confidence="grounded",
+            salience_level="medium",
+            salience_reason="active_goals",
+            interruption_cost="medium",
+            learning_timing_bias="prefer_available_windows",
+        )
+
+    return {
+        "timing_bias": signal.timing_bias,
+        "blocked_state_bias": signal.blocked_state_bias,
+        "blocked_action": blocked_decision.action.value,
+        "blocked_reason": blocked_decision.reason,
+        "available_action": available_decision.action.value,
+        "available_reason": available_decision.reason,
     }
 
 
@@ -4976,6 +5189,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_workflow_composition_behavior,
     ),
     EvalScenario(
+        name="workflow_approval_threading_behavior",
+        category="behavior",
+        description="Workflow timeline entries keep pending approvals bound to the right thread, resume message, and replay guardrail when a run is still waiting for approval.",
+        runner=_eval_workflow_approval_threading_behavior,
+    ),
+    EvalScenario(
+        name="capability_repair_behavior",
+        category="behavior",
+        description="Capability overview exposes actionable starter-pack and blocked-workflow repair sequences instead of only passive blocked states.",
+        runner=_eval_capability_repair_behavior,
+    ),
+    EvalScenario(
         name="mcp_specialist_local_runtime_profile",
         category="runtime",
         description="Dynamic MCP specialists can route through the local profile using their sanitized runtime path.",
@@ -5166,6 +5391,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Recent negative feedback on the same intervention type reduces future interruption eagerness and shows up in delivery audit details.",
         runner=_eval_guardian_outcome_learning,
+    ),
+    EvalScenario(
+        name="guardian_learning_policy_v2_behavior",
+        category="guardian",
+        description="Blocked-state and timing feedback now shape future delivery policy, not just phrasing and cadence guidance.",
+        runner=_eval_guardian_learning_policy_v2_behavior,
     ),
     EvalScenario(
         name="daily_briefing_fallback",

@@ -19,16 +19,18 @@
 - [x] session-scoped secret references for safer downstream tool usage
 - [x] explicit execution-boundary metadata and approval behavior surfaced for tools and reusable workflows
 - [x] forced approval wrapping for reusable workflows that cross high-risk or approval-mode MCP boundaries
+- [x] approval records now preserve fingerprints, resume context, and thread labels so replay and resume surfaces can recover safely instead of guessing the target thread
 
 ## Working On Now
 
 - [x] this workstream has now shipped both `execution-safety-hardening-v1` and `execution-safety-hardening-v2`
 - [x] explicit secret-reference containment now blocks raw secret injection into non-injection-safe tools while leaving MCP and future explicit injection surfaces available
+- [x] this workstream now also ships `execution-safety-hardening-v5`
 - [ ] reduce reliance on raw secret retrieval in favor of narrower secret-injection paths
 
 ## Still To Do On `develop`
 
-- [ ] tighten isolation between planning, privileged execution, and future workflow layers beyond the first metadata/approval hardening pass
+- [ ] tighten isolation between planning, privileged execution, approval replay, and future workflow layers beyond the current metadata and recovery hardening passes
 - [ ] add deeper policy distinctions inside MCP and external execution paths
 - [ ] keep trust UX strict without making approvals noisy or unusable
 

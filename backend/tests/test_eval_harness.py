@@ -74,6 +74,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "delegated_tool_workflow_behavior" in captured.out
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
     assert "workflow_composition_behavior" in captured.out
+    assert "workflow_approval_threading_behavior" in captured.out
+    assert "capability_repair_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -112,6 +114,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "activity_digest_degraded_summary_audit" in captured.out
     assert "evening_review_degraded_delivery_behavior" in captured.out
     assert "evening_review_degraded_inputs_audit" in captured.out
+    assert "guardian_learning_policy_v2_behavior" in captured.out
 
 
 def test_main_emits_json_summary(capsys):
@@ -165,11 +168,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "observer_delivery_salience_confidence_behavior",
                 "guardian_feedback_loop",
                 "guardian_outcome_learning",
+                "guardian_learning_policy_v2_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegated_tool_workflow_behavior",
                 "delegated_tool_workflow_degraded_behavior",
                 "workflow_composition_behavior",
+                "workflow_approval_threading_behavior",
+                "capability_repair_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -330,6 +336,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["observer_interruption_cost"] == "low"
     assert details_by_name["guardian_state_synthesis"]["world_model_focus"] == "Ship guardian state while in VS Code"
     assert details_by_name["guardian_state_synthesis"]["world_model_alignment"] == "medium"
+    assert details_by_name["guardian_state_synthesis"]["world_model_memory_signals"] >= 1
     assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
@@ -345,12 +352,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["active_projects_count"] >= 1
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_project"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_memory_signal"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_execution_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_memory_signals"] is True
     assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
@@ -493,6 +502,12 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_outcome_learning"]["positive_helpful_count"] == 2
     assert details_by_name["guardian_outcome_learning"]["positive_acknowledged_count"] == 2
     assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 1
+    assert details_by_name["guardian_learning_policy_v2_behavior"]["timing_bias"] == "avoid_focus_windows"
+    assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_state_bias"] == "avoid_blocked_state_interruptions"
+    assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_action"] == "bundle"
+    assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_reason"] == "learned_blocked_state_avoidance"
+    assert details_by_name["guardian_learning_policy_v2_behavior"]["available_action"] == "act"
+    assert details_by_name["guardian_learning_policy_v2_behavior"]["available_reason"] == "learned_available_window"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["chat_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["onboarding_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
@@ -540,6 +555,20 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["workflow_composition_behavior"]["workflow_runner_tool_names"] == [
         "workflow_web_brief_to_file",
     ]
+    assert details_by_name["workflow_approval_threading_behavior"]["status"] == "awaiting_approval"
+    assert details_by_name["workflow_approval_threading_behavior"]["thread_label"] == "Research thread"
+    assert details_by_name["workflow_approval_threading_behavior"]["pending_approval_count"] == 1
+    assert details_by_name["workflow_approval_threading_behavior"]["pending_resume_message"] == "Continue once the web brief is approved"
+    assert details_by_name["workflow_approval_threading_behavior"]["timeline_has_approval"] is True
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_block_reason"] == "pending_approval"
+    assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
+    assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
+    assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]
+    assert any(
+        label.startswith("Allow write_file")
+        for label in details_by_name["capability_repair_behavior"]["recommendation_labels"]
+    )
+    assert details_by_name["capability_repair_behavior"]["runbooks_ready"] >= 1
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"

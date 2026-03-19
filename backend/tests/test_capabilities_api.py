@@ -134,6 +134,8 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
     research_pack = next(pack for pack in payload["starter_packs"] if pack["name"] == "research-briefing")
     assert research_pack["availability"] == "blocked"
     assert research_pack["blocked_skills"][0]["name"] == "web-briefing"
+    assert not any(action["type"] == "activate_starter_pack" for action in research_pack["recommended_actions"])
+    assert any(action["type"] == "set_tool_policy" for action in research_pack["recommended_actions"])
     assert any(item["type"] == "skill" and item["name"] == "daily-standup" for item in payload["catalog_items"])
     assert any(item["type"] == "mcp_server" and item["name"] == "github" for item in payload["catalog_items"])
     assert payload["recommendations"]

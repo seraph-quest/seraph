@@ -184,6 +184,10 @@ describe("CockpitView", () => {
                 blocked_skills: [],
                 blocked_workflows: [{ name: "web-brief-to-file", availability: "blocked", missing_tools: ["write_file"], missing_skills: [] }],
                 availability: "partial",
+                recommended_actions: [
+                  { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
+                  { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+                ],
               },
             ],
             catalog_items: [
@@ -385,7 +389,8 @@ describe("CockpitView", () => {
     expect(screen.getByText("disabled · calendar_events")).toBeInTheDocument();
     expect(screen.getByText("invocable 1/2 available")).toBeInTheDocument();
     expect(screen.getByText("approval 0 · blocked 1")).toBeInTheDocument();
-    expect(screen.getByText("blocked web-brief-to-file · tools write_file")).toBeInTheDocument();
+    expect(screen.getByText("blocked web-brief-to-file")).toBeInTheDocument();
+    expect(screen.getByText("tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
@@ -442,6 +447,127 @@ describe("CockpitView", () => {
     );
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   }, 15000);
+
+  it("supports starter-pack repairs and saved runbook macros", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/starter-packs/research-briefing/activate")) {
+        return Promise.resolve(mockResponse({ status: "activated" }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 2,
+            skills_ready: 1,
+            skills_total: 1,
+            workflows_ready: 0,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 1,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "write_file", description: "Write", risk_level: "medium", execution_boundaries: ["workspace_write"], availability: "blocked", blocked_reason: "tool_policy_balanced" }],
+          skills: [{ name: "web-briefing", enabled: true, description: "Web briefing", requires_tools: ["write_file"], availability: "blocked", missing_tools: ["write_file"] }],
+          workflows: [{
+            name: "web-brief-to-file",
+            tool_name: "workflow_web_brief_to_file",
+            description: "Research and save",
+            inputs: { query: { type: "string", description: "Query", required: true } },
+            requires_tools: ["write_file"],
+            requires_skills: ["web-briefing"],
+            user_invocable: true,
+            enabled: true,
+            step_count: 2,
+            file_path: "defaults/workflows/web-brief-to-file.json",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_write"],
+            risk_level: "medium",
+            requires_approval: false,
+            approval_behavior: "direct",
+            is_available: false,
+            missing_tools: ["write_file"],
+            missing_skills: [],
+            recommended_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+          }],
+          mcp_servers: [],
+          starter_packs: [{
+            name: "research-briefing",
+            label: "Research briefing",
+            description: "Enable the research pack.",
+            sample_prompt: "Run workflow \"web-brief-to-file\" with query=\"seraph\".",
+            skills: ["web-briefing"],
+            workflows: ["web-brief-to-file"],
+            ready_skills: [],
+            ready_workflows: [],
+            blocked_skills: [{ name: "web-briefing", availability: "blocked", missing_tools: ["write_file"] }],
+            blocked_workflows: [{ name: "web-brief-to-file", availability: "blocked", missing_tools: ["write_file"], missing_skills: [] }],
+            availability: "blocked",
+            recommended_actions: [
+              { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
+              { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+            ],
+          }],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [{
+            id: "workflow:web-brief-to-file",
+            label: "Run web-brief-to-file",
+            description: "Draft the research pack workflow",
+            source: "workflow",
+            command: "Run workflow \"web-brief-to-file\" with query=\"seraph\".",
+            action: { type: "draft_workflow", label: "Draft workflow", name: "web-brief-to-file" },
+          }],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Operator terminal")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("save macro"));
+    await waitFor(() => expect(screen.getByText("1 saved")).toBeInTheDocument());
+    expect(screen.getAllByText("Run web-brief-to-file").length).toBeGreaterThan(1);
+    fireEvent.click(screen.getAllByText("repair")[0]);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/starter-packs/research-briefing/activate"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+  });
 
   it("surfaces the latest assistant response in the main cockpit column", async () => {
     useChatStore.setState({

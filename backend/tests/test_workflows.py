@@ -300,6 +300,11 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
                     "id": "approval-1",
                     "tool_name": "workflow_web_brief_to_file",
                     "session_id": "session-1",
+                    "fingerprint": "web-brief",
+                    "summary": "Approval pending for workflow_web_brief_to_file",
+                    "risk_level": "medium",
+                    "created_at": "2026-03-18T12:01:10Z",
+                    "resume_message": "Continue the web brief once approved",
                 }
             ],
         ),
@@ -328,12 +333,67 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert run["artifact_paths"] == ["notes/brief.md"]
     assert run["pending_approval_count"] == 1
     assert run["pending_approval_ids"] == ["approval-1"]
+    assert run["pending_approvals"][0]["resume_message"] == "Continue the web brief once approved"
     assert run["thread_id"] == "session-1"
     assert run["thread_label"] == "Research thread"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "pending_approval"
     assert run["approval_recovery_message"]
     assert run["timeline"][0]["kind"] == "workflow_started"
+    assert run["timeline"][1]["kind"] == "approval_pending"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {"arguments": {"query": "seraph", "file_path": "notes/brief.md"}},
+                },
+            ],
+        ),
+        patch(
+            "src.api.workflows.approval_repository.list_pending",
+            return_value=[
+                {
+                    "id": "approval-1",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "session_id": "session-1",
+                    "fingerprint": "none",
+                    "summary": "Approval pending for workflow_web_brief_to_file",
+                    "risk_level": "medium",
+                    "created_at": "2026-03-18T12:01:10Z",
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["status"] == "awaiting_approval"
+    assert run["pending_approval_count"] == 1
+    assert run["timeline"][1]["kind"] == "approval_pending"
 
     def test_list_workflows_includes_policy_metadata(self, workflows_dir):
         mgr = WorkflowManager()

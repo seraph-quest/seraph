@@ -34,6 +34,8 @@ class GuardianLearningSignal:
     cadence_bias: str
     channel_bias: str
     escalation_bias: str
+    timing_bias: str
+    blocked_state_bias: str
 
     @classmethod
     def neutral(cls, intervention_type: str) -> "GuardianLearningSignal":
@@ -48,6 +50,8 @@ class GuardianLearningSignal:
             cadence_bias="neutral",
             channel_bias="neutral",
             escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
         )
 
 
@@ -203,6 +207,26 @@ class GuardianFeedbackRepository:
         not_helpful_count = sum(1 for item in interventions if item.feedback_type == "not_helpful")
         acknowledged_count = sum(1 for item in interventions if item.feedback_type == "acknowledged")
         failed_count = sum(1 for item in interventions if item.latest_outcome == "failed")
+        blocked_state_interventions = [
+            item
+            for item in interventions
+            if item.user_state in {"deep_work", "in_meeting", "away"}
+        ]
+        blocked_state_negative = sum(
+            1 for item in blocked_state_interventions if item.feedback_type == "not_helpful"
+        )
+        blocked_state_positive_native = sum(
+            1
+            for item in blocked_state_interventions
+            if item.transport == "native_notification"
+            and item.feedback_type in {"helpful", "acknowledged"}
+        )
+        available_window_positive = sum(
+            1
+            for item in interventions
+            if item.user_state == "available"
+            and item.feedback_type in {"helpful", "acknowledged"}
+        )
 
         bias = "neutral"
         if not_helpful_count >= 2 or (
@@ -232,6 +256,18 @@ class GuardianFeedbackRepository:
         if acknowledged_count >= 2 and helpful_count >= 1 and not_helpful_count == 0:
             escalation_bias = "prefer_async_native"
 
+        timing_bias = "neutral"
+        if blocked_state_negative >= 2:
+            timing_bias = "avoid_focus_windows"
+        elif available_window_positive >= 2 and not_helpful_count == 0:
+            timing_bias = "prefer_available_windows"
+
+        blocked_state_bias = "neutral"
+        if blocked_state_negative >= 2:
+            blocked_state_bias = "avoid_blocked_state_interruptions"
+        elif blocked_state_positive_native >= 2 and not_helpful_count == 0:
+            blocked_state_bias = "prefer_async_for_blocked_state"
+
         return GuardianLearningSignal(
             intervention_type=intervention_type,
             helpful_count=helpful_count,
@@ -243,6 +279,8 @@ class GuardianFeedbackRepository:
             cadence_bias=cadence_bias,
             channel_bias=channel_bias,
             escalation_bias=escalation_bias,
+            timing_bias=timing_bias,
+            blocked_state_bias=blocked_state_bias,
         )
 
 

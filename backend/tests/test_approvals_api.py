@@ -1,6 +1,7 @@
 """Tests for approval request APIs."""
 
 import pytest
+from unittest.mock import patch
 
 from src.approval.repository import approval_repository
 
@@ -42,3 +43,28 @@ async def test_deny_pending_request(client):
     resp = await client.post(f"/api/approvals/{request.id}/deny")
     assert resp.status_code == 200
     assert resp.json()["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_includes_thread_labels(client):
+    request = await approval_repository.get_or_create_pending(
+        session_id="thread-1",
+        tool_name="shell_execute",
+        risk_level="high",
+        summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
+        fingerprint="threaded",
+        details={"resume_message": "Continue with this shell command"},
+    )
+
+    with patch(
+        "src.api.approvals.session_manager.list_sessions",
+        return_value=[{"id": "thread-1", "title": "Release repair"}],
+    ):
+        resp = await client.get("/api/approvals/pending")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload[0]["id"] == request.id
+    assert payload[0]["thread_id"] == "thread-1"
+    assert payload[0]["thread_label"] == "Release repair"
+    assert payload[0]["resume_message"] == "Continue with this shell command"

@@ -36,6 +36,8 @@ def _make_guardian_state() -> GuardianState:
             intervention_receptivity="high",
             active_projects=("Guardian cockpit",),
             execution_pressure=("Workflow brief-sync degraded at write_file",),
+            memory_signals=("Ship guardian state", "Prefers dense dashboards"),
+            continuity_threads=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
         ),
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
@@ -80,7 +82,10 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_formatted", return_value="- [goal] Ship guardian state"),
+        patch(
+            "src.memory.vector_store.search_with_status",
+            return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
+        ),
         patch(
             "src.audit.repository.audit_repository.list_events",
             return_value=[
@@ -116,6 +121,8 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert state.world_model.current_focus == "Ship guardian state while in VS Code"
     assert "Ship guardian state" in state.world_model.active_commitments
     assert "Guardian cockpit" in state.world_model.active_projects
+    assert "Ship guardian state" in state.world_model.memory_signals
+    assert "Prior roadmap" in state.world_model.continuity_threads[0]
     assert any(
         "brief-sync degraded" in item
         for item in state.world_model.execution_pressure
@@ -138,6 +145,8 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Current focus: Ship guardian state while in VS Code" in block
     assert "Intervention receptivity: high" in block
     assert "Active projects:" in block
+    assert "Memory signals:" in block
+    assert "Continuity threads:" in block
     assert "Recent execution pressure:" in block
     assert "Observer model: confidence=grounded | salience=high (active_goals) | interruption_cost=low" in block
     assert "Observer snapshot:" in block

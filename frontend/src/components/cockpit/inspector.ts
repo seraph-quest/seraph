@@ -25,7 +25,7 @@ export interface WorkflowRunRecord {
   toolName: string;
   workflowName: string;
   sessionId?: string | null;
-  status: "succeeded" | "failed" | "running";
+  status: "succeeded" | "failed" | "running" | "awaiting_approval";
   startedAt: string;
   updatedAt: string;
   summary: string;
@@ -39,6 +39,15 @@ export interface WorkflowRunRecord {
   acceptsSecretRefs?: boolean;
   pendingApprovalCount?: number;
   pendingApprovalIds?: string[];
+  pendingApprovals?: Array<{
+    id: string;
+    summary: string;
+    riskLevel?: string;
+    createdAt: string;
+    threadId?: string | null;
+    threadLabel?: string | null;
+    resumeMessage?: string | null;
+  }>;
   threadId?: string | null;
   threadLabel?: string | null;
   threadSource?: string | null;

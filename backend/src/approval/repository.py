@@ -148,8 +148,14 @@ class ApprovalRepository:
                     "tool_name": request.tool_name,
                     "risk_level": request.risk_level,
                     "status": request.status,
+                    "fingerprint": request.fingerprint,
                     "summary": request.summary,
                     "created_at": request.created_at.isoformat(),
+                    **(
+                        json.loads(request.details_json)
+                        if request.details_json
+                        else {}
+                    ),
                 }
                 for request in requests
             ]

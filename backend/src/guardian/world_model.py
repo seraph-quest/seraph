@@ -23,6 +23,8 @@ class GuardianWorldModel:
     recurring_patterns: tuple[str, ...] = ()
     active_routines: tuple[str, ...] = ()
     project_state: tuple[str, ...] = ()
+    memory_signals: tuple[str, ...] = ()
+    continuity_threads: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
         lines = [
@@ -42,6 +44,14 @@ class GuardianWorldModel:
         if self.project_state:
             lines.append("Project state:")
             lines.extend(f"- {item}" for item in self.project_state)
+
+        if self.memory_signals:
+            lines.append("Memory signals:")
+            lines.extend(f"- {item}" for item in self.memory_signals)
+
+        if self.continuity_threads:
+            lines.append("Continuity threads:")
+            lines.extend(f"- {item}" for item in self.continuity_threads)
 
         if self.open_loops_or_pressure:
             lines.append("Open loops and pressure:")
@@ -93,6 +103,8 @@ def _extract_tagged_memory(block: str, tag: str, *, limit: int = 2) -> list[str]
     results: list[str] = []
     for raw_line in block.splitlines():
         line = raw_line.strip()
+        if line.startswith("- "):
+            line = line[2:].strip()
         if not line.lower().startswith(prefix):
             continue
         cleaned = _clean_line(line)
@@ -156,6 +168,13 @@ def build_guardian_world_model(
     """Build a first explicit working-state / commitments model from current signals."""
     memory_lines = _extract_lines(memory_context, limit=3)
     recent_session_lines = _extract_lines(recent_sessions_summary, limit=2)
+    feedback_lines = _extract_lines(recent_intervention_feedback, limit=2)
+    goal_memory = _extract_tagged_memory(memory_context, "goal", limit=2)
+    preference_constraints = _extract_tagged_memory(memory_context, "preference", limit=2)
+    recurring_patterns = _extract_tagged_memory(memory_context, "pattern", limit=3)
+    active_routines = _extract_tagged_memory(memory_context, "routine", limit=3)
+    memory_signals = _dedupe(goal_memory + recurring_patterns[:1] + preference_constraints[:1] + active_routines[:1])
+    continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
 
     current_focus = "No clear focus signal"
     if observer_context.current_event:
@@ -170,6 +189,8 @@ def build_guardian_world_model(
         current_focus = observer_context.screen_context.strip().splitlines()[0][:120]
     elif current_session_history.strip():
         current_focus = _extract_lines(current_session_history, limit=1)[0]
+    elif goal_memory:
+        current_focus = goal_memory[0]
     elif recent_session_lines:
         current_focus = recent_session_lines[0]
 
@@ -197,9 +218,6 @@ def build_guardian_world_model(
     for line in memory_lines[1:]:
         open_loops.append(line)
     execution_pressure = _extract_lines(recent_execution_summary, limit=3)
-    recurring_patterns = _extract_tagged_memory(memory_context, "pattern", limit=3)
-    active_routines = _extract_tagged_memory(memory_context, "routine", limit=3)
-    preference_constraints = _extract_tagged_memory(memory_context, "preference", limit=2)
     active_constraints: list[str] = []
     if observer_context.interruption_mode == "focus":
         active_constraints.append("User is in focus mode")
@@ -223,4 +241,6 @@ def build_guardian_world_model(
         recurring_patterns=_dedupe(recurring_patterns),
         active_routines=_dedupe(active_routines),
         project_state=_dedupe(project_state),
+        memory_signals=memory_signals,
+        continuity_threads=continuity_threads,
     )

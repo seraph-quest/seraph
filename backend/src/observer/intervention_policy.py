@@ -66,6 +66,8 @@ def decide_intervention(
     learning_cadence_bias: str = "neutral",
     learning_channel_bias: str = "neutral",
     learning_escalation_bias: str = "neutral",
+    learning_timing_bias: str = "neutral",
+    learning_blocked_state_bias: str = "neutral",
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
     should_cost_budget = user_state_machine.should_cost_budget(
@@ -174,6 +176,19 @@ def decide_intervention(
             should_cost_budget=should_cost_budget,
         )
 
+    if (
+        learning_blocked_state_bias == "avoid_blocked_state_interruptions"
+        and user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}
+        and urgency < 5
+        and intervention_type != "alert"
+    ):
+        return InterventionDecision(
+            action=InterventionAction.bundle,
+            reason="learned_blocked_state_avoidance",
+            delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
     if user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}:
         return InterventionDecision(
             action=InterventionAction.bundle,
@@ -231,6 +246,21 @@ def decide_intervention(
         return InterventionDecision(
             action=InterventionAction.act,
             reason="learned_quicker_followup",
+            delivery_decision=DeliveryDecision.deliver,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if (
+        learning_timing_bias == "prefer_available_windows"
+        and user_state == UserState.available.value
+        and urgency >= 2
+        and interruption_cost != "high"
+        and attention_budget_remaining > 0
+        and intervention_type != "alert"
+    ):
+        return InterventionDecision(
+            action=InterventionAction.act,
+            reason="learned_available_window",
             delivery_decision=DeliveryDecision.deliver,
             should_cost_budget=should_cost_budget,
         )

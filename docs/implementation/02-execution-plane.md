@@ -26,16 +26,18 @@
 - [x] workflow loading now rejects underdeclared runtime step tools, and tool/workflow metadata now expose secret-reference acceptance explicitly for injection-safe paths
 - [x] workflow execution audit now carries structured workflow-run details, artifact-path lineage, and degraded-step visibility for cockpit/operator views
 - [x] workflow run history now exposes boundary-aware replay context, approval counts, risk level, step tools, and artifact lineage through the workflows API
+- [x] workflow run history now also exposes pending-approval details, awaiting-approval state, replay guardrails, and thread-aware recovery metadata instead of only recent run summaries
 
 ## Working On Now
 
 - [x] this workstream has now shipped both workflow-facing hardening slices through `execution-safety-hardening-v1` and `execution-safety-hardening-v2`
 - [x] this workstream partnered on `cockpit-workflow-views-v1`
+- [x] this workstream now also ships `workflow-timeline-and-approval-replay-v3`
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] richer direct workflow execution, approval visibility, artifact round-tripping, and workflow history on top of the new cockpit workflow-run surface and first boundary-aware replay model
+- [ ] richer direct workflow execution, approval visibility, artifact round-tripping, and workflow history on top of the cockpit workflow-run surface, approval-aware timeline, and boundary-aware replay model
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Non-Goals

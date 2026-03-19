@@ -4,6 +4,8 @@ sidebar_position: 4
 
 # OpenClaw Feature Parity Analysis
 
+> Archive note: this comparison predates the cockpit-only pivot and still scores Seraph partly through the retired village/editor line. Treat it as historical competitive context, not the current product benchmark.
+
 Competitive analysis comparing Seraph with OpenClaw (formerly Clawdbot/Moltbot), identifying feature gaps and prioritized recommendations.
 
 *Last updated: 2026-02-18*
@@ -16,11 +18,11 @@ OpenClaw is a MIT-licensed AI agent by Peter Steinberger with 200k+ GitHub stars
 
 | Area | Seraph Advantage |
 |------|-----------------|
-| **Visual UI** | Phaser 3 RPG village with animated sprites, magic effects, tile-based map — nothing like this in OpenClaw (text-only chat) |
+| **Visual UI** | Historical note: this line referred to the retired Phaser village shell. Current Seraph differentiates through its operator cockpit, not a game shell. |
 | **Screen Awareness** | Continuous daemon with structured OCR analysis, activity digests, capture modes — OpenClaw only has on-demand screen recording via device nodes |
 | **Goal System** | Full hierarchical 6-level goal tree with domains, materialized paths, dashboard, scheduled checks — OpenClaw tracks goals in plain markdown |
 | **Attention Guardian** | Sophisticated delivery gate with 6 user states, 3 interruption modes, attention budget, queued bundles — OpenClaw has no equivalent |
-| **Map Editor** | Standalone Tiled-compatible editor with 33 tilesets, building interiors, NPC browser — unique |
+| **Map Editor** | Historical note: the standalone editor is retired and pending removal, so this is no longer an active product advantage. |
 | **Activity Digests** | Daily + weekly LLM-generated analysis of screen activity patterns — unique |
 
 ## Where OpenClaw is AHEAD (Feature Gaps)
@@ -99,7 +101,7 @@ OpenClaw lets users create arbitrary cron jobs via natural language. Jobs run in
 
 ### 10. Canvas / A2UI (LOWER IMPACT for Seraph)
 
-OpenClaw's A2UI protocol lets agents render declarative UI. Seraph has Phaser (arguably richer) but can't dynamically generate new UI surfaces.
+OpenClaw's A2UI protocol lets agents render declarative UI. Seraph has a richer operator cockpit than a plain chat shell, but it still can't dynamically generate new structured UI surfaces.
 
 **Gap**: Agent can't create custom visual outputs beyond chat text.
 
@@ -146,6 +148,6 @@ OpenClaw has approval-code pairing for unknown senders, group policies, and per-
 Seraph and OpenClaw have **fundamentally different philosophies**:
 
 - **OpenClaw**: "Meet users where they are" (messaging apps) — breadth across platforms
-- **Seraph**: "Create a compelling new home" (RPG village) — depth in a unique experience
+- **Seraph**: "Create a compelling operator cockpit" — depth in a unique guardian workspace
 
-Seraph's biggest moat is the **visual experience + screen awareness + proactive intelligence** combination. No one else has that. The gaps to close are primarily in **agent capability breadth** (more tools, more providers, user-defined automation) rather than in the core architecture, which is already sophisticated.
+Seraph's biggest moat is the **operator cockpit + screen awareness + proactive intelligence** combination. No one else has that exact mix. The gaps to close are primarily in **agent capability breadth** (more tools, more providers, user-defined automation) rather than in the core architecture, which is already sophisticated.

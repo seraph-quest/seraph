@@ -1,12 +1,14 @@
 from unittest.mock import MagicMock, patch
 
 from src.agent.factory import create_agent, get_model, get_tools
+from src.observer.context import CurrentContext
 from src.skills.loader import Skill
 
 
 class TestAgentFactory:
     @patch("src.agent.factory.mcp_manager")
-    def test_get_tools_returns_list(self, mock_mcp):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_returns_list(self, _mock_context, mock_mcp):
         mock_mcp.get_tools.return_value = []
         tools = get_tools()
         assert isinstance(tools, list)
@@ -23,6 +25,26 @@ class TestAgentFactory:
         mock_litellm_cls.assert_called_once()
         assert model is not None
 
+    @patch("src.agent.factory.LiteLLMModel")
+    def test_get_model_uses_local_profile_for_chat_runtime_path(self, mock_litellm_cls):
+        mock_litellm_cls.return_value = MagicMock()
+
+        from config.settings import settings
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", "chat_agent"),
+        ):
+            get_model()
+
+        call_kwargs = mock_litellm_cls.call_args[1]
+        assert call_kwargs["model_id"] == "ollama/llama3.2"
+        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+
     @patch("src.agent.factory.ToolCallingAgent")
     @patch("src.agent.factory.get_model")
     def test_create_agent(self, mock_get_model, mock_agent_cls):
@@ -30,6 +52,7 @@ class TestAgentFactory:
         mock_agent_cls.return_value = MagicMock()
 
         agent = create_agent()
+        mock_get_model.assert_called_once_with(runtime_path="chat_agent")
         mock_agent_cls.assert_called_once()
         assert agent is not None
 

@@ -98,12 +98,12 @@ class TestEveningReviewTimeout:
                 patch(
                     "src.scheduler.jobs.evening_review._count_messages_today",
                     new_callable=AsyncMock,
-                    return_value=5,
+                    return_value=(5, False),
                 ),
                 patch(
                     "src.scheduler.jobs.evening_review._get_completed_goals_today",
                     new_callable=AsyncMock,
-                    return_value=[],
+                    return_value=([], False),
                 ),
                 patch("litellm.completion", side_effect=_slow_litellm),
                 patch("src.observer.delivery.deliver_or_queue", mock_deliver),

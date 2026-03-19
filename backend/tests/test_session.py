@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.agent.session import SessionManager
+from src.audit.repository import audit_repository
 
 
 @pytest.fixture
@@ -159,6 +160,37 @@ class TestGenerateTitle:
             title = await sm.generate_title("s1")
 
         assert title == "AI Discussion"
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "session_title_generation"
+            and event["session_id"] == "s1"
+            and event["details"]["title_length"] == len("AI Discussion")
+            for event in events
+        )
+        assert any(
+            event["event_type"] == "llm_primary_success"
+            and event["tool_name"] == "llm_runtime"
+            and event["session_id"] == "s1"
+            and event["details"]["runtime_path"] == "session_title_generation"
+            and event["details"]["request_id"]
+            for event in events
+        )
+
+    async def test_generates_title_uses_session_title_runtime_path(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Tell me about AI")
+        await sm.add_message("s1", "assistant", "AI is fascinating")
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "AI Discussion"
+
+        with patch("src.llm_runtime.completion_with_fallback", AsyncMock(return_value=mock_response)) as mock_completion:
+            title = await sm.generate_title("s1")
+
+        assert title == "AI Discussion"
+        assert mock_completion.await_args.kwargs["runtime_path"] == "session_title_generation"
 
     async def test_skips_non_default_title(self, async_db, sm):
         s = await sm.get_or_create("s1")
@@ -166,3 +198,11 @@ class TestGenerateTitle:
         # Need to re-fetch since generate_title reads from DB
         title = await sm.generate_title("s1")
         assert title == "Custom Title"
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_skipped"
+            and event["tool_name"] == "session_title_generation"
+            and event["session_id"] == "s1"
+            and event["details"]["reason"] == "title_already_set"
+            for event in events
+        )

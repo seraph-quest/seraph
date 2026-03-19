@@ -22,16 +22,21 @@ function resetStore() {
     messages: [],
     sessionId: null,
     sessions: [],
+    sessionContinuity: {},
     connectionStatus: "disconnected",
     isAgentBusy: false,
     agentVisual: { animationState: "idle", positionX: 50, facing: "right", speechText: null },
     ambientState: "idle",
+    ambientTooltip: "",
     chatPanelOpen: true,
     chatMaximized: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
+    interfaceMode: "cockpit",
     onboardingCompleted: null,
     toolRegistry: [],
+    magicEffectPoolSize: 0,
+    debugWalkability: false,
   });
 }
 
@@ -53,6 +58,12 @@ describe("chatStore sync actions", () => {
     useChatStore.getState().setSessionId("abc123");
     expect(useChatStore.getState().sessionId).toBe("abc123");
     expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_last_session_id", "abc123");
+  });
+
+  it("setInterfaceMode writes to localStorage", () => {
+    useChatStore.getState().setInterfaceMode("village");
+    expect(useChatStore.getState().interfaceMode).toBe("village");
+    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_interface_mode", "village");
   });
 
   it("setAgentVisual merges partial state", () => {
@@ -154,6 +165,27 @@ describe("chatStore async actions", () => {
     expect(useChatStore.getState().sessionId).toBe("s1");
     expect(useChatStore.getState().messages).toHaveLength(2);
     expect(useChatStore.getState().messages[1].role).toBe("agent"); // mapped from assistant
+  });
+
+  it("restoreLastSession reloads the stored thread and marks it restored", async () => {
+    localStorageMock.setItem("seraph_last_session_id", "s1");
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ id: "s1", title: "Saved", created_at: "", updated_at: "", last_message: null, last_message_role: null }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          { id: "m1", role: "assistant", content: "restored", created_at: "2024-01-01T00:00:00Z" },
+        ],
+      });
+
+    await useChatStore.getState().restoreLastSession();
+
+    expect(useChatStore.getState().sessionId).toBe("s1");
+    expect(useChatStore.getState().messages[0].content).toBe("restored");
+    expect(useChatStore.getState().sessionContinuity.s1).toBe("restored");
   });
 
   it("deleteSession removes from list and clears if current", async () => {

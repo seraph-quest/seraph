@@ -125,6 +125,9 @@ class UserProfile(SQLModel, table=True):
     onboarding_completed: bool = Field(default=False)
     interruption_mode: str = Field(default="balanced")
     capture_mode: str = Field(default="on_switch")  # on_switch | balanced | detailed
+    tool_policy_mode: str = Field(default="full")  # safe | balanced | full
+    mcp_policy_mode: str = Field(default="full")  # disabled | approval | full
+    approval_mode: str = Field(default="high_risk")  # off | high_risk
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -135,11 +138,42 @@ class QueuedInsight(SQLModel, table=True):
     __tablename__ = "queued_insights"
 
     id: str = Field(default_factory=_uuid, primary_key=True)
+    intervention_id: Optional[str] = Field(default=None, index=True)
     content: str
     intervention_type: str = Field(default="advisory")
     urgency: int = Field(default=3)
     reasoning: str = Field(default="")
     created_at: datetime = Field(default_factory=_now)
+
+
+# ─── GuardianIntervention ──────────────────────────────
+
+class GuardianIntervention(SQLModel, table=True):
+    __tablename__ = "guardian_interventions"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    message_type: str = Field(default="proactive", index=True)
+    intervention_type: str = Field(default="advisory", index=True)
+    urgency: int = Field(default=3, index=True)
+    content_excerpt: str = Field(default="")
+    reasoning: Optional[str] = Field(default=None)
+    is_scheduled: bool = Field(default=False, index=True)
+    guardian_confidence: Optional[str] = Field(default=None, index=True)
+    data_quality: Optional[str] = Field(default=None, index=True)
+    user_state: Optional[str] = Field(default=None, index=True)
+    interruption_mode: Optional[str] = Field(default=None, index=True)
+    policy_action: str = Field(default="act", index=True)
+    policy_reason: str = Field(default="")
+    delivery_decision: Optional[str] = Field(default=None, index=True)
+    transport: Optional[str] = Field(default=None, index=True)
+    latest_outcome: str = Field(default="created", index=True)
+    notification_id: Optional[str] = Field(default=None, index=True)
+    feedback_type: Optional[str] = Field(default=None, index=True)
+    feedback_note: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    feedback_at: Optional[datetime] = Field(default=None, index=True)
 
 
 # ─── ScreenObservation ─────────────────────────────────
@@ -171,3 +205,37 @@ class Secret(SQLModel, table=True):
     description: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
+
+
+# ─── AuditEvent ─────────────────────────────────────────
+
+class AuditEvent(SQLModel, table=True):
+    __tablename__ = "audit_events"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    actor: str = Field(default="agent", index=True)
+    event_type: str = Field(default="tool_call", index=True)
+    tool_name: Optional[str] = Field(default=None, index=True)
+    risk_level: str = Field(default="low", index=True)
+    policy_mode: str = Field(default="full", index=True)
+    summary: str = Field(default="")
+    details_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
+# ─── ApprovalRequest ────────────────────────────────────
+
+class ApprovalRequest(SQLModel, table=True):
+    __tablename__ = "approval_requests"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    tool_name: str = Field(index=True)
+    risk_level: str = Field(default="high", index=True)
+    status: str = Field(default="pending", index=True)  # pending | approved | denied | consumed
+    fingerprint: str = Field(index=True)
+    summary: str = Field(default="")
+    details_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    resolved_at: Optional[datetime] = Field(default=None)

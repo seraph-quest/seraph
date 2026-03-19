@@ -1,9 +1,11 @@
 """Tests for the token-aware context window."""
 
-from unittest.mock import patch, MagicMock, PropertyMock
+import asyncio
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.agent.context_window import (
     build_context_window,
     _format_messages,
@@ -43,6 +45,38 @@ class TestCountTokens:
         short = _count_tokens("hi")
         long = _count_tokens("this is a much longer sentence with more words")
         assert long > short
+
+    @patch("src.agent.context_window.tiktoken.get_encoding", side_effect=RuntimeError("offline"))
+    def test_falls_back_when_tiktoken_unavailable(self, _mock_get_encoding):
+        from src.agent import context_window
+
+        context_window._load_encoding.cache_clear()
+        try:
+            count = _count_tokens("hello world")
+            assert isinstance(count, int)
+            assert count > 0
+        finally:
+            context_window._load_encoding.cache_clear()
+
+    def test_retries_real_encoding_after_transient_failure(self):
+        from src.agent import context_window
+
+        class FakeEncoding:
+            @staticmethod
+            def encode(text: str):
+                return list(range(len(text)))
+
+        side_effects = [RuntimeError("offline"), FakeEncoding()]
+        with patch("src.agent.context_window.tiktoken.get_encoding", side_effect=side_effects):
+            context_window._load_encoding.cache_clear()
+            try:
+                fallback_count = _count_tokens("hello world")
+                recovered_count = _count_tokens("hello world")
+            finally:
+                context_window._load_encoding.cache_clear()
+
+        assert fallback_count > 0
+        assert recovered_count == len("hello world")
 
 
 class TestBuildContextWindow:
@@ -147,6 +181,72 @@ class TestSummaryCache:
             )
             assert "truncated" in result or len(result) > 0
 
+    @patch("src.agent.context_window.completion_with_fallback_sync")
+    def test_cache_miss_routes_summary_through_context_window_runtime_path(self, mock_completion):
+        from src.agent.context_window import _summarize_middle
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "short summary"
+        mock_completion.return_value = mock_response
+
+        result = _summarize_middle(
+            [_msg("user", "hello world")],
+            session_id="sess",
+            range_key="0-1",
+        )
+
+        assert result == "short summary"
+        assert mock_completion.call_args.kwargs["runtime_path"] == "context_window_summary"
+
+    def test_cache_miss_logs_runtime_audit_success(self, async_db):
+        from src.agent.context_window import _summarize_middle
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "short summary"
+
+        with patch("src.agent.context_window.completion_with_fallback_sync", return_value=mock_response):
+            result = _summarize_middle(
+                [_msg("user", "hello world")],
+                session_id="sess",
+                range_key="0-1",
+            )
+
+        assert result == "short summary"
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "background_task_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "context_window_summary"
+        assert events[0]["details"]["runtime_path"] == "context_window_summary"
+        assert events[0]["details"]["message_count"] == 1
+
+    def test_cache_miss_logs_runtime_audit_degraded(self, async_db):
+        from src.agent.context_window import _summarize_middle
+
+        with patch("src.agent.context_window.completion_with_fallback_sync", side_effect=RuntimeError("provider down")):
+            result = _summarize_middle(
+                [_msg("user", "hello world")],
+                session_id="sess",
+                range_key="0-1-fail",
+            )
+
+        assert "truncated" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "background_task_degraded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "context_window_summary"
+        assert events[0]["details"]["runtime_path"] == "context_window_summary"
+        assert events[0]["details"]["fallback"] == "truncation"
+
 
 class TestSettingsIntegration:
     """Tests that build_context_window reads defaults from settings."""
@@ -190,3 +290,24 @@ class TestSettingsIntegration:
             result = build_context_window(msgs, token_budget=999999)
         for i in range(10):
             assert f"msg {i}" in result
+
+
+class TestOfflineReliability:
+    @patch("src.agent.context_window.tiktoken.get_encoding", side_effect=RuntimeError("offline"))
+    def test_build_context_window_still_works_without_tiktoken(self, _mock_get_encoding):
+        from src.agent import context_window
+
+        context_window._load_encoding.cache_clear()
+        try:
+            msgs = [_msg("user", f"message number {i} " * 40) for i in range(20)]
+            result = build_context_window(
+                msgs,
+                token_budget=200,
+                keep_first=1,
+                keep_recent=2,
+                session_id="offline-test",
+            )
+            assert "message number 0" in result
+            assert "message number 19" in result
+        finally:
+            context_window._load_encoding.cache_clear()

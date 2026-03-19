@@ -14,8 +14,10 @@ from src.memory.soul import ensure_soul_exists
 from src.scheduler.engine import init_scheduler, shutdown_scheduler
 from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
+from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+_LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
 def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
@@ -32,6 +34,21 @@ def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
             shutil.copy2(os.path.join(bundled_skills, filename), dst)
 
 
+def _seed_default_workflows(defaults_dir: str, workflows_dir: str) -> None:
+    """Copy bundled default workflows to workspace if they don't already exist."""
+    import shutil
+
+    bundled_workflows = os.path.join(defaults_dir, "workflows")
+    if not os.path.isdir(bundled_workflows):
+        return
+    for filename in os.listdir(bundled_workflows):
+        if not filename.endswith(".md"):
+            continue
+        dst = os.path.join(workflows_dir, filename)
+        if not os.path.exists(dst):
+            shutil.copy2(os.path.join(bundled_workflows, filename), dst)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -46,6 +63,12 @@ async def lifespan(app: FastAPI):
             context_manager.update_interruption_mode(profile.interruption_mode)
         if profile.capture_mode:
             context_manager.update_capture_mode(profile.capture_mode)
+        if profile.tool_policy_mode:
+            context_manager.update_tool_policy_mode(profile.tool_policy_mode)
+        if profile.mcp_policy_mode:
+            context_manager.update_mcp_policy_mode(profile.mcp_policy_mode)
+        if profile.approval_mode:
+            context_manager.update_approval_mode(profile.approval_mode)
     except Exception:
         import logging
         logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
@@ -76,6 +99,10 @@ async def lifespan(app: FastAPI):
     os.makedirs(skills_dir, exist_ok=True)
     _seed_default_skills(defaults_dir, skills_dir)
     skill_manager.init(skills_dir)
+    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
+    os.makedirs(workflows_dir, exist_ok=True)
+    _seed_default_workflows(defaults_dir, workflows_dir)
+    workflow_manager.init(workflows_dir)
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()
@@ -96,6 +123,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://localhost:5173"],
+        allow_origin_regex=_LOCAL_DEV_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

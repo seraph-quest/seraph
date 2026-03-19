@@ -57,85 +57,99 @@ export function GoalForm({ goal, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="rpg-frame p-3 w-[280px] max-w-[90vw] relative z-10 space-y-2">
-        <div className="text-[11px] uppercase tracking-wider text-retro-highlight font-bold mb-2">
-          {isEdit ? "Edit Quest" : "New Quest"}
-        </div>
-
-        <input
-          type="text"
-          placeholder="Quest title"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          className="w-full bg-transparent text-[10px] text-retro-text border-b border-retro-text/20 px-0.5 py-1 outline-none focus:border-retro-highlight"
-          autoFocus
-        />
-
-        <div className="flex gap-2">
-          <div className="flex-1">
-            <div className="text-[9px] text-retro-text/40 mb-0.5">Level</div>
-            <select
-              value={level}
-              onChange={(e) => setLevel(e.target.value)}
-              className="w-full bg-retro-bg text-[10px] text-retro-text border border-retro-text/20 rounded-sm px-0.5 py-0.5 outline-none focus:border-retro-highlight"
-            >
-              {LEVELS.map((l) => (
-                <option key={l} value={l}>{l}</option>
-              ))}
-            </select>
+    <div className="cockpit-modal-shell cockpit-modal-shell--raised">
+      <button
+        type="button"
+        className="cockpit-modal-backdrop"
+        onClick={onClose}
+        aria-label="Close goal editor"
+      />
+      <section className="cockpit-modal-card cockpit-modal-card--goal-editor">
+        <div className="cockpit-modal-header">
+          <div>
+            <div className="cockpit-card-title">{isEdit ? "Edit Goal" : "New Goal"}</div>
+            <div className="cockpit-card-meta">guardian planning</div>
           </div>
-          <div className="flex-1">
-            <div className="text-[9px] text-retro-text/40 mb-0.5">Domain</div>
-            <select
-              value={domain}
-              onChange={(e) => setDomain(e.target.value)}
-              className="w-full bg-retro-bg text-[10px] text-retro-text border border-retro-text/20 rounded-sm px-0.5 py-0.5 outline-none focus:border-retro-highlight"
-            >
-              {DOMAINS.map((d) => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
-          </div>
+          <button type="button" className="cockpit-modal-close" onClick={onClose}>
+            Close
+          </button>
         </div>
-
-        <textarea
-          placeholder="Description (optional)"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          rows={2}
-          className="w-full bg-transparent text-[10px] text-retro-text border border-retro-text/20 rounded-sm px-1 py-1 outline-none focus:border-retro-highlight resize-none"
-        />
-
-        <div>
-          <div className="text-[9px] text-retro-text/40 mb-0.5">Due date (optional)</div>
+        <div className="cockpit-modal-body cockpit-modal-form cockpit-tone-scope cockpit-goals-scope">
           <input
-            type="date"
-            value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            className="bg-retro-bg text-[10px] text-retro-text border border-retro-text/20 rounded-sm px-1 py-0.5 outline-none focus:border-retro-highlight"
+            type="text"
+            placeholder="Goal title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full bg-transparent text-[11px] text-slate-100 border-b border-white/10 px-0.5 py-1 outline-none focus:border-cyan-300 placeholder:text-slate-500"
+            autoFocus
           />
-        </div>
 
-        {error && <div className="text-[9px] text-red-400">{error}</div>}
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <div className="text-[10px] text-slate-400 mb-1 uppercase tracking-[0.16em]">Level</div>
+              <select
+                value={level}
+                onChange={(e) => setLevel(e.target.value)}
+                className="w-full bg-slate-950/70 text-[11px] text-slate-100 border border-white/10 rounded-md px-2 py-1.5 outline-none focus:border-cyan-300"
+              >
+                {LEVELS.map((l) => (
+                  <option key={l} value={l}>{l}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1">
+              <div className="text-[10px] text-slate-400 mb-1 uppercase tracking-[0.16em]">Domain</div>
+              <select
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                className="w-full bg-slate-950/70 text-[11px] text-slate-100 border border-white/10 rounded-md px-2 py-1.5 outline-none focus:border-cyan-300"
+              >
+                {DOMAINS.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+          </div>
 
-        <div className="flex gap-2 pt-1">
-          <button
-            onClick={handleSubmit}
-            disabled={saving}
-            className="text-[10px] text-retro-highlight hover:text-retro-text uppercase tracking-wider font-bold"
-          >
-            {saving ? "Saving..." : isEdit ? "Update" : "Create"}
-          </button>
-          <button
-            onClick={onClose}
-            className="text-[10px] text-retro-text/40 hover:text-retro-text uppercase tracking-wider"
-          >
-            Cancel
-          </button>
+          <textarea
+            placeholder="Description (optional)"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            className="w-full bg-slate-950/70 text-[11px] text-slate-100 border border-white/10 rounded-md px-2 py-2 outline-none focus:border-cyan-300 resize-none placeholder:text-slate-500"
+          />
+
+          <div>
+            <div className="text-[10px] text-slate-400 mb-1 uppercase tracking-[0.16em]">
+              Due date (optional)
+            </div>
+            <input
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+              className="bg-slate-950/70 text-[11px] text-slate-100 border border-white/10 rounded-md px-2 py-1.5 outline-none focus:border-cyan-300"
+            />
+          </div>
+
+          {error && <div className="text-[10px] text-rose-400">{error}</div>}
+
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={handleSubmit}
+              disabled={saving}
+              className="cockpit-action cockpit-action--primary disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? "Saving..." : isEdit ? "Update" : "Create"}
+            </button>
+            <button
+              onClick={onClose}
+              className="cockpit-action cockpit-action--ghost"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

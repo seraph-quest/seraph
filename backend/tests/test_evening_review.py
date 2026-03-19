@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.scheduler.jobs.evening_review import (
     run_evening_review,
@@ -43,8 +44,8 @@ async def test_evening_review_happy_path():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=15)),
-        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=["Exercise"])),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(15, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Exercise"], False))),
         patch("litellm.completion", return_value=_mock_litellm_response("Great day, Hero! You completed Exercise.")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -58,6 +59,29 @@ async def test_evening_review_happy_path():
         assert msg.urgency == 2
         assert "Great day" in msg.content
         assert call_args[1]["is_scheduled"] is True
+
+
+@pytest.mark.asyncio
+async def test_evening_review_uses_named_runtime_path():
+    ctx = _make_context(recent_git_activity=[{"msg": "fix bug"}])
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+    mock_response = _mock_litellm_response("Great day, Hero! You completed Exercise.")
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(15, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=(["Exercise"], False))),
+        patch(
+            "src.scheduler.jobs.evening_review.completion_with_fallback",
+            new=AsyncMock(return_value=mock_response),
+        ) as mock_completion,
+        patch("src.observer.delivery.deliver_or_queue", AsyncMock()),
+    ):
+        await run_evening_review()
+
+    assert mock_completion.await_args.kwargs["runtime_path"] == "evening_review"
 
 
 @pytest.mark.asyncio
@@ -77,8 +101,8 @@ async def test_evening_review_no_completed_goals():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=5)),
-        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=[])),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(5, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=([], False))),
         patch("litellm.completion", side_effect=mock_completion),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -106,8 +130,8 @@ async def test_evening_review_no_messages_today():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=0)),
-        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=[])),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(0, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=([], False))),
         patch("litellm.completion", side_effect=mock_completion),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -146,8 +170,8 @@ async def test_evening_review_llm_failure():
     with (
         patch("src.observer.manager.context_manager", mock_cm),
         patch("src.memory.soul.read_soul", return_value="# Soul"),
-        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=0)),
-        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=[])),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(0, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=([], False))),
         patch("litellm.completion", side_effect=Exception("LLM down")),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
     ):
@@ -157,24 +181,26 @@ async def test_evening_review_llm_failure():
 
 @pytest.mark.asyncio
 async def test_count_messages_today_db_failure():
-    """_count_messages_today returns 0 on DB failure."""
+    """_count_messages_today returns 0 with degraded flag on DB failure."""
     with patch(
         "src.db.engine.get_session",
         side_effect=Exception("DB error"),
     ):
-        count = await _count_messages_today()
+        count, degraded = await _count_messages_today()
         assert count == 0
+        assert degraded is True
 
 
 @pytest.mark.asyncio
 async def test_get_completed_goals_today_db_failure():
-    """_get_completed_goals_today returns [] on failure."""
+    """_get_completed_goals_today returns [] with degraded flag on failure."""
     with patch(
         "src.goals.repository.goal_repository",
         MagicMock(list_goals=AsyncMock(side_effect=Exception("DB error"))),
     ):
-        result = await _get_completed_goals_today()
+        result, degraded = await _get_completed_goals_today()
         assert result == []
+        assert degraded is True
 
 
 @pytest.mark.asyncio
@@ -195,9 +221,37 @@ async def test_get_completed_goals_today_filters_by_date():
         "src.goals.repository.goal_repository",
         MagicMock(list_goals=AsyncMock(return_value=[goal_today, goal_yesterday])),
     ):
-        result = await _get_completed_goals_today()
+        result, degraded = await _get_completed_goals_today()
 
         assert "Today goal" in result
+        assert degraded is False
         # Yesterday's goal should only be excluded if it's actually a different date
         if yesterday != today:
             assert "Yesterday goal" not in result
+
+
+@pytest.mark.asyncio
+async def test_evening_review_logs_degraded_runtime_details(async_db):
+    ctx = _make_context()
+    mock_cm = MagicMock()
+    mock_cm.refresh = AsyncMock(return_value=ctx)
+    mock_deliver = AsyncMock()
+
+    with (
+        patch("src.observer.manager.context_manager", mock_cm),
+        patch("src.memory.soul.read_soul", return_value="# Soul"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(0, True))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today", AsyncMock(return_value=([], True))),
+        patch("litellm.completion", return_value=_mock_litellm_response("Quiet day.")),
+        patch("src.observer.delivery.deliver_or_queue", mock_deliver),
+    ):
+        await run_evening_review()
+
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        event["event_type"] == "scheduler_job_succeeded"
+        and event["tool_name"] == "evening_review"
+        and event["details"]["data_quality"] == "degraded"
+        and event["details"]["degraded_inputs"] == ["messages_today", "completed_goals_today"]
+        for event in events
+    )

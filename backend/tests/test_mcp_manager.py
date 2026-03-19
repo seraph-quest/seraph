@@ -1,9 +1,11 @@
 """Tests for MCP manager (src/tools/mcp_manager.py)."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.tools.mcp_manager import MCPManager
 
 
@@ -297,11 +299,65 @@ class TestMCPManager:
         assert mgr._status["svc"]["status"] == "connected"
         assert mgr._status["svc"]["error"] is None
 
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_success_logs_runtime_audit_event(self, MockMCPClient, async_db):
+        mock_client = MagicMock()
+        mock_client.get_tools.return_value = [MagicMock(name="tool1")]
+        MockMCPClient.return_value = mock_client
+
+        mgr = MCPManager()
+        mgr.connect("svc", "http://svc/mcp")
+
+        events = asyncio.run(audit_repository.list_events(limit=10))
+        assert any(
+            event["event_type"] == "integration_connected"
+            and event["tool_name"] == "mcp_server:svc"
+            and event["details"]["tool_count"] == 1
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    @patch("src.tools.mcp_manager.MCPClient")
+    async def test_connect_success_logs_runtime_audit_event_inside_async_context(self, MockMCPClient, async_db):
+        mock_client = MagicMock()
+        mock_client.get_tools.return_value = [MagicMock(name="tool1")]
+        MockMCPClient.return_value = mock_client
+
+        mgr = MCPManager()
+        mgr.connect("svc", "http://svc/mcp")
+        await asyncio.sleep(0)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_connected"
+            and event["tool_name"] == "mcp_server:svc"
+            and event["details"]["tool_count"] == 1
+            for event in events
+        )
+
     def test_disconnect_sets_disconnected(self):
         mgr = MCPManager()
         mgr._status["svc"] = {"status": "connected", "error": None}
         mgr.disconnect("svc")
         assert mgr._status["svc"]["status"] == "disconnected"
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_disconnect_logs_runtime_audit_event(self, MockMCPClient, async_db):
+        mock_client = MagicMock()
+        mock_client.get_tools.return_value = [MagicMock(name="tool1")]
+        MockMCPClient.return_value = mock_client
+
+        mgr = MCPManager()
+        mgr.connect("svc", "http://svc/mcp")
+        mgr.disconnect("svc")
+
+        events = asyncio.run(audit_repository.list_events(limit=10))
+        assert any(
+            event["event_type"] == "integration_disconnected"
+            and event["tool_name"] == "mcp_server:svc"
+            and event["details"]["had_client"] is True
+            for event in events
+        )
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_set_token_stores_and_reconnects(self, MockMCPClient, tmp_path):
@@ -342,3 +398,30 @@ class TestMCPManager:
         assert entry["status_message"] == "Missing TOK"
         assert entry["auth_hint"] == "Create a PAT at github.com"
         assert entry["has_headers"] is True
+
+    def test_connect_unresolved_headers_logs_runtime_audit_event(self, async_db):
+        mgr = MCPManager()
+        mgr.connect("gh", "http://gh/mcp", headers={"Authorization": "Bearer ${MISSING_TOKEN_XYZ}"})
+
+        events = asyncio.run(audit_repository.list_events(limit=10))
+        assert any(
+            event["event_type"] == "integration_auth_required"
+            and event["tool_name"] == "mcp_server:gh"
+            and "MISSING_TOKEN_XYZ" in event["details"]["error"]
+            for event in events
+        )
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_error_logs_runtime_audit_event(self, MockMCPClient, async_db):
+        MockMCPClient.side_effect = ConnectionError("Connection refused")
+
+        mgr = MCPManager()
+        mgr.connect("gh", "http://gh/mcp")
+
+        events = asyncio.run(audit_repository.list_events(limit=10))
+        assert any(
+            event["event_type"] == "integration_failed"
+            and event["tool_name"] == "mcp_server:gh"
+            and event["details"]["error"] == "Connection refused"
+            for event in events
+        )

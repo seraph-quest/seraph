@@ -1,8 +1,12 @@
 import asyncio
 import logging
+from time import perf_counter
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.session import session_manager
+from src.audit.runtime import log_background_task_event
+from src.llm_runtime import completion_with_fallback
 from src.memory.soul import read_soul, update_soul_section
 from src.memory.vector_store import add_memory
 
@@ -34,29 +38,34 @@ async def consolidate_session(session_id: str) -> None:
 
     Runs as a background task after each conversation.
     """
+    started_at = perf_counter()
     try:
         history = await session_manager.get_history_text(session_id, limit=30)
         if not history or len(history) < 50:
+            await log_background_task_event(
+                task_name="session_consolidation",
+                outcome="skipped",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "insufficient_history",
+                    "history_length": len(history),
+                },
+            )
             return
 
         soul = read_soul()
         prompt = _CONSOLIDATION_PROMPT.format(conversation=history, soul=soul)
-
-        # Use LiteLLM directly for the consolidation call (lighter than full agent)
-        import litellm
+        runtime_tokens = None
 
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    litellm.completion,
-                    model=settings.default_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    api_key=settings.openrouter_api_key,
-                    api_base="https://openrouter.ai/api/v1",
-                    temperature=0.3,
-                    max_tokens=1024,
-                ),
+            runtime_tokens = set_runtime_context(session_id, "high_risk")
+            response = await completion_with_fallback(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=1024,
                 timeout=settings.consolidation_llm_timeout,
+                runtime_path="session_consolidation",
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -64,7 +73,20 @@ async def consolidate_session(session_id: str) -> None:
                 settings.consolidation_llm_timeout,
                 session_id[:8],
             )
+            await log_background_task_event(
+                task_name="session_consolidation",
+                outcome="timed_out",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.consolidation_llm_timeout,
+                    "history_length": len(history),
+                },
+            )
             return
+        finally:
+            if runtime_tokens is not None:
+                reset_runtime_context(runtime_tokens)
 
         text = response.choices[0].message.content.strip()
 
@@ -113,6 +135,26 @@ async def consolidate_session(session_id: str) -> None:
             stored,
             len(soul_updates),
         )
+        await log_background_task_event(
+            task_name="session_consolidation",
+            outcome="succeeded",
+            session_id=session_id,
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "history_length": len(history),
+                "stored_memory_count": stored,
+                "soul_update_count": len(soul_updates),
+            },
+        )
 
-    except Exception:
+    except Exception as exc:
+        await log_background_task_event(
+            task_name="session_consolidation",
+            outcome="failed",
+            session_id=session_id,
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("Memory consolidation failed for session %s", session_id[:8])

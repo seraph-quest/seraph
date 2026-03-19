@@ -1,9 +1,11 @@
+import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager
 
@@ -72,6 +74,33 @@ class TestContextManagerRefresh:
         assert ctx.screen_context == "Editing Python"
 
     @pytest.mark.asyncio
+    async def test_refresh_derives_salience_confidence_and_interruption_cost(self):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing roadmap")
+
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+
+        with patch("src.observer.sources.time_source.gather_time", return_value={
+            "time_of_day": "afternoon", "day_of_week": "Tuesday", "is_working_hours": True,
+        }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [{"summary": "Design review", "start": soon}], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value={
+                 "recent_git_activity": [{"msg": "ship salience model"}]
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship observer salience"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="available"):
+            ctx = await mgr.refresh()
+
+        assert ctx.observer_confidence == "grounded"
+        assert ctx.salience_level == "high"
+        assert ctx.salience_reason == "upcoming_event"
+        assert ctx.interruption_cost == "high"
+
+    @pytest.mark.asyncio
     async def test_refresh_preserves_heartbeat(self):
         mgr = ContextManager()
         mgr.update_screen_context("VS Code", None)
@@ -108,6 +137,120 @@ class TestContextManagerRefresh:
         # Time defaults preserved, other sources still work
         assert ctx.time_of_day == "unknown"
         assert ctx.upcoming_events == []
+
+    @pytest.mark.asyncio
+    async def test_refresh_logs_runtime_audit_event(self, async_db):
+        mgr = ContextManager()
+
+        with patch("src.observer.sources.time_source.gather_time", return_value={
+            "time_of_day": "morning",
+            "day_of_week": "Monday",
+            "is_working_hours": True,
+        }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value=None), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": ""
+             }):
+            await mgr.refresh()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "observer_context_refresh"
+            and event["details"]["data_quality"] == "good"
+            and event["details"]["sources_ok"] == 4
+            and event["details"]["observer_confidence"] == "grounded"
+            and event["details"]["salience_level"] == "low"
+            and event["details"]["salience_reason"] == "background"
+            and event["details"]["interruption_cost"] == "low"
+            and event["details"]["triggered_bundle_delivery"] is False
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_logs_degraded_runtime_audit_details(self, async_db):
+        mgr = ContextManager()
+
+        with patch("src.observer.sources.time_source.gather_time", side_effect=RuntimeError("boom")), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value=None), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": ""
+             }):
+            await mgr.refresh()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "observer_context_refresh"
+            and event["details"]["data_quality"] == "degraded"
+            and event["details"]["sources_ok"] == 3
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_logs_failure_runtime_audit_event(self, async_db):
+        mgr = ContextManager()
+
+        with patch("src.observer.sources.time_source.gather_time", return_value={
+            "time_of_day": "morning",
+            "day_of_week": "Monday",
+            "is_working_hours": True,
+        }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value=None), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": ""
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", side_effect=RuntimeError("derive failed")):
+            with pytest.raises(RuntimeError, match="derive failed"):
+                await mgr.refresh()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_failed"
+            and event["tool_name"] == "observer_context_refresh"
+            and event["details"]["error"] == "derive failed"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_transition_logs_bundle_trigger(self, async_db):
+        mgr = ContextManager()
+        mgr._context.user_state = "deep_work"
+
+        with patch("src.observer.sources.time_source.gather_time", return_value={
+            "time_of_day": "morning",
+            "day_of_week": "Monday",
+            "is_working_hours": True,
+        }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock, return_value={
+                 "upcoming_events": [], "current_event": None
+             }), \
+             patch("src.observer.sources.git_source.gather_git", return_value=None), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": ""
+             }), \
+             patch.object(mgr, "_deliver_bundle", new_callable=AsyncMock):
+            await mgr.refresh()
+            await asyncio.sleep(0)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "observer_context_refresh"
+            and event["details"]["triggered_bundle_delivery"] is True
+            and event["details"]["previous_user_state"] == "deep_work"
+            and event["details"]["new_user_state"] == "transitioning"
+            for event in events
+        )
 
 
 class TestContextManagerUpdates:
@@ -170,6 +313,55 @@ class TestContextManagerUpdates:
         mgr.update_screen_context(None, None)
         ts2 = mgr.get_context().last_daemon_post
         assert ts2 >= ts1
+
+
+class TestQueuedBundleAudit:
+    @pytest.mark.asyncio
+    async def test_deliver_bundle_logs_success_runtime_audit(self, async_db):
+        mgr = ContextManager()
+
+        with patch("src.observer.delivery.deliver_queued_bundle", new_callable=AsyncMock, return_value=2):
+            await mgr._deliver_bundle(0)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "observer_queued_bundle_delivery"
+            and event["details"]["requested_epoch"] == 0
+            and event["details"]["delivered_count"] == 2
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_deliver_bundle_logs_skipped_runtime_audit(self, async_db):
+        mgr = ContextManager()
+        mgr._transition_epoch = 2
+
+        await mgr._deliver_bundle(1)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_skipped"
+            and event["tool_name"] == "observer_queued_bundle_delivery"
+            and event["details"]["requested_epoch"] == 1
+            and event["details"]["current_epoch"] == 2
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_deliver_bundle_logs_failure_runtime_audit(self, async_db):
+        mgr = ContextManager()
+
+        with patch("src.observer.delivery.deliver_queued_bundle", new_callable=AsyncMock, side_effect=RuntimeError("ws down")):
+            await mgr._deliver_bundle(0)
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_failed"
+            and event["tool_name"] == "observer_queued_bundle_delivery"
+            and event["details"]["error"] == "ws down"
+            for event in events
+        )
 
 
 class TestCurrentContextSerialization:

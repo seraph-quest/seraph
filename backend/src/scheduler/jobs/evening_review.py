@@ -3,8 +3,11 @@
 import asyncio
 import logging
 from datetime import date
+from time import perf_counter
 
 from config.settings import settings
+from src.audit.runtime import log_background_task_event, log_scheduler_job_event
+from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,7 @@ Write a short evening review (3-6 sentences) covering:
 Be concise. No preamble. Just the review text."""
 
 
-async def _count_messages_today() -> int:
+async def _count_messages_today() -> tuple[int, bool]:
     """Count messages created today."""
     try:
         from src.db.engine import get_session as get_db_session
@@ -48,13 +51,22 @@ async def _count_messages_today() -> int:
                     func.date(Message.created_at) == today
                 )
             )
-            return result.scalar_one_or_none() or 0
-    except Exception:
+            return result.scalar_one_or_none() or 0, False
+    except Exception as exc:
         logger.exception("Failed to count today's messages")
-        return 0
+        await log_background_task_event(
+            task_name="evening_review_inputs",
+            outcome="degraded",
+            details={
+                "source": "messages_today",
+                "fallback_value": 0,
+                "error": str(exc),
+            },
+        )
+        return 0, True
 
 
-async def _get_completed_goals_today() -> list[str]:
+async def _get_completed_goals_today() -> tuple[list[str], bool]:
     """Get titles of goals completed today."""
     try:
         from src.goals.repository import goal_repository
@@ -64,14 +76,24 @@ async def _get_completed_goals_today() -> list[str]:
         return [
             g.title for g in goals
             if g.updated_at and g.updated_at.date() == today
-        ]
-    except Exception:
+        ], False
+    except Exception as exc:
         logger.exception("Failed to get completed goals")
-        return []
+        await log_background_task_event(
+            task_name="evening_review_inputs",
+            outcome="degraded",
+            details={
+                "source": "completed_goals_today",
+                "fallback_value": [],
+                "error": str(exc),
+            },
+        )
+        return [], True
 
 
 async def run_evening_review() -> None:
     """Generate and send the evening review to connected clients."""
+    started_at = perf_counter()
     try:
         from src.observer.manager import context_manager
 
@@ -81,10 +103,18 @@ async def run_evening_review() -> None:
         soul = read_soul()
 
         # Gather today's data
-        message_count, completed_titles = await asyncio.gather(
+        message_count_result, completed_titles_result = await asyncio.gather(
             _count_messages_today(),
             _get_completed_goals_today(),
         )
+        message_count, message_count_degraded = message_count_result
+        completed_titles, completed_titles_degraded = completed_titles_result
+        degraded_inputs = []
+        if message_count_degraded:
+            degraded_inputs.append("messages_today")
+        if completed_titles_degraded:
+            degraded_inputs.append("completed_goals_today")
+        data_quality = "degraded" if degraded_inputs else "good"
 
         completed_text = ", ".join(completed_titles) if completed_titles else "None today"
         git_text = f"{len(ctx.recent_git_activity)} commits" if ctx.recent_git_activity else "No git activity"
@@ -98,23 +128,24 @@ async def run_evening_review() -> None:
             active_goals=goals_text,
         )
 
-        import litellm
-
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    litellm.completion,
-                    model=settings.default_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    api_key=settings.openrouter_api_key,
-                    api_base="https://openrouter.ai/api/v1",
-                    temperature=0.6,
-                    max_tokens=512,
-                ),
+            response = await completion_with_fallback(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_tokens=512,
                 timeout=settings.agent_briefing_timeout,
+                runtime_path="evening_review",
             )
         except asyncio.TimeoutError:
             logger.warning("evening_review: LLM timed out after %ds", settings.agent_briefing_timeout)
+            await log_scheduler_job_event(
+                job_name="evening_review",
+                outcome="timed_out",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.agent_briefing_timeout,
+                },
+            )
             return
 
         review_text = response.choices[0].message.content.strip()
@@ -129,7 +160,27 @@ async def run_evening_review() -> None:
             reasoning="Scheduled evening review",
         )
         await deliver_or_queue(message, is_scheduled=True)
+        await log_scheduler_job_event(
+            job_name="evening_review",
+            outcome="succeeded",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "response_length": len(review_text),
+                "completed_goal_count": len(completed_titles),
+                "message_count": message_count,
+                "data_quality": data_quality,
+                "degraded_inputs": degraded_inputs,
+            },
+        )
         logger.info("evening_review: delivered evening review")
 
-    except Exception:
+    except Exception as exc:
+        await log_scheduler_job_event(
+            job_name="evening_review",
+            outcome="failed",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("evening_review failed")

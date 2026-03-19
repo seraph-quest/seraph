@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlmodel import select, func, col
 
+from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
 
@@ -69,17 +70,38 @@ class ScreenObservationRepository:
         start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
         end = start + timedelta(days=1)
 
-        async with get_session() as db:
-            result = await db.execute(
-                select(ScreenObservation)
-                .where(col(ScreenObservation.timestamp) >= start)
-                .where(col(ScreenObservation.timestamp) < end)
-                .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-                .order_by(col(ScreenObservation.timestamp))
+        try:
+            async with get_session() as db:
+                result = await db.execute(
+                    select(ScreenObservation)
+                    .where(col(ScreenObservation.timestamp) >= start)
+                    .where(col(ScreenObservation.timestamp) < end)
+                    .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+                    .order_by(col(ScreenObservation.timestamp))
+                )
+                observations = list(result.scalars().all())
+        except Exception as e:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="daily_summary",
+                outcome="failed",
+                details={
+                    "date": target_date.isoformat(),
+                    "error": str(e),
+                },
             )
-            observations = list(result.scalars().all())
+            raise
 
         if not observations:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="daily_summary",
+                outcome="empty_result",
+                details={
+                    "date": target_date.isoformat(),
+                    "reason": "no_observations",
+                },
+            )
             return {"date": target_date.isoformat(), "total_observations": 0}
 
         # Aggregate by activity type
@@ -102,7 +124,7 @@ class ScreenObservationRepository:
         # Find longest focus streaks (consecutive same-activity observations)
         streaks = self._compute_streaks(observations)
 
-        return {
+        summary = {
             "date": target_date.isoformat(),
             "total_observations": len(observations),
             "total_tracked_minutes": total_tracked_s // 60,
@@ -112,6 +134,19 @@ class ScreenObservationRepository:
             "by_app": dict(sorted(by_app.items(), key=lambda x: -x[1])),
             "longest_streaks": streaks[:3],
         }
+        await log_integration_event(
+            integration_type="screen_repository",
+            name="daily_summary",
+            outcome="succeeded",
+            details={
+                "date": target_date.isoformat(),
+                "total_observations": summary["total_observations"],
+                "total_tracked_minutes": summary["total_tracked_minutes"],
+                "activity_count": len(summary["by_activity"]),
+                "project_count": len(summary["by_project"]),
+            },
+        )
+        return summary
 
     async def get_weekly_summary(self, week_start: date) -> dict[str, Any]:
         """Aggregate observations for a 7-day period starting from week_start."""
@@ -121,17 +156,54 @@ class ScreenObservationRepository:
         total_observations = 0
         total_minutes = 0
 
-        for i in range(7):
-            day = week_start + timedelta(days=i)
-            daily = await self.get_daily_summary(day)
-            daily_summaries.append(daily)
-            total_observations += daily.get("total_observations", 0)
-            total_minutes += daily.get("total_tracked_minutes", 0)
+        try:
+            for i in range(7):
+                day = week_start + timedelta(days=i)
+                daily = await self.get_daily_summary(day)
+                daily_summaries.append(daily)
+                total_observations += daily.get("total_observations", 0)
+                total_minutes += daily.get("total_tracked_minutes", 0)
 
-            for act, secs in daily.get("by_activity", {}).items():
-                combined_activity[act] = combined_activity.get(act, 0) + secs
-            for proj, secs in daily.get("by_project", {}).items():
-                combined_project[proj] = combined_project.get(proj, 0) + secs
+                for act, secs in daily.get("by_activity", {}).items():
+                    combined_activity[act] = combined_activity.get(act, 0) + secs
+                for proj, secs in daily.get("by_project", {}).items():
+                    combined_project[proj] = combined_project.get(proj, 0) + secs
+        except Exception as e:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="weekly_summary",
+                outcome="failed",
+                details={
+                    "week_start": week_start.isoformat(),
+                    "error": str(e),
+                },
+            )
+            raise
+
+        if total_observations == 0:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="weekly_summary",
+                outcome="empty_result",
+                details={
+                    "week_start": week_start.isoformat(),
+                    "reason": "no_observations",
+                },
+            )
+        else:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="weekly_summary",
+                outcome="succeeded",
+                details={
+                    "week_start": week_start.isoformat(),
+                    "total_observations": total_observations,
+                    "total_tracked_minutes": total_minutes,
+                    "active_days": sum(
+                        1 for daily in daily_summaries if daily.get("total_observations", 0) > 0
+                    ),
+                },
+            )
 
         return {
             "week_start": week_start.isoformat(),
@@ -154,17 +226,82 @@ class ScreenObservationRepository:
         """Delete observations older than retention_days. Returns count deleted."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
 
-        async with get_session() as db:
-            result = await db.execute(
-                select(ScreenObservation).where(col(ScreenObservation.timestamp) < cutoff)
+        try:
+            async with get_session() as db:
+                result = await db.execute(
+                    select(ScreenObservation).where(col(ScreenObservation.timestamp) < cutoff)
+                )
+                old = list(result.scalars().all())
+                for obs in old:
+                    await db.delete(obs)
+        except Exception as e:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="cleanup",
+                outcome="failed",
+                details={
+                    "retention_days": retention_days,
+                    "error": str(e),
+                },
             )
-            old = list(result.scalars().all())
-            for obs in old:
-                await db.delete(obs)
+            raise
 
         if old:
             logger.info("Cleaned up %d screen observations older than %d days", len(old), retention_days)
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="cleanup",
+                outcome="succeeded",
+                details={
+                    "retention_days": retention_days,
+                    "deleted_count": len(old),
+                },
+            )
+        else:
+            await log_integration_event(
+                integration_type="screen_repository",
+                name="cleanup",
+                outcome="skipped",
+                details={
+                    "retention_days": retention_days,
+                    "deleted_count": 0,
+                },
+            )
         return len(old)
+
+    async def get_recent_projects(
+        self,
+        *,
+        days: int = 7,
+        limit: int = 3,
+    ) -> list[str]:
+        """Return the most active recent non-blocked project labels."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+
+        async with get_session() as db:
+            tracked_duration = func.sum(func.coalesce(ScreenObservation.duration_s, 0))
+            last_seen = func.max(ScreenObservation.timestamp)
+            result = await db.execute(
+                select(
+                    ScreenObservation.project,
+                    tracked_duration.label("tracked_duration"),
+                    last_seen.label("last_seen"),
+                )
+                .where(col(ScreenObservation.timestamp) >= cutoff)
+                .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+                .where(col(ScreenObservation.project).is_not(None))
+                .group_by(ScreenObservation.project)
+                .order_by(tracked_duration.desc(), last_seen.desc())
+                .limit(max(limit, 1))
+            )
+            rows = result.all()
+
+        projects: list[str] = []
+        for row in rows:
+            project = row[0]
+            if isinstance(project, str) and project.strip() and project not in projects:
+                projects.append(project)
+        return projects
 
     @staticmethod
     def _compute_streaks(observations: list[ScreenObservation]) -> list[dict]:

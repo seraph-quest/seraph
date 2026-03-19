@@ -2,10 +2,13 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from time import perf_counter
 
 from sqlmodel import select, col
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
 from src.db.models import Session, Message
 
@@ -84,6 +87,46 @@ class SessionManager:
                 }
                 for r in rows
             ]
+
+    async def get_recent_sessions_summary(
+        self,
+        *,
+        exclude_session_id: str | None = None,
+        limit_sessions: int = 3,
+        snippet_chars: int = 140,
+    ) -> str:
+        """Summarize recent sessions outside the current thread for guardian state."""
+        async with get_session() as db:
+            stmt = select(Session)
+            if exclude_session_id:
+                stmt = stmt.where(Session.id != exclude_session_id)
+            result = await db.execute(
+                stmt.order_by(col(Session.updated_at).desc()).limit(limit_sessions)
+            )
+            sessions = result.scalars().all()
+            if not sessions:
+                return ""
+
+            lines: list[str] = []
+            for session in sessions:
+                msg_result = await db.execute(
+                    select(Message)
+                    .where(Message.session_id == session.id)
+                    .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                    .order_by(col(Message.created_at).desc())
+                    .limit(1)
+                )
+                latest = msg_result.scalars().first()
+                title = session.title or "Untitled session"
+                if latest and latest.content:
+                    snippet = latest.content.replace("\n", " ").strip()
+                    if len(snippet) > snippet_chars:
+                        snippet = snippet[:snippet_chars] + "..."
+                    lines.append(f"- {title}: {latest.role} said \"{snippet}\"")
+                else:
+                    lines.append(f"- {title}: no user-facing messages yet")
+
+            return "\n".join(lines)
 
     async def update_title(self, session_id: str, title: str) -> bool:
         async with get_session() as db:
@@ -189,8 +232,18 @@ class SessionManager:
 
     async def generate_title(self, session_id: str) -> str | None:
         """Generate a short title for a session using LLM."""
+        started_at = perf_counter()
         session = await self.get(session_id)
         if not session or session.title != "New Conversation":
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="skipped",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "session_missing" if not session else "title_already_set",
+                },
+            )
             return session.title if session else None
 
         async with get_session() as db:
@@ -204,33 +257,64 @@ class SessionManager:
             messages = result.scalars().all()
 
         if not messages:
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="skipped",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "no_messages",
+                },
+            )
             return None
 
         transcript = "\n".join(f"{m.role.capitalize()}: {m.content[:200]}" for m in messages)
+        runtime_tokens = None
 
         try:
-            import litellm
+            from src.llm_runtime import completion_with_fallback
 
-            response = await asyncio.to_thread(
-                litellm.completion,
-                model=settings.default_model,
+            runtime_tokens = set_runtime_context(session_id, "high_risk")
+            response = await completion_with_fallback(
                 messages=[{
                     "role": "user",
                     "content": f"Generate a very short title (3-6 words, no quotes) for this conversation. Respond with ONLY the title.\n\n{transcript}",
                 }],
-                api_key=settings.openrouter_api_key,
-                api_base="https://openrouter.ai/api/v1",
                 temperature=0.3,
                 max_tokens=20,
+                runtime_path="session_title_generation",
             )
 
             title = response.choices[0].message.content.strip().strip('"\'')
             await self.update_title(session_id, title)
             logger.info("Generated title for session %s: %s", session_id[:8], title)
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="succeeded",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_count": len(messages),
+                    "title_length": len(title),
+                },
+            )
             return title
-        except Exception:
+        except Exception as exc:
+            await log_background_task_event(
+                task_name="session_title_generation",
+                outcome="failed",
+                session_id=session_id,
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_count": len(messages),
+                    "error": str(exc),
+                },
+            )
             logger.exception("Failed to generate title for session %s", session_id[:8])
             return None
+        finally:
+            if runtime_tokens is not None:
+                reset_runtime_context(runtime_tokens)
 
     async def count_messages(self, session_id: str) -> int:
         """Count user+assistant messages in a session."""
@@ -241,6 +325,5 @@ class SessionManager:
                 .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
             )
             return len(result.scalars().all())
-
 
 session_manager = SessionManager()

@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from config.settings import settings
+
 from src.agent.specialists import (
     DOMAIN_TOOLS,
     SPECIALIST_CONFIGS,
@@ -14,14 +16,16 @@ from src.agent.specialists import (
     create_memory_keeper,
     create_specialist,
     create_web_researcher,
+    mcp_specialist_runtime_path,
 )
+from src.observer.context import CurrentContext
 
 
 class TestToolDomainMapping:
     def test_all_builtin_tools_have_domains(self):
         expected_tools = {
             "view_soul", "update_soul",
-            "store_secret", "get_secret", "list_secrets", "delete_secret",
+            "store_secret", "get_secret", "get_secret_ref", "list_secrets", "delete_secret",
             "create_goal", "update_goal", "get_goals", "get_goal_progress",
             "web_search", "browse_webpage",
             "read_file", "write_file", "fill_template", "shell_execute",
@@ -94,6 +98,35 @@ class TestCreateSpecialist:
         assert agent_kwargs["name"] == "test_agent"
         assert agent_kwargs["max_steps"] == 3
 
+    @patch("src.agent.specialists.ToolCallingAgent")
+    @patch("src.agent.specialists.LiteLLMModel")
+    def test_creates_agent_with_local_profile_for_named_runtime_path(self, mock_model_cls, mock_agent_cls):
+        mock_model_cls.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+        tool = MagicMock()
+        tool.name = "test_tool"
+
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", "test_agent"),
+        ):
+            create_specialist(
+                name="test_agent",
+                description="A test agent",
+                tools=[tool],
+                temperature=0.5,
+                max_steps=3,
+            )
+
+        call_kwargs = mock_model_cls.call_args[1]
+        assert call_kwargs["model_id"] == "ollama/llama3.2"
+        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+
 
 class TestNamedFactories:
     def _make_tools_by_name(self):
@@ -113,7 +146,15 @@ class TestNamedFactories:
         create_memory_keeper(tools_by_name)
         agent_kwargs = mock_agent_cls.call_args[1]
         tool_names = {t.name for t in agent_kwargs["tools"]}
-        assert tool_names == {"view_soul", "update_soul", "store_secret", "get_secret", "list_secrets", "delete_secret"}
+        assert tool_names == {
+            "view_soul",
+            "update_soul",
+            "store_secret",
+            "get_secret",
+            "get_secret_ref",
+            "list_secrets",
+            "delete_secret",
+        }
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
@@ -174,6 +215,9 @@ class TestNamedFactories:
 
 
 class TestMcpSpecialist:
+    def test_runtime_path_helper_matches_sanitized_name(self):
+        assert mcp_specialist_runtime_path("my-server") == "mcp_my_server"
+
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
     def test_name_sanitization(self, mock_model_cls, mock_agent_cls):
@@ -208,13 +252,37 @@ class TestMcpSpecialist:
         agent_kwargs = mock_agent_cls.call_args[1]
         assert agent_kwargs["description"] == "Task manager"
 
+    @patch("src.agent.specialists.ToolCallingAgent")
+    @patch("src.agent.specialists.LiteLLMModel")
+    def test_uses_local_profile_for_dynamic_runtime_path(self, mock_model_cls, mock_agent_cls):
+        mock_model_cls.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+        tool = MagicMock()
+        tool.name = "list_tasks"
+
+        with (
+            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+            patch.object(settings, "llm_api_key", "primary-key"),
+            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+            patch.object(settings, "local_model", "ollama/llama3.2"),
+            patch.object(settings, "local_llm_api_key", ""),
+            patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", "mcp_things3"),
+        ):
+            create_mcp_specialist("things3", [tool], description="Task manager")
+
+        call_kwargs = mock_model_cls.call_args[1]
+        assert call_kwargs["model_id"] == "ollama/llama3.2"
+        assert call_kwargs["api_base"] == "http://localhost:11434/v1"
+
 
 class TestBuildAllSpecialists:
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
-    def test_without_mcp_returns_builtin(self, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_without_mcp_returns_builtin(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
         mock_mcp.get_config.return_value = []
 
@@ -237,16 +305,31 @@ class TestBuildAllSpecialists:
             tools.append(tool)
         mock_discover.return_value = tools
 
-        specialists = build_all_specialists()
-        assert len(specialists) == 4
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            specialists = build_all_specialists()
+
+        assert len(specialists) == 5
         names = {s.name for s in specialists}
-        assert names == {"memory_keeper", "goal_planner", "web_researcher", "file_worker"}
+        assert names == {
+            "memory_keeper",
+            "goal_planner",
+            "web_researcher",
+            "file_worker",
+            "workflow_runner",
+        }
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
-    def test_with_mcp_returns_builtin_plus_mcp(self, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_with_mcp_returns_builtin_plus_mcp(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
 
         created = []
@@ -276,16 +359,26 @@ class TestBuildAllSpecialists:
         mock_mcp.is_connected.return_value = True
         mock_mcp.get_server_tools.return_value = [mcp_tool]
 
-        specialists = build_all_specialists()
-        assert len(specialists) == 5
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            specialists = build_all_specialists()
+
+        assert len(specialists) == 6
         names = {s.name for s in specialists}
         assert "mcp_things3" in names
+        assert "workflow_runner" in names
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
-    def test_skips_disconnected_mcp(self, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_skips_disconnected_mcp(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
 
         created = []
@@ -310,5 +403,20 @@ class TestBuildAllSpecialists:
         ]
         mock_mcp.is_connected.return_value = False
 
-        specialists = build_all_specialists()
-        assert len(specialists) == 4  # only built-in
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]),
+        ):
+            specialists = build_all_specialists()
+
+        assert len(specialists) == 5
+        assert {specialist.name for specialist in specialists} == {
+            "memory_keeper",
+            "goal_planner",
+            "web_researcher",
+            "file_worker",
+            "workflow_runner",
+        }

@@ -1,0 +1,79 @@
+---
+title: S1-B3 Runtime Reliability
+---
+
+# S1-B3: Runtime Reliability
+
+## Intent
+
+Make Seraph more resilient, observable, and predictable under real usage.
+
+## Capabilities in scope
+
+- model/provider routing and fallback
+- at least one local-model-capable path
+- richer observability for agent behavior and tool execution
+- evaluation harness for core agent workflows
+- clearer degraded-mode behavior when dependencies fail
+
+## Current progress
+
+This batch is active. Use the checklist below as the live status view.
+
+### Done
+
+- [x] degraded-mode fallback in the token-aware context window when `tiktoken` cannot load offline
+- [x] centralized provider-agnostic LLM runtime settings with an optional fallback completion path for direct LiteLLM calls
+- [x] timeout-safe audit events for primary-vs-fallback direct LLM completion behavior so degraded mode is visible after the fact
+- [x] fallback-capable `smolagents` model wrappers for the main agent, onboarding agent, strategist, and specialists so provider failure is less likely to collapse the interactive runtime
+- [x] repeatable runtime eval harness for core guardian/tool reliability contracts so fallback wiring and degraded behavior can be checked without live providers
+- [x] lifecycle audit events for REST/WebSocket chat runs and scheduled proactive jobs so runtime failures and skips are more visible after the fact
+
+### Working Now
+
+- [ ] broaden observability beyond the first direct LLM events and first chat/proactive-job lifecycle coverage
+
+### Still Open
+
+- [ ] broader model/provider routing beyond the first shared fallback path
+- [ ] deeper local-model-capable execution paths beyond a configurable API base/model swap
+- [ ] broader observability coverage across more tool/runtime paths
+- [ ] richer evaluation coverage beyond the first core guardian and tool scenarios
+
+## Non-goals
+
+- exhaustive benchmark program across every model
+- production-grade hosted observability platform
+- fully automated eval-driven deployment gating
+
+## Required architectural changes
+
+- centralize model selection and fallback strategy
+- standardize runtime event logging across critical paths
+- define test/eval scenarios for guardian, tool, and proactive flows
+- add explicit error-handling behavior for provider/tool outages
+
+## Likely files/systems touched
+
+- model configuration and agent factory paths
+- scheduler and proactive jobs
+- logging and evaluation utilities
+- tool failure and timeout handling
+
+## Acceptance criteria
+
+- provider failure does not collapse the entire chat path
+- a local or non-OpenRouter path is demonstrably possible
+- key flows are observable and easier to debug
+- the project has a repeatable evaluation harness for core behavior
+
+## Dependencies on earlier batches
+
+- can begin in parallel with [S1-B2 Execution Plane](./s1-b2-execution-plane)
+- benefits from [S1-B1 Trust Boundaries](./s1-b1-trust-boundaries) defining clearer execution paths
+
+## Open risks
+
+- fallback logic can become inconsistent if added ad hoc
+- observability can create noise if events are not scoped well
+- local model support may underperform unless task routing is explicit

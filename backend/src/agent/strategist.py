@@ -1,12 +1,17 @@
 """Strategist agent — periodic strategic reasoning with restricted tool set."""
 
+from __future__ import annotations
+
 import json
 import logging
 from dataclasses import dataclass
 
-from smolagents import LiteLLMModel, ToolCallingAgent
+from smolagents import ToolCallingAgent
 
 from config.settings import settings
+from src.guardian.state import GuardianState
+from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
+from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
 
@@ -60,15 +65,20 @@ class StrategistDecision:
     reasoning: str
 
 
-def create_strategist_agent(context_block: str) -> ToolCallingAgent:
+def create_strategist_agent(
+    context_block: str = "",
+    *,
+    guardian_state: GuardianState | None = None,
+) -> ToolCallingAgent:
     """Create a restricted agent for strategic reasoning."""
-    model = LiteLLMModel(
-        model_id=settings.default_model,
-        api_key=settings.openrouter_api_key,
-        api_base="https://openrouter.ai/api/v1",
+    model = LiteLLMModel(**build_model_kwargs(
         temperature=0.4,
         max_tokens=settings.model_max_tokens,
-    )
+        runtime_path="strategist_agent",
+    ))
+
+    if guardian_state is not None:
+        context_block = guardian_state.to_prompt_block()
 
     instructions = STRATEGIST_INSTRUCTIONS.format(
         proactivity_level=settings.proactivity_level,
@@ -76,7 +86,7 @@ def create_strategist_agent(context_block: str) -> ToolCallingAgent:
     )
 
     return ToolCallingAgent(
-        tools=[view_soul, get_goals, get_goal_progress],
+        tools=wrap_tools_for_audit([view_soul, get_goals, get_goal_progress]),
         model=model,
         max_steps=5,
         instructions=instructions,

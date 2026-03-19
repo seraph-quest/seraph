@@ -1,19 +1,18 @@
 <h1 align="center">Seraph</h1>
 
 <p align="center">
-  <strong>A proactive AI guardian with a retro 16-bit RPG village UI</strong>
+  <strong>A proactive AI guardian with persistent memory, observation, and real-world action</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/seraph-quest/seraph/actions"><img src="https://github.com/seraph-quest/seraph/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
   <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/react-19-61dafb" alt="React 19" />
-  <img src="https://img.shields.io/badge/phaser-3.90-orange" alt="Phaser 3.90" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
 </p>
 
 <p align="center">
-  An animated pixel-art avatar casts magic effects when using tools in a Phaser 3 village while you chat via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration.
+  Seraph ships today with a guardian cockpit browser shell, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is cockpit-only: legacy village/editor code is retired and slated for removal rather than future productization.
 </p>
 
 ---
@@ -29,7 +28,7 @@ cp .env.dev.example .env.dev
 ./manage.sh -e dev up -d
 
 # 3. Open
-open http://localhost:3000        # Retro village UI
+open http://localhost:3000        # Current shipped browser UI
 open http://localhost:8004/docs   # Swagger API docs
 
 # 4. (Optional) Screen awareness daemon
@@ -43,13 +42,13 @@ open http://localhost:8004/docs   # Swagger API docs
 
 | Layer | Stack |
 |-------|-------|
-| **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90 |
+| **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand |
 | **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
 | **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
-| **Tools** | 12 native tools (auto-discovered) + plug-and-play MCP servers |
-| **Scheduler** | APScheduler — briefings, reviews, strategist ticks, memory consolidation |
+| **Tools** | 17 built-in tool capabilities (auto-discovered) + reusable workflows + plug-and-play MCP servers |
+| **Scheduler** | APScheduler — 9 jobs across briefings, reviews, strategist, observer cleanup, and memory/goal maintenance |
 | **Daemon** | Native macOS — window tracking, optional OCR (Apple Vision / OpenRouter) |
-| **Infra** | Docker Compose (backend + frontend + snekbox sandbox), uv |
+| **Infra** | Docker Compose (backend + frontend + snekbox sandbox + http-mcp), uv |
 
 ---
 
@@ -57,22 +56,23 @@ open http://localhost:8004/docs   # Swagger API docs
 
 ```
 frontend/src/
-  game/              Phaser 3 village scene, sprites, EventBus
+  components/cockpit/ Guardian cockpit shell, state rails, intervention feed
   components/        React overlays — chat, quest panel, settings
-  hooks/             useWebSocket, useAgentAnimation
+  hooks/             useWebSocket, keyboard and operator interaction hooks
   stores/            Zustand stores — chat, quest
-  lib/               Tool parser, animation state machine
-  config/            Constants, default positions, waypoints
+  lib/               Tool parser and cockpit helpers
+  config/            Frontend constants
 
 backend/src/
-  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, mcp)
+  api/               REST + WebSocket endpoints (chat, sessions, goals, tools, workflows, mcp)
   agent/             smolagents factory, onboarding, strategist, session manager
   tools/             @tool implementations + MCP manager
+  workflows/         Reusable multi-step workflow loader, runtime, and gating
   memory/            Soul file, LanceDB vector store, embedder, consolidator
   goals/             Hierarchical goal CRUD
   plugins/           Tool auto-discovery + registry
-  scheduler/         APScheduler jobs (briefing, review, strategist, consolidation)
-  observer/          Context manager, user state machine, delivery engine
+  scheduler/         APScheduler engine, connection manager, 9 background jobs
+  observer/          Context manager, data sources, user state machine, delivery engine
 
 daemon/              Native macOS screen daemon (window tracking + OCR)
 docs/                Docusaurus docs site
@@ -80,15 +80,9 @@ docs/                Docusaurus docs site
 
 ---
 
-## Village & Avatar
+## Retired Surfaces
 
-```
-User sends message  -->  THINKING
-  Tool detected     -->  CASTING + magic effect overlay
-  Response ready    -->  SPEAKING  -->  IDLE  -->  WANDERING
-```
-
-Tool use triggers a casting animation with a magic effect overlay at the agent's position.
+Legacy village/editor code still exists in the repo for the moment, but it is no longer part of the product contract, documentation truth, or roadmap direction. Seraph is being built as a cockpit-first guardian system, not a game-shell assistant.
 
 ---
 
@@ -125,12 +119,28 @@ Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
 
 ## Development Status
 
-| Phase | Name | Status |
-|-------|------|--------|
-| 1 | **Persistent Identity** — soul, memory, goals, onboarding, quest UI | Complete |
-| 2 | **Capable Executor** — shell, browser, plugin system | Complete |
-| 3 | **The Observer** — scheduler, context awareness, proactive reasoning, screen daemon | Complete |
-| 4 | **The Network** — MCP integration, skills, channels, workflows, voice | In Progress |
-| 5 | **Security** — credential injection, leak detection, OAuth 2.1, capabilities | Planned |
+Seraph no longer uses the old phase model as the live planning surface.
 
-See [docs/](docs/) for full vision, roadmap, and phase specifications.
+Canonical docs now live in:
+
+- `docs/implementation/` — shipped state, workstreams, and current status
+- `docs/research/` — product thesis and design target
+
+Current truth:
+
+- [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
+- [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
+- [x] the source-of-truth docs now target a power-user guardian cockpit and the browser app now defaults to that shell
+- [ ] no workstream is complete yet
+- [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
+
+Start with:
+
+- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
+- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/implementation/08-docs-contract.md](docs/implementation/08-docs-contract.md)
+- [docs/implementation/09-benchmark-status.md](docs/implementation/09-benchmark-status.md)
+- [docs/implementation/10-superiority-delivery.md](docs/implementation/10-superiority-delivery.md)
+- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
+- [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
+- [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)

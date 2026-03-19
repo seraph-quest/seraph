@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
 import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
-import { useDragResize } from "../hooks/useDragResize";
-import { ResizeHandles } from "./ResizeHandles";
 import { EventBus } from "../game/EventBus";
-import { DialogFrame } from "./chat/DialogFrame";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
 import { CaptureModeToggle } from "./settings/CaptureModeToggle";
+import { ToolPolicyModeToggle } from "./settings/ToolPolicyModeToggle";
+import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
+import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
+import { AuditLogPanel } from "./settings/AuditLogPanel";
+import { WorkflowPanel } from "./settings/WorkflowPanel";
 
 interface SkillInfo {
   name: string;
@@ -405,11 +407,6 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
 
-  const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize("settings", {
-    minWidth: 240,
-    minHeight: 200,
-  });
-
   const fetchSkills = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/api/skills`);
@@ -541,20 +538,28 @@ export function SettingsPanel() {
   if (!settingsPanelOpen) return null;
 
   return (
-    <div
-      ref={panelRef}
-      className="settings-overlay"
-      style={style}
-      onPointerDown={bringToFront}
-    >
-      <ResizeHandles resizeHandleProps={resizeHandleProps} />
-      <DialogFrame
-        title="Settings"
-        className="flex-1 min-h-0 flex flex-col"
-        onClose={() => setSettingsPanelOpen(false)}
-        dragHandleProps={dragHandleProps}
-      >
-        <div className="flex-1 min-h-0 overflow-y-auto retro-scrollbar flex flex-col gap-2 pb-1">
+    <div className="cockpit-modal-shell">
+      <button
+        type="button"
+        className="cockpit-modal-backdrop"
+        onClick={() => setSettingsPanelOpen(false)}
+        aria-label="Close settings"
+      />
+      <section className="cockpit-modal-card cockpit-modal-card--settings">
+        <div className="cockpit-modal-header">
+          <div>
+            <div className="cockpit-card-title">Settings</div>
+            <div className="cockpit-card-meta">system controls</div>
+          </div>
+          <button
+            type="button"
+            className="cockpit-modal-close"
+            onClick={() => setSettingsPanelOpen(false)}
+          >
+            Close
+          </button>
+        </div>
+        <div className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
               General
@@ -578,6 +583,16 @@ export function SettingsPanel() {
           <DaemonStatus />
 
           <CaptureModeToggle />
+
+          <ToolPolicyModeToggle />
+
+          <McpPolicyModeToggle />
+
+          <ApprovalModeToggle />
+
+          <AuditLogPanel />
+
+          <WorkflowPanel />
 
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
@@ -687,7 +702,7 @@ export function SettingsPanel() {
             Seraph v0.1
           </div>
         </div>
-      </DialogFrame>
+      </section>
     </div>
   );
 }

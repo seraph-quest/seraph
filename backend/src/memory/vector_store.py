@@ -9,6 +9,7 @@ import lancedb
 import pyarrow as pa
 
 from config.settings import settings
+from src.audit.runtime import log_integration_event_sync
 from src.memory.embedder import embed
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,22 @@ _SCHEMA = pa.schema([
 
 _db: Optional[lancedb.DBConnection] = None
 _db_lock = threading.Lock()
+
+
+def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
+    log_integration_event_sync(
+        integration_type="vector_store",
+        name=_TABLE_NAME,
+        outcome=outcome,
+        details=details,
+    )
+
+
+def _safe_query_length(query: object) -> int | None:
+    try:
+        return len(query)  # type: ignore[arg-type]
+    except Exception:
+        return None
 
 
 def _get_db() -> lancedb.DBConnection:
@@ -70,6 +87,15 @@ def add_memory(
                         results[0]["_distance"],
                         results[0]["id"][:8],
                     )
+                    _log_vector_store_event(
+                        "succeeded",
+                        details={
+                            "operation": "add",
+                            "category": category,
+                            "deduplicated": True,
+                            "source_session_id": source_session_id or None,
+                        },
+                    )
                     return results[0]["id"]
         except Exception:
             logger.debug("Dedup check failed, proceeding with insert", exc_info=True)
@@ -86,21 +112,39 @@ def add_memory(
         }])
 
         logger.info("Added memory %s (category=%s)", memory_id[:8], category)
+        _log_vector_store_event(
+            "succeeded",
+            details={
+                "operation": "add",
+                "category": category,
+                "deduplicated": False,
+                "source_session_id": source_session_id or None,
+            },
+        )
         return memory_id
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to add memory")
+        _log_vector_store_event(
+            "failed",
+            details={
+                "operation": "add",
+                "category": category,
+                "source_session_id": source_session_id or None,
+                "error": str(exc),
+            },
+        )
         return ""
 
 
-def search(
+def search_with_status(
     query: str,
     top_k: int = 0,
     category_filter: Optional[str] = None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     """Search memories by semantic similarity.
 
     Returns list of dicts with: id, text, category, score, created_at.
-    Returns [] on any failure.
+    Returns `(results, degraded)` where degraded is true on fail-open fallback.
     """
     try:
         if top_k <= 0:
@@ -109,7 +153,17 @@ def search(
         table = _get_or_create_table()
 
         if table.count_rows() == 0:
-            return []
+            _log_vector_store_event(
+                "empty_result",
+                details={
+                    "operation": "search",
+                    "reason": "empty_table",
+                    "query_length": _safe_query_length(query),
+                    "category_filter": category_filter,
+                    "top_k": top_k,
+                },
+            )
+            return [], False
 
         query_vector = embed(query)
 
@@ -124,6 +178,30 @@ def search(
 
         rows = results.to_list()
 
+        if not rows:
+            _log_vector_store_event(
+                "empty_result",
+                details={
+                    "operation": "search",
+                    "reason": "no_match",
+                    "query_length": _safe_query_length(query),
+                    "category_filter": category_filter,
+                    "top_k": top_k,
+                },
+            )
+            return [], False
+
+        _log_vector_store_event(
+            "succeeded",
+            details={
+                "operation": "search",
+                "query_length": _safe_query_length(query),
+                "category_filter": category_filter,
+                "top_k": top_k,
+                "result_count": len(rows),
+            },
+        )
+
         return [
             {
                 "id": r["id"],
@@ -133,10 +211,34 @@ def search(
                 "created_at": r["created_at"],
             }
             for r in rows
-        ]
-    except Exception:
+        ], False
+    except Exception as exc:
         logger.exception("Failed to search memories")
-        return []
+        _log_vector_store_event(
+            "failed",
+            details={
+                "operation": "search",
+                "query_length": _safe_query_length(query),
+                "category_filter": category_filter,
+                "top_k": top_k,
+                "error": str(exc),
+            },
+        )
+        return [], True
+
+
+def search(
+    query: str,
+    top_k: int = 0,
+    category_filter: Optional[str] = None,
+) -> list[dict]:
+    """Search memories by semantic similarity.
+
+    Returns list of dicts with: id, text, category, score, created_at.
+    Returns [] on any failure.
+    """
+    results, _degraded = search_with_status(query, top_k, category_filter)
+    return results
 
 
 def search_formatted(
@@ -149,7 +251,7 @@ def search_formatted(
     Returns "" on any failure.
     """
     try:
-        results = search(query, top_k, category_filter)
+        results, _degraded = search_with_status(query, top_k, category_filter)
         if not results:
             return ""
         lines = []
@@ -159,3 +261,10 @@ def search_formatted(
     except Exception:
         logger.exception("Failed to format memory search results")
         return ""
+
+
+def _reset_vector_store_state() -> None:
+    """Reset cached DB state for tests and deterministic evals."""
+    global _db
+    with _db_lock:
+        _db = None

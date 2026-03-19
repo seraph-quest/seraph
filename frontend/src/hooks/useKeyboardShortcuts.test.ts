@@ -1,142 +1,137 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { useChatStore } from "../stores/chatStore";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-function resetStore() {
+vi.hoisted(() => {
+  let store: Record<string, string> = {};
+  const localStorageMock = {
+    getItem: vi.fn((key: string) => store[key] ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      store[key] = value;
+    }),
+    removeItem: vi.fn((key: string) => {
+      delete store[key];
+    }),
+    clear: vi.fn(() => {
+      store = {};
+    }),
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    value: localStorageMock,
+    configurable: true,
+  });
+});
+
+import { useChatStore } from "../stores/chatStore";
+import { useCockpitLayoutStore } from "../stores/cockpitLayoutStore";
+import { handleGlobalKeyboardShortcut } from "./useKeyboardShortcuts";
+
+function resetStores() {
   useChatStore.setState({
     chatPanelOpen: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
+    interfaceMode: "village",
+  });
+  useCockpitLayoutStore.setState({
+    activeLayoutId: "default",
+    inspectorVisible: true,
   });
 }
 
-function fireKey(
+function makeEvent(
   key: string,
-  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean },
-) {
+  options?: { target?: Partial<HTMLElement>; shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; code?: string },
+): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     key,
+    code: options?.code,
     shiftKey: options?.shiftKey ?? false,
+    ctrlKey: options?.ctrlKey ?? false,
+    metaKey: options?.metaKey ?? false,
     bubbles: true,
   });
   if (options?.target) {
     Object.defineProperty(event, "target", { value: options.target });
   }
-  window.dispatchEvent(event);
+  return event;
 }
 
-describe("useKeyboardShortcuts", () => {
-  let cleanup: (() => void) | undefined;
-
-  beforeEach(async () => {
-    resetStore();
-
-    // Register handler matching the hook logic (with shiftKey requirement)
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
-      const s = useChatStore.getState();
-      switch (e.key.toLowerCase()) {
-        case "c":
-          if (!e.shiftKey) return;
-          s.setChatPanelOpen(!s.chatPanelOpen);
-          break;
-        case "q":
-          if (!e.shiftKey) return;
-          s.setQuestPanelOpen(!s.questPanelOpen);
-          break;
-        case "s":
-          if (!e.shiftKey) return;
-          s.setSettingsPanelOpen(!s.settingsPanelOpen);
-          break;
-        case "escape":
-          if (s.chatPanelOpen) s.setChatPanelOpen(false);
-          else if (s.questPanelOpen) s.setQuestPanelOpen(false);
-          else if (s.settingsPanelOpen) s.setSettingsPanelOpen(false);
-          break;
-      }
-    };
-    window.addEventListener("keydown", handler);
-    cleanup = () => window.removeEventListener("keydown", handler);
+describe("handleGlobalKeyboardShortcut", () => {
+  beforeEach(() => {
+    resetStores();
+    vi.restoreAllMocks();
   });
 
-  afterEach(() => {
-    cleanup?.();
+  it("Shift+C dispatches cockpit composer focus without toggling legacy chat in cockpit mode", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    handleGlobalKeyboardShortcut(makeEvent("c", { shiftKey: true }));
+
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(dispatchSpy.mock.calls[0]?.[0]).toBeInstanceOf(CustomEvent);
+    expect((dispatchSpy.mock.calls[0]?.[0] as CustomEvent).type).toBe("seraph-cockpit-focus-composer");
+    expect(useChatStore.getState().chatPanelOpen).toBe(false);
   });
 
-  it("Shift+C toggles chat panel open", () => {
-    fireKey("c", { shiftKey: true });
+  it("Shift+1/2/3 switch cockpit layouts", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
+
+    handleGlobalKeyboardShortcut(makeEvent("@", { shiftKey: true, code: "Digit2" }));
+    expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("focus");
+
+    handleGlobalKeyboardShortcut(makeEvent("#", { shiftKey: true, code: "Digit3" }));
+    expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("review");
+
+    handleGlobalKeyboardShortcut(makeEvent("!", { shiftKey: true, code: "Digit1" }));
+    expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("default");
+  });
+
+  it("Shift+I toggles inspector visibility in cockpit mode", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
+
+    handleGlobalKeyboardShortcut(makeEvent("I", { shiftKey: true, code: "KeyI" }));
+    expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(false);
+
+    handleGlobalKeyboardShortcut(makeEvent("I", { shiftKey: true, code: "KeyI" }));
+    expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(true);
+  });
+
+  it("Shift+K and Ctrl+K open the cockpit palette", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    handleGlobalKeyboardShortcut(makeEvent("K", { shiftKey: true, code: "KeyK" }));
+    handleGlobalKeyboardShortcut(makeEvent("k", { ctrlKey: true, code: "KeyK" }));
+
+    expect(dispatchSpy).toHaveBeenCalledTimes(2);
+    expect((dispatchSpy.mock.calls[0]?.[0] as CustomEvent).type).toBe("seraph-cockpit-open-palette");
+    expect((dispatchSpy.mock.calls[1]?.[0] as CustomEvent).type).toBe("seraph-cockpit-open-palette");
+  });
+
+  it("Shift+C toggles legacy chat panel outside cockpit mode", () => {
+    handleGlobalKeyboardShortcut(makeEvent("c", { shiftKey: true }));
     expect(useChatStore.getState().chatPanelOpen).toBe(true);
   });
 
-  it("Shift+C toggles chat panel closed", () => {
-    useChatStore.setState({ chatPanelOpen: true });
-    fireKey("c", { shiftKey: true });
-    expect(useChatStore.getState().chatPanelOpen).toBe(false);
-  });
+  it("Escape closes legacy panels in priority order outside cockpit mode", () => {
+    useChatStore.setState({
+      chatPanelOpen: true,
+      questPanelOpen: true,
+      settingsPanelOpen: true,
+    });
 
-  it("Shift+Q toggles quest panel", () => {
-    fireKey("q", { shiftKey: true });
-    expect(useChatStore.getState().questPanelOpen).toBe(true);
-  });
-
-  it("Shift+S toggles settings panel", () => {
-    fireKey("s", { shiftKey: true });
-    expect(useChatStore.getState().settingsPanelOpen).toBe(true);
-  });
-
-  it("bare C without Shift does NOT toggle chat", () => {
-    fireKey("c");
-    expect(useChatStore.getState().chatPanelOpen).toBe(false);
-  });
-
-  it("bare Q without Shift does NOT toggle quests", () => {
-    fireKey("q");
-    expect(useChatStore.getState().questPanelOpen).toBe(false);
-  });
-
-  it("bare S without Shift does NOT toggle settings (no WASD conflict)", () => {
-    fireKey("s");
-    expect(useChatStore.getState().settingsPanelOpen).toBe(false);
-  });
-
-  it("Escape closes chat panel first", () => {
-    useChatStore.setState({ chatPanelOpen: true, questPanelOpen: true });
-    fireKey("Escape");
+    handleGlobalKeyboardShortcut(makeEvent("Escape"));
     expect(useChatStore.getState().chatPanelOpen).toBe(false);
     expect(useChatStore.getState().questPanelOpen).toBe(true);
   });
 
-  it("Escape closes quest panel when chat is closed", () => {
-    useChatStore.setState({ chatPanelOpen: false, questPanelOpen: true });
-    fireKey("Escape");
-    expect(useChatStore.getState().questPanelOpen).toBe(false);
-  });
+  it("ignores shortcuts while typing in inputs", () => {
+    useChatStore.setState({ interfaceMode: "cockpit" });
 
-  it("Escape closes settings panel when others are closed", () => {
-    useChatStore.setState({ settingsPanelOpen: true });
-    fireKey("Escape");
-    expect(useChatStore.getState().settingsPanelOpen).toBe(false);
-  });
+    handleGlobalKeyboardShortcut(makeEvent("2", { shiftKey: true, target: { tagName: "INPUT" } }));
+    handleGlobalKeyboardShortcut(makeEvent("i", { shiftKey: true, target: { tagName: "TEXTAREA" } }));
 
-  it("Escape does nothing when all panels closed", () => {
-    fireKey("Escape");
-    expect(useChatStore.getState().chatPanelOpen).toBe(false);
-    expect(useChatStore.getState().questPanelOpen).toBe(false);
-    expect(useChatStore.getState().settingsPanelOpen).toBe(false);
-  });
-
-  it("ignores keys when target is INPUT", () => {
-    fireKey("c", { target: { tagName: "INPUT" }, shiftKey: true });
-    expect(useChatStore.getState().chatPanelOpen).toBe(false);
-  });
-
-  it("ignores keys when target is TEXTAREA", () => {
-    fireKey("s", { target: { tagName: "TEXTAREA" }, shiftKey: true });
-    expect(useChatStore.getState().settingsPanelOpen).toBe(false);
-  });
-
-  it("handles uppercase Shift+C", () => {
-    fireKey("C", { shiftKey: true });
-    expect(useChatStore.getState().chatPanelOpen).toBe(true);
+    expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("default");
+    expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(true);
   });
 });

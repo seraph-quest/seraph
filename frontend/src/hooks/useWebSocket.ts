@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import { WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
+import { API_URL, WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { useAgentAnimation } from "./useAgentAnimation";
@@ -17,6 +17,7 @@ export function useWebSocket() {
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(WS_RECONNECT_DELAY_MS);
+  const pendingResumeRef = useRef<{ sessionId: string | null; message: string } | null>(null);
 
   const {
     addMessage,
@@ -25,6 +26,7 @@ export function useWebSocket() {
     setAgentBusy,
     setAmbientState,
     setChatPanelOpen,
+    markSessionContinuity,
   } = useChatStore();
 
   const { onToolDetected, onFinalAnswer, onThinking } = useAgentAnimation();
@@ -33,6 +35,133 @@ export function useWebSocket() {
   const onFinalAnswerRef = useRef(onFinalAnswer);
   onToolDetectedRef.current = onToolDetected;
   onFinalAnswerRef.current = onFinalAnswer;
+
+  const buildUserMessage = useCallback((message: string): ChatMessage => ({
+    id: makeId(),
+    role: "user",
+    content: message,
+    timestamp: Date.now(),
+    sessionId: useChatStore.getState().sessionId,
+  }), []);
+
+  const buildErrorMessage = useCallback((message: string): ChatMessage => ({
+    id: makeId(),
+    role: "error",
+    content: message,
+    timestamp: Date.now(),
+    sessionId: useChatStore.getState().sessionId,
+  }), []);
+
+  const sendSocketMessage = useCallback(
+    (
+      message: string,
+      sessionId: string | null,
+      echoUser: boolean,
+      messageType: "message" | "resume_message" = "message"
+    ) => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+
+      try {
+        setAgentBusy(true);
+        onThinking();
+
+        if (echoUser) {
+          addMessage(buildUserMessage(message));
+        }
+
+        wsRef.current.send(
+          JSON.stringify({
+            type: messageType,
+            message,
+            session_id: sessionId,
+          })
+        );
+        return true;
+      } catch {
+        setAgentBusy(false);
+        addMessage(buildErrorMessage("Message delivery failed."));
+        return false;
+      }
+    },
+    [addMessage, buildErrorMessage, buildUserMessage, setAgentBusy, onThinking]
+  );
+
+  const sendRestMessage = useCallback(async (message: string, sessionId: string | null) => {
+    setAgentBusy(true);
+    onThinking();
+    addMessage(buildUserMessage(message));
+
+    try {
+      const response = await fetch(`${API_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          session_id: sessionId,
+        }),
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload?.detail ?? payload;
+
+        if (response.status === 409 && detail?.type === "approval_required") {
+          const approvalMsg: ChatMessage = {
+            id: makeId(),
+            role: "approval",
+            content: detail.message ?? "Approval required before continuing.",
+            timestamp: Date.now(),
+            sessionId,
+            approvalId: detail.approval_id,
+            toolUsed: detail.tool_name,
+            riskLevel: detail.risk_level,
+            approvalStatus: "pending",
+          };
+          addMessage(approvalMsg);
+          return false;
+        }
+
+        const messageText =
+          (typeof detail === "string" && detail)
+          || detail?.message
+          || "Message delivery failed.";
+        addMessage(buildErrorMessage(messageText));
+        return false;
+      }
+
+      const nextSessionId = typeof payload?.session_id === "string" ? payload.session_id : sessionId;
+      if (nextSessionId) {
+        setSessionId(nextSessionId);
+      }
+
+      const responseText = typeof payload?.response === "string" ? payload.response : "";
+      onFinalAnswerRef.current(responseText);
+      addMessage({
+        id: makeId(),
+        role: "agent",
+        content: responseText,
+        timestamp: Date.now(),
+        sessionId: nextSessionId,
+      });
+
+      await useChatStore.getState().fetchProfile();
+      await useChatStore.getState().loadSessions();
+      if (nextSessionId) {
+        const updated = useChatStore.getState();
+        const session = updated.sessions.find((item) => item.id === nextSessionId);
+        if (session && session.title === "New Conversation") {
+          await updated.generateSessionTitle(nextSessionId);
+        }
+      }
+
+      return true;
+    } catch {
+      addMessage(buildErrorMessage("Message delivery failed."));
+      return false;
+    } finally {
+      setAgentBusy(false);
+    }
+  }, [addMessage, buildErrorMessage, buildUserMessage, onThinking, setAgentBusy, setSessionId]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -47,13 +176,13 @@ export function useWebSocket() {
       useChatStore.getState().fetchProfile();
       useChatStore.getState().fetchToolRegistry();
 
-      // Await sessions load before restoring last session to avoid race
-      useChatStore.getState().loadSessions().then(() => {
-        const stored = useChatStore.getState().sessionId;
-        if (stored && useChatStore.getState().messages.length === 0) {
-          useChatStore.getState().switchSession(stored);
-        }
-      });
+      void useChatStore.getState().restoreLastSession();
+
+      if (pendingResumeRef.current) {
+        const pending = pendingResumeRef.current;
+        pendingResumeRef.current = null;
+        sendSocketMessage(pending.message, pending.sessionId, false, "resume_message");
+      }
 
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -70,7 +199,13 @@ export function useWebSocket() {
 
         if (data.session_id) {
           const current = useChatStore.getState().sessionId;
-          if (!current) setSessionId(data.session_id);
+          if (!current) {
+            setSessionId(data.session_id);
+          } else if (current !== data.session_id) {
+            markSessionContinuity(data.session_id, "new_activity");
+            void useChatStore.getState().loadSessions();
+            return;
+          }
         }
 
         if (data.type === "step") {
@@ -84,6 +219,7 @@ export function useWebSocket() {
             role: "step",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
             stepNumber: data.step ?? undefined,
             toolUsed: tool ?? undefined,
           };
@@ -97,6 +233,7 @@ export function useWebSocket() {
             role: "agent",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
           };
           addMessage(agentMsg);
 
@@ -120,8 +257,24 @@ export function useWebSocket() {
             role: "error",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
           };
           addMessage(errorMsg);
+        } else if (data.type === "approval_required") {
+          setAgentBusy(false);
+
+          const approvalMsg: ChatMessage = {
+            id: makeId(),
+            role: "approval",
+            content: data.content,
+            timestamp: Date.now(),
+            sessionId: data.session_id,
+            approvalId: data.approval_id,
+            toolUsed: data.tool_name,
+            riskLevel: data.risk_level,
+            approvalStatus: "pending",
+          };
+          addMessage(approvalMsg);
         } else if (data.type === "proactive") {
           // Phase 3: Proactive messages from Seraph
           const proactiveMsg: ChatMessage = {
@@ -129,6 +282,8 @@ export function useWebSocket() {
             role: "proactive",
             content: data.content,
             timestamp: Date.now(),
+            sessionId: data.session_id,
+            interventionId: data.intervention_id,
             urgency: data.urgency ?? undefined,
             interventionType: data.intervention_type ?? undefined,
           };
@@ -161,6 +316,7 @@ export function useWebSocket() {
     };
 
     ws.onclose = () => {
+      setAgentBusy(false);
       setConnectionStatus("disconnected");
       if (pingRef.current) clearInterval(pingRef.current);
       reconnectRef.current = setTimeout(connect, backoffRef.current);
@@ -168,10 +324,11 @@ export function useWebSocket() {
     };
 
     ws.onerror = () => {
+      setAgentBusy(false);
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
+  }, [addMessage, markSessionContinuity, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
   const skipOnboarding = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -180,40 +337,44 @@ export function useWebSocket() {
   }, []);
 
   const sendMessage = useCallback(
-    (message: string) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
-      setAgentBusy(true);
-      onThinking();
-
-      const userMsg: ChatMessage = {
-        id: makeId(),
-        role: "user",
-        content: message,
-        timestamp: Date.now(),
-      };
-      addMessage(userMsg);
-
+    async (message: string) => {
       const sessionId = useChatStore.getState().sessionId;
-      wsRef.current.send(
-        JSON.stringify({
-          type: "message",
-          message,
-          session_id: sessionId,
-        })
-      );
+      if (sendSocketMessage(message, sessionId, true)) {
+        return true;
+      }
+
+      return sendRestMessage(message, sessionId);
     },
-    [addMessage, setAgentBusy, onThinking]
+    [sendRestMessage, sendSocketMessage]
   );
 
   useEffect(() => {
+    const handleApprovalResume = (payload: { sessionId?: string | null; message?: string }) => {
+      if (!payload?.message) return;
+      const fallbackSessionId = useChatStore.getState().sessionId;
+      const ok = sendSocketMessage(
+        payload.message,
+        payload.sessionId ?? fallbackSessionId,
+        false,
+        "resume_message"
+      );
+      if (!ok) {
+        pendingResumeRef.current = {
+          sessionId: payload.sessionId ?? fallbackSessionId,
+          message: payload.message,
+        };
+      }
+    };
+
+    EventBus.on("approval-resume", handleApprovalResume);
     connect();
     return () => {
+      EventBus.off("approval-resume", handleApprovalResume);
       if (pingRef.current) clearInterval(pingRef.current);
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, sendSocketMessage]);
 
   return { sendMessage, skipOnboarding };
 }

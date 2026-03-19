@@ -10,11 +10,18 @@ Tier 2 (dynamic): one specialist per connected MCP server
 
 import re
 
-from smolagents import LiteLLMModel, ToolCallingAgent
+from smolagents import ToolCallingAgent
 
 from config.settings import settings
+from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.plugins.loader import discover_tools
+from src.skills.manager import skill_manager
+from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
+from src.tools.audit import wrap_tools_for_audit
 from src.tools.mcp_manager import mcp_manager
+from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
+from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
+from src.workflows.manager import workflow_manager
 
 # --- Tool → domain mapping ---
 
@@ -23,6 +30,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "update_soul": "memory",
     "store_secret": "memory",
     "get_secret": "memory",
+    "get_secret_ref": "memory",
     "list_secrets": "memory",
     "delete_secret": "memory",
     "create_goal": "goals",
@@ -83,6 +91,15 @@ SPECIALIST_CONFIGS: dict[str, dict] = {
     },
 }
 
+WORKFLOW_RUNNER_CONFIG = {
+    "description": (
+        "Executes reusable multi-step workflows that chain tools, skills, "
+        "and connected MCP capabilities for repeatable outcomes."
+    ),
+    "temperature": 0.2,
+    "max_steps": 6,
+}
+
 
 def _sanitize_agent_name(name: str) -> str:
     """Convert a string to a valid Python identifier for use as agent name."""
@@ -96,15 +113,18 @@ def _sanitize_agent_name(name: str) -> str:
     return sanitized or "unnamed_agent"
 
 
-def _create_model(temperature: float) -> LiteLLMModel:
+def mcp_specialist_runtime_path(server_name: str) -> str:
+    """Return the runtime path/name used for a connected MCP specialist."""
+    return _sanitize_agent_name(f"mcp_{server_name}")
+
+
+def _create_model(temperature: float, runtime_path: str) -> LiteLLMModel:
     """Create a LiteLLMModel with specialist-specific temperature."""
-    return LiteLLMModel(
-        model_id=settings.default_model,
-        api_key=settings.openrouter_api_key,
-        api_base="https://openrouter.ai/api/v1",
+    return LiteLLMModel(**build_model_kwargs(
         temperature=temperature,
         max_tokens=settings.model_max_tokens,
-    )
+        runtime_path=runtime_path,
+    ))
 
 
 def create_specialist(
@@ -115,7 +135,7 @@ def create_specialist(
     max_steps: int,
 ) -> ToolCallingAgent:
     """Create a specialist agent with the given tools and settings."""
-    model = _create_model(temperature)
+    model = _create_model(temperature, runtime_path=name)
     return ToolCallingAgent(
         tools=tools,
         model=model,
@@ -167,7 +187,7 @@ def create_mcp_specialist(
     description: str = "",
 ) -> ToolCallingAgent:
     """Create a specialist agent for a single MCP server's tools."""
-    name = _sanitize_agent_name(f"mcp_{server_name}")
+    name = mcp_specialist_runtime_path(server_name)
     if not description:
         tool_names = [getattr(t, "name", str(t)) for t in tools]
         description = f"MCP server '{server_name}' with tools: {', '.join(tool_names)}"
@@ -179,10 +199,17 @@ def create_mcp_specialist(
 def build_all_specialists() -> list[ToolCallingAgent]:
     """Assemble the full list of specialist agents (built-in + MCP)."""
     # Build tools_by_name from discovered tools
-    all_tools = discover_tools()
+    mode = get_current_tool_policy_mode()
+    mcp_mode = get_current_mcp_policy_mode()
+    all_tools = wrap_tools_for_approval(
+        wrap_tools_for_audit(
+            wrap_tools_for_secret_refs(filter_tools(discover_tools(), mode))
+        )
+    )
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []
+    executable_tools: list = list(all_tools)
 
     # Tier 1: built-in specialists
     for factory in (create_memory_keeper, create_goal_planner, create_web_researcher, create_file_worker):
@@ -196,10 +223,73 @@ def build_all_specialists() -> list[ToolCallingAgent]:
         name = server_info["name"]
         if not mcp_manager.is_connected(name):
             continue
-        server_tools = mcp_manager.get_server_tools(name)
+        filtered_server_tools = filter_tools(
+            mcp_manager.get_server_tools(name),
+            mode,
+            is_mcp=True,
+            mcp_mode=mcp_mode,
+        )
+        if mcp_mode == "approval":
+            server_tools = wrap_tools_with_forced_approval(
+                wrap_tools_for_audit(
+                    wrap_tools_for_secret_refs(filtered_server_tools),
+                    treat_all_as_mcp=True,
+                ),
+                treat_all_as_mcp=True,
+            )
+        else:
+            server_tools = wrap_tools_for_approval(
+                wrap_tools_for_audit(
+                    wrap_tools_for_secret_refs(filtered_server_tools),
+                    treat_all_as_mcp=True,
+                ),
+                treat_all_as_mcp=True,
+            )
         if not server_tools:
             continue
         desc = server_info.get("description", "")
+        executable_tools.extend(server_tools)
         specialists.append(create_mcp_specialist(name, server_tools, desc))
+
+    active_skill_names = [
+        skill.name
+        for skill in skill_manager.get_active_skills([tool.name for tool in executable_tools])
+    ]
+    workflow_tools = workflow_manager.build_workflow_tools(
+        executable_tools,
+        active_skill_names,
+    )
+    forced_approval_workflows: list = []
+    normal_workflows: list = []
+    workflow_risk_overrides: dict[str, str] = {}
+    for tool in workflow_tools:
+        metadata = workflow_manager.get_tool_metadata(tool.name) or {}
+        boundaries = metadata.get("execution_boundaries", [])
+        risk_level = metadata.get("risk_level")
+        if isinstance(risk_level, str):
+            workflow_risk_overrides[tool.name] = risk_level
+        if mcp_mode == "approval" and "external_mcp" in boundaries:
+            forced_approval_workflows.append(tool)
+        else:
+            normal_workflows.append(tool)
+    workflow_tools = wrap_tools_for_approval(
+        normal_workflows,
+        risk_overrides=workflow_risk_overrides,
+    )
+    if forced_approval_workflows:
+        workflow_tools += wrap_tools_with_forced_approval(
+            forced_approval_workflows,
+            risk_overrides=workflow_risk_overrides,
+        )
+    if workflow_tools:
+        specialists.append(
+            create_specialist(
+                "workflow_runner",
+                WORKFLOW_RUNNER_CONFIG["description"],
+                workflow_tools,
+                WORKFLOW_RUNNER_CONFIG["temperature"],
+                WORKFLOW_RUNNER_CONFIG["max_steps"],
+            )
+        )
 
     return specialists

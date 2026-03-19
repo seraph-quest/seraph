@@ -4,25 +4,28 @@ sidebar_position: 2
 
 # OpenClaw vs Seraph — Feature Gap Analysis
 
+> This document is a historical comparison snapshot, not the live product-status source of truth. For current status, use `docs/implementation/00-master-roadmap.md`, `docs/implementation/STATUS.md`, and the numbered workstream files under `docs/implementation/`.
+> Historical note: the Seraph side of this comparison predates the cockpit-only pivot and still describes the retired village/editor line.
+
 > **Date**: 2026-02-09 (updated)
 > **OpenClaw version context**: v2026.1.x (145k+ GitHub stars, formerly Clawdbot/Moltbot)
-> **Seraph branch**: `main` (Phases 0–3.5 mostly complete, Phase 4 partial)
+> **Seraph branch**: `develop` (current repo snapshot; this file remains historical/reference, not the source of truth)
 
 ## Overview
 
 **OpenClaw** is a self-hosted gateway connecting messaging platforms (WhatsApp, Telegram, Discord, etc.) to AI agents. It's headless — text-in/text-out with no visual UI.
 
-**Seraph** is a self-contained web app with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar casts magic effects when using tools while the user chats via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals.
+**Seraph** in this historical snapshot is described through the old village-first shell. That is no longer the active product direction; current Seraph is cockpit-first.
 
 Different philosophies, but many of OpenClaw's features are worth adopting.
 
 ---
 
-## What Seraph Has (Phase 0-2 Complete)
+## What Seraph Has In The Current Repo
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
 - Tool execution with visual feedback (animated RPG avatar casts magic effects in village)
-- **12 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
+- **17 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
 - **Memory consolidation** — Background extraction of facts/preferences/decisions after each conversation
@@ -93,8 +96,8 @@ These were gaps in the original analysis that have since been implemented:
 | **Sandboxed execution** | No sandboxing | snekbox Docker sidecar (Phase 2) |
 | **Browser automation** | DuckDuckGo text search only | Playwright with headless Chromium (Phase 2) |
 | **Shell command execution** | No shell tool | snekbox-based sandboxed execution (Phase 2) |
-| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (12 native tools) + MCP integrations + SKILL.md plugins (Phase 2 + 4) |
-| **Proactive heartbeat** | No scheduler or reasoning engine | APScheduler with 6 jobs: strategist tick, daily briefing, evening review, memory consolidation, goal check, calendar scan (Phase 3) |
+| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (17 built-in tool capabilities) + MCP integrations + SKILL.md plugins |
+| **Proactive heartbeat** | No scheduler or reasoning engine | APScheduler with 9 jobs: strategist tick, daily briefing, evening review, memory consolidation, goal check, calendar scan, activity digest, weekly activity review, screen cleanup |
 | **Multi-agent / subagents** | Single agent (+ onboarding agent) | Recursive delegation with orchestrator + domain specialists behind feature flag (Phase 4) |
 | **Configuration UI** | No settings UI | Settings panel with interruption mode toggle, SKILL.md management, MCP server management (Phase 3.5) |
 

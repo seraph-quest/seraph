@@ -2,6 +2,7 @@ import os
 import logging
 
 from config.settings import settings
+from src.audit.runtime import log_integration_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -25,21 +26,56 @@ _DEFAULT_SOUL = """# Soul of the Traveler
 """
 
 
+def _log_soul_event(outcome: str, details: dict | None = None) -> None:
+    log_integration_event_sync(
+        integration_type="soul_file",
+        name=os.path.basename(_soul_path),
+        outcome=outcome,
+        details=details,
+    )
+
+
 def read_soul() -> str:
     """Read the soul file. Returns default template if not found."""
     try:
         with open(_soul_path, "r", encoding="utf-8") as f:
-            return f.read()
+            text = f.read()
+            _log_soul_event(
+                "succeeded",
+                details={"operation": "read", "used_default": False, "length": len(text)},
+            )
+            return text
     except FileNotFoundError:
+        _log_soul_event(
+            "empty_result",
+            details={"operation": "read", "reason": "missing_file", "used_default": True},
+        )
         return _DEFAULT_SOUL
+    except Exception as exc:
+        _log_soul_event(
+            "failed",
+            details={"operation": "read", "error": str(exc)},
+        )
+        raise
 
 
 def write_soul(content: str) -> None:
     """Write the full soul file."""
-    os.makedirs(os.path.dirname(_soul_path), exist_ok=True)
-    with open(_soul_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    logger.info("Soul file updated")
+    try:
+        os.makedirs(os.path.dirname(_soul_path), exist_ok=True)
+        with open(_soul_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info("Soul file updated")
+        _log_soul_event(
+            "succeeded",
+            details={"operation": "write", "length": len(content)},
+        )
+    except Exception as exc:
+        _log_soul_event(
+            "failed",
+            details={"operation": "write", "length": len(content), "error": str(exc)},
+        )
+        raise
 
 
 def update_soul_section(section: str, content: str) -> str:
@@ -86,3 +122,12 @@ def ensure_soul_exists() -> None:
     if not os.path.exists(_soul_path):
         write_soul(_DEFAULT_SOUL)
         logger.info("Created default soul file at %s", _soul_path)
+        _log_soul_event(
+            "succeeded",
+            details={"operation": "ensure", "created": True},
+        )
+    else:
+        _log_soul_event(
+            "skipped",
+            details={"operation": "ensure", "created": False},
+        )

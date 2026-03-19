@@ -1,11 +1,16 @@
 """Token-aware context window for conversation history."""
 
+import hashlib
 import logging
+import math
 from functools import lru_cache
 
 import tiktoken
 
 from config.settings import settings
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.audit.runtime import log_background_task_event_sync
+from src.llm_runtime import completion_with_fallback_sync
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +18,28 @@ _summary_cache: dict[str, str] = {}
 
 
 @lru_cache(maxsize=1)
-def _get_encoding():
+def _load_encoding():
     return tiktoken.get_encoding("cl100k_base")
 
 
+def _get_encoding():
+    try:
+        return _load_encoding()
+    except Exception:
+        logger.warning("Failed to load tiktoken encoding, using approximate token counts", exc_info=True)
+        return None
+
+
 def _count_tokens(text: str) -> int:
-    return len(_get_encoding().encode(text))
+    if not text:
+        return 0
+
+    encoding = _get_encoding()
+    if encoding is None:
+        # Rough fallback: GPT-style tokenization is often around 3-4 chars/token.
+        return max(1, math.ceil(len(text) / 4))
+
+    return len(encoding.encode(text))
 
 
 def _format_messages(messages: list[dict]) -> str:
@@ -37,11 +58,13 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
         return _summary_cache[cache_key]
 
     text = _format_messages(messages)
+    message_count = len(messages)
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    runtime_tokens = None
     try:
-        import litellm
-
-        response = litellm.completion(
-            model=settings.default_model,
+        if session_id:
+            runtime_tokens = set_runtime_context(session_id, "high_risk")
+        response = completion_with_fallback_sync(
             messages=[{
                 "role": "user",
                 "content": (
@@ -50,15 +73,42 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
                     f"{text[:8000]}"
                 ),
             }],
-            api_key=settings.openrouter_api_key,
-            api_base="https://openrouter.ai/api/v1",
             temperature=0.3,
             max_tokens=200,
+            runtime_path="context_window_summary",
         )
         summary = response.choices[0].message.content.strip()
+        log_background_task_event_sync(
+            task_name="context_window_summary",
+            session_id=session_id or None,
+            outcome="succeeded",
+            details={
+                "range_key": range_key,
+                "message_count": message_count,
+                "summary_length": len(summary),
+                "source_hash": text_hash,
+                "runtime_path": "context_window_summary",
+            },
+        )
     except Exception:
         logger.warning("Failed to summarize middle section, using truncation fallback")
         summary = text[:500] + "\n[...earlier conversation truncated...]"
+        log_background_task_event_sync(
+            task_name="context_window_summary",
+            session_id=session_id or None,
+            outcome="degraded",
+            details={
+                "range_key": range_key,
+                "message_count": message_count,
+                "summary_length": len(summary),
+                "source_hash": text_hash,
+                "fallback": "truncation",
+                "runtime_path": "context_window_summary",
+            },
+        )
+    finally:
+        if runtime_tokens is not None:
+            reset_runtime_context(runtime_tokens)
 
     _summary_cache[cache_key] = summary
     # Keep cache bounded

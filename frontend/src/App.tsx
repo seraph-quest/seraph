@@ -1,19 +1,24 @@
-import { useRef, useEffect } from "react";
-import { PhaserGame, type IRefPhaserGame } from "./game/PhaserGame";
-import { ChatPanel } from "./components/chat/ChatPanel";
+import { useEffect } from "react";
 import { QuestPanel } from "./components/quest/QuestPanel";
-import { HudButtons } from "./components/HudButtons";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useChatStore } from "./stores/chatStore";
 import { EventBus } from "./game/EventBus";
+import { CockpitView } from "./components/cockpit/CockpitView";
 
 export default function App() {
   const { sendMessage, skipOnboarding } = useWebSocket();
   useKeyboardShortcuts();
-  const phaserRef = useRef<IRefPhaserGame>(null);
+  const interfaceMode = useChatStore((s) => s.interfaceMode);
+  const setInterfaceMode = useChatStore((s) => s.setInterfaceMode);
   // Bridge Phaser EventBus → React panel toggles
+  useEffect(() => {
+    if (interfaceMode !== "cockpit") {
+      setInterfaceMode("cockpit");
+    }
+  }, [interfaceMode, setInterfaceMode]);
+
   useEffect(() => {
     const toggleChat = () => {
       const s = useChatStore.getState();
@@ -35,14 +40,9 @@ export default function App() {
 
   return (
     <>
-      <div id="game-viewport" className="fixed inset-0 z-0">
-        <PhaserGame ref={phaserRef} />
-      </div>
-      <ChatPanel onSend={sendMessage} onSkipOnboarding={skipOnboarding} />
+      <CockpitView onSend={sendMessage} onSkipOnboarding={skipOnboarding} />
       <QuestPanel />
       <SettingsPanel />
-      <HudButtons />
-      <div className="crt-overlay" />
     </>
   );
 }

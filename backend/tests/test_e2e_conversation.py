@@ -3,13 +3,17 @@
 Uses a mocked agent to verify the full WS pipeline without hitting a real LLM.
 """
 
+import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from smolagents import ToolCall, ActionStep, FinalAnswerStep
 from smolagents.monitoring import Timing
 from starlette.testclient import TestClient
 
+from src.approval.exceptions import ApprovalRequired
+from src.audit.repository import audit_repository
+from src.vault.repository import vault_repository
 from tests.test_websocket import _make_sync_client_with_db
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
@@ -154,6 +158,230 @@ class TestE2EConversation:
                     # First step should mention web_search tool
                     assert any("web_search" in s["content"] for s in steps), \
                         f"No step mentions web_search: {[s['content'] for s in steps]}"
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_agent_run_success_is_written_to_audit_log(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter(_make_agent_steps())
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "search for weather",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        if msg["type"] == "final":
+                            break
+
+                events = client.get("/api/audit/events").json()
+                assert any(
+                    event["event_type"] == "agent_run_succeeded"
+                    and event["tool_name"] == "chat_agent"
+                    and event["details"]["transport"] == "websocket"
+                    for event in events
+                )
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_high_risk_tool_sends_approval_required_message(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.side_effect = ApprovalRequired(
+                approval_id="approval-1",
+                session_id="s1",
+                tool_name="shell_execute",
+                risk_level="high",
+                summary="Calling tool: shell_execute({\"code\": \"[redacted]\"})",
+            )
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "run this snippet",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        if msg["type"] == "approval_required":
+                            assert msg["approval_id"] == "approval-1"
+                            assert msg["tool_name"] == "shell_execute"
+                            assert msg["risk_level"] == "high"
+                            assert "continue automatically" in msg["content"]
+                            break
+                    else:
+                        raise AssertionError("Expected approval_required message")
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_timeout_logs_only_timed_out_runtime_event(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter(_make_agent_steps())
+
+            with (
+                patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())),
+                patch(
+                    "src.api.ws.asyncio.wait_for",
+                    new=AsyncMock(side_effect=asyncio.TimeoutError),
+                ),
+                patch("src.memory.consolidator.consolidate_session"),
+            ):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "search for weather",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        if msg["type"] == "final":
+                            assert "taking too long" in msg["content"]
+                            break
+                    else:
+                        raise AssertionError("Expected timeout final message")
+
+                events = client.get("/api/audit/events").json()
+                assert any(
+                    event["event_type"] == "agent_run_timed_out"
+                    and event["tool_name"] == "chat_agent"
+                    and event["details"]["transport"] == "websocket"
+                    for event in events
+                )
+                assert not any(
+                    event["event_type"] == "agent_run_succeeded"
+                    and event["tool_name"] == "chat_agent"
+                    and event["details"]["transport"] == "websocket"
+                    for event in events
+                )
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_secret_values_are_redacted_in_streamed_messages(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            import asyncio
+
+            asyncio.run(vault_repository.store("service_token", "super-secret-token"))
+
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter([
+                ToolCall(name="get_secret", arguments={"key": "service_token"}, id="tc1"),
+                ActionStep(
+                    step_number=1,
+                    timing=_TIMING,
+                    observations="Retrieved secret: super-secret-token",
+                    is_final_answer=False,
+                ),
+                FinalAnswerStep(output="Using secret super-secret-token now."),
+            ])
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "fetch the token",
+                        "session_id": None,
+                    }))
+
+                    received = []
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        received.append(msg)
+                        if msg["type"] == "final":
+                            break
+
+                    contents = [msg["content"] for msg in received if "content" in msg]
+                    assert any("[redacted secret]" in content for content in contents)
+                    assert all("super-secret-token" not in content for content in contents)
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_resume_message_does_not_duplicate_user_turn(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.return_value = iter([
+                FinalAnswerStep(output="Resumed successfully."),
+            ])
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "run this snippet",
+                        "session_id": "s-resume",
+                    }))
+
+                    for _ in range(10):
+                        msg = json.loads(ws.receive_text())
+                        if msg["type"] == "final":
+                            break
+
+                    ws.send_text(json.dumps({
+                        "type": "resume_message",
+                        "message": "run this snippet",
+                        "session_id": "s-resume",
+                    }))
+
+                    for _ in range(10):
+                        msg = json.loads(ws.receive_text())
+                        if msg["type"] == "final":
+                            break
+
+                messages = client.get("/api/sessions/s-resume/messages").json()
+                user_messages = [m for m in messages if m["role"] == "user"]
+                assert len(user_messages) == 1
+                assert user_messages[0]["content"] == "run this snippet"
         finally:
             stack.close()
             for p in patches:

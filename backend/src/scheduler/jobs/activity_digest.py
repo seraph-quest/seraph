@@ -3,8 +3,11 @@
 import asyncio
 import logging
 from datetime import date
+from time import perf_counter
 
 from config.settings import settings
+from src.audit.runtime import log_background_task_event, log_scheduler_job_event
+from src.llm_runtime import completion_with_fallback
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
@@ -39,8 +42,30 @@ Write a short activity digest (4-8 sentences) covering:
 Be concise. No preamble. Just the digest text."""
 
 
+def _normalize_summary(summary: dict) -> tuple[dict, list[str]]:
+    """Fill optional summary fields and surface degraded inputs when they are missing."""
+    degraded_inputs = []
+    normalized = dict(summary)
+
+    defaults = {
+        "total_tracked_minutes": 0,
+        "switch_count": 0,
+        "by_activity": {},
+        "by_project": {},
+        "longest_streaks": [],
+    }
+
+    for key, fallback in defaults.items():
+        if key not in normalized:
+            normalized[key] = fallback
+            degraded_inputs.append(key)
+
+    return normalized, degraded_inputs
+
+
 async def run_activity_digest() -> None:
     """Generate and send the daily activity digest to connected clients."""
+    started_at = perf_counter()
     try:
         from src.observer.screen_repository import screen_observation_repo
         from src.memory.soul import read_soul
@@ -48,8 +73,28 @@ async def run_activity_digest() -> None:
         summary = await screen_observation_repo.get_daily_summary(date.today())
 
         if summary.get("total_observations", 0) == 0:
+            await log_scheduler_job_event(
+                job_name="activity_digest",
+                outcome="skipped",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "reason": "no_observations",
+                },
+            )
             logger.info("activity_digest: no observations today — skipping")
             return
+
+        summary, degraded_inputs = _normalize_summary(summary)
+        if degraded_inputs:
+            await log_background_task_event(
+                task_name="activity_digest_inputs",
+                outcome="degraded",
+                details={
+                    "source": "screen_summary",
+                    "missing_fields": degraded_inputs,
+                },
+            )
+        data_quality = "degraded" if degraded_inputs else "good"
 
         soul = read_soul()
 
@@ -78,23 +123,24 @@ async def run_activity_digest() -> None:
             streaks=streaks,
         )
 
-        import litellm
-
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    litellm.completion,
-                    model=settings.default_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    api_key=settings.openrouter_api_key,
-                    api_base="https://openrouter.ai/api/v1",
-                    temperature=0.6,
-                    max_tokens=768,
-                ),
+            response = await completion_with_fallback(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_tokens=768,
                 timeout=settings.agent_briefing_timeout,
+                runtime_path="activity_digest",
             )
         except asyncio.TimeoutError:
             logger.warning("activity_digest: LLM timed out after %ds", settings.agent_briefing_timeout)
+            await log_scheduler_job_event(
+                job_name="activity_digest",
+                outcome="timed_out",
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "timeout_seconds": settings.agent_briefing_timeout,
+                },
+            )
             return
 
         digest_text = response.choices[0].message.content.strip()
@@ -109,7 +155,27 @@ async def run_activity_digest() -> None:
             reasoning="Scheduled daily activity digest",
         )
         await deliver_or_queue(message, is_scheduled=True)
+        await log_scheduler_job_event(
+            job_name="activity_digest",
+            outcome="succeeded",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "response_length": len(digest_text),
+                "total_tracked_minutes": summary.get("total_tracked_minutes", 0),
+                "switch_count": summary.get("switch_count", 0),
+                "data_quality": data_quality,
+                "degraded_inputs": degraded_inputs,
+            },
+        )
         logger.info("activity_digest: delivered daily digest")
 
-    except Exception:
+    except Exception as exc:
+        await log_scheduler_job_event(
+            job_name="activity_digest",
+            outcome="failed",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "error": str(exc),
+            },
+        )
         logger.exception("activity_digest failed")

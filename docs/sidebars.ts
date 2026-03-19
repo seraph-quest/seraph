@@ -1,17 +1,29 @@
 import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
-  docsSidebar: [
+  legacySidebar: [
     'intro',
     'setup',
     {
       type: 'category',
       label: 'Overview',
-      items: ['overview/vision', 'overview/roadmap', 'overview/status-report', 'overview/next-steps'],
+      items: ['overview/status-report', 'overview/roadmap'],
     },
     {
       type: 'category',
-      label: 'Development Phases',
+      label: 'Plan',
+      items: [
+        'plan/trust-boundaries',
+        'plan/execution-plane',
+        'plan/runtime-reliability',
+        'plan/presence-and-reach',
+        'plan/guardian-intelligence',
+        'plan/ecosystem-and-leverage',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Archived Phases',
       items: [
         'development/phase-1-persistent-identity',
         'development/phase-2-capable-executor',
@@ -19,13 +31,6 @@ const sidebars: SidebarsConfig = {
         'development/phase-3.5-polish-and-production',
         'development/phase-4-the-network',
         'development/phase-5-security',
-      ],
-    },
-    {
-      type: 'category',
-      label: 'Tools',
-      items: [
-        'tools/village-editor',
       ],
     },
     {
@@ -48,9 +53,24 @@ const sidebars: SidebarsConfig = {
       label: 'Architecture',
       items: [
         'architecture/tauri-analysis',
-        'architecture/feature-comparison',
         'architecture/recursive-delegation-research',
         'development/screen-daemon-research',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Archived Directions',
+      items: [
+        'archive/village-first-vision',
+        'archive/village-editor',
+        'architecture/competitive-agent-research',
+        'architecture/feature-comparison',
+        'development/openclaw-feature-parity',
+        'plan/embodied-ux',
+        'roadmap/sections/section-4-embodiment-life-os',
+        'roadmap/seasons/season-4-embodied-life-os',
+        'roadmap/batches/s4-b1-avatar-reflection',
+        'roadmap/batches/s4-b3-world-motivation',
       ],
     },
   ],

@@ -1,28 +1,37 @@
-export type MessageRole = "user" | "agent" | "step" | "error" | "proactive";
+export type MessageRole = "user" | "agent" | "step" | "error" | "proactive" | "approval";
 
 export interface ChatMessage {
   id: string;
   role: MessageRole;
   content: string;
   timestamp: number;
+  sessionId?: string | null;
+  interventionId?: string;
   stepNumber?: number;
   toolUsed?: string;
   urgency?: number;
   interventionType?: string;
+  approvalId?: string;
+  riskLevel?: string;
+  approvalStatus?: "pending" | "approved" | "denied" | "consumed";
 }
 
 export interface WSMessage {
-  type: "message" | "ping" | "skip_onboarding";
+  type: "message" | "resume_message" | "ping" | "skip_onboarding";
   message: string;
   session_id: string | null;
 }
 
 export interface WSResponse {
-  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient";
+  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient" | "approval_required";
   content: string;
   session_id: string;
   step: number | null;
   seq: number | null;
+  intervention_id?: string;
+  approval_id?: string;
+  tool_name?: string;
+  risk_level?: string;
   urgency?: number;
   intervention_type?: string;
   reasoning?: string;
@@ -59,6 +68,8 @@ export interface SessionInfo {
   last_message: string | null;
   last_message_role: string | null;
 }
+
+export type SessionContinuityState = "live" | "restored" | "new_activity";
 
 export interface GoalInfo {
   id: string;

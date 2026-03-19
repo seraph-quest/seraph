@@ -36,9 +36,15 @@ class CurrentContext:
 
     # Daemon heartbeat — Unix timestamp of last POST from daemon
     last_daemon_post: Optional[float] = None
+    last_native_notification_at: Optional[datetime] = None
+    last_native_notification_title: Optional[str] = None
+    last_native_notification_outcome: Optional[str] = None
 
     # Capture mode — controls screenshot frequency (on_switch | balanced | detailed)
     capture_mode: str = "on_switch"
+    tool_policy_mode: str = "full"
+    mcp_policy_mode: str = "full"
+    approval_mode: str = "high_risk"
 
     # Phase 3.3 — State machine tracking
     previous_user_state: str = "available"
@@ -46,6 +52,10 @@ class CurrentContext:
 
     # Data quality — "good" if all sources succeeded, "degraded" if some failed, "stale" if all failed
     data_quality: str = "good"
+    observer_confidence: str = "grounded"
+    salience_level: str = "low"
+    salience_reason: str = "background"
+    interruption_cost: str = "low"
 
     def to_dict(self) -> dict:
         """Serialize for API responses."""
@@ -54,6 +64,8 @@ class CurrentContext:
             data["last_interaction"] = data["last_interaction"].isoformat()
         if data["attention_budget_last_reset"]:
             data["attention_budget_last_reset"] = data["attention_budget_last_reset"].isoformat()
+        if data["last_native_notification_at"]:
+            data["last_native_notification_at"] = data["last_native_notification_at"].isoformat()
         return data
 
     def to_prompt_block(self) -> str:
@@ -90,6 +102,16 @@ class CurrentContext:
             minutes_ago = int(delta.total_seconds() / 60)
             lines.append(f"Last interaction: {minutes_ago}m ago")
 
-        lines.append(f"User state: {self.user_state} | Mode: {self.interruption_mode} | Budget: {self.attention_budget_remaining}")
+        lines.append(
+            "User state: "
+            f"{self.user_state} | Mode: {self.interruption_mode} | "
+            f"Budget: {self.attention_budget_remaining} | Tools: {self.tool_policy_mode} | "
+            f"MCP: {self.mcp_policy_mode} | Approvals: {self.approval_mode}"
+        )
+        lines.append(
+            "Observer model: "
+            f"confidence={self.observer_confidence} | salience={self.salience_level} ({self.salience_reason}) | "
+            f"interruption_cost={self.interruption_cost}"
+        )
 
         return "\n".join(lines)

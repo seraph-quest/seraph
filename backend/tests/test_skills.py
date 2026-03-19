@@ -7,6 +7,7 @@ import tempfile
 import pytest
 import pytest_asyncio
 
+from src.audit.repository import audit_repository
 from src.skills.loader import Skill, _parse_skill_file, load_skills
 from src.skills.manager import SkillManager
 
@@ -355,3 +356,49 @@ class TestSkillAPI:
         data = resp.json()
         assert data["status"] == "reloaded"
         assert data["count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_update_skill_logs_runtime_audit(self, async_db, client, _setup_skill_manager):
+        resp = await client.put(
+            "/api/skills/test-skill",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 200
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "skill:test-skill"
+            and event["details"]["enabled"] is False
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_nonexistent_skill_logs_runtime_audit(self, async_db, client, _setup_skill_manager):
+        resp = await client.put(
+            "/api/skills/nonexistent",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 404
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_failed"
+            and event["tool_name"] == "skill:nonexistent"
+            and event["details"]["status"] == "not_found"
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_reload_skills_logs_runtime_audit(self, async_db, client, _setup_skill_manager):
+        resp = await client.post("/api/skills/reload")
+        assert resp.status_code == 200
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "skills:reload"
+            and event["details"]["count"] == 3
+            and sorted(event["details"]["skill_names"]) == ["disabled-skill", "simple-skill", "test-skill"]
+            for event in events
+        )

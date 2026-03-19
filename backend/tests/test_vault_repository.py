@@ -1,9 +1,11 @@
 """Tests for VaultRepository (src/vault/repository.py)."""
 
-from unittest.mock import patch
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.vault.repository import VaultRepository
 
 
@@ -35,6 +37,16 @@ class TestStore:
         assert secret.encrypted_value == "ENC:sk-123"
         assert secret.description == "Test key"
 
+        events = await audit_repository.list_events(limit=5)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "store"
+            and event["details"]["action"] == "created"
+            and event["details"]["description_present"] is True
+            for event in events
+        )
+
     async def test_upsert_overwrites(self, async_db, repo):
         await repo.store("token", "old-value")
         await repo.store("token", "new-value")
@@ -47,6 +59,35 @@ class TestStore:
         keys = await repo.list_keys()
         assert keys[0]["description"] == "v2"
 
+    async def test_commit_failure_logs_failed_not_success(self, repo):
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(return_value=result)
+        fake_db.flush = AsyncMock()
+        fake_db.add = MagicMock()
+
+        @asynccontextmanager
+        async def _failing_get_session():
+            yield fake_db
+            raise RuntimeError("commit failed")
+
+        with (
+            patch("src.vault.repository.get_session", _failing_get_session),
+            patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event,
+        ):
+            with pytest.raises(RuntimeError, match="commit failed"):
+                await repo.store("token", "value")
+
+        assert not any(
+            call.args == ("succeeded", "store")
+            for call in mock_log_event.await_args_list
+        )
+        assert any(
+            call.args == ("failed", "store") and call.kwargs["error"] == "commit failed"
+            for call in mock_log_event.await_args_list
+        )
+
 
 class TestGet:
     async def test_existing(self, async_db, repo):
@@ -57,6 +98,31 @@ class TestGet:
     async def test_nonexistent(self, async_db, repo):
         result = await repo.get("nope")
         assert result is None
+
+        events = await audit_repository.list_events(limit=5)
+        assert any(
+            event["event_type"] == "integration_empty_result"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "get"
+            and event["details"]["reason"] == "missing_secret"
+            for event in events
+        )
+
+    async def test_decrypt_failure_logs_runtime_audit(self, async_db, repo):
+        await repo.store("broken", "value")
+
+        with patch("src.vault.repository.decrypt", side_effect=ValueError("bad decrypt")):
+            with pytest.raises(ValueError, match="bad decrypt"):
+                await repo.get("broken")
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_failed"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "get"
+            and event["details"]["error"] == "bad decrypt"
+            for event in events
+        )
 
 
 class TestListKeys:
@@ -78,6 +144,32 @@ class TestListKeys:
             assert "value" not in entry
 
 
+class TestListSecretValues:
+    async def test_skips_undecryptable_rows(self, async_db, repo):
+        await repo.store("good", "value-a")
+        await repo.store("bad", "value-b")
+
+        def _decrypt_or_fail(ciphertext: str) -> str:
+            if ciphertext == "ENC:value-a":
+                return "value-a"
+            raise ValueError("bad row")
+
+        with patch("src.vault.repository.decrypt", side_effect=_decrypt_or_fail):
+            values = await repo.list_secret_values()
+
+        assert values == [("good", "value-a")]
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "integration_succeeded"
+            and event["tool_name"] == "vault:secrets"
+            and event["details"]["operation"] == "list_secret_values"
+            and event["details"]["decryptable_count"] == 1
+            and event["details"]["undecryptable_count"] == 1
+            for event in events
+        )
+
+
 class TestDelete:
     async def test_success(self, async_db, repo):
         await repo.store("to_delete", "val")
@@ -86,6 +178,34 @@ class TestDelete:
 
     async def test_nonexistent(self, async_db, repo):
         assert await repo.delete("nope") is False
+
+    async def test_commit_failure_logs_failed_not_success(self, repo):
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = MagicMock()
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(return_value=result)
+        fake_db.delete = AsyncMock()
+
+        @asynccontextmanager
+        async def _failing_get_session():
+            yield fake_db
+            raise RuntimeError("commit failed")
+
+        with (
+            patch("src.vault.repository.get_session", _failing_get_session),
+            patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event,
+        ):
+            with pytest.raises(RuntimeError, match="commit failed"):
+                await repo.delete("token")
+
+        assert not any(
+            call.args == ("succeeded", "delete")
+            for call in mock_log_event.await_args_list
+        )
+        assert any(
+            call.args == ("failed", "delete") and call.kwargs["error"] == "commit failed"
+            for call in mock_log_event.await_args_list
+        )
 
 
 class TestExists:

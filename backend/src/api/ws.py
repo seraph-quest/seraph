@@ -1,19 +1,35 @@
 import asyncio
+import contextvars
 import json
 import logging
+from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from smolagents import ActionStep, ToolCall, FinalAnswerStep
 
 from config.settings import settings
+from src.approval.exceptions import ApprovalRequired
+from src.approval.repository import approval_repository
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
+from src.audit.formatting import format_tool_call_summary
+from src.audit.runtime import log_agent_run_event
+from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete, reset_onboarding
-from src.memory.soul import read_soul
-from src.memory.vector_store import search_formatted
+from src.guardian.state import build_guardian_state
 from src.models.schemas import WSMessage, WSResponse
 from src.scheduler.connection_manager import ws_manager
+from src.tools.policy import get_current_tool_policy_mode
+from src.vault.redaction import redact_secrets_in_text
+from src.llm_runtime import (
+    _finish_request,
+    _mark_request_timed_out,
+    _register_request,
+    reset_current_llm_request_id,
+    set_current_llm_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +41,7 @@ _DONE = object()  # sentinel for queue completion
 
 def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
     """Format a tool call step for WS display."""
-    if step_name in specialist_names:
-        task = arguments.get("task", "") if isinstance(arguments, dict) else ""
-        return f"Delegating to {step_name}: {task}"
-    return f"Calling tool: {step_name}({json.dumps(arguments)})"
+    return format_tool_call_summary(step_name, arguments, specialist_names)
 
 
 def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
@@ -52,19 +65,11 @@ async def _build_agent(session_id: str, message: str):
     if not profile.onboarding_completed:
         return create_onboarding_agent(), True, set()
 
-    history = await session_manager.get_history_text(session_id)
-    soul = read_soul()
-    memories = await asyncio.to_thread(search_formatted, message)
-
-    from src.observer.manager import context_manager as obs_manager
-    observer_context = obs_manager.get_context().to_prompt_block()
-
-    agent = build_agent(
-        additional_context=history,
-        soul_context=soul,
-        memory_context=memories,
-        observer_context=observer_context,
+    guardian_state = await build_guardian_state(
+        session_id=session_id,
+        user_message=message,
     )
+    agent = build_agent(guardian_state=guardian_state)
     specialist_names = (
         set(agent.managed_agents.keys())
         if hasattr(agent, "managed_agents") and agent.managed_agents
@@ -138,7 +143,8 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             session = await session_manager.get_or_create(ws_msg.session_id)
-            await session_manager.add_message(session.id, "user", ws_msg.message)
+            if ws_msg.type != "resume_message":
+                await session_manager.add_message(session.id, "user", ws_msg.message)
             try:
                 from src.observer.manager import context_manager
                 context_manager.update_last_interaction()
@@ -149,14 +155,24 @@ async def websocket_chat(websocket: WebSocket):
 
             step_num = 0
             final_result = ""
+            tool_call_count = 0
+            started_at = perf_counter()
+            run_outcome = "succeeded"
 
             try:
                 queue: asyncio.Queue = asyncio.Queue()
                 loop = asyncio.get_running_loop()
-                loop.run_in_executor(None, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
+                llm_request_id = f"agent-ws:{session.id}:{started_at}"
+                _register_request(llm_request_id)
+                tokens = set_runtime_context(session.id, context_manager.get_context().approval_mode)
+                llm_request_token = set_current_llm_request_id(llm_request_id)
+                run_ctx = contextvars.copy_context()
+                reset_runtime_context(tokens)
+                reset_current_llm_request_id(llm_request_token)
+                loop.run_in_executor(None, run_ctx.run, _run_agent_to_queue, agent, ws_msg.message, queue, loop)
 
                 async def _drain_queue():
-                    nonlocal step_num, final_result
+                    nonlocal step_num, final_result, tool_call_count
                     while True:
                         step = await queue.get()
                         if step is _DONE:
@@ -167,6 +183,7 @@ async def websocket_chat(websocket: WebSocket):
                         if isinstance(step, ToolCall):
                             if step.name == "final_answer":
                                 continue
+                            tool_call_count += 1
                             step_num += 1
                             content = _format_tool_step(step.name, step.arguments, specialist_names)
                             await websocket.send_text(
@@ -181,11 +198,12 @@ async def websocket_chat(websocket: WebSocket):
 
                         elif isinstance(step, ActionStep):
                             if step.observations and not step.is_final_answer:
+                                safe_observations = await redact_secrets_in_text(step.observations)
                                 step_num += 1
                                 await websocket.send_text(
                                     WSResponse(
                                         type="step",
-                                        content=step.observations,
+                                        content=safe_observations,
                                         session_id=session.id,
                                         step=step_num,
                                         seq=_next_seq(),
@@ -193,27 +211,106 @@ async def websocket_chat(websocket: WebSocket):
                                 )
 
                         elif isinstance(step, FinalAnswerStep):
-                            final_result = str(step.output)
+                            final_result = await redact_secrets_in_text(str(step.output))
 
                 await asyncio.wait_for(_drain_queue(), timeout=settings.agent_chat_timeout)
 
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
+                run_outcome = "timed_out"
+                _mark_request_timed_out(llm_request_id)
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="timed_out",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "step_count": step_num,
+                        "tool_call_count": tool_call_count,
+                        "timeout_seconds": settings.agent_chat_timeout,
+                    },
+                )
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
+
+            except ApprovalRequired as exc:
+                await approval_repository.merge_details(
+                    exc.approval_id,
+                    {"resume_message": ws_msg.message},
+                )
+                await audit_repository.log_event(
+                    session_id=exc.session_id,
+                    actor="agent",
+                    event_type="approval_requested",
+                    tool_name=exc.tool_name,
+                    risk_level=exc.risk_level,
+                    policy_mode=get_current_tool_policy_mode(),
+                    summary=exc.summary,
+                )
+                await websocket.send_text(
+                    WSResponse(
+                        type="approval_required",
+                        content=(
+                            f"{exc.summary}\n\n"
+                            "This is a high-risk action. Approve it in chat to continue automatically."
+                        ),
+                        session_id=session.id,
+                        seq=_next_seq(),
+                        approval_id=exc.approval_id,
+                        tool_name=exc.tool_name,
+                        risk_level=exc.risk_level,
+                    ).model_dump_json()
+                )
+                continue
 
             except Exception as e:
                 logger.exception("Agent streaming failed")
+                safe_error = await redact_secrets_in_text(f"Agent error: {e}")
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="failed",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "step_count": step_num,
+                        "tool_call_count": tool_call_count,
+                        "error": safe_error,
+                    },
+                )
                 await websocket.send_text(
                     WSResponse(
                         type="error",
-                        content=f"Agent error: {e}",
+                        content=safe_error,
                         session_id=session.id,
                         seq=_next_seq(),
                     ).model_dump_json()
                 )
                 continue
+            finally:
+                if "llm_request_id" in locals():
+                    _finish_request(llm_request_id)
 
             await session_manager.add_message(session.id, "assistant", final_result)
+            if run_outcome == "succeeded":
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="succeeded",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "response_length": len(final_result),
+                        "step_count": step_num,
+                        "tool_call_count": tool_call_count,
+                    },
+                )
             await websocket.send_text(
                 WSResponse(
                     type="final",
@@ -242,3 +339,9 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")
+    except RuntimeError as exc:
+        ws_manager.disconnect(websocket)
+        if "WebSocket is not connected" in str(exc):
+            logger.info("WebSocket client disconnected before next receive")
+            return
+        raise

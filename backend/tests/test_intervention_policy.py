@@ -194,6 +194,48 @@ def test_decide_intervention_can_learn_async_native_delivery_when_user_is_blocke
     assert decision.delivery_decision.value == "deliver"
 
 
+def test_decide_intervention_can_learn_blocked_state_avoidance():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This can wait until the user is out of deep work.",
+        urgency=3,
+        user_state="deep_work",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        learning_blocked_state_bias="avoid_blocked_state_interruptions",
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "learned_blocked_state_avoidance"
+
+
+def test_decide_intervention_can_learn_available_window_delivery():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Now is a good time for this nudge.",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        learning_timing_bias="prefer_available_windows",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "learned_available_window"
+
+
 def test_decide_intervention_acts_on_calibrated_high_salience():
     decision = decide_intervention(
         message_type="proactive",

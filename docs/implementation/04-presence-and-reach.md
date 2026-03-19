@@ -16,6 +16,7 @@
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, browser-side controls for pending native notifications, a first learning-driven native-channel preference layer, one continuity snapshot that exposes daemon state, deferred bundle items, pending native notifications, and recent interventions together, plus action-card continuation payloads and an actionable cockpit desktop-shell card with dismiss/follow-up/continue controls
+- [x] cross-surface continuity now also exposes explicit open-thread and continue flows across native notifications, queued interventions, and recent interventions
 
 ## Working On Now
 
@@ -24,12 +25,13 @@
 - [x] this workstream now ships `cross-surface-continuity-v2`
 - [x] this workstream now ships `native-desktop-shell-v2`
 - [x] this workstream now ships `native-channel-expansion-v1`
+- [x] this workstream now ships `native-channel-expansion-v2`
 
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell and continuity layer
 - [ ] broader external communication channels
-- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new continuity snapshot, action-card continuation model, and desktop-shell control card
+- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new continuity snapshot, action-card continuation model, and desktop-shell open-thread control card
 
 ## Non-Goals
 

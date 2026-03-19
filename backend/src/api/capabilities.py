@@ -329,6 +329,51 @@ def _recommended_actions(
     return catalog_items, recommendations[:8], runbooks[:10]
 
 
+def _starter_pack_recommended_actions(
+    pack: dict[str, Any],
+    *,
+    skills_by_name: dict[str, dict[str, Any]],
+    native_tools: list[dict[str, Any]],
+    tool_mode: str,
+    workflows_by_name: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if pack.get("availability") != "ready" and _starter_pack_activation_would_change_state(
+        pack,
+        skills_by_name=skills_by_name,
+        workflows_by_name=workflows_by_name,
+    ):
+        actions.append({
+            "type": "activate_starter_pack",
+            "label": "Activate pack",
+            "name": pack["name"],
+        })
+
+    tool_status = {str(tool["name"]): tool for tool in native_tools}
+    seen_tool_modes: set[tuple[str, str]] = set()
+    for blocked in [*pack.get("blocked_skills", []), *pack.get("blocked_workflows", [])]:
+        if not isinstance(blocked, dict):
+            continue
+        for missing_tool in blocked.get("missing_tools", []) or []:
+            blocked_tool = tool_status.get(str(missing_tool))
+            suggested_mode = _recommended_tool_policy_mode(
+                current_mode=tool_mode,
+                blocked_reason=None if blocked_tool is None else blocked_tool.get("blocked_reason"),
+            )
+            if suggested_mode is None:
+                continue
+            key = (str(missing_tool), suggested_mode)
+            if key in seen_tool_modes:
+                continue
+            seen_tool_modes.add(key)
+            actions.append({
+                "type": "set_tool_policy",
+                "label": f"Allow {missing_tool}",
+                "mode": suggested_mode,
+            })
+    return actions
+
+
 def _attach_skill_actions(
     skills: list[dict[str, Any]],
     *,
@@ -531,6 +576,8 @@ def _starter_pack_statuses(
     *,
     skills_by_name: dict[str, dict[str, Any]],
     workflows_by_name: dict[str, dict[str, Any]],
+    native_tools: list[dict[str, Any]],
+    tool_mode: str,
 ) -> list[dict[str, Any]]:
     packs: list[dict[str, Any]] = []
     for pack in _load_starter_packs():
@@ -581,6 +628,20 @@ def _starter_pack_statuses(
             "blocked_skills": blocked_skills,
             "blocked_workflows": blocked_workflows,
             "availability": availability,
+            "recommended_actions": _starter_pack_recommended_actions(
+                {
+                    "name": pack["name"],
+                    "skills": skill_names,
+                    "workflows": workflow_names,
+                    "availability": availability,
+                    "blocked_skills": blocked_skills,
+                    "blocked_workflows": blocked_workflows,
+                },
+                skills_by_name=skills_by_name,
+                native_tools=native_tools,
+                tool_mode=tool_mode,
+                workflows_by_name=workflows_by_name,
+            ),
         })
     return packs
 
@@ -596,6 +657,8 @@ def _build_capability_overview() -> dict[str, Any]:
     starter_packs = _starter_pack_statuses(
         skills_by_name=skills_by_name,
         workflows_by_name=workflows_by_name,
+        native_tools=native_tools,
+        tool_mode=tool_mode,
     )
     _attach_tool_actions(native_tools)
     _attach_skill_actions(skills, native_tools=native_tools, tool_mode=tool_mode)

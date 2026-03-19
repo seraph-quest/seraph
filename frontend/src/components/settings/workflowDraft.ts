@@ -5,6 +5,26 @@ export interface WorkflowInputSpec {
   default?: unknown;
 }
 
+export interface WorkflowRecommendedAction {
+  type:
+    | "toggle_skill"
+    | "toggle_workflow"
+    | "toggle_mcp_server"
+    | "test_mcp_server"
+    | "test_native_notification"
+    | "set_tool_policy"
+    | "set_mcp_policy"
+    | "install_catalog_item"
+    | "activate_starter_pack"
+    | "draft_workflow"
+    | "open_settings";
+  label: string;
+  name?: string;
+  mode?: string;
+  enabled?: boolean;
+  target?: string;
+}
+
 export interface WorkflowInfo {
   name: string;
   tool_name: string;
@@ -24,6 +44,7 @@ export interface WorkflowInfo {
   is_available?: boolean;
   missing_tools?: string[];
   missing_skills?: string[];
+  recommended_actions?: WorkflowRecommendedAction[];
 }
 
 function inputPlaceholder(

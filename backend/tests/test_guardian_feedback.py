@@ -135,3 +135,36 @@ async def test_learning_signal_can_prefer_direct_delivery_and_native_channel(asy
     assert signal.bias == "prefer_direct_delivery"
     assert signal.channel_bias == "prefer_native_notification"
     assert signal.escalation_bias == "prefer_async_native"
+
+
+async def test_learning_signal_tracks_timing_and_blocked_state_biases(async_db):
+    for feedback_type, user_state, transport in (
+        ("not_helpful", "deep_work", "websocket"),
+        ("not_helpful", "in_meeting", "websocket"),
+        ("helpful", "away", "native_notification"),
+        ("acknowledged", "deep_work", "native_notification"),
+    ):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Respect the current focus block.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state=user_state,
+            interruption_mode="focus" if user_state != "away" else "balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport=transport,
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+
+    assert signal.timing_bias == "avoid_focus_windows"
+    assert signal.blocked_state_bias == "avoid_blocked_state_interruptions"

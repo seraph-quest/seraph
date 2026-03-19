@@ -124,6 +124,16 @@ def _overall_confidence(
     current_session_status: str,
     recent_sessions_status: str,
 ) -> str:
+    degraded_signals = sum(
+        1
+        for status in (
+            world_model_status,
+            memory_status,
+            current_session_status,
+            recent_sessions_status,
+        )
+        if status == "degraded"
+    )
     grounded_signals = sum(
         1
         for status in (
@@ -137,7 +147,9 @@ def _overall_confidence(
     if observer_confidence == "degraded":
         return "degraded"
     if observer_confidence == "partial":
-        return "partial" if grounded_signals else "degraded"
+        return "partial" if grounded_signals or degraded_signals else "degraded"
+    if degraded_signals:
+        return "partial"
     if grounded_signals >= 2 and world_model_status != "empty":
         return "grounded"
     return "partial"
@@ -161,6 +173,8 @@ def _learning_guidance_text(
     cadence_bias: str,
     channel_bias: str,
     escalation_bias: str,
+    timing_bias: str,
+    blocked_state_bias: str,
 ) -> str:
     guidance: list[str] = []
     if phrasing_bias == "be_brief_and_literal":
@@ -179,6 +193,16 @@ def _learning_guidance_text(
     if escalation_bias == "prefer_async_native":
         guidance.append("Escalate through async native continuation before direct interruption when possible.")
 
+    if timing_bias == "avoid_focus_windows":
+        guidance.append("Avoid direct interruptions during deep-work, meeting, or away windows unless urgency is high.")
+    elif timing_bias == "prefer_available_windows":
+        guidance.append("When possible, deliver nudges while the user is explicitly available.")
+
+    if blocked_state_bias == "avoid_blocked_state_interruptions":
+        guidance.append("When the user is blocked, prefer bundling over direct interruption.")
+    elif blocked_state_bias == "prefer_async_for_blocked_state":
+        guidance.append("When the user is blocked, prefer async native continuation instead of browser interruption.")
+
     return "\n".join(f"- {line}" for line in guidance)
 
 
@@ -191,7 +215,7 @@ async def build_guardian_state(
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import read_soul
-    from src.memory.vector_store import search_formatted
+    from src.memory.vector_store import search_with_status
     from src.audit.repository import audit_repository
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.manager import context_manager
@@ -231,10 +255,14 @@ async def build_guardian_state(
 
     query = user_message or memory_query or ""
     memory_requested = bool(query.strip())
-    memory_context = (
-        await asyncio.to_thread(search_formatted, query)
-        if memory_requested
-        else ""
+    memory_results: list[dict[str, object]] = []
+    memory_degraded = False
+    if memory_requested:
+        memory_results, memory_degraded = await asyncio.to_thread(search_with_status, query)
+    memory_context = "\n".join(
+        f"- [{item['category']}] {item['text']}"
+        for item in memory_results
+        if isinstance(item.get("category"), str) and isinstance(item.get("text"), str)
     )
     world_model = build_guardian_world_model(
         observer_context=observer_context,
@@ -246,12 +274,17 @@ async def build_guardian_state(
         recent_execution_summary=recent_execution_summary,
     )
     world_model_status = _world_model_status(world_model)
+    memory_status = (
+        "degraded"
+        if memory_requested and memory_degraded
+        else _status_for_text(memory_context, requested=memory_requested)
+    )
 
     confidence = GuardianStateConfidence(
         overall=_overall_confidence(
             observer_confidence=observer_context.observer_confidence,
             world_model_status=world_model_status,
-            memory_status=_status_for_text(memory_context, requested=memory_requested),
+            memory_status=memory_status,
             current_session_status=_status_for_text(
                 current_session_history,
                 requested=session_id is not None,
@@ -260,7 +293,7 @@ async def build_guardian_state(
         ),
         observer=observer_context.observer_confidence,
         world_model=world_model_status,
-        memory=_status_for_text(memory_context, requested=memory_requested),
+        memory=memory_status,
         current_session=_status_for_text(
             current_session_history,
             requested=session_id is not None,
@@ -282,6 +315,8 @@ async def build_guardian_state(
             cadence_bias=advisory_learning_signal.cadence_bias,
             channel_bias=advisory_learning_signal.channel_bias,
             escalation_bias=advisory_learning_signal.escalation_bias,
+            timing_bias=advisory_learning_signal.timing_bias,
+            blocked_state_bias=advisory_learning_signal.blocked_state_bias,
         ),
         confidence=confidence,
     )

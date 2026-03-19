@@ -1,12 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../game/EventBus", () => ({
-  EventBus: {
-    emit: vi.fn(),
-  },
-}));
-
 import { CockpitView } from "./CockpitView";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
@@ -256,9 +250,34 @@ describe("CockpitView", () => {
                 thread_id: "session-1",
                 thread_label: "Session 1",
                 thread_source: "session",
+                run_fingerprint: "fp-1",
+                run_identity: "session-1:workflow_web_brief_to_file:fp-1",
                 replay_allowed: true,
                 replay_block_reason: null,
                 replay_draft: "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+                retry_from_step_draft: "Retry workflow \"web-brief-to-file\" from step \"write_file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+                step_records: [
+                  {
+                    id: "web_search",
+                    index: 0,
+                    tool: "web_search",
+                    status: "succeeded",
+                    argument_keys: ["query"],
+                    artifact_paths: [],
+                    result_summary: "2 web results",
+                    error_kind: null,
+                  },
+                  {
+                    id: "write_file",
+                    index: 1,
+                    tool: "write_file",
+                    status: "degraded",
+                    argument_keys: ["file_path"],
+                    artifact_paths: ["notes/brief.md"],
+                    result_summary: "saved fallback note",
+                    error_kind: "tool_failed",
+                  },
+                ],
                 approval_recovery_message: null,
                 timeline: [
                   { kind: "workflow_started", at: "2026-03-18T12:01:00Z", summary: "Workflow started" },
@@ -431,6 +450,8 @@ describe("CockpitView", () => {
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
     expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
+    expect(screen.getByText(/web_search succeeded · 2 web results/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
     expect(screen.getByText("Use Output")).toBeInTheDocument();
     const runButton = screen.getByRole("button", { name: "Run summarize-file" });
     expect(runButton).toBeInTheDocument();

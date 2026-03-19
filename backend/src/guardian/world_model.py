@@ -17,6 +17,9 @@ class GuardianWorldModel:
     open_loops_or_pressure: tuple[str, ...]
     focus_alignment: str
     intervention_receptivity: str
+    active_blockers: tuple[str, ...] = ()
+    next_up: tuple[str, ...] = ()
+    dominant_thread: str = "No dominant thread"
     active_projects: tuple[str, ...] = ()
     execution_pressure: tuple[str, ...] = ()
     active_constraints: tuple[str, ...] = ()
@@ -43,6 +46,16 @@ class GuardianWorldModel:
         if self.active_projects:
             lines.append("Active projects:")
             lines.extend(f"- {item}" for item in self.active_projects)
+
+        if self.active_blockers:
+            lines.append("Active blockers:")
+            lines.extend(f"- {item}" for item in self.active_blockers)
+
+        if self.next_up:
+            lines.append("Next up:")
+            lines.extend(f"- {item}" for item in self.next_up)
+
+        lines.append(f"Dominant thread: {self.dominant_thread}")
 
         if self.project_state:
             lines.append("Project state:")
@@ -240,6 +253,23 @@ def build_guardian_world_model(
         open_loops.append(recent_session_lines[0])
     for line in memory_lines[1:]:
         open_loops.append(line)
+    active_blockers = _dedupe(
+        [
+            line for line in open_loops[:2]
+            if "Current state:" not in line and "Attention budget" not in line
+        ]
+        + list(preference_constraints[:1])
+    )
+    next_up = _dedupe(
+        list(active_projects[:1])
+        + list(goal_memory[:1])
+        + list(recent_session_lines[:1])
+    )
+    dominant_thread = (
+        continuity_threads[0]
+        if continuity_threads
+        else (active_projects[0] if active_projects else current_focus)
+    )
     execution_pressure = _extract_lines(recent_execution_summary, limit=3)
     active_constraints: list[str] = []
     if observer_context.interruption_mode == "focus":
@@ -258,6 +288,9 @@ def build_guardian_world_model(
         open_loops_or_pressure=_dedupe(open_loops),
         focus_alignment=_derive_focus_alignment(observer_context),
         intervention_receptivity=_derive_intervention_receptivity(observer_context),
+        active_blockers=active_blockers,
+        next_up=next_up,
+        dominant_thread=dominant_thread,
         active_projects=_dedupe(list(active_projects)),
         execution_pressure=_dedupe(execution_pressure),
         active_constraints=_dedupe(active_constraints),

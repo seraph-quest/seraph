@@ -78,7 +78,6 @@ export function WorkflowPanel() {
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const setInterfaceMode = useChatStore((s) => s.setInterfaceMode);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
 
   const fetchWorkflows = useCallback(async () => {
@@ -138,7 +137,6 @@ export function WorkflowPanel() {
 
   const handleDraft = (workflow: WorkflowInfo) => {
     const message = buildWorkflowDraft(workflow);
-    setInterfaceMode("cockpit");
     setSettingsPanelOpen(false);
     window.setTimeout(() => {
       window.dispatchEvent(

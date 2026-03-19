@@ -101,17 +101,6 @@ export interface DomainProgress {
   percentage: number;
 }
 
-export interface MagicEffectDef {
-  id: string;
-  name: string;
-  tilesetKey: string;      // Phaser texture key (e.g. "CuteRPG_Magical")
-  tileWidth: number;
-  tileHeight: number;
-  columns: number;
-  frameDuration: number;
-  frames: number[];        // local tile IDs for the animation
-}
-
 export interface ToolMeta {
   name: string;
   description: string;

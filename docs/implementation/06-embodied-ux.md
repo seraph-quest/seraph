@@ -25,7 +25,7 @@
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
 - [x] cockpit is now the active browser shell on load rather than merely the default mode
 - [x] quest and settings overlays now use cockpit modal styling rather than legacy overlay frames
-- [x] village/editor code is now treated as retired legacy code rather than a supported surface
+- [x] dormant village/editor runtime code and legacy browser entry points are removed from the active product path rather than treated as fallback surfaces
 
 ## Working On Now
 
@@ -37,11 +37,10 @@
 - [x] this workstream now ships `artifact-evidence-roundtrip-v2`
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships the denser operator-terminal layer with live operator feed, saved runbook macros, approval-aware workflow timeline actions, and a threaded operator timeline
-- [x] this workstream now hands the queue forward to retiring the village/editor line so the repo matches the cockpit-only product contract
+- [x] this workstream now hands the queue forward to deeper step-level workflow density and richer cockpit operator control rather than repo-level shell retirement
 
 ## Still To Do On `develop`
 
-- [ ] remove dormant village/editor runtime code and any remaining legacy browser entry points so the shipped UI surface matches the documented product direction exactly
 - [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight and repair
 - [ ] richer workflow history, broader keyboard/operator control, step-level replay/debug visibility, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, operator timeline, pane model, direct artifact/workflow draft handoff, operator terminal, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
@@ -69,7 +68,7 @@
 - [x] the cockpit now exposes first-class operator visibility for approval-thread recovery and cross-surface continue/open-thread actions
 - [x] the cockpit now exposes a first-class threaded operator timeline instead of leaving workflow, approval, notification, intervention, and failure continuity in separate panes
 - [x] settings and goals now present as cockpit-styled modal overlays instead of legacy shell overlays
-- [x] the docs now treat the village/editor line as retired rather than as a fallback product branch
+- [x] the docs and active repo now treat the village/editor line as removed history rather than as a fallback product branch
 - [ ] the cockpit still needs richer install/recommend/repair guidance beyond the first "what can I do now?" capability surface, blocked-state explanation, starter-pack view, and preflight/autorepair layer
 - [ ] the cockpit still needs broader workflow history, deeper step-level workflow control, and more flexible workspace ergonomics
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

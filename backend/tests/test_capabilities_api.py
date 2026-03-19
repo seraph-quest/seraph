@@ -275,6 +275,7 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
     assert workflow_payload["availability"] == "blocked"
     assert workflow_payload["blocking_reasons"] == ["missing tool: write_file"]
     assert workflow_payload["can_autorepair"] is True
+    assert workflow_payload["autorepair_actions"][0]["type"] == "set_tool_policy"
     assert workflow_payload["parameter_schema"]["file_path"]["type"] == "string"
 
     assert runbook_resp.status_code == 200
@@ -283,6 +284,7 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
     assert runbook_payload["blocking_reasons"] == ["missing tool: write_file"]
     assert runbook_payload["risk_level"] == "medium"
     assert runbook_payload["execution_boundaries"] == ["external_read", "workspace_write"]
+    assert runbook_payload["autorepair_actions"][0]["type"] == "set_tool_policy"
 
 
 @pytest.mark.asyncio

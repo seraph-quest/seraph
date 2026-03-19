@@ -60,7 +60,7 @@ async def get_goal_tree():
 
 @router.get("/goals/dashboard")
 async def get_goal_dashboard():
-    """Get summary stats for quest log UI."""
+    """Get summary stats for the goals UI."""
     return await goal_repository.get_dashboard()
 
 

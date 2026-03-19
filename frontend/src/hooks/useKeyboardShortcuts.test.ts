@@ -29,7 +29,6 @@ function resetStores() {
     chatPanelOpen: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
-    interfaceMode: "village",
   });
   useCockpitLayoutStore.setState({
     activeLayoutId: "default",
@@ -61,8 +60,7 @@ describe("handleGlobalKeyboardShortcut", () => {
     vi.restoreAllMocks();
   });
 
-  it("Shift+C dispatches cockpit composer focus without toggling legacy chat in cockpit mode", () => {
-    useChatStore.setState({ interfaceMode: "cockpit" });
+  it("Shift+C dispatches cockpit composer focus without toggling a legacy chat panel", () => {
     const dispatchSpy = vi.spyOn(window, "dispatchEvent");
 
     handleGlobalKeyboardShortcut(makeEvent("c", { shiftKey: true }));
@@ -74,8 +72,6 @@ describe("handleGlobalKeyboardShortcut", () => {
   });
 
   it("Shift+1/2/3 switch cockpit layouts", () => {
-    useChatStore.setState({ interfaceMode: "cockpit" });
-
     handleGlobalKeyboardShortcut(makeEvent("@", { shiftKey: true, code: "Digit2" }));
     expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("focus");
 
@@ -87,8 +83,6 @@ describe("handleGlobalKeyboardShortcut", () => {
   });
 
   it("Shift+I toggles inspector visibility in cockpit mode", () => {
-    useChatStore.setState({ interfaceMode: "cockpit" });
-
     handleGlobalKeyboardShortcut(makeEvent("I", { shiftKey: true, code: "KeyI" }));
     expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(false);
 
@@ -97,7 +91,6 @@ describe("handleGlobalKeyboardShortcut", () => {
   });
 
   it("Shift+K and Ctrl+K open the cockpit palette", () => {
-    useChatStore.setState({ interfaceMode: "cockpit" });
     const dispatchSpy = vi.spyOn(window, "dispatchEvent");
 
     handleGlobalKeyboardShortcut(makeEvent("K", { shiftKey: true, code: "KeyK" }));
@@ -108,26 +101,30 @@ describe("handleGlobalKeyboardShortcut", () => {
     expect((dispatchSpy.mock.calls[1]?.[0] as CustomEvent).type).toBe("seraph-cockpit-open-palette");
   });
 
-  it("Shift+C toggles legacy chat panel outside cockpit mode", () => {
-    handleGlobalKeyboardShortcut(makeEvent("c", { shiftKey: true }));
-    expect(useChatStore.getState().chatPanelOpen).toBe(true);
+  it("Shift+Q and Shift+S toggle cockpit overlays", () => {
+    handleGlobalKeyboardShortcut(makeEvent("q", { shiftKey: true }));
+    expect(useChatStore.getState().questPanelOpen).toBe(true);
+
+    handleGlobalKeyboardShortcut(makeEvent("s", { shiftKey: true }));
+    expect(useChatStore.getState().settingsPanelOpen).toBe(true);
   });
 
-  it("Escape closes legacy panels in priority order outside cockpit mode", () => {
+  it("Escape closes overlays in priority order", () => {
     useChatStore.setState({
-      chatPanelOpen: true,
       questPanelOpen: true,
       settingsPanelOpen: true,
     });
 
     handleGlobalKeyboardShortcut(makeEvent("Escape"));
-    expect(useChatStore.getState().chatPanelOpen).toBe(false);
-    expect(useChatStore.getState().questPanelOpen).toBe(true);
+    expect(useChatStore.getState().questPanelOpen).toBe(false);
+    expect(useChatStore.getState().settingsPanelOpen).toBe(true);
+
+    handleGlobalKeyboardShortcut(makeEvent("Escape"));
+    expect(useChatStore.getState().questPanelOpen).toBe(false);
+    expect(useChatStore.getState().settingsPanelOpen).toBe(false);
   });
 
   it("ignores shortcuts while typing in inputs", () => {
-    useChatStore.setState({ interfaceMode: "cockpit" });
-
     handleGlobalKeyboardShortcut(makeEvent("2", { shiftKey: true, target: { tagName: "INPUT" } }));
     handleGlobalKeyboardShortcut(makeEvent("i", { shiftKey: true, target: { tagName: "TEXTAREA" } }));
 

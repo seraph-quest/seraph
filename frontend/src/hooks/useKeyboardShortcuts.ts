@@ -12,51 +12,39 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
   const { bringToFront, applyCockpitLayout } = usePanelLayoutStore.getState();
   const cockpitLayout = useCockpitLayoutStore.getState();
 
-  if (s.interfaceMode === "cockpit") {
-    if ((event.metaKey || event.ctrlKey) && code === "KeyK") {
-      event.preventDefault();
-      window.dispatchEvent(new CustomEvent("seraph-cockpit-open-palette"));
-      return;
-    }
-    if (event.shiftKey && code === "Digit1") {
-      cockpitLayout.setLayout("default");
-      applyCockpitLayout("default", cockpitLayout.inspectorVisible);
-      return;
-    }
-    if (event.shiftKey && code === "Digit2") {
-      cockpitLayout.setLayout("focus");
-      applyCockpitLayout("focus", cockpitLayout.inspectorVisible);
-      return;
-    }
-    if (event.shiftKey && code === "Digit3") {
-      cockpitLayout.setLayout("review");
-      applyCockpitLayout("review", cockpitLayout.inspectorVisible);
-      return;
-    }
-    if (event.shiftKey && code === "KeyI") {
-      cockpitLayout.toggleInspector();
-      return;
-    }
-    if (event.shiftKey && code === "KeyK") {
-      window.dispatchEvent(new CustomEvent("seraph-cockpit-open-palette"));
-      return;
-    }
-
-    switch (event.key.toLowerCase()) {
-      case "c":
-        if (!event.shiftKey) return;
-        window.dispatchEvent(new CustomEvent("seraph-cockpit-focus-composer"));
-        return;
-      default:
-        break;
-    }
+  if ((event.metaKey || event.ctrlKey) && code === "KeyK") {
+    event.preventDefault();
+    window.dispatchEvent(new CustomEvent("seraph-cockpit-open-palette"));
+    return;
+  }
+  if (event.shiftKey && code === "Digit1") {
+    cockpitLayout.setLayout("default");
+    applyCockpitLayout("default", cockpitLayout.inspectorVisible);
+    return;
+  }
+  if (event.shiftKey && code === "Digit2") {
+    cockpitLayout.setLayout("focus");
+    applyCockpitLayout("focus", cockpitLayout.inspectorVisible);
+    return;
+  }
+  if (event.shiftKey && code === "Digit3") {
+    cockpitLayout.setLayout("review");
+    applyCockpitLayout("review", cockpitLayout.inspectorVisible);
+    return;
+  }
+  if (event.shiftKey && code === "KeyI") {
+    cockpitLayout.toggleInspector();
+    return;
+  }
+  if (event.shiftKey && code === "KeyK") {
+    window.dispatchEvent(new CustomEvent("seraph-cockpit-open-palette"));
+    return;
   }
 
   switch (event.key.toLowerCase()) {
     case "c":
       if (!event.shiftKey) return;
-      if (!s.chatPanelOpen) bringToFront("chat");
-      s.setChatPanelOpen(!s.chatPanelOpen);
+      window.dispatchEvent(new CustomEvent("seraph-cockpit-focus-composer"));
       return;
     case "q":
       if (!event.shiftKey) return;
@@ -69,8 +57,7 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
       s.setSettingsPanelOpen(!s.settingsPanelOpen);
       return;
     case "escape":
-      if (s.chatPanelOpen) s.setChatPanelOpen(false);
-      else if (s.questPanelOpen) s.setQuestPanelOpen(false);
+      if (s.questPanelOpen) s.setQuestPanelOpen(false);
       else if (s.settingsPanelOpen) s.setSettingsPanelOpen(false);
       return;
     default:

@@ -36,6 +36,8 @@ class GuardianLearningSignal:
     escalation_bias: str
     timing_bias: str
     blocked_state_bias: str
+    suppression_bias: str
+    thread_preference_bias: str
 
     @classmethod
     def neutral(cls, intervention_type: str) -> "GuardianLearningSignal":
@@ -52,6 +54,8 @@ class GuardianLearningSignal:
             escalation_bias="neutral",
             timing_bias="neutral",
             blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
         )
 
 
@@ -160,12 +164,18 @@ class GuardianFeedbackRepository:
             await db.refresh(intervention)
             return intervention
 
-    async def list_recent(self, *, limit: int = 5) -> list[GuardianIntervention]:
+    async def list_recent(
+        self,
+        *,
+        limit: int = 5,
+        session_id: str | None = None,
+    ) -> list[GuardianIntervention]:
         async with get_session() as db:
+            query = select(GuardianIntervention)
+            if session_id:
+                query = query.where(GuardianIntervention.session_id == session_id)
             result = await db.execute(
-                select(GuardianIntervention)
-                .order_by(GuardianIntervention.updated_at.desc())
-                .limit(limit)
+                query.order_by(GuardianIntervention.updated_at.desc()).limit(limit)
             )
             return list(result.scalars().all())
 
@@ -268,6 +278,18 @@ class GuardianFeedbackRepository:
         elif blocked_state_positive_native >= 2 and not_helpful_count == 0:
             blocked_state_bias = "prefer_async_for_blocked_state"
 
+        suppression_bias = "neutral"
+        if not_helpful_count >= 3 or failed_count >= 2:
+            suppression_bias = "extend_suppression"
+        elif helpful_count >= 2 and not_helpful_count == 0:
+            suppression_bias = "resume_faster"
+
+        thread_preference_bias = "neutral"
+        if helpful_count + acknowledged_count >= 2 and not_helpful_count == 0:
+            thread_preference_bias = "prefer_existing_thread"
+        elif failed_count >= 2:
+            thread_preference_bias = "prefer_clean_thread"
+
         return GuardianLearningSignal(
             intervention_type=intervention_type,
             helpful_count=helpful_count,
@@ -281,6 +303,8 @@ class GuardianFeedbackRepository:
             escalation_bias=escalation_bias,
             timing_bias=timing_bias,
             blocked_state_bias=blocked_state_bias,
+            suppression_bias=suppression_bias,
+            thread_preference_bias=thread_preference_bias,
         )
 
 

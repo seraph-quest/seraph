@@ -213,10 +213,17 @@ interface CapabilityRecommendation {
 
 interface RunbookInfo {
   id: string;
+  name?: string;
   label: string;
   description: string;
   source: "starter_pack" | "workflow";
   command: string;
+  availability?: "ready" | "partial" | "blocked" | "disabled";
+  blocking_reasons?: string[];
+  recommended_actions?: CapabilityAction[];
+  parameter_schema?: Record<string, unknown>;
+  risk_level?: string;
+  execution_boundaries?: string[];
   action?: CapabilityAction | null;
 }
 
@@ -251,6 +258,25 @@ interface OperatorFeedEntry {
   summary: string;
   status: "info" | "success" | "failed";
   createdAt: string;
+}
+
+interface OperatorTimelineEntry {
+  id: string;
+  kind: "workflow_run" | "approval" | "notification" | "queued_insight" | "intervention" | "audit";
+  title: string;
+  summary: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  continue_message?: string | null;
+  replay_draft?: string | null;
+  replay_allowed?: boolean;
+  replay_block_reason?: string | null;
+  recommended_actions?: CapabilityAction[];
+  source: string;
+  metadata?: Record<string, unknown>;
 }
 
 type ToolPolicyMode = "safe" | "balanced" | "full";
@@ -387,6 +413,25 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     replayAllowed: typeof value.replay_allowed === "boolean" ? value.replay_allowed : undefined,
     replayBlockReason: typeof value.replay_block_reason === "string" ? value.replay_block_reason : null,
     replayDraft: typeof value.replay_draft === "string" ? value.replay_draft : null,
+    replayInputs:
+      value.replay_inputs && typeof value.replay_inputs === "object" && !Array.isArray(value.replay_inputs)
+        ? (value.replay_inputs as Record<string, unknown>)
+        : undefined,
+    parameterSchema:
+      value.parameter_schema && typeof value.parameter_schema === "object" && !Array.isArray(value.parameter_schema)
+        ? (value.parameter_schema as Record<string, unknown>)
+        : undefined,
+    replayRecommendedActions: Array.isArray(value.replay_recommended_actions)
+      ? value.replay_recommended_actions.filter(
+          (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+        )
+      : undefined,
+    availability: typeof value.availability === "string" ? value.availability : null,
+    resumeFromStep: typeof value.resume_from_step === "string" ? value.resume_from_step : null,
+    resumeCheckpointLabel:
+      typeof value.resume_checkpoint_label === "string" ? value.resume_checkpoint_label : null,
+    threadContinueMessage:
+      typeof value.thread_continue_message === "string" ? value.thread_continue_message : null,
     approvalRecoveryMessage:
       typeof value.approval_recovery_message === "string"
         ? value.approval_recovery_message
@@ -451,6 +496,10 @@ function replayBlockCopy(reason: string | null | undefined): string {
   switch (reason) {
     case "pending_approval":
       return "pending approval";
+    case "workflow_unavailable":
+      return "workflow unavailable";
+    case "workflow_disabled":
+      return "workflow disabled";
     case "secret_ref_surface":
       return "secret-ref surface";
     case "secret_bearing_boundary":
@@ -460,6 +509,10 @@ function replayBlockCopy(reason: string | null | undefined): string {
     default:
       return "manual review required";
   }
+}
+
+function timelineStatusLabel(value: OperatorTimelineEntry): string {
+  return `${value.kind.replace(/_/g, " ")} · ${value.status.replace(/_/g, " ")}`;
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
@@ -530,6 +583,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
+  const [operatorTimeline, setOperatorTimeline] = useState<OperatorTimelineEntry[]>([]);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -599,6 +653,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         approvalsResponse,
         continuityResponse,
         capabilitiesResponse,
+        operatorTimelineResponse,
         workflowRunsResponse,
         toolModeResponse,
         mcpModeResponse,
@@ -609,6 +664,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         fetch(`${API_URL}/api/approvals/pending?limit=8`),
         fetch(`${API_URL}/api/observer/continuity`),
         fetch(`${API_URL}/api/capabilities/overview`),
+        fetch(`${API_URL}/api/operator/timeline?limit=12${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
         fetch(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
         fetch(`${API_URL}/api/settings/tool-policy-mode`),
         fetch(`${API_URL}/api/settings/mcp-policy-mode`),
@@ -651,6 +707,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         );
         setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
       }
+      if (!isCancelled() && operatorTimelineResponse.ok) {
+        const operatorTimelinePayload = await operatorTimelineResponse.json();
+        setOperatorTimeline(
+          Array.isArray(operatorTimelinePayload.items)
+            ? operatorTimelinePayload.items
+            : [],
+        );
+      }
       if (!isCancelled() && workflowRunsResponse.ok) {
         const workflowRunsPayload = await workflowRunsResponse.json();
         setWorkflowRuns(
@@ -689,6 +753,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         setCatalogItems([]);
         setCapabilityRecommendations([]);
         setRunbooks([]);
+        setOperatorTimeline([]);
         setToolPolicyMode("unknown");
         setMcpPolicyMode("unknown");
         setApprovalMode("unknown");
@@ -850,6 +915,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => runbooks.slice(0, 6),
     [runbooks],
   );
+  const recentOperatorTimeline = useMemo(
+    () => operatorTimeline.slice(0, 10),
+    [operatorTimeline],
+  );
   const operatorMacros = useMemo(
     () => savedRunbooks.slice(0, 6),
     [savedRunbooks],
@@ -884,7 +953,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `runbook:${item.id}`,
         kind: "runbook",
         label: item.label,
-        detail: item.description,
+        detail: `${item.availability ?? "unknown"} · ${item.description}`,
         action: item.action ?? null,
         draft: item.command,
       });
@@ -894,7 +963,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `macro:${item.id}`,
         kind: "macro",
         label: item.label,
-        detail: `saved runbook · ${item.description}`,
+        detail: `saved runbook · ${item.availability ?? "unknown"} · ${item.description}`,
         action: item.action ?? null,
         draft: item.command,
       });
@@ -1194,6 +1263,87 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       if (!opened) return;
     }
     queueComposerDraft(message);
+  }
+
+  async function preflightCapability(targetType: "runbook" | "workflow" | "starter_pack", name: string) {
+    const response = await fetch(
+      `${API_URL}/api/capabilities/preflight?target_type=${encodeURIComponent(targetType)}&name=${encodeURIComponent(name)}`,
+    );
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Capability preflight failed");
+    }
+    return payload as {
+      target_type: string;
+      name: string;
+      label: string;
+      description: string;
+      availability: string;
+      blocking_reasons: string[];
+      recommended_actions: CapabilityAction[];
+      command?: string | null;
+      parameter_schema?: Record<string, unknown>;
+      risk_level?: string | null;
+      execution_boundaries?: string[];
+      can_autorepair: boolean;
+      ready: boolean;
+    };
+  }
+
+  async function executeRunbook(runbook: RunbookInfo) {
+    setOperatorStatus(`Preflighting ${runbook.label}...`);
+    try {
+      const preflight = await preflightCapability("runbook", runbook.id);
+      if (!preflight.ready) {
+        if (preflight.recommended_actions?.length) {
+          await runCapabilityActions(preflight.recommended_actions, runbook.label);
+          await refreshCockpit();
+          setOperatorStatus(`${runbook.label} repaired`);
+          appendOperatorFeed(`${runbook.label} repaired`, "success");
+          return;
+        }
+        setOperatorStatus(
+          preflight.blocking_reasons?.[0]
+            ? `${runbook.label} blocked: ${preflight.blocking_reasons[0]}`
+            : `${runbook.label} is blocked`,
+        );
+        appendOperatorFeed(`${runbook.label} blocked`, "failed");
+        return;
+      }
+      if (preflight.command) {
+        queueComposerDraft(preflight.command);
+        setOperatorStatus(`${runbook.label} drafted to command bar`);
+        appendOperatorFeed(`${runbook.label} drafted`, "success");
+      } else if (runbook.action) {
+        await runCapabilityAction(runbook.action);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Capability preflight failed";
+      setOperatorStatus(message);
+      appendOperatorFeed(message, "failed");
+    }
+  }
+
+  async function repairWorkflowReplay(workflow: WorkflowRunRecord) {
+    const actions: CapabilityAction[] = Array.isArray(workflow.replayRecommendedActions)
+      ? workflow.replayRecommendedActions.flatMap((item) => {
+          if (
+            !item
+            || typeof item !== "object"
+            || typeof item.type !== "string"
+            || typeof item.label !== "string"
+          ) {
+            return [];
+          }
+          return [item as unknown as CapabilityAction];
+        })
+      : [];
+    if (!actions.length) {
+      setOperatorStatus(`No replay repair actions available for ${workflow.workflowName}`);
+      appendOperatorFeed(`No replay repair actions available for ${workflow.workflowName}`, "failed");
+      return;
+    }
+    await runCapabilityActions(actions, `${workflow.workflowName} replay`);
   }
 
   async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
@@ -1536,6 +1686,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         pending_approvals: workflow.pendingApprovals?.map((item) => item.summary).join(" | ") || "none",
         replay_allowed: workflow.replayAllowed ?? false,
         replay_block_reason: workflow.replayBlockReason ?? "none",
+        availability: workflow.availability ?? "unknown",
+        replay_inputs: workflow.replayInputs ?? {},
+        replay_recommended_actions: workflow.replayRecommendedActions ?? [],
+        resume_from_step: workflow.resumeFromStep ?? "n/a",
+        resume_checkpoint_label: workflow.resumeCheckpointLabel ?? "n/a",
         timeline: workflow.timeline ?? [],
         linked_interventions: linkedInterventions.length,
       };
@@ -2090,6 +2245,95 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
+        {activeLayout.sections.timeline && (
+          <CockpitWorkspaceWindow
+            panelId="operator_timeline_pane"
+            title="Operator timeline"
+            meta={`${recentOperatorTimeline.length} live`}
+            minWidth={360}
+            minHeight={220}
+          >
+            <section className="cockpit-panel cockpit-panel--embedded">
+              <div className="cockpit-list">
+                {recentOperatorTimeline.map((item) => (
+                  <div key={item.id} className="cockpit-row">
+                    <button
+                      className="cockpit-row-button"
+                      onClick={() =>
+                        setSelectedInspector({
+                          kind: "operator",
+                          entity: {
+                            entityType: "workflow_definition",
+                            name: item.title,
+                            meta: timelineStatusLabel(item),
+                            summary: item.summary,
+                            details: {
+                              source: item.source,
+                              thread: item.thread_label ?? item.thread_id ?? "ambient",
+                              status: item.status,
+                              continue_message: item.continue_message ?? "",
+                              replay_allowed: item.replay_allowed ?? false,
+                              replay_block_reason: item.replay_block_reason ?? "none",
+                              metadata: item.metadata ?? {},
+                            },
+                          },
+                        })
+                      }
+                    >
+                      <div className="cockpit-row-header">
+                        <span className="cockpit-role">{item.title}</span>
+                        <span className="cockpit-row-age">{formatAge(item.updated_at)}</span>
+                      </div>
+                      <div className="cockpit-row-body">{item.summary}</div>
+                      <div className="cockpit-row-meta">
+                        {timelineStatusLabel(item)}
+                        {item.thread_label ? ` · ${item.thread_label}` : ""}
+                      </div>
+                    </button>
+                    <div className="cockpit-feedback-row">
+                      {item.continue_message && (
+                        <button
+                          className="cockpit-feedback-button"
+                          onClick={() => void queueThreadDraft(item.continue_message ?? "", item.thread_id)}
+                        >
+                          Continue
+                        </button>
+                      )}
+                      {item.thread_id && (
+                        <button
+                          className="cockpit-feedback-button"
+                          onClick={() => void openThread(item.thread_id)}
+                        >
+                          Open Thread
+                        </button>
+                      )}
+                      {item.replay_draft && item.replay_allowed !== false && (
+                        <button
+                          className="cockpit-feedback-button"
+                          onClick={() => queueComposerDraft(item.replay_draft ?? "")}
+                        >
+                          Replay
+                        </button>
+                      )}
+                      {item.recommended_actions?.length ? (
+                        <button
+                          className="cockpit-feedback-button"
+                          onClick={() => void runCapabilityActions(item.recommended_actions ?? [], item.title)}
+                        >
+                          Repair
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+                {recentOperatorTimeline.length === 0 && (
+                  <div className="cockpit-empty">No threaded operator timeline entries yet.</div>
+                )}
+              </div>
+            </section>
+          </CockpitWorkspaceWindow>
+        )}
+
         {activeLayout.sections.workflows && (
           <CockpitWorkspaceWindow
             panelId="workflows_pane"
@@ -2125,6 +2369,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           {(workflow.threadLabel ?? (workflow.threadId ? sessionTitleById[workflow.threadId] : null))
                             ? ` · ${workflow.threadLabel ?? sessionTitleById[workflow.threadId ?? ""]}`
                             : ""}
+                          {workflow.availability ? ` · ${workflow.availability}` : ""}
                           {workflow.replayAllowed === false ? ` · replay blocked` : ""}
                         </div>
                         {workflow.timeline?.length ? (
@@ -2134,13 +2379,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         ) : null}
                       </button>
                       <div className="cockpit-feedback-row">
-                        {approval?.resume_message && (
+                        {(approval?.resume_message || workflow.threadContinueMessage) && (
                           <button
                             className="cockpit-feedback-button"
                             onClick={() =>
                               void queueThreadDraft(
-                                approval.resume_message ?? "",
-                                approval.thread_id ?? approval.session_id ?? workflow.threadId ?? workflow.sessionId,
+                                approval?.resume_message ?? workflow.threadContinueMessage ?? "",
+                                approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId,
                               )
                             }
                           >
@@ -2163,9 +2408,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             Draft rerun
                           </button>
                         ) : (
-                          <span className="cockpit-feedback-status">
-                            Replay blocked: {replayBlockCopy(workflow.replayBlockReason)}
-                          </span>
+                          <>
+                            <span className="cockpit-feedback-status">
+                              Replay blocked: {replayBlockCopy(workflow.replayBlockReason)}
+                            </span>
+                            {workflow.replayRecommendedActions?.length ? (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => void repairWorkflowReplay(workflow)}
+                              >
+                                Repair replay
+                              </button>
+                            ) : null}
+                          </>
                         )}
                       </div>
                     </div>
@@ -2730,25 +2985,46 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-operator-section">
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">runbooks</span>
-                      <span className="cockpit-operator-link">{operatorRunbooks.length} ready</span>
+                      <span className="cockpit-operator-link">
+                        {operatorRunbooks.filter((item) => item.availability === "ready").length}/{operatorRunbooks.length} ready
+                      </span>
                     </div>
                     {operatorRunbooks.map((runbook) => (
                       <div key={runbook.id} className="cockpit-operator-row">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() => queueComposerDraft(runbook.command)}
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: "workflow_definition",
+                                name: runbook.label,
+                                meta: `${runbook.source.replace("_", " ")} · ${runbook.availability ?? "unknown"}`,
+                                summary: runbook.description,
+                                details: {
+                                  command: runbook.command,
+                                  blocking_reasons: runbook.blocking_reasons ?? [],
+                                  risk_level: runbook.risk_level ?? "unknown",
+                                  execution_boundaries: runbook.execution_boundaries ?? [],
+                                  parameter_schema: runbook.parameter_schema ?? {},
+                                },
+                              },
+                            })
+                          }
                         >
                           <div className="cockpit-value">{runbook.label}</div>
-                          <div className="cockpit-operator-note">{runbook.description}</div>
+                          <div className="cockpit-operator-note">
+                            {runbook.availability ?? "unknown"} · {runbook.description}
+                          </div>
                         </button>
                         <div className="cockpit-operator-actions">
                           <button
                             type="button"
                             className="cockpit-operator-button"
-                            onClick={() => queueComposerDraft(runbook.command)}
+                            onClick={() => void executeRunbook(runbook)}
                           >
-                            draft
+                            {runbook.availability === "ready" ? "draft" : "repair"}
                           </button>
                           <button
                             type="button"
@@ -2784,7 +3060,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() => queueComposerDraft(runbook.command)}
+                          onClick={() => void executeRunbook(runbook)}
                         >
                           <div className="cockpit-value">{runbook.label}</div>
                           <div className="cockpit-operator-note">{runbook.description}</div>
@@ -2793,9 +3069,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <button
                             type="button"
                             className="cockpit-operator-button"
-                            onClick={() => queueComposerDraft(runbook.command)}
+                            onClick={() => void executeRunbook(runbook)}
                           >
-                            draft
+                            {runbook.availability === "ready" ? "draft" : "repair"}
                           </button>
                           <button
                             type="button"
@@ -3209,7 +3485,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <button
                             type="button"
                             className="cockpit-operator-button"
-                            onClick={() => queueComposerDraft(buildWorkflowDraft(workflow))}
+                            onClick={async () => {
+                              try {
+                                const preflight = await preflightCapability("workflow", workflow.name);
+                                if (!preflight.ready && preflight.recommended_actions?.length) {
+                                  await runCapabilityActions(preflight.recommended_actions, workflow.name);
+                                  return;
+                                }
+                                queueComposerDraft(preflight.command ?? buildWorkflowDraft(workflow));
+                              } catch {
+                                queueComposerDraft(buildWorkflowDraft(workflow));
+                              }
+                            }}
                           >
                             draft
                           </button>
@@ -3282,7 +3569,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           className="cockpit-feedback-button"
                           onClick={() => {
-                            queueComposerDraft(item.draft!);
+                            const runbook = operatorRunbooks.find((entry) => `runbook:${entry.id}` === item.id)
+                              ?? operatorMacros.find((entry) => `macro:${entry.id}` === item.id);
+                            if (runbook) {
+                              void executeRunbook(runbook);
+                            } else {
+                              queueComposerDraft(item.draft!);
+                            }
                             setPaletteOpen(false);
                           }}
                         >

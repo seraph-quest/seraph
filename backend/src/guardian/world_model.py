@@ -25,6 +25,9 @@ class GuardianWorldModel:
     project_state: tuple[str, ...] = ()
     memory_signals: tuple[str, ...] = ()
     continuity_threads: tuple[str, ...] = ()
+    collaborators: tuple[str, ...] = ()
+    recurring_obligations: tuple[str, ...] = ()
+    project_timeline: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
         lines = [
@@ -52,6 +55,18 @@ class GuardianWorldModel:
         if self.continuity_threads:
             lines.append("Continuity threads:")
             lines.extend(f"- {item}" for item in self.continuity_threads)
+
+        if self.collaborators:
+            lines.append("Collaborators:")
+            lines.extend(f"- {item}" for item in self.collaborators)
+
+        if self.recurring_obligations:
+            lines.append("Recurring obligations:")
+            lines.extend(f"- {item}" for item in self.recurring_obligations)
+
+        if self.project_timeline:
+            lines.append("Project timeline:")
+            lines.extend(f"- {item}" for item in self.project_timeline)
 
         if self.open_loops_or_pressure:
             lines.append("Open loops and pressure:")
@@ -173,6 +188,14 @@ def build_guardian_world_model(
     preference_constraints = _extract_tagged_memory(memory_context, "preference", limit=2)
     recurring_patterns = _extract_tagged_memory(memory_context, "pattern", limit=3)
     active_routines = _extract_tagged_memory(memory_context, "routine", limit=3)
+    collaborators = _extract_tagged_memory(memory_context, "collaborator", limit=3)
+    recurring_obligations = _extract_tagged_memory(memory_context, "obligation", limit=3)
+    project_timeline = _dedupe(
+        _extract_tagged_memory(memory_context, "timeline", limit=3)
+        + list(active_projects[:1])
+        + _extract_lines(recent_execution_summary, limit=2)
+        + recent_session_lines[:1]
+    )
     memory_signals = _dedupe(goal_memory + recurring_patterns[:1] + preference_constraints[:1] + active_routines[:1])
     continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
 
@@ -243,4 +266,7 @@ def build_guardian_world_model(
         project_state=_dedupe(project_state),
         memory_signals=memory_signals,
         continuity_threads=continuity_threads,
+        collaborators=_dedupe(collaborators),
+        recurring_obligations=_dedupe(recurring_obligations),
+        project_timeline=project_timeline,
     )

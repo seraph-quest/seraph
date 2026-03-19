@@ -3,6 +3,7 @@ export type CockpitLayoutId = "default" | "focus" | "review";
 export type CockpitSectionId =
   | "rail"
   | "guardianState"
+  | "timeline"
   | "workflows"
   | "interventions"
   | "audit"
@@ -29,6 +30,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     sections: {
       rail: true,
       guardianState: true,
+      timeline: true,
       workflows: true,
       interventions: true,
       audit: true,
@@ -45,6 +47,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     sections: {
       rail: false,
       guardianState: true,
+      timeline: true,
       workflows: true,
       interventions: true,
       audit: false,
@@ -61,6 +64,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     sections: {
       rail: true,
       guardianState: false,
+      timeline: true,
       workflows: true,
       interventions: true,
       audit: true,

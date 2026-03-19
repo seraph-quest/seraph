@@ -172,7 +172,7 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_runbooks_only_include_ready_workflows(client):
+async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_workflows(client):
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -217,9 +217,72 @@ async def test_capabilities_overview_runbooks_only_include_ready_workflows(clien
 
     assert resp.status_code == 200
     payload = resp.json()
-    runbook_ids = {item["id"] for item in payload["runbooks"]}
-    assert "workflow:summarize-file" in runbook_ids
-    assert "workflow:web-brief-to-file" not in runbook_ids
+    runbooks = {item["id"]: item for item in payload["runbooks"]}
+    assert runbooks["workflow:summarize-file"]["availability"] == "ready"
+    assert any(
+        action["type"] == "draft_workflow"
+        for action in runbooks["workflow:summarize-file"]["recommended_actions"]
+    )
+    assert runbooks["workflow:web-brief-to-file"]["availability"] == "blocked"
+    assert runbooks["workflow:web-brief-to-file"]["blocking_reasons"] == ["missing tool: write_file"]
+    assert any(
+        action["type"] == "set_tool_policy"
+        for action in runbooks["workflow:web-brief-to-file"]["recommended_actions"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata(client):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch("src.api.capabilities.skill_manager.list_skills", return_value=[]),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "description": "Research and save",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query", "required": True},
+                        "file_path": {"type": "string", "description": "Output path", "required": True},
+                    },
+                    "requires_tools": ["web_search", "write_file"],
+                    "requires_skills": [],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "risk_level": "medium",
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+    ):
+        workflow_resp = await client.get("/api/capabilities/preflight", params={"target_type": "workflow", "name": "web-brief-to-file"})
+        runbook_resp = await client.get("/api/capabilities/preflight", params={"target_type": "runbook", "name": "workflow:web-brief-to-file"})
+
+    assert workflow_resp.status_code == 200
+    workflow_payload = workflow_resp.json()
+    assert workflow_payload["availability"] == "blocked"
+    assert workflow_payload["blocking_reasons"] == ["missing tool: write_file"]
+    assert workflow_payload["can_autorepair"] is True
+    assert workflow_payload["parameter_schema"]["file_path"]["type"] == "string"
+
+    assert runbook_resp.status_code == 200
+    runbook_payload = runbook_resp.json()
+    assert runbook_payload["availability"] == "blocked"
+    assert runbook_payload["blocking_reasons"] == ["missing tool: write_file"]
+    assert runbook_payload["risk_level"] == "medium"
+    assert runbook_payload["execution_boundaries"] == ["external_read", "workspace_write"]
 
 
 @pytest.mark.asyncio

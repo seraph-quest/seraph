@@ -75,7 +75,9 @@ def test_main_lists_available_scenarios(capsys):
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
     assert "workflow_composition_behavior" in captured.out
     assert "workflow_approval_threading_behavior" in captured.out
+    assert "threaded_operator_timeline_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
+    assert "capability_preflight_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -175,7 +177,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "delegated_tool_workflow_degraded_behavior",
                 "workflow_composition_behavior",
                 "workflow_approval_threading_behavior",
+                "threaded_operator_timeline_behavior",
                 "capability_repair_behavior",
+                "capability_preflight_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -557,10 +561,68 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["workflow_approval_threading_behavior"]["status"] == "awaiting_approval"
     assert details_by_name["workflow_approval_threading_behavior"]["thread_label"] == "Research thread"
+    assert details_by_name["workflow_approval_threading_behavior"]["thread_source"] == "session"
     assert details_by_name["workflow_approval_threading_behavior"]["pending_approval_count"] == 1
     assert details_by_name["workflow_approval_threading_behavior"]["pending_resume_message"] == "Continue once the web brief is approved"
     assert details_by_name["workflow_approval_threading_behavior"]["timeline_has_approval"] is True
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_allowed"] is False
     assert details_by_name["workflow_approval_threading_behavior"]["replay_block_reason"] == "pending_approval"
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_draft_is_none"] is True
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_input_keys"] == ["file_path", "query"]
+    assert details_by_name["workflow_approval_threading_behavior"]["parameter_schema_keys"] == [
+        "file_path",
+        "query",
+    ]
+    assert details_by_name["workflow_approval_threading_behavior"]["replay_recommended_actions"] == [
+        "open_settings",
+    ]
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] == "approval_gate"
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] == "Approval gate"
+    assert (
+        details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"]
+        == "Continue once the web brief is approved"
+    )
+    assert (
+        details_by_name["workflow_approval_threading_behavior"]["approval_recovery_message"]
+        == "Review pending approval(s) for workflow 'web-brief-to-file' before replaying."
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["item_kinds"] == [
+        "notification",
+        "intervention",
+        "queued_insight",
+        "workflow_run",
+        "approval",
+        "audit",
+    ]
+    assert details_by_name["threaded_operator_timeline_behavior"]["latest_kind"] == "notification"
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_thread_id"] == "thread-1"
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["workflow_continue_message_matches_replay"]
+        is True
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_replay_allowed"] is True
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_resume_from_step"] == "write_step"
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["workflow_resume_checkpoint_label"]
+        == "Retry failed step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["approval_thread_matches"] is True
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["approval_continue_message"]
+        == "Continue after shell approval."
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["notification_thread_matches"] is True
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["notification_continue_message"]
+        == "Continue from native notification."
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["queued_thread_matches"] is True
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["queued_continue_message"]
+        == "Continue from queued guardian bundle: Bundle the research notes for later."
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["intervention_source"] == "native_notification"
+    assert details_by_name["threaded_operator_timeline_behavior"]["audit_thread_label"] == "Research thread"
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]
@@ -569,6 +631,37 @@ def test_runtime_eval_scenarios_expose_expected_details():
         for label in details_by_name["capability_repair_behavior"]["recommendation_labels"]
     )
     assert details_by_name["capability_repair_behavior"]["runbooks_ready"] >= 1
+    assert details_by_name["capability_preflight_behavior"]["workflow_ready"] is False
+    assert details_by_name["capability_preflight_behavior"]["workflow_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["workflow_blocking_reasons"] == [
+        "missing tool: write_file",
+    ]
+    assert details_by_name["capability_preflight_behavior"]["workflow_parameter_schema_keys"] == [
+        "file_path",
+        "query",
+    ]
+    assert details_by_name["capability_preflight_behavior"]["workflow_recommended_action_types"] == [
+        "set_tool_policy",
+    ]
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_can_autorepair"] is True
+    assert "skill web-briefing missing tool: write_file" in (
+        details_by_name["capability_preflight_behavior"]["starter_pack_blocking_reasons"]
+    )
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_command_present"] is True
+    assert details_by_name["capability_preflight_behavior"]["runbook_ready"] is False
+    assert details_by_name["capability_preflight_behavior"]["runbook_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["runbook_parameter_schema_keys"] == [
+        "file_path",
+        "query",
+    ]
+    assert details_by_name["capability_preflight_behavior"]["runbook_risk_level"] == "medium"
+    assert details_by_name["capability_preflight_behavior"]["runbook_execution_boundaries"] == [
+        "external_read",
+        "workspace_write",
+    ]
+    assert details_by_name["capability_preflight_behavior"]["runbook_blocking_reasons"] == [
+        "missing tool: write_file",
+    ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
     assert details_by_name["embedding_runtime_audit"]["loaded_integration_type"] == "embedding_model"
@@ -692,9 +785,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["provider_policy_safeguards"]["required_policy_intents"] == ["tool_use"]
     assert details_by_name["provider_policy_safeguards"]["max_cost_tier"] == "medium"
     assert details_by_name["provider_policy_safeguards"]["max_latency_tier"] == "medium"
+    assert details_by_name["provider_policy_safeguards"]["required_task_class"] == "chat"
+    assert details_by_name["provider_policy_safeguards"]["max_budget_class"] == "medium"
     assert details_by_name["provider_policy_safeguards"]["primary_missing_required_intents"] == ["tool_use"]
     assert details_by_name["provider_policy_safeguards"]["primary_cost_guardrail"] is False
     assert details_by_name["provider_policy_safeguards"]["primary_latency_guardrail"] is False
+    assert details_by_name["provider_policy_safeguards"]["primary_task_class"] == "analysis"
+    assert details_by_name["provider_policy_safeguards"]["primary_task_guardrail"] is False
+    assert details_by_name["provider_policy_safeguards"]["primary_budget_class"] == "high"
+    assert details_by_name["provider_policy_safeguards"]["primary_budget_guardrail"] is False
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_model"] == (
         "openrouter/anthropic/claude-sonnet-4"
     )

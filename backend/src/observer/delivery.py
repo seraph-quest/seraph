@@ -166,6 +166,8 @@ async def deliver_or_queue(
             learning_escalation_bias=learning_signal.escalation_bias,
             learning_timing_bias=learning_signal.timing_bias,
             learning_blocked_state_bias=learning_signal.blocked_state_bias,
+            learning_suppression_bias=learning_signal.suppression_bias,
+            learning_thread_preference_bias=learning_signal.thread_preference_bias,
         )
 
         event_details = {
@@ -185,6 +187,8 @@ async def deliver_or_queue(
             "learning_escalation_bias": learning_signal.escalation_bias,
             "learning_timing_bias": learning_signal.timing_bias,
             "learning_blocked_state_bias": learning_signal.blocked_state_bias,
+            "learning_suppression_bias": learning_signal.suppression_bias,
+            "learning_thread_preference_bias": learning_signal.thread_preference_bias,
             "learning_helpful_count": learning_signal.helpful_count,
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,

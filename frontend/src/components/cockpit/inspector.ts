@@ -54,6 +54,13 @@ export interface WorkflowRunRecord {
   replayAllowed?: boolean;
   replayBlockReason?: string | null;
   replayDraft?: string | null;
+  replayInputs?: Record<string, unknown>;
+  parameterSchema?: Record<string, unknown>;
+  replayRecommendedActions?: Array<Record<string, unknown>>;
+  availability?: string | null;
+  resumeFromStep?: string | null;
+  resumeCheckpointLabel?: string | null;
+  threadContinueMessage?: string | null;
   approvalRecoveryMessage?: string | null;
   timeline?: Array<{ kind: string; at: string; summary: string }>;
 }

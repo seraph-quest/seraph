@@ -68,6 +68,8 @@ def decide_intervention(
     learning_escalation_bias: str = "neutral",
     learning_timing_bias: str = "neutral",
     learning_blocked_state_bias: str = "neutral",
+    learning_suppression_bias: str = "neutral",
+    learning_thread_preference_bias: str = "neutral",
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
     should_cost_budget = user_state_machine.should_cost_budget(
@@ -159,6 +161,14 @@ def decide_intervention(
             action=InterventionAction.bundle,
             reason="learned_low_cadence",
             delivery_decision=DeliveryDecision.queue,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if learning_suppression_bias == "extend_suppression" and urgency < 4 and intervention_type != "alert":
+        return InterventionDecision(
+            action=InterventionAction.defer,
+            reason="learned_suppression_window",
+            delivery_decision=None,
             should_cost_budget=should_cost_budget,
         )
 
@@ -283,7 +293,11 @@ def decide_intervention(
 
     return InterventionDecision(
         action=InterventionAction.act,
-        reason="available_capacity",
+        reason=(
+            "prefer_existing_thread"
+            if learning_thread_preference_bias == "prefer_existing_thread" and intervention_type != "alert"
+            else "available_capacity"
+        ),
         delivery_decision=DeliveryDecision.deliver,
         should_cost_budget=should_cost_budget,
     )

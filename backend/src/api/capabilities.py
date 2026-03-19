@@ -7,7 +7,7 @@ import os
 import shutil
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
@@ -123,6 +123,43 @@ def _workflow_draft(workflow: dict[str, Any]) -> str:
     return f'Run workflow "{workflow["name"]}".'
 
 
+def _workflow_blocking_reasons(workflow: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    availability = str(workflow.get("availability") or "unknown")
+    if availability == "disabled":
+        reasons.append("workflow disabled")
+    for skill_name in workflow.get("missing_skills", []) or []:
+        reasons.append(f"missing skill: {skill_name}")
+    for tool_name in workflow.get("missing_tools", []) or []:
+        reasons.append(f"missing tool: {tool_name}")
+    return reasons
+
+
+def _starter_pack_blocking_reasons(pack: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    for blocked in pack.get("blocked_skills", []) or []:
+        if not isinstance(blocked, dict):
+            continue
+        name = str(blocked.get("name") or "unknown")
+        availability = str(blocked.get("availability") or "missing")
+        if availability == "disabled":
+            reasons.append(f"skill disabled: {name}")
+        for tool_name in blocked.get("missing_tools", []) or []:
+            reasons.append(f"skill {name} missing tool: {tool_name}")
+    for blocked in pack.get("blocked_workflows", []) or []:
+        if not isinstance(blocked, dict):
+            continue
+        name = str(blocked.get("name") or "unknown")
+        availability = str(blocked.get("availability") or "missing")
+        if availability == "disabled":
+            reasons.append(f"workflow disabled: {name}")
+        for skill_name in blocked.get("missing_skills", []) or []:
+            reasons.append(f"workflow {name} missing skill: {skill_name}")
+        for tool_name in blocked.get("missing_tools", []) or []:
+            reasons.append(f"workflow {name} missing tool: {tool_name}")
+    return reasons
+
+
 def _suggested_tool_policy_mode(blocked_reason: str | None) -> str | None:
     if blocked_reason == "tool_policy_safe":
         return "balanced"
@@ -172,6 +209,7 @@ def _recommended_actions(
     *,
     skills_by_name: dict[str, dict[str, Any]],
     workflows_by_name: dict[str, dict[str, Any]],
+    starter_packs: list[dict[str, Any]],
     native_tools: list[dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
     tool_mode: str,
@@ -297,32 +335,47 @@ def _recommended_actions(
                 })
 
     runbooks: list[dict[str, Any]] = []
-    for pack in _load_starter_packs():
-        if not isinstance(pack, dict) or not isinstance(pack.get("name"), str):
-            continue
+    packs_by_name = {
+        str(pack["name"]): pack
+        for pack in starter_packs
+        if isinstance(pack, dict) and isinstance(pack.get("name"), str)
+    }
+    for pack_name, pack in packs_by_name.items():
         sample_prompt = str(pack.get("sample_prompt") or "").strip()
         if not sample_prompt:
             continue
         runbooks.append({
-            "id": f"starter-pack:{pack['name']}",
-            "label": str(pack.get("label") or pack["name"]),
+            "id": f"starter-pack:{pack_name}",
+            "name": pack_name,
+            "label": str(pack.get("label") or pack_name),
             "description": pack.get("description", ""),
             "source": "starter_pack",
             "command": sample_prompt,
-            "action": {"type": "activate_starter_pack", "label": "Activate pack", "name": pack["name"]},
+            "availability": pack.get("availability", "blocked"),
+            "blocking_reasons": _starter_pack_blocking_reasons(pack),
+            "recommended_actions": pack.get("recommended_actions", []),
+            "parameter_schema": {},
+            "risk_level": "medium",
+            "execution_boundaries": ["capability_activation"],
+            "action": {"type": "activate_starter_pack", "label": "Activate pack", "name": pack_name},
         })
 
     for workflow in workflows_by_name.values():
         if not bool(workflow.get("user_invocable", False)):
             continue
-        if workflow.get("availability") != "ready":
-            continue
         runbooks.append({
             "id": f"workflow:{workflow['name']}",
+            "name": workflow["name"],
             "label": f"Run {workflow['name']}",
             "description": workflow.get("description", ""),
             "source": "workflow",
             "command": _workflow_draft(workflow),
+            "availability": workflow.get("availability", "blocked"),
+            "blocking_reasons": _workflow_blocking_reasons(workflow),
+            "recommended_actions": workflow.get("recommended_actions", []),
+            "parameter_schema": workflow.get("inputs", {}),
+            "risk_level": workflow.get("risk_level", "high"),
+            "execution_boundaries": workflow.get("execution_boundaries", []),
             "action": {"type": "draft_workflow", "label": "Draft workflow", "name": workflow["name"]},
         })
 
@@ -672,6 +725,7 @@ def _build_capability_overview() -> dict[str, Any]:
     catalog_items, recommendations, runbooks = _recommended_actions(
         skills_by_name=skills_by_name,
         workflows_by_name=workflows_by_name,
+        starter_packs=starter_packs,
         native_tools=native_tools,
         mcp_servers=mcp_servers,
         tool_mode=tool_mode,
@@ -710,6 +764,129 @@ def _build_capability_overview() -> dict[str, Any]:
 @router.get("/capabilities/overview")
 async def get_capability_overview():
     return _build_capability_overview()
+
+
+def _capability_preflight_payload(
+    *,
+    overview: dict[str, Any],
+    target_type: str,
+    name: str,
+) -> dict[str, Any]:
+    availability = "unknown"
+    label = name
+    description = ""
+    command: str | None = None
+    parameter_schema: dict[str, Any] = {}
+    risk_level: str | None = None
+    execution_boundaries: list[str] = []
+    recommended_actions: list[dict[str, Any]] = []
+    blocking_reasons: list[str] = []
+
+    if target_type == "workflow":
+        item = next(
+            (workflow for workflow in overview["workflows"] if workflow.get("name") == name),
+            None,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
+        availability = str(item.get("availability") or "unknown")
+        label = str(item.get("name") or name)
+        description = str(item.get("description") or "")
+        command = _workflow_draft(item)
+        parameter_schema = (
+            item.get("inputs") if isinstance(item.get("inputs"), dict) else {}
+        )
+        risk_level = str(item.get("risk_level") or "unknown")
+        execution_boundaries = [
+            str(value)
+            for value in item.get("execution_boundaries", []) or []
+            if isinstance(value, str)
+        ]
+        recommended_actions = [
+            action for action in item.get("recommended_actions", []) or []
+            if isinstance(action, dict)
+        ]
+        blocking_reasons = _workflow_blocking_reasons(item)
+    elif target_type == "starter_pack":
+        item = next(
+            (pack for pack in overview["starter_packs"] if pack.get("name") == name),
+            None,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Starter pack '{name}' not found")
+        availability = str(item.get("availability") or "unknown")
+        label = str(item.get("label") or name)
+        description = str(item.get("description") or "")
+        command = str(item.get("sample_prompt") or "") or None
+        recommended_actions = [
+            action for action in item.get("recommended_actions", []) or []
+            if isinstance(action, dict)
+        ]
+        blocking_reasons = _starter_pack_blocking_reasons(item)
+        risk_level = "medium"
+        execution_boundaries = ["capability_activation"]
+    elif target_type == "runbook":
+        item = next(
+            (runbook for runbook in overview["runbooks"] if runbook.get("id") == name),
+            None,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"Runbook '{name}' not found")
+        availability = str(item.get("availability") or "unknown")
+        label = str(item.get("label") or name)
+        description = str(item.get("description") or "")
+        command = str(item.get("command") or "") or None
+        parameter_schema = (
+            item.get("parameter_schema")
+            if isinstance(item.get("parameter_schema"), dict)
+            else {}
+        )
+        risk_level = str(item.get("risk_level") or "unknown")
+        execution_boundaries = [
+            str(value)
+            for value in item.get("execution_boundaries", []) or []
+            if isinstance(value, str)
+        ]
+        recommended_actions = [
+            action for action in item.get("recommended_actions", []) or []
+            if isinstance(action, dict)
+        ]
+        blocking_reasons = [
+            str(value)
+            for value in item.get("blocking_reasons", []) or []
+            if isinstance(value, str)
+        ]
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported target_type '{target_type}'")
+
+    return {
+        "target_type": target_type,
+        "name": name,
+        "label": label,
+        "description": description,
+        "availability": availability,
+        "blocking_reasons": blocking_reasons,
+        "recommended_actions": recommended_actions,
+        "command": command,
+        "parameter_schema": parameter_schema,
+        "risk_level": risk_level,
+        "execution_boundaries": execution_boundaries,
+        "can_autorepair": bool(recommended_actions),
+        "ready": availability == "ready",
+    }
+
+
+@router.get("/capabilities/preflight")
+async def get_capability_preflight(
+    target_type: str = Query(...),
+    name: str = Query(...),
+):
+    overview = _build_capability_overview()
+    return _capability_preflight_payload(
+        overview=overview,
+        target_type=target_type,
+        name=name,
+    )
 
 
 @router.post("/capabilities/starter-packs/{name}/activate")

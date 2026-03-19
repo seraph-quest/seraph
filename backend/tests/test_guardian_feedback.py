@@ -1,5 +1,10 @@
 """Tests for guardian intervention feedback persistence."""
 
+from datetime import datetime, timedelta, timezone
+
+from sqlmodel import select
+
+from src.db.models import GuardianIntervention
 from src.guardian.feedback import guardian_feedback_repository
 
 
@@ -168,3 +173,60 @@ async def test_learning_signal_tracks_timing_and_blocked_state_biases(async_db):
 
     assert signal.timing_bias == "avoid_focus_windows"
     assert signal.blocked_state_bias == "avoid_blocked_state_interruptions"
+
+
+async def test_list_recent_can_scope_to_single_session(async_db):
+    base_time = datetime.now(timezone.utc)
+
+    first = await guardian_feedback_repository.create_intervention(
+        session_id="session-1",
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="Older session-1 intervention.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="delivered",
+    )
+    second = await guardian_feedback_repository.create_intervention(
+        session_id="session-2",
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="Newer session-2 intervention.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="delivered",
+    )
+
+    # Persist deterministic timestamps so session-scoped queries are not starved by newer global traffic.
+    async with async_db() as db:
+        stored_first = (
+            await db.execute(select(GuardianIntervention).where(GuardianIntervention.id == first.id))
+        ).scalar_one()
+        stored_second = (
+            await db.execute(select(GuardianIntervention).where(GuardianIntervention.id == second.id))
+        ).scalar_one()
+        stored_first.updated_at = base_time
+        stored_second.updated_at = base_time + timedelta(minutes=5)
+        db.add(stored_first)
+        db.add(stored_second)
+        await db.flush()
+
+    recent_for_session = await guardian_feedback_repository.list_recent(limit=1, session_id="session-1")
+
+    assert [item.id for item in recent_for_session] == [first.id]

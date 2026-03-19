@@ -18,6 +18,7 @@ export const PANEL_MIN_SIZES: Record<string, { width: number; height: number }> 
   goals_pane: { width: 224, height: 112 },
   outputs_pane: { width: 224, height: 96 },
   approvals_pane: { width: 224, height: 112 },
+  operator_timeline_pane: { width: 240, height: 128 },
   response_pane: { width: 224, height: 112 },
   guardian_state_pane: { width: 240, height: 144 },
   workflows_pane: { width: 224, height: 112 },
@@ -41,6 +42,7 @@ const COCKPIT_PANE_IDS = [
   "goals_pane",
   "outputs_pane",
   "approvals_pane",
+  "operator_timeline_pane",
   "response_pane",
   "guardian_state_pane",
   "workflows_pane",
@@ -62,17 +64,18 @@ const LAYOUT_COLUMNS: Record<CockpitLayoutId, LayoutColumn[]> = {
   default: [
     { weight: 0.92, panes: ["sessions_pane", "goals_pane", "outputs_pane"] },
     { weight: 1.38, panes: ["response_pane", "guardian_state_pane", "interventions_pane"] },
-    { weight: 1.02, panes: ["approvals_pane", "workflows_pane", "audit_pane", "trace_pane", "inspector_pane"] },
-    { weight: 1.18, panes: ["conversation_pane", "desktop_shell_pane", "operator_surface_pane"] },
+    { weight: 0.98, panes: ["approvals_pane", "operator_timeline_pane", "workflows_pane"] },
+    { weight: 0.94, panes: ["audit_pane", "trace_pane", "inspector_pane"] },
+    { weight: 1.12, panes: ["conversation_pane", "desktop_shell_pane", "operator_surface_pane"] },
   ],
   focus: [
     { weight: 1.28, panes: ["response_pane", "guardian_state_pane", "interventions_pane"] },
-    { weight: 1.02, panes: ["workflows_pane", "inspector_pane"] },
+    { weight: 1.02, panes: ["operator_timeline_pane", "workflows_pane", "inspector_pane"] },
     { weight: 1.16, panes: ["conversation_pane", "desktop_shell_pane", "operator_surface_pane"] },
   ],
   review: [
     { weight: 0.86, panes: ["sessions_pane", "approvals_pane"] },
-    { weight: 1.1, panes: ["response_pane", "workflows_pane", "interventions_pane"] },
+    { weight: 1.1, panes: ["response_pane", "operator_timeline_pane", "workflows_pane", "interventions_pane"] },
     { weight: 1.08, panes: ["audit_pane", "trace_pane", "inspector_pane"] },
     { weight: 1.12, panes: ["conversation_pane", "desktop_shell_pane", "operator_surface_pane"] },
   ],
@@ -114,7 +117,7 @@ function distributeHeights(
   let remaining = usable - minTotal;
   const growthWeights = ids.map((id) => {
     if (id === "guardian_state_pane" || id === "inspector_pane" || id === "conversation_pane") return 2;
-    if (id === "operator_surface_pane" || id === "response_pane") return 1.5;
+    if (id === "operator_surface_pane" || id === "response_pane" || id === "operator_timeline_pane") return 1.5;
     return 1;
   });
   const totalWeight = growthWeights.reduce((sum, value) => sum + value, 0);
@@ -227,6 +230,7 @@ function defaultZStack(): string[] {
     "goals_pane",
     "outputs_pane",
     "approvals_pane",
+    "operator_timeline_pane",
     "response_pane",
     "guardian_state_pane",
     "workflows_pane",

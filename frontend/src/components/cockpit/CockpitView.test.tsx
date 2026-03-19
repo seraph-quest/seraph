@@ -706,6 +706,104 @@ describe("CockpitView", () => {
     expect(useChatStore.getState().sessionId).toBe("session-1");
   });
 
+  it("uses workflow-attached approvals when the pending sidebar is capped away", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions/session-2/messages")) {
+        return Promise.resolve(mockResponse([]));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [{
+            id: "workflow-run-1",
+            tool_name: "workflow_web_brief_to_file",
+            workflow_name: "web-brief-to-file",
+            session_id: "session-2",
+            status: "awaiting_approval",
+            started_at: "2026-03-18T12:01:00Z",
+            updated_at: "2026-03-18T12:01:45Z",
+            summary: "workflow_web_brief_to_file is waiting for approval",
+            step_tools: ["web_search", "write_file"],
+            artifact_paths: [],
+            continued_error_steps: [],
+            arguments: { query: "seraph", file_path: "notes/brief.md" },
+            risk_level: "medium",
+            execution_boundaries: ["external_read", "workspace_write"],
+            accepts_secret_refs: false,
+            pending_approval_count: 1,
+            pending_approval_ids: ["approval-run-1"],
+            pending_approvals: [{
+              id: "approval-run-1",
+              summary: "Approve write_file for web brief",
+              risk_level: "medium",
+              created_at: "2026-03-18T12:01:30Z",
+              thread_id: "session-2",
+              thread_label: "Approval thread",
+              resume_message: "Continue workflow after approval.",
+            }],
+            thread_id: "session-2",
+            thread_label: "Approval thread",
+            thread_source: "session",
+            replay_allowed: true,
+            replay_block_reason: null,
+            replay_draft: "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+            approval_recovery_message: "Continue workflow after approval.",
+            timeline: [
+              { kind: "workflow_started", at: "2026-03-18T12:01:00Z", summary: "Workflow started" },
+            ],
+          }],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue workflow after approval.")).toBeInTheDocument(),
+    );
+    expect(useChatStore.getState().sessionId).toBe("session-2");
+  });
+
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
     useChatStore.setState({
       messages: [

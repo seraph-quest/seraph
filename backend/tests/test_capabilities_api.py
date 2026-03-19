@@ -277,3 +277,76 @@ async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_
     recommendation_ids = {item["id"] for item in payload["recommendations"]}
     assert "starter-pack:research-briefing" not in recommendation_ids
     assert "tool-policy:write_file:full" in recommendation_ids
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks(client):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], ["daily-standup"], "approval"),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.api.capabilities.skill_manager.list_skills",
+            return_value=[
+                {
+                    "name": "daily-standup",
+                    "description": "Generate a quick standup",
+                    "requires_tools": ["shell_execute"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "file_path": "/tmp/daily-standup.md",
+                },
+            ],
+        ),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "summarize-file",
+                    "tool_name": "workflow_summarize_file",
+                    "description": "Summarize an existing file",
+                    "requires_tools": ["read_file"],
+                    "requires_skills": [],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "step_count": 1,
+                    "file_path": "/tmp/summarize-file.md",
+                    "policy_modes": ["balanced", "full"],
+                    "execution_boundaries": ["workspace_read"],
+                    "risk_level": "low",
+                    "accepts_secret_refs": False,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "daily-operator-rhythm",
+                    "label": "Daily Operator Rhythm",
+                    "description": "Standup plus file summary",
+                    "sample_prompt": "Run workflow \"summarize-file\" with file_path=\"notes/today.md\".",
+                    "skills": ["daily-standup"],
+                    "workflows": ["summarize-file"],
+                }
+            ],
+        ),
+        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+    ):
+        resp = await client.get("/api/capabilities/overview")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    pack = payload["starter_packs"][0]
+    assert pack["name"] == "daily-operator-rhythm"
+    assert pack["blocked_skills"][0]["name"] == "daily-standup"
+    assert pack["blocked_skills"][0]["missing_tools"] == ["shell_execute"]
+    assert any(action["type"] == "set_tool_policy" and action["mode"] == "full" for action in pack["recommended_actions"])
+    assert not any(action["type"] == "activate_starter_pack" for action in pack["recommended_actions"])

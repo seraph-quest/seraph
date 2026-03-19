@@ -979,10 +979,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const byId = pendingApprovals.find((approval) => workflow.pendingApprovalIds?.includes(approval.id));
       if (byId) return byId;
     }
-    return pendingApprovals.find((approval) =>
+    const fromSidebar = pendingApprovals.find((approval) =>
       approval.tool_name === workflow.toolName
       && approval.session_id === workflow.sessionId,
-    ) ?? null;
+    );
+    if (fromSidebar) return fromSidebar;
+
+    const attached = workflow.pendingApprovals?.[0];
+    if (!attached) return null;
+    return {
+      id: attached.id,
+      session_id: workflow.sessionId ?? null,
+      thread_id: attached.threadId ?? workflow.threadId ?? workflow.sessionId ?? null,
+      thread_label: attached.threadLabel ?? workflow.threadLabel ?? null,
+      tool_name: workflow.toolName,
+      risk_level: attached.riskLevel ?? workflow.riskLevel ?? "unknown",
+      status: "pending",
+      summary: attached.summary,
+      created_at: attached.createdAt,
+      resume_message: attached.resumeMessage ?? workflow.approvalRecoveryMessage ?? null,
+    };
   }
 
   function interventionsForWorkflow(workflow: WorkflowRunRecord): GuardianContinuityIntervention[] {

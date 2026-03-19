@@ -351,7 +351,7 @@ def _starter_pack_recommended_actions(
 
     tool_status = {str(tool["name"]): tool for tool in native_tools}
     seen_tool_modes: set[tuple[str, str]] = set()
-    for blocked in pack.get("blocked_workflows", []):
+    for blocked in [*pack.get("blocked_skills", []), *pack.get("blocked_workflows", [])]:
         if not isinstance(blocked, dict):
             continue
         for missing_tool in blocked.get("missing_tools", []) or []:
@@ -634,6 +634,7 @@ def _starter_pack_statuses(
                     "skills": skill_names,
                     "workflows": workflow_names,
                     "availability": availability,
+                    "blocked_skills": blocked_skills,
                     "blocked_workflows": blocked_workflows,
                 },
                 skills_by_name=skills_by_name,

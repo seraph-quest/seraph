@@ -124,6 +124,16 @@ def _overall_confidence(
     current_session_status: str,
     recent_sessions_status: str,
 ) -> str:
+    degraded_signals = sum(
+        1
+        for status in (
+            world_model_status,
+            memory_status,
+            current_session_status,
+            recent_sessions_status,
+        )
+        if status == "degraded"
+    )
     grounded_signals = sum(
         1
         for status in (
@@ -137,7 +147,9 @@ def _overall_confidence(
     if observer_confidence == "degraded":
         return "degraded"
     if observer_confidence == "partial":
-        return "partial" if grounded_signals else "degraded"
+        return "partial" if grounded_signals or degraded_signals else "degraded"
+    if degraded_signals:
+        return "partial"
     if grounded_signals >= 2 and world_model_status != "empty":
         return "grounded"
     return "partial"
@@ -262,12 +274,17 @@ async def build_guardian_state(
         recent_execution_summary=recent_execution_summary,
     )
     world_model_status = _world_model_status(world_model)
+    memory_status = (
+        "degraded"
+        if memory_requested and memory_degraded
+        else _status_for_text(memory_context, requested=memory_requested)
+    )
 
     confidence = GuardianStateConfidence(
         overall=_overall_confidence(
             observer_confidence=observer_context.observer_confidence,
             world_model_status=world_model_status,
-            memory_status=_status_for_text(memory_context, requested=memory_requested),
+            memory_status=memory_status,
             current_session_status=_status_for_text(
                 current_session_history,
                 requested=session_id is not None,
@@ -276,11 +293,7 @@ async def build_guardian_state(
         ),
         observer=observer_context.observer_confidence,
         world_model=world_model_status,
-        memory=(
-            "degraded"
-            if memory_requested and memory_degraded
-            else _status_for_text(memory_context, requested=memory_requested)
-        ),
+        memory=memory_status,
         current_session=_status_for_text(
             current_session_history,
             requested=session_id is not None,

@@ -4,7 +4,7 @@ Seraph now uses a three-part docs layout:
 
 - `docs/implementation/` is the canonical shipped-status surface
 - `docs/research/` is the canonical design and product-thesis surface
-- `docs/docs/` is retained as legacy/reference material
+- `docs/docs/` is a frozen archive for historical material that is no longer part of the active product contract
 
 The trees are meant to mirror each other:
 
@@ -25,7 +25,7 @@ The Docusaurus site now serves:
 
 - `/` from `docs/implementation/`
 - `/research` from `docs/research/`
-- `/legacy` from `docs/docs/`
+- `/legacy` from `docs/docs/` as the historical archive route
 
 This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
 

@@ -4,6 +4,8 @@ sidebar_position: 4
 
 # Phase 3.5 — Polish & Production Readiness
 
+> Archive note: this phase document predates the cockpit-only pivot and still includes village/avatar/Tauri-era planning language. Treat it as historical implementation context, not current product guidance.
+
 **Goal**: Complete unfinished Phase 3 UI work, fix backend gaps, harden infrastructure, and eliminate adoption barriers — making what exists production-quality before expanding in Phase 4.
 
 **Status**: Mostly complete — 3.5.1 (Goal UI), 3.5.2 (Interruption Mode), 3.5.5 (Token-Aware Context), 3.5.6 (Timeouts), 3.5.9 (Accessibility), 3.5.10 (LLM Logging) are done. 3.5.4 (Calendar) functional when credentials configured. 3.5.3 (Avatar State), 3.5.7 (Tauri), 3.5.8 (Infra Hardening) remain planned.

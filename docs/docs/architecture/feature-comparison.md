@@ -5,6 +5,7 @@ sidebar_position: 2
 # OpenClaw vs Seraph — Feature Gap Analysis
 
 > This document is a historical comparison snapshot, not the live product-status source of truth. For current status, use `docs/implementation/00-master-roadmap.md`, `docs/implementation/STATUS.md`, and the numbered workstream files under `docs/implementation/`.
+> Historical note: the Seraph side of this comparison predates the cockpit-only pivot and still describes the retired village/editor line.
 
 > **Date**: 2026-02-09 (updated)
 > **OpenClaw version context**: v2026.1.x (145k+ GitHub stars, formerly Clawdbot/Moltbot)
@@ -14,7 +15,7 @@ sidebar_position: 2
 
 **OpenClaw** is a self-hosted gateway connecting messaging platforms (WhatsApp, Telegram, Discord, etc.) to AI agents. It's headless — text-in/text-out with no visual UI.
 
-**Seraph** is a self-contained web app with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar casts magic effects when using tools while the user chats via an RPG-style dialog box. Persistent identity, long-term memory, hierarchical goals.
+**Seraph** in this historical snapshot is described through the old village-first shell. That is no longer the active product direction; current Seraph is cockpit-first.
 
 Different philosophies, but many of OpenClaw's features are worth adopting.
 

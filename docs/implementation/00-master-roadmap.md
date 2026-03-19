@@ -56,7 +56,7 @@ Legend for the checklist column:
 - [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
-- [x] The guardian cockpit is now the active interface path, with the village retained only as a legacy fallback rather than a parallel active shell.
+- [x] The guardian cockpit is now the only supported interface contract; the village/editor line is retired and should be removed from the repo rather than revived.
 - [x] Seraph now exposes a coherent capability surface for tools, skills, workflows, MCP servers, starter packs, workflow runs, reusable runbooks, preflight/autorepair actions, live operator logs, and active thread continuity from inside the cockpit itself.
 - [x] Workflow runs, pending approvals, notifications, queued interventions, recent interventions, and failure events now share explicit thread labels, continue drafts, open-thread links, and one threaded operator timeline instead of living as separate operator silos.
 - [x] Guardian state now carries memory signals, continuity threads, collaborators, recurring obligations, project timelines, and learned timing, suppression, blocked-state, plus thread guidance instead of only first-pass focus and delivery bias.
@@ -212,26 +212,26 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#1 execution-safety-hardening-v7`
+- the current active item is `#1 retire-village-and-editor-v1`
 
-1. [ ] `execution-safety-hardening-v7`:
+1. [ ] `retire-village-and-editor-v1`:
+   remove the dormant village shell, map editor, and game-facing docs so the repo, product story, and cockpit-only direction stop contradicting each other
+2. [ ] `execution-safety-hardening-v7`:
    harden threaded replay, operator-timeline mutations, capability autorepair, provider fallback escalation, and native continuation resume paths so the denser cockpit keeps clear privilege boundaries as leverage increases
-2. [ ] `workflow-step-debugging-and-recovery-v1`:
+3. [ ] `workflow-step-debugging-and-recovery-v1`:
    deepen workflow history from run-level timelines into step-level diagnostics, checkpoint targeting, failed-step evidence, and safer retry-from-step recovery
-3. [ ] `capability-bootstrap-and-pack-install-v1`:
+4. [ ] `cockpit-density-and-live-operator-views-v2`:
+   tighten the operator timeline, workflow timeline, approvals, evidence, and command surfaces into a faster keyboard-first cockpit with better step/debug density
+5. [ ] `capability-bootstrap-and-pack-install-v1`:
    move from first preflight/autorepair into broader bundled capability bootstrap, dependency install sequencing, and clearer pack-level recovery for skills, workflows, and MCP servers
-4. [ ] `provider-policy-explainability-and-budgets-v1`:
+6. [ ] `provider-policy-explainability-and-budgets-v1`:
    expose operator-readable routing explanations, budget classes, task/risk-aware degrade paths, and better cross-surface visibility into why the runtime picked or rejected each target
-5. [ ] `native-channel-expansion-v4`:
-   deepen native continuation from notifications and recents into broader approval follow-up, richer thread resume surfaces, and clearer browser/native arbitration under load
-6. [ ] `world-model-memory-fusion-v7`:
-   deepen durable project state with collaborator timelines, recurring obligations, routines, and execution-memory fusion that can hold longer-running commitments more coherently
-7. [ ] `guardian-learning-policy-v7`:
-   extend learning from the first suppression/timing/thread bias layer into stronger cooldown, escalation, and context-conditioned intervention policy adaptation with better quality gates
-8. [ ] `cockpit-density-and-live-operator-views-v2`:
-   tighten the new operator timeline, workflow timeline, approvals, evidence, and command surfaces into a faster keyboard-first cockpit with better step/debug density
-9. [ ] `extension-debugging-and-authoring-v1`:
+7. [ ] `extension-debugging-and-authoring-v1`:
    make third-party and user-authored skills, workflows, and MCP surfaces easier to validate, debug, recover, and operate from inside the cockpit
+8. [ ] `world-model-memory-fusion-v7`:
+   deepen durable project state with collaborator timelines, recurring obligations, routines, and execution-memory fusion that can hold longer-running commitments more coherently
+9. [ ] `guardian-learning-policy-v7`:
+   extend learning from the first suppression/timing/thread bias layer into stronger cooldown, escalation, and context-conditioned intervention policy adaptation with better quality gates
 10. [ ] `guardian-behavioral-evals-v7`:
    add deterministic contracts for workflow step recovery, broader capability bootstrap/autorepair, routing explainability and budgets, deeper learning, and richer native continuity
 
@@ -267,7 +267,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 ## Current Shipped Slice On `develop`
 
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
-- [x] guardian cockpit as the active browser shell, with the Phaser village kept only as an explicit legacy fallback path
+- [x] guardian cockpit as the active and only supported browser shell
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and a first actionable desktop control shell inside the cockpit
 - [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, cockpit-to-settings linkage for queued desktop state, and desktop-shell draft/continue actions over pending notifications, queued bundle items, and recent interventions
 - [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces

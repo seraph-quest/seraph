@@ -40,7 +40,7 @@ Seraph already has a stronger deterministic runtime-eval story than the reviewed
 
 ### 1. Primary interface
 
-Seraph’s first guardian cockpit shell is a better product direction than the old village-first default, but it is still thinner than the best reference surfaces. OpenClaw, Hermes, and IronClaw still present denser operator-first surfaces with stronger artifact, workflow, and trace control today.
+Seraph’s guardian cockpit is the right product direction, but it is still thinner than the best reference surfaces. OpenClaw, Hermes, and IronClaw still present denser operator-first surfaces with stronger artifact, workflow, and trace control today.
 
 ### 2. Workflow composition
 

@@ -8,12 +8,11 @@
   <a href="https://github.com/seraph-quest/seraph/actions"><img src="https://github.com/seraph-quest/seraph/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
   <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/react-19-61dafb" alt="React 19" />
-  <img src="https://img.shields.io/badge/phaser-3.90-orange" alt="Phaser 3.90" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
 </p>
 
 <p align="center">
-  Seraph ships today with a guardian cockpit browser shell, a legacy village mode, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The live product direction is a denser guardian cockpit for power users, not a village-first shell.
+  Seraph ships today with a guardian cockpit browser shell, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is cockpit-only: legacy village/editor code is retired and slated for removal rather than future productization.
 </p>
 
 ---
@@ -43,7 +42,7 @@ open http://localhost:8004/docs   # Swagger API docs
 
 | Layer | Stack |
 |-------|-------|
-| **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand, Phaser 3.90 |
+| **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand |
 | **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
 | **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
 | **Tools** | 17 built-in tool capabilities (auto-discovered) + reusable workflows + plug-and-play MCP servers |
@@ -58,12 +57,11 @@ open http://localhost:8004/docs   # Swagger API docs
 ```
 frontend/src/
   components/cockpit/ Guardian cockpit shell, state rails, intervention feed
-  game/              Phaser 3 village scene, sprites, EventBus
   components/        React overlays — chat, quest panel, settings
-  hooks/             useWebSocket, useAgentAnimation
+  hooks/             useWebSocket, keyboard and operator interaction hooks
   stores/            Zustand stores — chat, quest
-  lib/               Tool parser, animation state machine
-  config/            Constants, default positions, waypoints
+  lib/               Tool parser and cockpit helpers
+  config/            Frontend constants
 
 backend/src/
   api/               REST + WebSocket endpoints (chat, sessions, goals, tools, workflows, mcp)
@@ -82,15 +80,9 @@ docs/                Docusaurus docs site
 
 ---
 
-## Current Legacy Embodiment Surface
+## Retired Surfaces
 
-```
-User sends message  -->  THINKING
-  Tool detected     -->  CASTING + magic effect overlay
-  Response ready    -->  SPEAKING  -->  IDLE  -->  WANDERING
-```
-
-Tool use currently triggers a casting animation with a magic effect overlay at the agent's position inside the legacy village mode. The default browser shell is now the guardian cockpit; the village remains available as an alternate embodiment surface.
+Legacy village/editor code still exists in the repo for the moment, but it is no longer part of the product contract, documentation truth, or roadmap direction. Seraph is being built as a cockpit-first guardian system, not a game-shell assistant.
 
 ---
 

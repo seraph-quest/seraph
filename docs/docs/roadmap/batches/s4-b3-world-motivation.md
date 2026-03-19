@@ -4,6 +4,8 @@ title: S4-B3 World + Motivation
 
 # S4-B3: World + Motivation
 
+> Archive note: this batch belongs to the retired village/world-growth direction and is kept only as historical planning context.
+
 ## Intent
 
 Tie long-term growth in the village world to real-life progress in a way that is motivating without becoming gimmicky.

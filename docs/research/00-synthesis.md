@@ -27,7 +27,7 @@ That means:
 
 - dense, linked, evidence-backed operator surfaces matter more than charm-first presentation
 - memory, intervention quality, and real execution matter more than one-shot conversation polish
-- the current village/game shell is treated as a shipped legacy surface, not the future primary product direction
+- the old village/game/editor line is treated as a retired historical direction, not a future or fallback product branch
 
 ## Core Thesis
 

@@ -95,7 +95,7 @@ const config: Config = {
           type: 'doc',
           docsPluginId: 'legacy',
           docId: 'intro',
-          label: 'Legacy Docs',
+          label: 'Archive',
           position: 'left',
         },
         {
@@ -129,7 +129,7 @@ const config: Config = {
           title: 'Reference',
           items: [
             {
-              label: 'Legacy Docs',
+              label: 'Archive',
               to: '/legacy',
             },
             {

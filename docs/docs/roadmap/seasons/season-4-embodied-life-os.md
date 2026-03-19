@@ -4,6 +4,8 @@ title: Season 4 - Embodied Life OS
 
 # Season 4: Embodied Life OS
 
+> Archive note: this season plan belongs to the retired village/avatar product branch. Treat it as historical planning context only.
+
 ## Theme
 
 Fully realize Seraph as a living, motivating, embodied life operating system.

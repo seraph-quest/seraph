@@ -4,6 +4,8 @@ sidebar_position: 3
 
 # Phase 3 — The Observer
 
+> Archive note: this phase document predates the cockpit-only pivot and still includes village/avatar delivery language. Treat it as historical implementation context, not current product guidance.
+
 **Goal**: Seraph understands what you're doing and starts thinking proactively.
 
 **Status**: Phases 3.1–3.5 implemented

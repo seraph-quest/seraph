@@ -8,7 +8,7 @@ Seraph should feel like a living guardian system with legible state, not a chat 
 
 The primary interface direction is a cockpit/terminal operator surface.
 
-The village and avatar shell can remain as a secondary or optional presence surface, but it is not the active shell for the current product direction. The main surface should optimize for command throughput, operator visibility, auditability, and fast intervention across multiple live threads.
+The village and avatar shell should be treated as retired, not as a secondary product branch. The main surface should optimize for command throughput, operator visibility, auditability, and fast intervention across multiple live threads.
 
 ## Why The Village Direction Falls Short
 
@@ -17,7 +17,7 @@ The village and avatar shell can remain as a secondary or optional presence surf
 - it is weak for comparing multiple live threads, artifacts, memories, and queues at once
 - it makes keyboard-first operator control feel secondary
 
-The village can be emotionally distinctive, but distinctiveness is not enough. The primary interface has to help the user steer and audit the system quickly.
+The old village can be emotionally distinctive, but distinctiveness is not enough. The primary interface has to help the user steer and audit the system quickly.
 
 ## Primary Interface Shape
 
@@ -45,7 +45,7 @@ The core workspace should support snap-aligned panes for:
 - memory evidence
 - goals, projects, and saved workspaces
 
-These panes should stay useful in compact form, be easy to rearrange, and hold a denser working set than the village-overlay model.
+These panes should stay useful in compact form, be easy to rearrange, and hold a denser working set than the retired village-overlay model.
 
 ### Command layer
 
@@ -70,12 +70,12 @@ A persistent command surface should stay available for:
 
 ## Embodiment After The Pivot
 
-If any embodiment remains, it should be subordinate to the cockpit:
+If embodiment returns in the future, it should be subordinate to the cockpit:
 
 - ambient status and mood cues
 - optional motivational reflection
 - lightweight ritual or home-state affordances
-- an occasional distinct village or presence surface when the user explicitly wants it
+- lightweight ambient status cues rather than a parallel scenic shell
 
 It should not gate core workflows or consume the main screen real estate.
 

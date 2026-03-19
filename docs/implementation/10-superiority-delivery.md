@@ -85,9 +85,9 @@ This file explains:
 - [x] This file should explain why the queue exists in its current order.
 - [x] The previous 10-item queue is now fully shipped on this branch.
 - [x] `execution-safety-hardening-v6`, `threaded-operator-timeline-v1`, `workflow-runbooks-and-parameterized-replay-v1`, `capability-preflight-and-autorepair-v1`, `provider-policy-safeguards-v3`, `native-channel-expansion-v3`, `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, `cockpit-density-and-live-operator-views-v1`, and `guardian-behavioral-evals-v6` now move into the latest completed batch in the roadmap.
-- [x] The roadmap now refreshes to `execution-safety-hardening-v7` as the next active item because the latest batch made threaded replay, preflight repair, provider safeguards, and live operator control materially easier to use.
-- [x] The new queue starts with execution hardening, step-level workflow recovery, broader capability bootstrap, and provider-policy explainability because those are now the highest-value trust and operability gaps after the current operator-timeline and preflight batch landed.
-- [x] The refreshed queue keeps deeper native reach, world-model fusion, guardian learning, denser operator views, extension ergonomics, and broader behavioral proof in the top 10 because the new batch widened leverage and therefore raises the value of better judgment, stronger debugging, and proof.
+- [x] The roadmap now refreshes to `retire-village-and-editor-v1` as the next active item so the repo and docs stop carrying a second product line that is no longer part of Seraph's direction.
+- [x] The new queue starts with retirement of the village/editor line, then execution hardening, step-level workflow recovery, cockpit-density work, broader capability bootstrap, and provider-policy explainability because those are now the highest-value trust and operability gaps after the current operator-timeline and preflight batch landed.
+- [x] The refreshed queue keeps extension authoring, world-model fusion, guardian learning, and broader behavioral proof in the top 10 while pushing broader native expansion later, because cockpit-only Seraph needs denser operator control and clearer capability leverage before more surface area.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

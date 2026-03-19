@@ -4,6 +4,8 @@ title: S4-B1 Avatar Reflection
 
 # S4-B1: Avatar Reflection
 
+> Archive note: this batch belongs to the retired village/avatar direction and is kept only as historical planning context.
+
 ## Intent
 
 Make the avatar visibly reflect real user and guardian state.

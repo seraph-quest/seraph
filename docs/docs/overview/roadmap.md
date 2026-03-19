@@ -32,7 +32,7 @@ Legend for the checklist column:
 | 03. Runtime Reliability | `[ ]` | Ordered fallbacks, runtime-path primary and fallback overrides, local routing across helper/agent/delegation/MCP-specialist paths, runtime audit visibility including embedding, vector-store, soul-file, and filesystem boundaries, and deterministic eval foundations are shipped; richer provider selection, remaining edge coverage, and broader evals are still left |
 | 04. Presence And Reach | `[ ]` | Browser, WebSocket, proactive delivery, and the native observer daemon are shipped foundations; desktop presence, notifications, channels, and cross-surface continuity are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, strategist, goals, daily briefing, and evening review foundations are shipped; the deeper adaptive guardian layer is still left |
-| 06. Embodied UX | `[ ]` | Village UI, quest log, avatar, ambient indicators, and settings surfaces are shipped; the fuller life-OS shell is still left |
+| 06. Embodied UX | `[ ]` | Guardian cockpit, goals/settings overlays, operator panes, and continuity surfaces are shipped; denser workspace composition and full retirement of the village/editor line are still left |
 | 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, and delegation foundations are shipped; stronger workflow leverage and extension ergonomics are still left |
 
 ## Delivery Order

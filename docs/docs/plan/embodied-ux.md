@@ -5,6 +5,8 @@ title: Workstream 06 - Embodied UX
 
 # Workstream 06: Embodied UX
 
+> Archive note: this page describes the retired village/avatar direction and is no longer the live embodied-UX plan. Use `docs/implementation/06-embodied-ux.md` and `docs/research/07-embodied-interface.md` for the current cockpit-first direction.
+
 ## Status On `develop`
 
 - [ ] Workstream 06 is only partially shipped on `develop`.

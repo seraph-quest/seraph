@@ -4,6 +4,8 @@ sidebar_position: 5
 
 # Phase 4 — The Network
 
+> Archive note: this phase document includes village-first presence metaphors that are no longer part of the active Seraph direction. Treat it as historical planning context only.
+
 **Goal**: Seraph reaches beyond the village — multi-channel presence, composable skills, voice, multi-agent collaboration, and agent-rendered visualizations.
 
 **Status**: Partially implemented — 4.1 (SKILL.md) and 4.4 (Multi-Agent/Delegation) are done. Remaining items planned.

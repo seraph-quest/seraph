@@ -244,8 +244,8 @@ beforeEach(() => {
 
 These areas are intentionally excluded from the test suite:
 
-- **Phaser game objects** (VillageScene, AgentSprite, UserSprite, SpeechBubble) — require WebGL context, fragile mocking
-- **EventBus.ts** — single-line Phaser EventEmitter wrapper
+- **Legacy Phaser game objects** (VillageScene, AgentSprite, UserSprite, SpeechBubble) — historical code that requires WebGL context and fragile mocking
+- **Legacy `EventBus.ts`** — single-line Phaser EventEmitter wrapper tied to the retired game shell
 - **LanceDB vector_store.py** — requires real embeddings model loaded
 - **Full WS message streaming** — complex sync/async interaction with agent streaming; basic WS tests cover ping, error handling, and skip_onboarding
 

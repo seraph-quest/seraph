@@ -4,6 +4,8 @@ sidebar_position: 4
 
 # Competitive Research: Seraph vs OpenClaw, IronClaw, and Hermes Agent
 
+> Archive note: this research memo predates the cockpit-only pivot and still includes village-first framing in a few sections. Use `docs/research/10-competitive-benchmark.md` and `docs/research/11-superiority-program.md` for the current source-of-truth benchmark.
+
 **Research date:** March 12, 2026
 **Seraph repo context:** local inspection of the current repository on `develop` before this doc was written
 **Scope:** product strategy, architecture, security posture, memory model, execution model, distribution, and competitive positioning
@@ -35,7 +37,7 @@ The right strategy is not to copy any single competitor wholesale.
 
 The right strategy is:
 
-1. keep Seraph's moat: proactive guardian intelligence, screen awareness, goal system, RPG interface
+1. keep Seraph's moat: proactive guardian intelligence, screen awareness, goal system, and cockpit-first operator surface
 2. import OpenClaw's execution breadth and surface area
 3. import IronClaw's security architecture and trust-boundary discipline
 4. import Hermes Agent's skill growth loop, multi-surface continuity, and research-oriented runtime ergonomics
@@ -151,7 +153,7 @@ This is one of the few genuinely defensible product moats in the repo.
 
 ### 4. The UX thesis is strong
 
-The village, quest log, avatar, ambient state, and life-OS metaphor are not superficial polish. They provide:
+The guardian cockpit, goal system, ambient state, and life-OS thesis are not superficial polish. They provide:
 
 - persistent ambient presence
 - motivation scaffolding
@@ -677,7 +679,7 @@ Seraph is ahead on **why the agent exists**, but behind on **how safely and broa
 - screen awareness
 - hierarchical life goals
 - soul-style identity model
-- village and quest interface
+- guardian cockpit and goal interface
 - long-horizon human optimization thesis
 
 These are the moat.

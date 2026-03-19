@@ -4,6 +4,8 @@ sidebar_position: 1
 
 # Tauri Desktop App — Architecture Analysis
 
+> Archive note: this analysis is still useful for native-shell packaging tradeoffs, but any React/Phaser or village-specific wording is historical. Current Seraph is cockpit-only.
+
 An evaluation of migrating Seraph from Docker + native daemon to a Tauri desktop application.
 
 **Status**: Under consideration for future phase (Phase 5-6)
@@ -12,7 +14,7 @@ An evaluation of migrating Seraph from Docker + native daemon to a Tauri desktop
 
 ## What is Tauri
 
-A Rust framework for building native desktop apps. The frontend (React/Phaser) runs in the OS's built-in webview (WebKit on macOS). A Rust backend handles native OS access. Result: a `.dmg` the user double-clicks.
+A Rust framework for building native desktop apps. The frontend (React/cockpit UI) runs in the OS's built-in webview (WebKit on macOS). A Rust backend handles native OS access. Result: a `.dmg` the user double-clicks.
 
 **The Python constraint**: Tauri's native layer is Rust, but our entire AI stack is Python (smolagents, LiteLLM, LanceDB, sentence-transformers). The AI ecosystem lives in Python. So Tauri would be a **thin native shell** around the existing Python backend, not a replacement.
 
@@ -25,7 +27,7 @@ A Rust framework for building native desktop apps. The frontend (React/Phaser) r
 │  Docker                                      │
 │  ┌──────────────┐  ┌──────────────────────┐ │
 │  │ frontend-dev │  │ backend-dev          │ │
-│  │ React/Phaser │  │ FastAPI + smolagents │ │
+│  │ React/cockpit│  │ FastAPI + smolagents │ │
 │  │ port 3000    │  │ port 8004            │ │
 │  └──────────────┘  └──────────────────────┘ │
 │  ┌──────────────┐                            │
@@ -66,7 +68,7 @@ User experience: `docker-compose up`, open browser, install daemon separately. T
 │             │                                │
 │  ┌──────────▼──────────┐  ┌──────────────┐  │
 │  │ Webview             │  │ Python sidecar│  │
-│  │ React/Phaser        │  │ FastAPI       │  │
+│  │ React/cockpit       │  │ FastAPI       │  │
 │  │ (native webview,    │  │ smolagents    │  │
 │  │  not Chromium)      │  │ LLM, DB, etc  │  │
 │  └─────────────────────┘  └──────────────┘  │
@@ -150,7 +152,7 @@ All AI code stays the same. FastAPI, smolagents, LanceDB, everything. No rewrite
 
 ### Frontend
 
-Identical React/Phaser code, served from Tauri's webview instead of a browser tab. Minor changes needed: asset paths, no CORS required since it's local.
+Identical React/cockpit code, served from Tauri's webview instead of a browser tab. Minor changes needed: asset paths, no CORS required since it's local.
 
 ### What Replaces Docker
 

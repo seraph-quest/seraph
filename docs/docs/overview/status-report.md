@@ -5,6 +5,8 @@ title: Development Status
 # Seraph Development Status
 
 > Legacy note: this page now lives under `/legacy`. The canonical shipped-status ledger is now `docs/implementation/STATUS.md`.
+>
+> Historical note: older lines on this page may still refer to pre-cockpit planning language. Current Seraph is cockpit-only; the village/editor line is retired and pending removal from the repo.
 
 ## Legend
 
@@ -56,7 +58,7 @@ title: Development Status
 
 ### Product surfaces
 
-- [x] Browser-based village UI
+- [x] Browser-based guardian cockpit UI
 - [x] WebSocket session flow
 - [x] Native macOS observer daemon
 - [x] Proactive delivery inside the current product
@@ -81,7 +83,7 @@ title: Development Status
 
 - [ ] native desktop shell, notifications, and external channels
 - [ ] deeper guardian world-modeling, learning loops, and stronger intervention quality
-- [ ] richer embodied UX beyond the current village and quest surfaces
+- [ ] richer cockpit density, operator visibility, and continuity across the current guardian surfaces
 - [ ] stronger workflow composition and extension ergonomics
 
 ## Workstream View

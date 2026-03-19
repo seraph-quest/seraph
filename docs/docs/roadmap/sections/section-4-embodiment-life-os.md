@@ -4,6 +4,8 @@ title: Section 4 - Embodiment + Life OS
 
 # Section 4: Embodiment + Life OS
 
+> Archive note: this section describes the retired village-first embodiment branch. Keep it only as historical planning context; the live product direction is the guardian cockpit.
+
 ## Why this section matters competitively
 
 OpenClaw, IronClaw, and Hermes all compete more naturally on capability than on presence, motivation, or long-term emotional stickiness. This section protects the part of Seraph that could become uniquely beloved rather than merely useful.

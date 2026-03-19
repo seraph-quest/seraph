@@ -10,7 +10,7 @@
 
 ## Shipped On `develop`
 
-- [x] browser-based guardian cockpit with legacy village fallback
+- [x] browser-based guardian cockpit as the only supported browser shell
 - [x] WebSocket conversation path
 - [x] native macOS observer daemon for screen and OCR ingest
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context

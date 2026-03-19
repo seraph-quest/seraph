@@ -573,15 +573,9 @@ Skills can be managed via:
 
 Eight bundled skills: `daily-standup`, `code-review`, `goal-reflection`, `weekly-planner`, `morning-intention`, `evening-journal`, `moltbook` (requires `http_request`), `web-briefing` (requires `http_request` + `web_search`).
 
-## Optional: Village Map Editor
+## Retired: Village Map Editor
 
-A standalone Tiled-compatible map editor for authoring the village map:
-
-```bash
-cd editor && npm install && npm run dev
-```
-
-Opens at `http://localhost:3001`. Outputs Tiled JSON consumed directly by the frontend VillageScene. See `editor/README.md` for full documentation.
+The standalone village map editor is retired and no longer part of the supported Seraph product surface. The `editor/` folder remains only as historical code pending removal.
 
 ## Resetting everything
 

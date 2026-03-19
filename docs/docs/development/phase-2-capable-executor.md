@@ -4,6 +4,8 @@ sidebar_position: 2
 
 # Phase 2 — Capable Executor
 
+> Archive note: this phase document predates the cockpit-only pivot and still includes village-shaped metadata/examples. Treat it as historical implementation context, not current product guidance.
+
 **Goal**: Seraph can do real things — browse, execute code, search the web.
 
 **Status**: Implemented

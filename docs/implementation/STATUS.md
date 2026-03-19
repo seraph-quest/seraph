@@ -17,7 +17,7 @@ title: Seraph Development Status
 - [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
-- [x] A first guardian cockpit shell now exists alongside the legacy village mode.
+- [x] The guardian cockpit is the only supported browser shell; the village/editor line is retired and should be removed rather than revived.
 - [x] The cockpit now exposes capability discovery, starter packs, workflow history, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a threaded operator timeline, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
@@ -39,7 +39,7 @@ title: Seraph Development Status
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now `execution-safety-hardening-v7`, because the latest batch made threaded replay, preflight repair, provider safeguards, and live operator control materially easier to use.
+- [x] The next strategic focus is now `retire-village-and-editor-v1`, because the docs, repo, and shipped app should no longer pretend there is a second product line beside the cockpit. After that, the queue now pulls cockpit density and step-level workflow recovery ahead of further native expansion.
 - [x] `execution-safety-hardening-v6`, `threaded-operator-timeline-v1`, `workflow-runbooks-and-parameterized-replay-v1`, `capability-preflight-and-autorepair-v1`, `provider-policy-safeguards-v3`, `native-channel-expansion-v3`, `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, `cockpit-density-and-live-operator-views-v1`, and `guardian-behavioral-evals-v6` are now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
@@ -58,7 +58,7 @@ title: Seraph Development Status
 
 ### Core guardian platform
 
-- [x] browser-based guardian cockpit with legacy village mode
+- [x] browser-based guardian cockpit as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
 - [x] persistent soul, vector memory, sessions, and goal storage
@@ -138,8 +138,8 @@ title: Seraph Development Status
 - [x] the cockpit now also includes a searchable capability palette plus a denser operator terminal for recommendations, repair actions, installable items, reusable runbooks, capability preflight, live operator-feed status, and saved runbook macros
 - [x] the cockpit now includes a threaded operator timeline that links workflow runs, approvals, queued continuity, recent interventions, and surfaced failures back to one browser thread model
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
-- [x] larger more readable settings and goals overlays now support the cockpit-first shell without removing the legacy Phaser village fallback
-- [x] visible tool use and agent activity in the current world surface
+- [x] larger more readable settings and goals overlays now support the cockpit-first shell directly
+- [x] capability state, workflow history, operator timelines, and live status are now visible in the current cockpit surface
 - [x] settings and management surfaces for tools, MCP, and system state
 - [x] macOS daemon-backed desktop presence card plus browser-side inspect/dismiss controls for native notifications and notification fallback for non-browser proactive reach
 

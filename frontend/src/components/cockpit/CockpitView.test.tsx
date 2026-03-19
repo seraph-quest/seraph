@@ -551,7 +551,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Operator terminal")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("save macro"));
+    fireEvent.click(await screen.findByRole("button", { name: "save macro" }, { timeout: 5000 }));
     await waitFor(() => expect(screen.getByText("1 saved")).toBeInTheDocument());
     expect(screen.getAllByText("Run web-brief-to-file").length).toBeGreaterThan(1);
     fireEvent.click(screen.getAllByText("repair")[0]);

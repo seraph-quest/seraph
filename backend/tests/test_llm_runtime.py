@@ -1784,6 +1784,52 @@ def test_completion_with_fallback_applies_cost_and_latency_guardrails(async_db):
     assert "latency_guardrail_exceeded" in primary_candidate["reason_codes"]
 
 
+def test_completion_with_fallback_applies_task_and_budget_guardrails(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="task-safe provider"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "provider_task_classes", "openrouter/anthropic/claude-sonnet-4=reasoning;openai/gpt-4o-mini=tool_execution"),
+        patch.object(settings, "provider_budget_classes", "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low"),
+        patch.object(settings, "runtime_task_class", "chat_agent=tool_execution"),
+        patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick the safe tool execution provider"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="chat_agent",
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openai/gpt-4o-mini",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4o-mini"
+    assert details["required_task_class"] == "tool_execution"
+    assert details["max_budget_class"] == "medium"
+    primary_candidate = next(
+        candidate for candidate in details["candidate_targets"] if candidate["source"] == "primary"
+    )
+    assert primary_candidate["matched_task_class"] is False
+    assert primary_candidate["within_budget_guardrail"] is False
+    assert "task_class_mismatch" in primary_candidate["reason_codes"]
+    assert "budget_guardrail_exceeded" in primary_candidate["reason_codes"]
+
+
 def test_completion_with_fallback_does_not_try_noncompliant_target_after_guardrail_skip(async_db):
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),

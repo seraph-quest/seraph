@@ -175,6 +175,8 @@ def _learning_guidance_text(
     escalation_bias: str,
     timing_bias: str,
     blocked_state_bias: str,
+    suppression_bias: str,
+    thread_preference_bias: str,
 ) -> str:
     guidance: list[str] = []
     if phrasing_bias == "be_brief_and_literal":
@@ -202,6 +204,16 @@ def _learning_guidance_text(
         guidance.append("When the user is blocked, prefer bundling over direct interruption.")
     elif blocked_state_bias == "prefer_async_for_blocked_state":
         guidance.append("When the user is blocked, prefer async native continuation instead of browser interruption.")
+
+    if suppression_bias == "extend_suppression":
+        guidance.append("After failed or poorly received nudges, extend quiet periods before trying again.")
+    elif suppression_bias == "resume_faster":
+        guidance.append("Helpful nudges can shorten the wait before the next aligned follow-up.")
+
+    if thread_preference_bias == "prefer_existing_thread":
+        guidance.append("When following up, prefer the existing thread instead of creating a fresh one.")
+    elif thread_preference_bias == "prefer_clean_thread":
+        guidance.append("After repeated failures, prefer a clean thread or explicit reset before retrying.")
 
     return "\n".join(f"- {line}" for line in guidance)
 
@@ -317,6 +329,8 @@ async def build_guardian_state(
             escalation_bias=advisory_learning_signal.escalation_bias,
             timing_bias=advisory_learning_signal.timing_bias,
             blocked_state_bias=advisory_learning_signal.blocked_state_bias,
+            suppression_bias=advisory_learning_signal.suppression_bias,
+            thread_preference_bias=advisory_learning_signal.thread_preference_bias,
         ),
         confidence=confidence,
     )

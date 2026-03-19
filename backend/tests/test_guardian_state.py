@@ -38,6 +38,9 @@ def _make_guardian_state() -> GuardianState:
             execution_pressure=("Workflow brief-sync degraded at write_file",),
             memory_signals=("Ship guardian state", "Prefers dense dashboards"),
             continuity_threads=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
+            collaborators=("Alice",),
+            recurring_obligations=("Weekly roadmap review",),
+            project_timeline=("Guardian cockpit", "Workflow brief-sync degraded at write_file"),
         ),
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
@@ -123,6 +126,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert "Guardian cockpit" in state.world_model.active_projects
     assert "Ship guardian state" in state.world_model.memory_signals
     assert "Prior roadmap" in state.world_model.continuity_threads[0]
+    assert "Guardian cockpit" in state.world_model.project_timeline[0]
     assert any(
         "brief-sync degraded" in item
         for item in state.world_model.execution_pressure
@@ -189,6 +193,9 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Memory signals:" in block
     assert "Continuity threads:" in block
     assert "Recent execution pressure:" in block
+    assert "Collaborators:" in block
+    assert "Recurring obligations:" in block
+    assert "Project timeline:" in block
     assert "Observer model: confidence=grounded | salience=high (active_goals) | interruption_cost=low" in block
     assert "Observer snapshot:" in block
     assert "Relevant memories:" in block

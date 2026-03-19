@@ -12,6 +12,7 @@ describe("cockpit layouts", () => {
 
     expect(layout.centerSingleColumn).toBe(false);
     expect(layout.sections.rail).toBe(true);
+    expect(layout.sections.timeline).toBe(true);
     expect(layout.sections.workflows).toBe(true);
     expect(layout.sections.audit).toBe(true);
     expect(layout.sections.trace).toBe(true);
@@ -24,6 +25,7 @@ describe("cockpit layouts", () => {
     expect(layout.centerSingleColumn).toBe(true);
     expect(layout.sections.rail).toBe(false);
     expect(layout.sections.guardianState).toBe(true);
+    expect(layout.sections.timeline).toBe(true);
     expect(layout.sections.workflows).toBe(true);
     expect(layout.sections.audit).toBe(false);
     expect(layout.sections.trace).toBe(false);
@@ -36,6 +38,7 @@ describe("cockpit layouts", () => {
     expect(layout.centerSingleColumn).toBe(true);
     expect(layout.sections.rail).toBe(true);
     expect(layout.sections.guardianState).toBe(false);
+    expect(layout.sections.timeline).toBe(true);
     expect(layout.sections.workflows).toBe(true);
     expect(layout.sections.audit).toBe(true);
     expect(layout.sections.trace).toBe(true);

@@ -8,12 +8,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from src.api.capabilities import _recommended_tool_policy_mode
 from src.agent.session import session_manager
 from src.agent.factory import get_base_tools_and_active_skills
 from src.approval.repository import fingerprint_tool_call
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
+from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.manager import workflow_manager
 
 router = APIRouter()
@@ -84,11 +86,16 @@ def _workflow_replay_draft(workflow_name: str, arguments: dict[str, Any] | None)
 
 def _workflow_replay_policy(
     *,
+    availability: str,
     risk_level: str,
     execution_boundaries: list[str],
     accepts_secret_refs: bool,
     pending_approval_count: int,
 ) -> tuple[bool, str | None]:
+    if availability == "disabled":
+        return False, "workflow_disabled"
+    if availability != "ready":
+        return False, "workflow_unavailable"
     if pending_approval_count > 0:
         return False, "pending_approval"
     if accepts_secret_refs:
@@ -101,6 +108,80 @@ def _workflow_replay_policy(
     if risk_level == "high":
         return False, "high_risk_requires_manual_reentry"
     return True, None
+
+
+def _workflow_runtime_statuses() -> dict[str, dict[str, Any]]:
+    base_tools, active_skill_names, _ = get_base_tools_and_active_skills()
+    available_tool_names = [tool.name for tool in base_tools]
+    workflows = workflow_manager.list_workflows(
+        available_tool_names=available_tool_names,
+        active_skill_names=active_skill_names,
+    )
+    statuses: dict[str, dict[str, Any]] = {}
+    for workflow in workflows:
+        enabled = bool(workflow.get("enabled", False))
+        is_available = bool(workflow.get("is_available", False))
+        if not enabled:
+            availability = "disabled"
+        elif is_available:
+            availability = "ready"
+        else:
+            availability = "blocked"
+        statuses[str(workflow["name"])] = {
+            **workflow,
+            "availability": availability,
+            "missing_tools": list(workflow.get("missing_tools", [])),
+            "missing_skills": list(workflow.get("missing_skills", [])),
+        }
+    return statuses
+
+
+def _workflow_replay_recommended_actions(workflow_status: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if workflow_status is None:
+        return []
+    actions: list[dict[str, Any]] = []
+    if not bool(workflow_status.get("enabled", False)):
+        actions.append({
+            "type": "toggle_workflow",
+            "label": "Enable workflow",
+            "name": workflow_status["name"],
+            "enabled": True,
+        })
+    for skill_name in workflow_status.get("missing_skills", []) or []:
+        actions.append({
+            "type": "toggle_skill",
+            "label": f"Enable {skill_name}",
+            "name": skill_name,
+            "enabled": True,
+        })
+    current_tool_mode = get_current_tool_policy_mode()
+    for tool_name in workflow_status.get("missing_tools", []) or []:
+        suggested_mode = _recommended_tool_policy_mode(
+            current_mode=current_tool_mode,
+            blocked_reason=None,
+        )
+        if suggested_mode is None:
+            continue
+        actions.append({
+            "type": "set_tool_policy",
+            "label": f"Allow {tool_name}",
+            "mode": suggested_mode,
+        })
+    if not actions:
+        actions.append({
+            "type": "open_settings",
+            "label": "Open settings",
+            "target": "workflows",
+        })
+    return actions
+
+
+def _resume_checkpoint_label(*, approvals: list[dict[str, Any]], continued_error_steps: list[str]) -> str | None:
+    if approvals:
+        return "Approval gate"
+    if continued_error_steps:
+        return "Retry failed step"
+    return None
 
 
 def _timeline_entries_for_run(
@@ -147,6 +228,7 @@ async def _list_workflow_runs(
     pending_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     completed: list[dict[str, Any]] = []
     pending_approvals = await approval_repository.list_pending(session_id=session_id, limit=100)
+    workflow_statuses = _workflow_runtime_statuses()
     pending_by_tool: dict[tuple[str | None, str], list[dict[str, Any]]] = defaultdict(list)
     pending_by_signature: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for approval in pending_approvals:
@@ -215,6 +297,7 @@ async def _list_workflow_runs(
                 artifact_paths.append(path)
 
         workflow_meta = workflow_manager.get_tool_metadata(tool_name) or {}
+        workflow_status = workflow_statuses.get(str(run["workflow_name"]))
         approval_key = _approval_projection_key(
             session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
             tool_name=tool_name,
@@ -248,8 +331,21 @@ async def _list_workflow_runs(
             "pending_approval_count": len(approvals),
             "pending_approval_ids": [approval["id"] for approval in approvals],
             "pending_approvals": approvals,
+            "availability": (
+                workflow_status.get("availability", "unknown")
+                if workflow_status is not None
+                else "unknown"
+            ),
+            "replay_inputs": run.get("arguments") or {},
+            "parameter_schema": (
+                workflow_status.get("inputs", {})
+                if workflow_status is not None and isinstance(workflow_status.get("inputs"), dict)
+                else {}
+            ),
+            "replay_recommended_actions": _workflow_replay_recommended_actions(workflow_status),
         })
         replay_allowed, replay_block_reason = _workflow_replay_policy(
+            availability=str(run["availability"]),
             risk_level=str(run["risk_level"]),
             execution_boundaries=list(run["execution_boundaries"]),
             accepts_secret_refs=bool(run["accepts_secret_refs"]),
@@ -270,9 +366,27 @@ async def _list_workflow_runs(
                 if replay_allowed
                 else None
             ),
+            "resume_from_step": (
+                "approval_gate"
+                if approvals
+                else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+            ),
+            "resume_checkpoint_label": _resume_checkpoint_label(
+                approvals=approvals,
+                continued_error_steps=list(run.get("continued_error_steps", [])),
+            ),
             "approval_recovery_message": (
                 f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
                 if len(approvals) > 0
+                else (
+                    f"Repair workflow '{run['workflow_name']}' before replaying."
+                    if str(run["availability"]) != "ready"
+                    else None
+                )
+            ),
+            "thread_continue_message": (
+                approvals[0].get("resume_message")
+                if approvals and isinstance(approvals[0], dict)
                 else None
             ),
             "timeline": _timeline_entries_for_run(run, approvals=approvals),
@@ -282,6 +396,7 @@ async def _list_workflow_runs(
     for run_queue in pending_by_key.values():
         for run in run_queue:
             workflow_meta = workflow_manager.get_tool_metadata(str(run["tool_name"])) or {}
+            workflow_status = workflow_statuses.get(str(run["workflow_name"]))
             approval_key = _approval_projection_key(
                 session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
                 tool_name=str(run["tool_name"]),
@@ -303,8 +418,21 @@ async def _list_workflow_runs(
                 "pending_approval_count": len(approvals),
                 "pending_approval_ids": [approval["id"] for approval in approvals],
                 "pending_approvals": approvals,
+                "availability": (
+                    workflow_status.get("availability", "unknown")
+                    if workflow_status is not None
+                    else "unknown"
+                ),
+                "replay_inputs": run.get("arguments") or {},
+                "parameter_schema": (
+                    workflow_status.get("inputs", {})
+                    if workflow_status is not None and isinstance(workflow_status.get("inputs"), dict)
+                    else {}
+                ),
+                "replay_recommended_actions": _workflow_replay_recommended_actions(workflow_status),
             })
             replay_allowed, replay_block_reason = _workflow_replay_policy(
+                availability=str(run["availability"]),
                 risk_level=str(run["risk_level"]),
                 execution_boundaries=list(run["execution_boundaries"]),
                 accepts_secret_refs=bool(run["accepts_secret_refs"]),
@@ -325,9 +453,27 @@ async def _list_workflow_runs(
                     if replay_allowed
                     else None
                 ),
+                "resume_from_step": (
+                    "approval_gate"
+                    if approvals
+                    else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+                ),
+                "resume_checkpoint_label": _resume_checkpoint_label(
+                    approvals=approvals,
+                    continued_error_steps=list(run.get("continued_error_steps", [])),
+                ),
                 "approval_recovery_message": (
                     f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
                     if len(approvals) > 0
+                    else (
+                        f"Repair workflow '{run['workflow_name']}' before replaying."
+                        if str(run["availability"]) != "ready"
+                        else None
+                    )
+                ),
+                "thread_continue_message": (
+                    approvals[0].get("resume_message")
+                    if approvals and isinstance(approvals[0], dict)
                     else None
                 ),
                 "timeline": _timeline_entries_for_run(run, approvals=approvals),

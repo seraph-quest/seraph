@@ -2168,10 +2168,22 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
                     "provider_latency_tiers",
                     "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
                 ),
+                patch.object(
+                    settings,
+                    "provider_task_classes",
+                    "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
+                ),
+                patch.object(
+                    settings,
+                    "provider_budget_classes",
+                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                ),
                 patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"),
                 patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"),
                 patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"),
                 patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"),
+                patch.object(settings, "runtime_task_class", "chat_agent=chat"),
+                patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"),
                 patch("litellm.completion", return_value=completion_response) as mock_completion,
             ):
                 response = completion_with_fallback_sync(
@@ -2197,9 +2209,15 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
         "required_policy_intents": routing_event["details"]["required_policy_intents"],
         "max_cost_tier": routing_event["details"]["max_cost_tier"],
         "max_latency_tier": routing_event["details"]["max_latency_tier"],
+        "required_task_class": routing_event["details"]["required_task_class"],
+        "max_budget_class": routing_event["details"]["max_budget_class"],
         "primary_missing_required_intents": primary_candidate["missing_required_intents"],
         "primary_cost_guardrail": primary_candidate["within_cost_guardrail"],
         "primary_latency_guardrail": primary_candidate["within_latency_guardrail"],
+        "primary_task_class": primary_candidate["task_class"],
+        "primary_task_guardrail": primary_candidate["matched_task_class"],
+        "primary_budget_class": primary_candidate["budget_class"],
+        "primary_budget_guardrail": primary_candidate["within_budget_guardrail"],
     }
 
 
@@ -4275,6 +4293,22 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
             ],
         ),
         patch(
+            "src.api.workflows._workflow_runtime_statuses",
+            return_value={
+                "web-brief-to-file": {
+                    "name": "web-brief-to-file",
+                    "enabled": True,
+                    "availability": "ready",
+                    "missing_tools": [],
+                    "missing_skills": [],
+                    "inputs": {
+                        "query": {"type": "string", "description": "Research query"},
+                        "file_path": {"type": "string", "description": "Destination path"},
+                    },
+                }
+            },
+        ),
+        patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
                 "risk_level": "medium",
@@ -4292,12 +4326,24 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
     return {
         "status": run["status"],
         "thread_label": run["thread_label"],
+        "thread_source": run["thread_source"],
         "pending_approval_count": run["pending_approval_count"],
         "pending_resume_message": run["pending_approvals"][0]["resume_message"],
         "timeline_has_approval": any(
             entry["kind"] == "approval_pending" for entry in run["timeline"]
         ),
+        "replay_allowed": run["replay_allowed"],
         "replay_block_reason": run["replay_block_reason"],
+        "replay_draft_is_none": run["replay_draft"] is None,
+        "replay_input_keys": sorted(run["replay_inputs"].keys()),
+        "parameter_schema_keys": sorted(run["parameter_schema"].keys()),
+        "replay_recommended_actions": [
+            action["type"] for action in run["replay_recommended_actions"]
+        ],
+        "resume_from_step": run["resume_from_step"],
+        "resume_checkpoint_label": run["resume_checkpoint_label"],
+        "thread_continue_message": run["thread_continue_message"],
+        "approval_recovery_message": run["approval_recovery_message"],
     }
 
 
@@ -4349,6 +4395,19 @@ def _eval_capability_repair_behavior() -> dict[str, Any]:
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
         patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "research-briefing",
+                    "label": "Research briefing",
+                    "description": "Research and save a short brief.",
+                    "skills": ["web-briefing"],
+                    "workflows": ["web-brief-to-file"],
+                    "sample_prompt": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+                }
+            ],
+        ),
     ):
         overview = _build_capability_overview()
 
@@ -4360,6 +4419,277 @@ def _eval_capability_repair_behavior() -> dict[str, Any]:
         "workflow_repair_actions": [item["type"] for item in workflow["recommended_actions"]],
         "recommendation_labels": [item["label"] for item in overview["recommendations"]],
         "runbooks_ready": len(overview["runbooks"]),
+    }
+
+
+async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_timeline
+
+    workflow_run = {
+        "id": "run-1",
+        "workflow_name": "web-brief-to-file",
+        "summary": "Workflow failed after saving the partial brief.",
+        "status": "failed",
+        "started_at": "2026-03-18T12:01:00Z",
+        "updated_at": "2026-03-18T12:04:00Z",
+        "thread_id": "thread-1",
+        "thread_label": "Research thread",
+        "replay_draft": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "replay_allowed": True,
+        "replay_block_reason": None,
+        "replay_recommended_actions": [],
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "pending_approval_count": 0,
+        "resume_from_step": "write_step",
+        "resume_checkpoint_label": "Retry failed step",
+        "availability": "ready",
+        "thread_continue_message": None,
+        "approval_recovery_message": None,
+    }
+    approval = {
+        "id": "approval-1",
+        "session_id": "thread-1",
+        "thread_id": "thread-1",
+        "thread_label": "Research thread",
+        "tool_name": "shell_execute",
+        "risk_level": "high",
+        "summary": "Approval pending for shell_execute",
+        "created_at": "2026-03-18T12:03:00Z",
+        "resume_message": "Continue after shell approval.",
+    }
+    notification_created_at = datetime(2026, 3, 18, 12, 6, tzinfo=timezone.utc)
+    queued_created_at = datetime(2026, 3, 18, 12, 5, tzinfo=timezone.utc)
+    intervention_updated_at = datetime(2026, 3, 18, 12, 5, 30, tzinfo=timezone.utc)
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[workflow_run],
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            return_value=[approval],
+        ),
+        patch(
+            "src.api.operator.native_notification_queue.list",
+            return_value=[
+                types.SimpleNamespace(
+                    id="notification-1",
+                    title="Seraph alert",
+                    body="Pick up the saved brief draft.",
+                    session_id="thread-1",
+                    resume_message="Continue from native notification.",
+                    created_at=notification_created_at,
+                    intervention_type="advisory",
+                    urgency=3,
+                )
+            ],
+        ),
+        patch(
+            "src.api.operator.insight_queue.peek_all",
+            return_value=[
+                types.SimpleNamespace(
+                    id="queued-1",
+                    intervention_id="intervention-1",
+                    intervention_type="advisory",
+                    content="Bundle the research notes for later.",
+                    urgency=2,
+                    reasoning="available_capacity",
+                    created_at=queued_created_at,
+                )
+            ],
+        ),
+        patch(
+            "src.api.operator.guardian_feedback_repository.list_recent",
+            return_value=[
+                types.SimpleNamespace(
+                    id="intervention-1",
+                    session_id="thread-1",
+                    intervention_type="advisory",
+                    content_excerpt="Bundle the research notes for later.",
+                    latest_outcome="acked",
+                    updated_at=intervention_updated_at,
+                    transport="native_notification",
+                    policy_action="act",
+                    policy_reason="learned_direct_delivery",
+                    feedback_type="helpful",
+                )
+            ],
+        ),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "audit-1",
+                    "session_id": "thread-1",
+                    "event_type": "tool_failed",
+                    "tool_name": "write_file",
+                    "risk_level": "medium",
+                    "summary": "write_file failed for notes/brief.md",
+                    "created_at": "2026-03-18T12:02:00Z",
+                }
+            ],
+        ),
+    ):
+        payload = await get_operator_timeline(limit=10, session_id="thread-1")
+
+    items = payload["items"]
+    workflow_item = next(item for item in items if item["kind"] == "workflow_run")
+    approval_item = next(item for item in items if item["kind"] == "approval")
+    notification_item = next(item for item in items if item["kind"] == "notification")
+    queued_item = next(item for item in items if item["kind"] == "queued_insight")
+    intervention_item = next(item for item in items if item["kind"] == "intervention")
+    audit_item = next(item for item in items if item["kind"] == "audit")
+
+    return {
+        "item_kinds": [item["kind"] for item in items],
+        "latest_kind": items[0]["kind"],
+        "workflow_thread_id": workflow_item["thread_id"],
+        "workflow_continue_message_matches_replay": (
+            workflow_item["continue_message"] == workflow_item["replay_draft"]
+        ),
+        "workflow_replay_allowed": workflow_item["replay_allowed"],
+        "workflow_resume_from_step": workflow_item["metadata"]["resume_from_step"],
+        "workflow_resume_checkpoint_label": workflow_item["metadata"]["resume_checkpoint_label"],
+        "approval_thread_matches": approval_item["thread_id"] == "thread-1",
+        "approval_continue_message": approval_item["continue_message"],
+        "notification_thread_matches": notification_item["thread_id"] == "thread-1",
+        "notification_continue_message": notification_item["continue_message"],
+        "queued_thread_matches": queued_item["thread_id"] == "thread-1",
+        "queued_continue_message": queued_item["continue_message"],
+        "intervention_source": intervention_item["source"],
+        "audit_thread_label": audit_item["thread_label"],
+    }
+
+
+def _eval_capability_preflight_behavior() -> dict[str, Any]:
+    from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
+
+    ctx = _make_context(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=([types.SimpleNamespace(name="web_search")], ["web-briefing"], "approval"),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.api.capabilities.skill_manager.list_skills",
+            return_value=[
+                {
+                    "name": "web-briefing",
+                    "description": "Web briefing",
+                    "requires_tools": ["web_search", "write_file"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "file_path": "/tmp/web-briefing.md",
+                },
+            ],
+        ),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "description": "Research and save",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Research query"},
+                        "file_path": {"type": "string", "description": "Destination path"},
+                    },
+                    "requires_tools": ["web_search", "write_file"],
+                    "requires_skills": ["web-briefing"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "step_count": 2,
+                    "file_path": "/tmp/web-brief-to-file.md",
+                    "policy_modes": ["balanced", "full"],
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "risk_level": "medium",
+                    "accepts_secret_refs": False,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "research-briefing",
+                    "label": "Research briefing",
+                    "description": "Research and save a short brief.",
+                    "skills": ["web-briefing"],
+                    "workflows": ["web-brief-to-file"],
+                    "sample_prompt": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+                }
+            ],
+        ),
+    ):
+        overview = _build_capability_overview()
+
+    workflow_preflight = _capability_preflight_payload(
+        overview=overview,
+        target_type="workflow",
+        name="web-brief-to-file",
+    )
+    starter_pack_preflight = _capability_preflight_payload(
+        overview=overview,
+        target_type="starter_pack",
+        name="research-briefing",
+    )
+    runbook_preflight = _capability_preflight_payload(
+        overview={
+            "workflows": [],
+            "starter_packs": [],
+            "runbooks": [
+                {
+                    "id": "workflow:web-brief-to-file",
+                    "label": "Run web-brief-to-file",
+                    "description": "Research and save",
+                    "availability": "blocked",
+                    "command": 'Run workflow "web-brief-to-file" with query="<query>", file_path="notes/output.md".',
+                    "parameter_schema": {
+                        "query": {"type": "string"},
+                        "file_path": {"type": "string"},
+                    },
+                    "risk_level": "medium",
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "recommended_actions": [
+                        {"type": "set_tool_policy", "label": "Allow write_file", "mode": "full"}
+                    ],
+                    "blocking_reasons": ["missing tool: write_file"],
+                }
+            ],
+        },
+        target_type="runbook",
+        name="workflow:web-brief-to-file",
+    )
+
+    return {
+        "workflow_ready": workflow_preflight["ready"],
+        "workflow_can_autorepair": workflow_preflight["can_autorepair"],
+        "workflow_blocking_reasons": workflow_preflight["blocking_reasons"],
+        "workflow_parameter_schema_keys": sorted(workflow_preflight["parameter_schema"].keys()),
+        "workflow_recommended_action_types": [
+            action["type"] for action in workflow_preflight["recommended_actions"]
+        ],
+        "starter_pack_can_autorepair": starter_pack_preflight["can_autorepair"],
+        "starter_pack_blocking_reasons": starter_pack_preflight["blocking_reasons"],
+        "starter_pack_command_present": starter_pack_preflight["command"] is not None,
+        "runbook_ready": runbook_preflight["ready"],
+        "runbook_can_autorepair": runbook_preflight["can_autorepair"],
+        "runbook_parameter_schema_keys": sorted(runbook_preflight["parameter_schema"].keys()),
+        "runbook_risk_level": runbook_preflight["risk_level"],
+        "runbook_execution_boundaries": runbook_preflight["execution_boundaries"],
+        "runbook_blocking_reasons": runbook_preflight["blocking_reasons"],
     }
 
 
@@ -5195,10 +5525,22 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_workflow_approval_threading_behavior,
     ),
     EvalScenario(
+        name="threaded_operator_timeline_behavior",
+        category="behavior",
+        description="The operator timeline keeps workflows, approvals, notifications, queued bundles, interventions, and failures bound to one thread with the right continue and replay metadata.",
+        runner=_eval_threaded_operator_timeline_behavior,
+    ),
+    EvalScenario(
         name="capability_repair_behavior",
         category="behavior",
         description="Capability overview exposes actionable starter-pack and blocked-workflow repair sequences instead of only passive blocked states.",
         runner=_eval_capability_repair_behavior,
+    ),
+    EvalScenario(
+        name="capability_preflight_behavior",
+        category="behavior",
+        description="Capability preflight exposes blocking reasons, parameter schemas, autorepair hints, and runbook metadata before the operator launches or repairs a capability.",
+        runner=_eval_capability_preflight_behavior,
     ),
     EvalScenario(
         name="mcp_specialist_local_runtime_profile",

@@ -228,6 +228,26 @@ def runtime_max_latency_tier(runtime_path: str | None) -> str | None:
     )
 
 
+def runtime_task_class(runtime_path: str | None) -> str | None:
+    value = _select_runtime_entry(
+        settings.runtime_task_class,
+        runtime_path=runtime_path,
+        separator=";",
+    )
+    normalized = _normalize_policy_tag(value or "")
+    return normalized or None
+
+
+def runtime_max_budget_class(runtime_path: str | None) -> str | None:
+    return _normalize_guardrail_tier(
+        _select_runtime_entry(
+            settings.runtime_max_budget_class,
+            runtime_path=runtime_path,
+            separator=";",
+        )
+    )
+
+
 def provider_capabilities(
     model_id: str | None,
     *,
@@ -268,6 +288,34 @@ def provider_latency_tier(
     return _normalize_guardrail_tier(
         _select_runtime_entry(
             settings.provider_latency_tiers,
+            runtime_path=model_id,
+            separator=";",
+        )
+    )
+
+
+def provider_task_class(
+    model_id: str | None,
+    *,
+    profile: str | None = None,
+) -> str | None:
+    value = _select_runtime_entry(
+        settings.provider_task_classes,
+        runtime_path=model_id,
+        separator=";",
+    )
+    normalized = _normalize_policy_tag(value or "")
+    return normalized or None
+
+
+def provider_budget_class(
+    model_id: str | None,
+    *,
+    profile: str | None = None,
+) -> str | None:
+    return _normalize_guardrail_tier(
+        _select_runtime_entry(
+            settings.provider_budget_classes,
             runtime_path=model_id,
             separator=";",
         )
@@ -669,14 +717,22 @@ def _target_policy_assessment(
     ]
     cost_tier = provider_cost_tier(model_id, profile=profile)
     latency_tier = provider_latency_tier(model_id, profile=profile)
+    task_class = provider_task_class(model_id, profile=profile)
+    budget_class = provider_budget_class(model_id, profile=profile)
     max_cost_tier = runtime_max_cost_tier(runtime_path)
     max_latency_tier = runtime_max_latency_tier(runtime_path)
+    required_task_class = runtime_task_class(runtime_path)
+    max_budget_class = runtime_max_budget_class(runtime_path)
     within_cost_guardrail = _tier_within_guardrail(cost_tier, max_cost_tier)
     within_latency_guardrail = _tier_within_guardrail(latency_tier, max_latency_tier)
+    matched_task_class = required_task_class is None or task_class == required_task_class
+    within_budget_guardrail = _tier_within_guardrail(budget_class, max_budget_class)
     policy_compliant = (
         not missing_requirements
         and within_cost_guardrail
         and within_latency_guardrail
+        and matched_task_class
+        and within_budget_guardrail
     )
     return {
         "required_policy_intents": requirements,
@@ -684,10 +740,16 @@ def _target_policy_assessment(
         "missing_required_intents": missing_requirements,
         "cost_tier": cost_tier,
         "latency_tier": latency_tier,
+        "task_class": task_class,
+        "budget_class": budget_class,
         "max_cost_tier": max_cost_tier,
         "max_latency_tier": max_latency_tier,
+        "required_task_class": required_task_class,
+        "max_budget_class": max_budget_class,
         "within_cost_guardrail": within_cost_guardrail,
         "within_latency_guardrail": within_latency_guardrail,
+        "matched_task_class": matched_task_class,
+        "within_budget_guardrail": within_budget_guardrail,
         "policy_compliant": policy_compliant,
     }
 
@@ -717,6 +779,8 @@ def _order_targets_by_policy(
         target["policy_assessment"]["required_policy_intents"]
         or target["policy_assessment"]["max_cost_tier"] is not None
         or target["policy_assessment"]["max_latency_tier"] is not None
+        or target["policy_assessment"]["required_task_class"] is not None
+        or target["policy_assessment"]["max_budget_class"] is not None
         for _, target in annotated_targets
     ):
         return [target for _, target in annotated_targets]
@@ -753,6 +817,10 @@ def _order_targets_by_policy(
             if not assessment["within_cost_guardrail"]:
                 safeguard_penalty += 1
             if not assessment["within_latency_guardrail"]:
+                safeguard_penalty += 1
+            if not assessment["matched_task_class"]:
+                safeguard_penalty += 1
+            if not assessment["within_budget_guardrail"]:
                 safeguard_penalty += 1
         return (compliance_penalty, safeguard_penalty, -local_score - capability_score, capability_priority, index)
 
@@ -806,6 +874,8 @@ def _candidate_reason_codes(
     missing_required_intents: list[str],
     within_cost_guardrail: bool,
     within_latency_guardrail: bool,
+    matched_task_class: bool,
+    within_budget_guardrail: bool,
     guardrail_fallback_only: bool,
 ) -> list[str]:
     reasons: list[str] = []
@@ -835,6 +905,10 @@ def _candidate_reason_codes(
         reasons.append("cost_guardrail_exceeded")
     if not within_latency_guardrail:
         reasons.append("latency_guardrail_exceeded")
+    if not matched_task_class:
+        reasons.append("task_class_mismatch")
+    if not within_budget_guardrail:
+        reasons.append("budget_guardrail_exceeded")
     if guardrail_fallback_only:
         reasons.append("no_guardrail_compliant_targets")
     return reasons
@@ -866,6 +940,8 @@ def _ordered_candidate_targets(
         primary_assessment["required_policy_intents"]
         or primary_assessment["max_cost_tier"] is not None
         or primary_assessment["max_latency_tier"] is not None
+        or primary_assessment["required_task_class"] is not None
+        or primary_assessment["max_budget_class"] is not None
     )
     primary_healthy = _is_target_healthy(
         model_id=str(primary_candidate["model_id"]),
@@ -907,6 +983,8 @@ def _build_routing_decision_details(
     policy_scores = runtime_policy_scores(runtime_path)
     max_cost_tier = runtime_max_cost_tier(runtime_path)
     max_latency_tier = runtime_max_latency_tier(runtime_path)
+    required_task_class = runtime_task_class(runtime_path)
+    max_budget_class = runtime_max_budget_class(runtime_path)
     primary_unhealthy = not _is_target_healthy(
         model_id=primary_model,
         api_base=primary_api_base,
@@ -966,8 +1044,14 @@ def _build_routing_decision_details(
                 "missing_required_intents": assessment["missing_required_intents"],
                 "cost_tier": assessment["cost_tier"],
                 "latency_tier": assessment["latency_tier"],
+                "task_class": assessment["task_class"],
+                "budget_class": assessment["budget_class"],
                 "within_cost_guardrail": assessment["within_cost_guardrail"],
                 "within_latency_guardrail": assessment["within_latency_guardrail"],
+                "required_task_class": assessment["required_task_class"],
+                "matched_task_class": assessment["matched_task_class"],
+                "max_budget_class": assessment["max_budget_class"],
+                "within_budget_guardrail": assessment["within_budget_guardrail"],
                 "policy_compliant": assessment["policy_compliant"],
                 "policy_score": _policy_score(
                     model_id=str(target["model_id"]),
@@ -983,6 +1067,8 @@ def _build_routing_decision_details(
                     missing_required_intents=assessment["missing_required_intents"],
                     within_cost_guardrail=assessment["within_cost_guardrail"],
                     within_latency_guardrail=assessment["within_latency_guardrail"],
+                    matched_task_class=assessment["matched_task_class"],
+                    within_budget_guardrail=assessment["within_budget_guardrail"],
                     guardrail_fallback_only=not compliant_targets_present and not assessment["policy_compliant"],
                 ),
             }
@@ -1002,6 +1088,8 @@ def _build_routing_decision_details(
         "policy_scores": policy_scores,
         "max_cost_tier": max_cost_tier,
         "max_latency_tier": max_latency_tier,
+        "required_task_class": required_task_class,
+        "max_budget_class": max_budget_class,
         "primary_model": primary_model,
         "selected_model": str(selected_target["model_id"]),
         "selected_profile": selected_target.get("profile"),

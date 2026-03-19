@@ -317,9 +317,26 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
             },
         ),
         patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
             "src.api.workflows.session_manager.list_sessions",
             return_value=[{"id": "session-1", "title": "Research thread"}],
         ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
     ):
         response = await client.get("/api/workflows/runs?session_id=session-1")
 
@@ -338,6 +355,11 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert run["thread_label"] == "Research thread"
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "pending_approval"
+    assert run["availability"] == "ready"
+    assert run["parameter_schema"]["file_path"]["type"] == "string"
+    assert run["resume_from_step"] == "approval_gate"
+    assert run["resume_checkpoint_label"] == "Approval gate"
+    assert run["thread_continue_message"] == "Continue the web brief once approved"
     assert run["approval_recovery_message"]
     assert run["timeline"][0]["kind"] == "workflow_started"
     assert run["timeline"][1]["kind"] == "approval_pending"
@@ -383,9 +405,23 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
             },
         ),
         patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {"query": {"type": "string", "description": "Search query"}},
+                    "enabled": True,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
             "src.api.workflows.session_manager.list_sessions",
             return_value=[{"id": "session-1", "title": "Research thread"}],
         ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
     ):
         response = await client.get("/api/workflows/runs?session_id=session-1")
 
@@ -393,6 +429,8 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
     run = response.json()["runs"][0]
     assert run["status"] == "awaiting_approval"
     assert run["pending_approval_count"] == 1
+    assert run["availability"] == "blocked"
+    assert any(action["type"] == "set_tool_policy" for action in run["replay_recommended_actions"])
     assert run["timeline"][1]["kind"] == "approval_pending"
 
     def test_list_workflows_includes_policy_metadata(self, workflows_dir):

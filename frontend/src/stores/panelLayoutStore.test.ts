@@ -48,11 +48,16 @@ describe("panelLayoutStore packed cockpit layouts", () => {
 
     const bottoms = [...columns.values()].map((items) => {
       const sorted = items.sort((left, right) => left.y - right.y);
+      for (let index = 1; index < sorted.length; index += 1) {
+        const previous = sorted[index - 1];
+        const current = sorted[index];
+        expect(current.y - (previous.y + previous.height)).toBe(16);
+      }
       const last = sorted[sorted.length - 1];
       return last ? last.y + last.height : 0;
     });
 
-    expect(new Set(bottoms).size).toBe(1);
+    expect(Math.max(...bottoms) - Math.min(...bottoms)).toBeLessThanOrEqual(16);
   });
 
   it("focus layout keeps a denser three-column arrangement without the hidden inspector", () => {
@@ -63,6 +68,7 @@ describe("panelLayoutStore packed cockpit layouts", () => {
 
     expect(xs.size).toBe(3);
     expect(panels.inspector_pane).toBeUndefined();
+    expect(panels.operator_timeline_pane).toBeDefined();
     expect(panels.response_pane).toBeDefined();
     expect(panels.conversation_pane).toBeDefined();
   });
@@ -74,6 +80,7 @@ describe("panelLayoutStore packed cockpit layouts", () => {
 
     expect(panels.response_pane.width).toBeGreaterThan(panels.sessions_pane.width);
     expect(panels.guardian_state_pane.width).toBeGreaterThan(panels.goals_pane.width);
+    expect(panels.operator_timeline_pane.width).toBeGreaterThanOrEqual(panels.approvals_pane.width);
     expect(panels.conversation_pane.width).toBeGreaterThan(panels.audit_pane.width);
   });
 

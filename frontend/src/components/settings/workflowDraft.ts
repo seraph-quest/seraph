@@ -45,6 +45,7 @@ export interface WorkflowInfo {
   missing_tools?: string[];
   missing_skills?: string[];
   recommended_actions?: WorkflowRecommendedAction[];
+  availability?: string;
 }
 
 function inputPlaceholder(

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../game/EventBus", () => ({
@@ -61,6 +61,7 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/capabilities/overview")) {
         return Promise.resolve(
           mockResponse({
@@ -213,10 +214,17 @@ describe("CockpitView", () => {
             runbooks: [
               {
                 id: "workflow:summarize-file",
+                name: "summarize-file",
                 label: "Run summarize-file",
                 description: "Summarize a workspace file",
                 source: "workflow",
                 command: "Run workflow \"summarize-file\" with file_path=\"notes/brief.md\".",
+                availability: "ready",
+                blocking_reasons: [],
+                recommended_actions: [],
+                parameter_schema: { file_path: { type: "string", description: "Workspace file" } },
+                risk_level: "low",
+                execution_boundaries: ["workspace"],
                 action: { type: "draft_workflow", label: "Draft workflow", name: "summarize-file" },
               },
             ],
@@ -373,6 +381,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
+    expect(screen.getByText("Operator timeline")).toBeInTheDocument();
     expect(screen.getByText("Desktop shell")).toBeInTheDocument();
     expect(screen.getByText("Operator terminal")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true");
@@ -459,6 +468,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -533,10 +543,17 @@ describe("CockpitView", () => {
           recommendations: [],
           runbooks: [{
             id: "workflow:web-brief-to-file",
+            name: "web-brief-to-file",
             label: "Run web-brief-to-file",
             description: "Draft the research pack workflow",
             source: "workflow",
             command: "Run workflow \"web-brief-to-file\" with query=\"seraph\".",
+            availability: "blocked",
+            blocking_reasons: ["missing tool: write_file"],
+            recommended_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+            parameter_schema: { query: { type: "string", description: "Query" } },
+            risk_level: "medium",
+            execution_boundaries: ["workspace_write"],
             action: { type: "draft_workflow", label: "Draft workflow", name: "web-brief-to-file" },
           }],
         }));
@@ -554,17 +571,21 @@ describe("CockpitView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "save macro" }, { timeout: 5000 }));
     await waitFor(() => expect(screen.getByText("1 saved")).toBeInTheDocument());
     expect(screen.getAllByText("Run web-brief-to-file").length).toBeGreaterThan(1);
-    fireEvent.click(screen.getAllByText("repair")[0]);
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/capabilities/starter-packs/research-briefing/activate"),
-        expect.objectContaining({ method: "POST" }),
-      ),
-    );
+    const starterPackRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
+    expect(starterPackRow).not.toBeNull();
+    fireEvent.click(within(starterPackRow as HTMLElement).getByRole("button", { name: "repair" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/settings/tool-policy-mode"),
         expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    const macroRow = screen.getAllByText("Run web-brief-to-file")[1]?.closest(".cockpit-operator-row");
+    expect(macroRow).not.toBeNull();
+    fireEvent.click(within(macroRow as HTMLElement).getByRole("button", { name: "repair" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/preflight?target_type=runbook&name=workflow%3Aweb-brief-to-file"),
       ),
     );
   });
@@ -597,6 +618,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -647,6 +669,7 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/capabilities/overview")) {
@@ -720,6 +743,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -828,6 +852,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -856,7 +881,7 @@ describe("CockpitView", () => {
   });
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 9 }, () => {
+    const deferredResponses = Array.from({ length: 10 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -881,7 +906,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(9));
+    await waitFor(() => expect(cockpitFetchCount).toBe(10));
     view.unmount();
 
     await act(async () => {
@@ -910,6 +935,7 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },

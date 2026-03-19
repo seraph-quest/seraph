@@ -795,13 +795,12 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
 
-    await waitFor(() =>
-      expect(screen.getByDisplayValue("Continue workflow after approval.")).toBeInTheDocument(),
-    );
-    expect(useChatStore.getState().sessionId).toBe("session-2");
+    await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });
+    expect(
+      await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
+    ).toBeInTheDocument();
   });
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {

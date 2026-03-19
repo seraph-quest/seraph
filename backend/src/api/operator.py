@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -19,10 +19,18 @@ from src.observer.native_notification_queue import native_notification_queue
 router = APIRouter()
 
 
-def _parse_iso(value: str | None) -> datetime:
+def _parse_iso(value: str | datetime | None) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     if not value:
-        return datetime.min
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _timeline_timestamp(value: str | datetime | None) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
 
 
 @router.get("/operator/timeline")
@@ -39,7 +47,10 @@ async def get_operator_timeline(
     pending_approvals = await approval_repository.list_pending(session_id=session_id, limit=max(limit, 12))
     notifications = await native_notification_queue.list()
     queued_insights = await insight_queue.peek_all()
-    recent_interventions = await guardian_feedback_repository.list_recent(limit=max(limit, 12))
+    recent_interventions = await guardian_feedback_repository.list_recent(
+        limit=max(limit, 12),
+        session_id=session_id,
+    )
     audit_events = await audit_repository.list_events(limit=max(limit, 20), session_id=session_id)
 
     items: list[dict[str, Any]] = []
@@ -112,8 +123,8 @@ async def get_operator_timeline(
             "title": notification.title,
             "summary": notification.body,
             "status": "queued",
-            "created_at": notification.created_at.isoformat(),
-            "updated_at": notification.created_at.isoformat(),
+            "created_at": _timeline_timestamp(notification.created_at),
+            "updated_at": _timeline_timestamp(notification.created_at),
             "thread_id": session_ref,
             "thread_label": session_titles.get(session_ref) if session_ref else None,
             "continue_message": notification.resume_message or notification.body,
@@ -153,8 +164,8 @@ async def get_operator_timeline(
             "title": insight.intervention_type,
             "summary": insight.content,
             "status": "queued",
-            "created_at": insight.created_at.isoformat(),
-            "updated_at": insight.created_at.isoformat(),
+            "created_at": _timeline_timestamp(insight.created_at),
+            "updated_at": _timeline_timestamp(insight.created_at),
             "thread_id": thread_id,
             "thread_label": session_titles.get(thread_id) if thread_id else None,
             "continue_message": f"Continue from queued guardian bundle: {insight.content}",
@@ -178,8 +189,8 @@ async def get_operator_timeline(
             "title": intervention.intervention_type,
             "summary": intervention.content_excerpt,
             "status": intervention.latest_outcome,
-            "created_at": intervention.updated_at.isoformat(),
-            "updated_at": intervention.updated_at.isoformat(),
+            "created_at": _timeline_timestamp(intervention.updated_at),
+            "updated_at": _timeline_timestamp(intervention.updated_at),
             "thread_id": intervention.session_id,
             "thread_label": session_titles.get(intervention.session_id) if intervention.session_id else None,
             "continue_message": f"Continue from this guardian intervention: {intervention.content_excerpt}",

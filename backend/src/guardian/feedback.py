@@ -164,12 +164,18 @@ class GuardianFeedbackRepository:
             await db.refresh(intervention)
             return intervention
 
-    async def list_recent(self, *, limit: int = 5) -> list[GuardianIntervention]:
+    async def list_recent(
+        self,
+        *,
+        limit: int = 5,
+        session_id: str | None = None,
+    ) -> list[GuardianIntervention]:
         async with get_session() as db:
+            query = select(GuardianIntervention)
+            if session_id:
+                query = query.where(GuardianIntervention.session_id == session_id)
             result = await db.execute(
-                select(GuardianIntervention)
-                .order_by(GuardianIntervention.updated_at.desc())
-                .limit(limit)
+                query.order_by(GuardianIntervention.updated_at.desc()).limit(limit)
             )
             return list(result.scalars().all())
 

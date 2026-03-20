@@ -9,6 +9,7 @@ import pytest_asyncio
 from unittest.mock import patch, MagicMock
 
 from src.skills.manager import SkillManager
+from src.api.catalog import install_catalog_item_by_name
 
 
 # ── Fixtures ─────────────────────────────────────────────
@@ -128,6 +129,7 @@ class TestCatalogAPI:
              patch("src.api.catalog._BUNDLED_SKILLS_DIR", bundled_skills_dir), \
              patch("src.api.catalog.skill_manager") as mock_skill_mgr:
             mock_settings.workspace_dir = workspace_dir
+            mock_skill_mgr.get_skill.side_effect = [None, object()]
 
             resp = await client.post("/api/catalog/install/test-catalog-skill")
             assert resp.status_code == 201
@@ -211,8 +213,10 @@ class TestCatalogAPI:
             f.write("---\nname: test-catalog-skill\ndescription: test\n---\nBody")
 
         with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
-             patch("src.api.catalog.settings") as mock_settings:
+             patch("src.api.catalog.settings") as mock_settings, \
+             patch("src.api.catalog.skill_manager") as mock_skill_mgr:
             mock_settings.workspace_dir = workspace_dir
+            mock_skill_mgr.get_skill.return_value = object()
 
             resp = await client.post("/api/catalog/install/test-catalog-skill")
             assert resp.status_code == 409
@@ -227,3 +231,40 @@ class TestCatalogAPI:
 
             resp = await client.post("/api/catalog/install/test-mcp")
             assert resp.status_code == 409
+
+    def test_install_catalog_skill_reports_invalid_existing_file(
+        self, catalog_data, workspace_dir
+    ):
+        skills_dir = os.path.join(workspace_dir, "skills")
+        with open(os.path.join(skills_dir, "test-catalog-skill.md"), "w", encoding="utf-8") as handle:
+            handle.write("not valid frontmatter")
+
+        with (
+            patch("src.api.catalog._load_catalog", return_value=catalog_data),
+            patch("src.api.catalog.settings") as mock_settings,
+            patch("src.api.catalog.skill_manager") as mock_skill_mgr,
+        ):
+            mock_settings.workspace_dir = workspace_dir
+            mock_skill_mgr.get_skill.return_value = None
+
+            result = install_catalog_item_by_name("test-catalog-skill")
+
+        assert result["ok"] is False
+        assert result["status"] == "installed_file_invalid"
+        mock_skill_mgr.reload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_install_skill_returns_422_when_bundled_file_cannot_load(
+        self, client, catalog_data, workspace_dir, bundled_skills_dir
+    ):
+        with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
+             patch("src.api.catalog.settings") as mock_settings, \
+             patch("src.api.catalog._BUNDLED_SKILLS_DIR", bundled_skills_dir), \
+             patch("src.api.catalog.skill_manager") as mock_skill_mgr:
+            mock_settings.workspace_dir = workspace_dir
+            mock_skill_mgr.get_skill.side_effect = [None, None]
+
+            resp = await client.post("/api/catalog/install/test-catalog-skill")
+
+        assert resp.status_code == 422
+        assert "could not be loaded" in resp.json()["detail"]

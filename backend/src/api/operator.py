@@ -69,6 +69,7 @@ async def get_operator_timeline(
             "continue_message": (
                 run.get("thread_continue_message")
                 or run.get("approval_recovery_message")
+                or run.get("retry_from_step_draft")
                 or run.get("replay_draft")
             ),
             "replay_draft": run.get("replay_draft"),
@@ -77,11 +78,24 @@ async def get_operator_timeline(
             "recommended_actions": run.get("replay_recommended_actions", []),
             "source": "workflow",
             "metadata": {
+                "run_identity": run.get("run_identity"),
+                "run_fingerprint": run.get("run_fingerprint"),
                 "risk_level": run.get("risk_level"),
                 "execution_boundaries": run.get("execution_boundaries", []),
+                "step_count": len(run.get("step_records", []) or []),
+                "failed_step_ids": list(run.get("continued_error_steps", []) or []),
+                "failed_step_tool": run.get("failed_step_tool"),
                 "pending_approval_count": run.get("pending_approval_count", 0),
                 "resume_from_step": run.get("resume_from_step"),
                 "resume_checkpoint_label": run.get("resume_checkpoint_label"),
+                "last_completed_step_id": run.get("last_completed_step_id"),
+                "checkpoint_step_ids": list(run.get("checkpoint_step_ids", []) or []),
+                "checkpoint_candidates": run.get("checkpoint_candidates", []),
+                "branch_kind": run.get("branch_kind"),
+                "branch_depth": run.get("branch_depth"),
+                "parent_run_identity": run.get("parent_run_identity"),
+                "root_run_identity": run.get("root_run_identity"),
+                "resume_plan": run.get("resume_plan"),
                 "availability": run.get("availability"),
             },
         })
@@ -146,6 +160,8 @@ async def get_operator_timeline(
         })
 
     for insight in queued_insights:
+        if session_id and getattr(insight, "session_id", None) not in {None, session_id}:
+            continue
         if session_id:
             match = next(
                 (
@@ -154,7 +170,7 @@ async def get_operator_timeline(
                 ),
                 None,
             )
-            if insight.intervention_id and match is None:
+            if insight.intervention_id and getattr(insight, "session_id", None) is None and match is None:
                 continue
         thread_id = next(
             (
@@ -162,7 +178,7 @@ async def get_operator_timeline(
                 if item.id == insight.intervention_id
             ),
             None,
-        )
+        ) or getattr(insight, "session_id", None)
         items.append({
             "id": f"queued:{insight.id}",
             "kind": "queued_insight",

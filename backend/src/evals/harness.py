@@ -4348,6 +4348,13 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
         ],
         "resume_from_step": run["resume_from_step"],
         "resume_checkpoint_label": run["resume_checkpoint_label"],
+        "branch_kind": run["branch_kind"],
+        "root_run_identity_matches_source": run["root_run_identity"] == run["run_identity"],
+        "checkpoint_candidate_kinds": [
+            checkpoint["kind"] for checkpoint in run["checkpoint_candidates"]
+        ],
+        "resume_plan_branch_kind": run["resume_plan"]["branch_kind"],
+        "resume_plan_requires_manual_execution": run["resume_plan"]["requires_manual_execution"],
         "thread_continue_message": run["thread_continue_message"],
         "approval_recovery_message": run["approval_recovery_message"],
     }
@@ -4400,7 +4407,7 @@ def _eval_capability_repair_behavior() -> dict[str, Any]:
             ],
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
-        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch(
             "src.api.capabilities._load_starter_packs",
             return_value=[
@@ -4449,9 +4456,50 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
         "pending_approval_count": 0,
         "resume_from_step": "write_step",
         "resume_checkpoint_label": "Retry failed step",
+        "retry_from_step_draft": (
+            'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md". '
+            'Resume from step "write_step".'
+        ),
+        "run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+        "run_fingerprint": "web-brief",
+        "continued_error_steps": ["write_step"],
+        "failed_step_tool": "write_file",
+        "checkpoint_step_ids": ["search_step", "write_step"],
+        "last_completed_step_id": "write_step",
+        "checkpoint_candidates": [
+            {
+                "step_id": "search_step",
+                "label": "search_step (web_search)",
+                "kind": "branch_from_checkpoint",
+                "status": "succeeded",
+            },
+            {
+                "step_id": "write_step",
+                "label": "write_step (write_file)",
+                "kind": "retry_failed_step",
+                "status": "continued_error",
+            },
+        ],
+        "branch_kind": "retry_failed_step",
+        "branch_depth": 0,
+        "parent_run_identity": None,
+        "root_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+        "resume_plan": {
+            "source_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+            "parent_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+            "root_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+            "branch_kind": "retry_failed_step",
+            "resume_from_step": "write_step",
+            "resume_checkpoint_label": "write_step (write_file)",
+            "requires_manual_execution": True,
+        },
         "availability": "ready",
         "thread_continue_message": None,
         "approval_recovery_message": None,
+        "step_records": [
+            {"id": "search_step", "tool": "web_search", "status": "succeeded"},
+            {"id": "write_step", "tool": "write_file", "status": "continued_error"},
+        ],
     }
     approval = {
         "id": "approval-1",
@@ -4556,12 +4604,17 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
         "item_kinds": [item["kind"] for item in items],
         "latest_kind": items[0]["kind"],
         "workflow_thread_id": workflow_item["thread_id"],
-        "workflow_continue_message_matches_replay": (
-            workflow_item["continue_message"] == workflow_item["replay_draft"]
+        "workflow_continue_message_matches_retry_plan": (
+            workflow_item["continue_message"] == workflow_run["retry_from_step_draft"]
         ),
         "workflow_replay_allowed": workflow_item["replay_allowed"],
         "workflow_resume_from_step": workflow_item["metadata"]["resume_from_step"],
         "workflow_resume_checkpoint_label": workflow_item["metadata"]["resume_checkpoint_label"],
+        "workflow_run_identity": workflow_item["metadata"]["run_identity"],
+        "workflow_branch_kind": workflow_item["metadata"]["branch_kind"],
+        "workflow_resume_plan_kind": workflow_item["metadata"]["resume_plan"]["branch_kind"],
+        "workflow_failed_step_tool": workflow_item["metadata"]["failed_step_tool"],
+        "workflow_checkpoint_candidate_count": len(workflow_item["metadata"]["checkpoint_candidates"]),
         "approval_thread_matches": approval_item["thread_id"] == "thread-1",
         "approval_continue_message": approval_item["continue_message"],
         "notification_thread_matches": notification_item["thread_id"] == "thread-1",
@@ -4624,7 +4677,7 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
             ],
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
-        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch(
             "src.api.capabilities._load_starter_packs",
             return_value=[

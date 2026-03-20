@@ -28,6 +28,8 @@
 - [x] bounded capability bootstrap that can apply safe install/repair actions for workflows, runbooks, and starter packs from the cockpit
 - [x] workflow diagnostics that expose stored load errors plus richer step timing, error summaries, and recovery hints for extension debugging
 - [x] threaded operator timeline surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, and surfaced failures
+- [x] cockpit-native extension studio for workflows, skills, and MCP configs with validation, diagnostics, save flows, and repair handoff
+- [x] first workflow branch/resume control with checkpoint candidates, lineage metadata, approval-gated resume plans, and resume drafts tied to existing inputs
 
 ## Working On Now
 
@@ -37,13 +39,13 @@
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships `capability-discovery-and-activation-v1`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, and `extension-debugging-and-recovery-v1`
 - [x] this workstream now also ships `capability-preflight-and-autorepair-v1`, `threaded-operator-timeline-v1`, and `workflow-runbooks-and-parameterized-replay-v1`
-- [x] this workstream now hands the queue forward to fuller install-doctor/bootstrap depth, richer live operator control, branch/resume workflow recovery, and better extension authoring rather than first-pass visibility
+- [x] this workstream now hands the queue forward to versioned capability distribution, deeper extension-studio ergonomics, and a visual workflow debugger rather than first-pass visibility
 
 ## Still To Do On `develop`
 
-- [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, installable catalog surfaces, and bounded bootstrap flow
-- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, replay guardrails, parameterized reruns, approval-aware recovery, diagnostics endpoint, and operator terminal
-- [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, and first debug metadata
+- [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, installable catalog surfaces, bounded bootstrap flow, and first extension-studio save path
+- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, branch/resume checkpoints, replay guardrails, parameterized reruns, approval-aware recovery, diagnostics endpoint, and operator terminal
+- [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, and first extension studio
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 
 ## Non-Goals

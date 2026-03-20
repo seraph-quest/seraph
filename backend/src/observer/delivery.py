@@ -329,6 +329,7 @@ async def deliver_or_queue(
                 urgency=urgency,
                 reasoning=message.reasoning or "",
                 intervention_id=intervention_id,
+                session_id=session_id,
             )
             logger.info("Queued proactive message (state=%s, mode=%s)", ctx.user_state, ctx.interruption_mode)
             await log_observer_delivery_event(

@@ -31,10 +31,10 @@
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the new collaborator/obligation/timeline world-model pass shipped
+- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the corroboration-aware world-model and richer thread-guidance pass shipped
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
 - [x] the first multi-signal learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
-- [x] `world-model-memory-fusion-v8`, `guardian-learning-policy-v8`, and `guardian-behavioral-evals-v8` are now shipped on this branch, so the next gap shifts to deeper durable modeling, corroboration quality, and stronger policy learning rather than more missing first-pass structure
+- [x] `world-model-memory-fusion-v9`, `guardian-learning-policy-v9`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, so the next gap shifts to project-graph quality, longer-horizon learning, and stronger cross-thread policy adaptation rather than more missing first-pass structure
 
 ## Still To Do On `develop`
 

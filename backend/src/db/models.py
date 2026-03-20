@@ -139,6 +139,7 @@ class QueuedInsight(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     intervention_id: Optional[str] = Field(default=None, index=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
     content: str
     intervention_type: str = Field(default="advisory")
     urgency: int = Field(default=3)

@@ -28,11 +28,11 @@
 
 ## Working On Now
 
-- [x] Runtime Reliability is no longer the repo-wide active focus after provider explainability and budgets v2 plus guardian behavioral evals v8 shipped
+- [x] Runtime Reliability is no longer the repo-wide active focus after provider explainability and budgets v3 plus guardian behavioral evals v9 shipped
 - [x] the previous runtime-focused queue is fully shipped on `develop`
-- [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v2`, and `guardian-behavioral-evals-v8` are now shipped on this branch, including budget/task-class routing safeguards, richer timeline-facing routing summaries, and deeper deterministic proof for repair plus bootstrap-adjacent guardian behavior
-- [ ] richer provider policy still remains to do on `develop`, but the new safeguard layer means the remaining work is now deeper explainability and cross-surface legibility rather than first-pass hard requirements and tier guardrails
-- [ ] the next runtime-facing queue item now shifts to `provider-policy-explainability-and-budgets-v3` rather than another first-pass safeguard slice
+- [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v3`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, including richer routing reason surfaces, budget/task-class guardrails, and deeper deterministic proof for bootstrap plus branching behavior
+- [ ] richer provider policy still remains to do on `develop`, but the remaining work is now simulation-grade planning, budget steering, and cross-surface legibility rather than first-pass hard requirements and tier guardrails
+- [ ] the next runtime-facing queue item now shifts to `provider-policy-simulation-and-budget-planning-v1`
 
 ## Still To Do On `develop`
 

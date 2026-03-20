@@ -67,15 +67,13 @@ class Workflow:
         return list(dict.fromkeys(step.tool for step in self.steps))
 
 
-def _parse_workflow_file(path: str, *, errors: list[dict[str, str]] | None = None) -> Workflow | None:
-    """Parse a single markdown workflow file."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError as exc:
-        _record_workflow_error(errors, path=path, message=f"Failed to read workflow file {path}: {exc}")
-        return None
-
+def parse_workflow_content(
+    content: str,
+    *,
+    path: str = "<draft>",
+    errors: list[dict[str, str]] | None = None,
+) -> Workflow | None:
+    """Parse workflow markdown content into a workflow model."""
     if not content.startswith("---"):
         _record_workflow_error(errors, path=path, message=f"Workflow file {path} missing YAML frontmatter")
         return None
@@ -204,6 +202,18 @@ def _parse_workflow_file(path: str, *, errors: list[dict[str, str]] | None = Non
         body=body,
         result_template=result_template if isinstance(result_template, str) else "",
     )
+
+
+def _parse_workflow_file(path: str, *, errors: list[dict[str, str]] | None = None) -> Workflow | None:
+    """Parse a single markdown workflow file."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as exc:
+        _record_workflow_error(errors, path=path, message=f"Failed to read workflow file {path}: {exc}")
+        return None
+
+    return parse_workflow_content(content, path=path, errors=errors)
 
 
 def scan_workflows(workflows_dir: str) -> tuple[list[Workflow], list[dict[str, str]]]:

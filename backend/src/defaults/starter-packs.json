@@ -12,6 +12,7 @@
       "name": "research-briefing",
       "label": "Research Briefing",
       "description": "Enable web research helpers and the note-saving workflow for repeatable briefs.",
+      "install_items": ["http-request"],
       "skills": ["web-briefing"],
       "workflows": ["web-brief-to-file"],
       "sample_prompt": "Search the web for the latest Warsaw weather and save a concise brief."

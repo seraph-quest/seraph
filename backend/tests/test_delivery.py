@@ -153,6 +153,7 @@ async def test_queue_when_blocked():
             urgency=3,
             reasoning="",
             intervention_id=msg.intervention_id,
+            session_id=None,
         )
     finally:
         for p in patches:

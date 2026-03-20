@@ -1,5 +1,9 @@
 """MCP server management API — CRUD + test endpoints."""
 
+from __future__ import annotations
+
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -15,6 +19,7 @@ class AddServerRequest(BaseModel):
     description: str = ""
     enabled: bool = True
     headers: dict[str, str] | None = None
+    auth_hint: str = ""
 
 
 class UpdateServerRequest(BaseModel):
@@ -34,6 +39,53 @@ async def list_servers():
     return {"servers": mcp_manager.get_config()}
 
 
+@router.post("/mcp/servers/validate")
+async def validate_server(req: AddServerRequest):
+    issues: list[str] = []
+    warnings: list[str] = []
+    url = (req.url or "").strip()
+    if not req.name.strip():
+        issues.append("Server name is required")
+    if not url:
+        issues.append("Server URL is required")
+    parsed = urlparse(url) if url else None
+    if parsed and parsed.scheme not in {"http", "https"}:
+        issues.append("Server URL must use http or https")
+    if parsed and not parsed.netloc:
+        issues.append("Server URL must include a host")
+    if req.headers is not None:
+        for key, value in req.headers.items():
+            if not isinstance(key, str) or not key.strip():
+                issues.append("Header names must be non-empty strings")
+                break
+            if not isinstance(value, str):
+                issues.append("Header values must be strings")
+                break
+    missing_vars = mcp_manager._check_unresolved_vars(req.headers)
+    if req.name in mcp_manager._config:
+        warnings.append("Server already exists and will need update instead of create")
+    if missing_vars:
+        warnings.append("Environment variables are still required before the server can connect")
+    return {
+        "valid": not issues,
+        "name": req.name.strip(),
+        "url": url,
+        "status": (
+            "invalid"
+            if issues
+            else ("auth_required" if missing_vars else "ready_to_test")
+        ),
+        "issues": issues,
+        "warnings": warnings,
+        "missing_env_vars": missing_vars,
+        "enabled": req.enabled,
+        "description": req.description,
+        "has_headers": bool(req.headers),
+        "auth_hint": req.auth_hint,
+        "existing": req.name in mcp_manager._config,
+    }
+
+
 @router.post("/mcp/servers", status_code=201)
 async def add_server(req: AddServerRequest):
     """Add a new MCP server."""
@@ -45,6 +97,7 @@ async def add_server(req: AddServerRequest):
         description=req.description,
         enabled=req.enabled,
         headers=req.headers,
+        auth_hint=req.auth_hint,
     )
     return {"status": "created", "name": req.name}
 

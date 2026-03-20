@@ -1418,6 +1418,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         result.ready ? "success" : "info",
       );
     }
+    if (!result.ready && result.manual_actions?.length) {
+      appendOperatorFeed(
+        `${label}: ${result.manual_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
+        "info",
+      );
+      await runCapabilityActions(result.manual_actions, `${label} bootstrap`);
+    }
     if (result.ready) {
       setOperatorStatus(`${label} ready`);
     } else {

@@ -736,6 +736,137 @@ describe("CockpitView", () => {
     );
   });
 
+  it("runs manual bootstrap actions for blocked runbooks before stopping", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 1,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [{
+            name: "github",
+            status: "auth_required",
+            enabled: true,
+            description: "GitHub MCP",
+            tool_count: 0,
+            auth_hint: "Add a token",
+            missing_env_vars: ["GITHUB_TOKEN"],
+            required_env_vars: ["GITHUB_TOKEN"],
+            recommended_actions: [{ type: "test_mcp_server", label: "Test server", name: "github" }],
+          }],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [{
+            id: "runbook:github-sync",
+            name: "github-sync",
+            label: "GitHub sync",
+            description: "Repair GitHub MCP and resume the runbook",
+            source: "workflow",
+            command: "Run workflow \"github-sync\".",
+            availability: "blocked",
+            blocking_reasons: ["mcp auth required: github"],
+            recommended_actions: [{ type: "test_mcp_server", label: "Test server", name: "github" }],
+            parameter_schema: {},
+            risk_level: "medium",
+            execution_boundaries: ["external_mcp"],
+            action: { type: "draft_workflow", label: "Draft workflow", name: "github-sync" },
+          }],
+        }));
+      }
+      if (url.includes("/api/capabilities/preflight")) {
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:github-sync",
+          label: "GitHub sync",
+          description: "Repair GitHub MCP and resume the runbook",
+          availability: "blocked",
+          blocking_reasons: ["mcp auth required: github"],
+          autorepair_actions: [],
+          recommended_actions: [{ type: "test_mcp_server", label: "Test server", name: "github" }],
+          ready: false,
+          can_autorepair: false,
+        }));
+      }
+      if (url.includes("/api/capabilities/bootstrap")) {
+        expect(init?.method).toBe("POST");
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:github-sync",
+          label: "GitHub sync",
+          status: "blocked",
+          ready: false,
+          availability: "blocked",
+          blocking_reasons: ["mcp auth required: github"],
+          applied_actions: [],
+          manual_actions: [{ type: "test_mcp_server", label: "Test server", name: "github" }],
+        }));
+      }
+      if (url.includes("/api/mcp/servers/github/test")) {
+        return Promise.resolve(mockResponse({ status: "ok", tool_count: 3 }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("GitHub sync")).toBeInTheDocument());
+    const runbookRow = screen.getByText("GitHub sync").closest(".cockpit-operator-row");
+    expect(runbookRow).not.toBeNull();
+    fireEvent.click(within(runbookRow as HTMLElement).getByRole("button", { name: "repair" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/bootstrap"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/mcp/servers/github/test"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+  });
+
   it("keeps step repair visible even when replay is blocked", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

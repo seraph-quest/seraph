@@ -230,7 +230,16 @@ def _step_recovery_recommended_actions(
 ) -> list[dict[str, Any]]:
     actions = _workflow_replay_recommended_actions(workflow_status)
     step_tool = str(step.get("tool") or "")
-    if step_tool and step_tool != "unknown":
+    missing_tools = workflow_status.get("missing_tools") if isinstance(workflow_status, dict) else []
+    if not isinstance(missing_tools, list):
+        missing_tools = []
+    step_requires_policy_repair = (
+        step_tool
+        and step_tool != "unknown"
+        and str(workflow_status.get("availability") or "") == "blocked"
+        and step_tool in {str(tool) for tool in missing_tools}
+    )
+    if step_requires_policy_repair:
         current_tool_mode = get_current_tool_policy_mode()
         suggested_mode = _recommended_tool_policy_mode(
             current_mode=current_tool_mode,

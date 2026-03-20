@@ -393,6 +393,8 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
 export function SettingsPanel() {
   const settingsPanelOpen = useChatStore((s) => s.settingsPanelOpen);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
+  const cockpitHintsEnabled = useChatStore((s) => s.cockpitHintsEnabled);
+  const setCockpitHintsEnabled = useChatStore((s) => s.setCockpitHintsEnabled);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restartOnboarding = useChatStore((s) => s.restartOnboarding);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -573,6 +575,21 @@ export function SettingsPanel() {
                 Restart intro
               </button>
             )}
+            <div className="cockpit-settings-inline-row">
+              <div className="cockpit-settings-copy">
+                <div className="cockpit-settings-label">Cockpit hints</div>
+                <div className="cockpit-settings-note">
+                  Show workspace and window guidance in the cockpit shell.
+                </div>
+              </div>
+              <button
+                type="button"
+                className={`cockpit-settings-toggle ${cockpitHintsEnabled ? "is-active" : ""}`}
+                onClick={() => setCockpitHintsEnabled(!cockpitHintsEnabled)}
+              >
+                {cockpitHintsEnabled ? "On" : "Off"}
+              </button>
+            </div>
           </div>
 
           <InterruptionModeToggle />

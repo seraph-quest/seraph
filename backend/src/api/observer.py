@@ -44,6 +44,8 @@ class NativeNotificationResponse(BaseModel):
     session_id: str | None = None
     thread_id: str | None = None
     thread_label: str | None = None
+    thread_source: str = "ambient"
+    continuation_mode: str = "open_thread"
     resume_message: str | None = None
     created_at: str
 
@@ -264,10 +266,10 @@ async def get_observer_continuity():
         "notifications": [
             {
                 **item,
-                "thread_id": item.get("session_id"),
+                "thread_id": item.get("thread_id") or item.get("session_id"),
                 "thread_label": (
-                    session_titles.get(str(item["session_id"]))
-                    if item.get("session_id")
+                    session_titles.get(str(item.get("thread_id") or item.get("session_id")))
+                    if item.get("thread_id") or item.get("session_id")
                     else None
                 ),
             }

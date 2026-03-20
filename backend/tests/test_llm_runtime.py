@@ -1690,7 +1690,13 @@ def test_completion_with_fallback_reroutes_to_guardrail_compliant_target(async_d
     events = asyncio.run(_fetch())
     details = events[0]["details"]
     assert details["selected_model"] == "openai/gpt-4o-mini"
+    assert details["selected_source"] == "fallback_chain"
+    assert "configured_fallback_chain" in details["selected_reason_codes"]
+    assert "selected_for_attempt" in details["selected_reason_codes"]
+    assert details["selected_policy_score"] == 0.0
+    assert details["reroute_cause"] == "policy_guardrails"
     assert details["rerouted_from_policy_guardrails"] is True
+    assert details["rejected_target_count"] == 2
     primary_candidate = next(
         candidate for candidate in details["candidate_targets"] if candidate["source"] == "primary"
     )

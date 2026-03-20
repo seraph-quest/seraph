@@ -28,16 +28,16 @@
 
 ## Working On Now
 
-- [x] Runtime Reliability is no longer the repo-wide active focus after provider safeguards v3, provider explainability and budgets v1, and guardian behavioral evals v7 shipped
+- [x] Runtime Reliability is no longer the repo-wide active focus after provider explainability and budgets v2 plus guardian behavioral evals v8 shipped
 - [x] the previous runtime-focused queue is fully shipped on `develop`
-- [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v1`, and `guardian-behavioral-evals-v7` are now shipped on this branch, including budget/task-class routing safeguards, richer routing legibility, and deeper deterministic proof for timeline plus repair-adjacent guardian behavior
+- [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v2`, and `guardian-behavioral-evals-v8` are now shipped on this branch, including budget/task-class routing safeguards, richer timeline-facing routing summaries, and deeper deterministic proof for repair plus bootstrap-adjacent guardian behavior
 - [ ] richer provider policy still remains to do on `develop`, but the new safeguard layer means the remaining work is now deeper explainability and cross-surface legibility rather than first-pass hard requirements and tier guardrails
-- [ ] the next runtime-facing queue item now shifts to `provider-policy-explainability-and-budgets-v2` rather than another first-pass safeguard slice
+- [ ] the next runtime-facing queue item now shifts to `provider-policy-explainability-and-budgets-v3` rather than another first-pass safeguard slice
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider selection policy beyond the shipped weighted scoring, required capability safeguards, task/budget guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, strategist-learning continuity, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair, delegated workflow, and workflow-composition behavioral contracts
+- [ ] deepen provider selection policy beyond the shipped weighted scoring, required capability safeguards, task/budget guardrails, path patterns, explicit overrides, ordered fallbacks, cooldown rerouting, and first operator-facing routing summaries
+- [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, strategist-learning continuity, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair/bootstrap, delegated workflow, and workflow-composition behavioral contracts
 
 ## Completed PR Sequence
 
@@ -79,4 +79,4 @@ This is the next ordered Runtime Reliability slice after the completed incident-
 - [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
 - [x] a local or non-OpenRouter path is demonstrably possible across helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist flows
 - [x] key flows are observable and easy to debug
-- [ ] the project has broad repeatable eval coverage for core guardian behavior beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair, delegated workflow, and workflow-composition behavioral contracts
+- [ ] the project has broad repeatable eval coverage for core guardian behavior beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair/bootstrap, delegated workflow, and workflow-composition behavioral contracts

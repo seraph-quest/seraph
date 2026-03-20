@@ -199,6 +199,20 @@ def decide_intervention(
             should_cost_budget=should_cost_budget,
         )
 
+    if (
+        learning_blocked_state_bias == "prefer_async_for_blocked_state"
+        and learning_channel_bias == "prefer_native_notification"
+        and user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}
+        and urgency >= 2
+        and intervention_type != "alert"
+    ):
+        return InterventionDecision(
+            action=InterventionAction.act,
+            reason="learned_blocked_state_async",
+            delivery_decision=DeliveryDecision.deliver,
+            should_cost_budget=should_cost_budget,
+        )
+
     if user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}:
         return InterventionDecision(
             action=InterventionAction.bundle,

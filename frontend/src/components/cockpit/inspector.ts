@@ -29,6 +29,13 @@ export interface WorkflowStepRecord {
   artifactPaths: string[];
   resultSummary?: string | null;
   errorKind?: string | null;
+  errorSummary?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  durationMs?: number | null;
+  recoveryActions?: Array<Record<string, unknown>>;
+  recoveryHint?: string | null;
+  isRecoverable?: boolean;
 }
 
 export interface WorkflowTimelineEntry {
@@ -39,6 +46,8 @@ export interface WorkflowTimelineEntry {
   stepTool?: string | null;
   resultSummary?: string | null;
   errorKind?: string | null;
+  errorSummary?: string | null;
+  durationMs?: number | null;
 }
 
 export interface WorkflowRunRecord {

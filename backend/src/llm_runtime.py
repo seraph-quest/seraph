@@ -1079,6 +1079,21 @@ def _build_routing_decision_details(
         for target in candidate_targets
         if target["decision"] != "skipped"
     ]
+    selected_candidate = next(
+        target for target in candidate_targets if target["decision"] == "selected"
+    )
+    reroute_cause = "none"
+    if rerouted_due_to_policy:
+        reroute_cause = "policy_guardrails"
+    elif rerouted and primary_unhealthy:
+        reroute_cause = "health"
+    elif rerouted:
+        reroute_cause = "degrade_open"
+    rejected_targets = [
+        target
+        for target in candidate_targets
+        if target["decision"] != "selected"
+    ]
 
     return {
         "runtime_path": runtime_path,
@@ -1094,16 +1109,16 @@ def _build_routing_decision_details(
         "selected_model": str(selected_target["model_id"]),
         "selected_profile": selected_target.get("profile"),
         "selected_source": selected_target["source"],
+        "selected_reason_codes": selected_candidate["reason_codes"],
+        "selected_policy_score": selected_candidate["policy_score"],
         "attempt_order": attempt_order,
+        "reroute_cause": reroute_cause,
         "rerouted_from_unhealthy_primary": rerouted and primary_unhealthy,
         "rerouted_from_policy_guardrails": rerouted_due_to_policy,
         "guardrail_compliant_targets_present": compliant_targets_present,
         "candidate_targets": candidate_targets,
-        "rejected_targets": [
-            target
-            for target in candidate_targets
-            if target["decision"] != "selected"
-        ],
+        "rejected_targets": rejected_targets,
+        "rejected_target_count": len(rejected_targets),
     }
 
 

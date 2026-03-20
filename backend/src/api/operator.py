@@ -117,6 +117,9 @@ async def get_operator_timeline(
         session_ref = notification.session_id
         if session_id and session_ref != session_id:
             continue
+        thread_id = getattr(notification, "thread_id", None) or session_ref
+        continuation_mode = getattr(notification, "continuation_mode", None)
+        thread_source = getattr(notification, "thread_source", None)
         items.append({
             "id": f"notification:{notification.id}",
             "kind": "notification",
@@ -125,8 +128,8 @@ async def get_operator_timeline(
             "status": "queued",
             "created_at": _timeline_timestamp(notification.created_at),
             "updated_at": _timeline_timestamp(notification.created_at),
-            "thread_id": session_ref,
-            "thread_label": session_titles.get(session_ref) if session_ref else None,
+            "thread_id": thread_id,
+            "thread_label": session_titles.get(thread_id) if thread_id else None,
             "continue_message": notification.resume_message or notification.body,
             "replay_draft": None,
             "replay_allowed": False,
@@ -137,6 +140,8 @@ async def get_operator_timeline(
                 "surface": "notification",
                 "intervention_type": notification.intervention_type,
                 "urgency": notification.urgency,
+                "thread_source": thread_source,
+                "continuation_mode": continuation_mode,
             },
         })
 
@@ -218,12 +223,26 @@ async def get_operator_timeline(
             summary = str(event.get("summary") or event_type)
             metadata = {
                 "event_type": event_type,
+                "runtime_path": details.get("runtime_path"),
+                "runtime_profile": details.get("runtime_profile"),
                 "selected_model": details.get("selected_model"),
                 "selected_profile": details.get("selected_profile"),
+                "selected_source": details.get("selected_source"),
+                "selected_reason_codes": details.get("selected_reason_codes", []),
+                "selected_policy_score": details.get("selected_policy_score"),
                 "required_policy_intents": details.get("required_policy_intents", []),
+                "max_cost_tier": details.get("max_cost_tier"),
+                "max_latency_tier": details.get("max_latency_tier"),
+                "required_task_class": details.get("required_task_class"),
                 "max_budget_class": details.get("max_budget_class"),
+                "attempt_order": details.get("attempt_order", []),
+                "reroute_cause": details.get("reroute_cause"),
+                "rerouted_from_unhealthy_primary": details.get("rerouted_from_unhealthy_primary"),
                 "rerouted_from_policy_guardrails": details.get("rerouted_from_policy_guardrails"),
+                "guardrail_compliant_targets_present": details.get("guardrail_compliant_targets_present"),
+                "rejected_target_count": details.get("rejected_target_count"),
                 "candidate_targets": details.get("candidate_targets", []),
+                "rejected_targets": details.get("rejected_targets", []),
             }
             items.append({
                 "id": f"audit:{event['id']}",

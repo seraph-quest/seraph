@@ -611,6 +611,343 @@ describe("CockpitView", () => {
     );
   });
 
+  it("drafts the starter-pack command after a successful bootstrap", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 1,
+            skills_total: 1,
+            workflows_ready: 0,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 1,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "write_file", description: "Write", risk_level: "medium", execution_boundaries: ["workspace_write"], availability: "blocked", blocked_reason: "tool_policy_balanced" }],
+          skills: [{ name: "web-briefing", enabled: true, description: "Web briefing", requires_tools: ["write_file"], availability: "blocked", missing_tools: ["write_file"] }],
+          workflows: [{
+            name: "web-brief-to-file",
+            tool_name: "workflow_web_brief_to_file",
+            description: "Research and save",
+            inputs: { query: { type: "string", description: "Query", required: true } },
+            requires_tools: ["write_file"],
+            requires_skills: ["web-briefing"],
+            user_invocable: true,
+            enabled: true,
+            step_count: 2,
+            file_path: "defaults/workflows/web-brief-to-file.json",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_write"],
+            risk_level: "medium",
+            requires_approval: false,
+            approval_behavior: "direct",
+            is_available: false,
+            missing_tools: ["write_file"],
+            missing_skills: [],
+            recommended_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+          }],
+          mcp_servers: [],
+          starter_packs: [{
+            name: "research-briefing",
+            label: "Research briefing",
+            description: "Enable the research pack.",
+            sample_prompt: "Run workflow \"web-brief-to-file\" with query=\"seraph\".",
+            skills: ["web-briefing"],
+            workflows: ["web-brief-to-file"],
+            ready_skills: [],
+            ready_workflows: [],
+            blocked_skills: [{ name: "web-briefing", availability: "blocked", missing_tools: ["write_file"] }],
+            blocked_workflows: [{ name: "web-brief-to-file", availability: "blocked", missing_tools: ["write_file"], missing_skills: [] }],
+            availability: "blocked",
+            recommended_actions: [
+              { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
+              { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+            ],
+          }],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/bootstrap")) {
+        expect(init?.method).toBe("POST");
+        return Promise.resolve(mockResponse({
+          target_type: "starter_pack",
+          name: "research-briefing",
+          label: "Research briefing",
+          status: "ready",
+          ready: true,
+          availability: "ready",
+          blocking_reasons: [],
+          applied_actions: [{ type: "set_tool_policy", mode: "full", status: "applied" }],
+          manual_actions: [],
+          command: "Run workflow \"web-brief-to-file\" with query=\"seraph\".",
+          overview: { summary: { starter_packs_ready: 1 } },
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
+    const starterPackRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
+    expect(starterPackRow).not.toBeNull();
+    fireEvent.click(within(starterPackRow as HTMLElement).getByRole("button", { name: "activate" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/bootstrap"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Run workflow "web-brief-to-file" with query="seraph".')).toBeInTheDocument(),
+    );
+  });
+
+  it("keeps step repair visible even when replay is blocked", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "write_file", description: "Write", risk_level: "medium", execution_boundaries: ["workspace_write"], availability: "blocked", blocked_reason: "tool_policy_balanced" }],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "evt-call",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-1",
+              status: "failed",
+              started_at: "2026-03-18T12:01:00Z",
+              updated_at: "2026-03-18T12:01:45Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              artifact_paths: [],
+              continued_error_steps: ["write_file"],
+              arguments: { query: "seraph", file_path: "notes/brief.md" },
+              risk_level: "medium",
+              execution_boundaries: ["external_read", "workspace_write"],
+              accepts_secret_refs: false,
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_fingerprint: "fp-1",
+              run_identity: "session-1:workflow_web_brief_to_file:fp-1",
+              replay_allowed: false,
+              replay_block_reason: "availability",
+              replay_draft: null,
+              retry_from_step_draft: null,
+              replay_recommended_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: [],
+                  result_summary: "Permission blocked",
+                  error_kind: "tool_failed",
+                  error_summary: "write_file blocked by tool policy",
+                  recovery_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+                  is_recoverable: true,
+                },
+              ],
+              approval_recovery_message: null,
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-18T12:01:00Z", summary: "Workflow started" },
+                { kind: "workflow_step_failed", at: "2026-03-18T12:01:45Z", summary: "write_file failed" },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "full" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("workflow_web_brief_to_file failed at write_file"));
+    expect(screen.getByRole("button", { name: "Repair step" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Repair step" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+  });
+
+  it("surfaces routing summaries in the operator timeline", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/operator/timeline")) {
+        return Promise.resolve(mockResponse({
+          items: [
+            {
+              id: "routing-1",
+              kind: "routing",
+              title: "chat_agent",
+              summary: "Selected openai/gpt-4o-mini for chat_agent",
+              status: "selected",
+              created_at: "2026-03-18T12:01:00Z",
+              updated_at: "2026-03-18T12:01:00Z",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              source: "runtime",
+              metadata: {
+                selected_model: "openai/gpt-4o-mini",
+                selected_source: "fallback_chain",
+                reroute_cause: "policy_guardrails",
+                max_budget_class: "standard",
+                required_task_class: "interactive",
+                required_policy_intents: ["fast", "cheap"],
+                max_cost_tier: "medium",
+                max_latency_tier: "low",
+                rejected_target_count: 2,
+              },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Selected openai/gpt-4o-mini for chat_agent")).toBeInTheDocument());
+    expect(screen.getByText(/model openai\/gpt-4o-mini · fallback_chain · policy_guardrails · budget standard · task interactive/)).toBeInTheDocument();
+    expect(screen.getByText(/intents fast, cheap · cost medium · latency low · rejected 2/)).toBeInTheDocument();
+  });
+
   it("surfaces the latest assistant response in the main cockpit column", async () => {
     useChatStore.setState({
       messages: [

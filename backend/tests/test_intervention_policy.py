@@ -215,6 +215,51 @@ def test_decide_intervention_can_learn_blocked_state_avoidance():
     assert decision.reason == "learned_blocked_state_avoidance"
 
 
+def test_decide_intervention_can_learn_blocked_state_async_delivery():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Leave this queued but visible for the next thread return.",
+        urgency=3,
+        user_state="deep_work",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        learning_channel_bias="prefer_native_notification",
+        learning_blocked_state_bias="prefer_async_for_blocked_state",
+    )
+
+    assert decision.action == InterventionAction.act
+    assert decision.reason == "learned_blocked_state_async"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "deliver"
+
+
+def test_decide_intervention_keeps_blocked_state_async_queued_without_native_channel_bias():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="This should stay queued without native-channel evidence.",
+        urgency=3,
+        user_state="deep_work",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        learning_blocked_state_bias="prefer_async_for_blocked_state",
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "blocked_state"
+
+
 def test_decide_intervention_can_learn_available_window_delivery():
     decision = decide_intervention(
         message_type="proactive",

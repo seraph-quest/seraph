@@ -8,6 +8,52 @@ from src.audit.repository import audit_repository
 
 
 @pytest.mark.asyncio
+async def test_validate_server_returns_missing_env_var_warnings(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._check_unresolved_vars.return_value = ["API_TOKEN"]
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "http-request",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${API_TOKEN}"},
+                "enabled": True,
+                "description": "HTTP tools",
+                "auth_hint": "Set API_TOKEN",
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is True
+    assert data["status"] == "auth_required"
+    assert data["missing_env_vars"] == ["API_TOKEN"]
+    assert data["warnings"]
+    assert data["existing"] is False
+
+
+@pytest.mark.asyncio
+async def test_validate_server_rejects_invalid_url(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._check_unresolved_vars.return_value = []
+        mock_mgr._config = {"gh": {"url": "https://api.github.com/mcp"}}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={"name": "gh", "url": "ftp://bad", "enabled": True},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "Server URL must use http or https" in data["issues"]
+    assert data["existing"] is True
+
+
+@pytest.mark.asyncio
 async def test_set_token_happy_path(client):
     """POST /api/mcp/servers/{name}/token should set token and return updated entry."""
     with patch("src.api.mcp.mcp_manager") as mock_mgr:

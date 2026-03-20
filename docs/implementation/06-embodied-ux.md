@@ -23,6 +23,8 @@
 - [x] cockpit capability preflight and autorepair flows for runbooks, starter packs, and workflows before the operator drafts or reruns them
 - [x] cockpit capability bootstrap now applies bounded safe install/repair actions for workflows, runbooks, and starter packs instead of leaving preflight as a separate manual operator step
 - [x] cockpit workflow views now expose richer step timestamps, duration, error summaries, recovery hints, and stored workflow diagnostics
+- [x] cockpit now includes a first extension studio for workflows, skills, and MCP configs with validation, diagnostics, save flows, and repair handoff from operator surfaces
+- [x] cockpit workflow views now expose first branch/resume checkpoints, lineage metadata, and resume drafts tied to existing inputs instead of only replay-from-start or retry-from-step cues
 - [x] cockpit session continuity now restores the active thread on reload, preserves explicit fresh-thread semantics, and marks background thread activity in the session list
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
 - [x] threaded operator timeline rows now surface routing summaries, selected reason codes, rejected targets, and native thread-source/continuation metadata
@@ -40,12 +42,12 @@
 - [x] this workstream now ships `artifact-evidence-roundtrip-v2`
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships the denser operator-terminal layer with live operator feed, saved runbook macros, approval-aware workflow timeline actions, and a threaded operator timeline
-- [x] this workstream now hands the queue forward to deeper workflow branching/resume control, richer capability bootstrap/install guidance, and denser cockpit operator control rather than repo-level shell retirement
+- [x] this workstream now hands the queue forward to a visual workflow debugger, richer cockpit density, and deeper studio ergonomics rather than first-pass branch/resume control
 
 ## Still To Do On `develop`
 
-- [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight, repair, and first bounded bootstrap
-- [ ] richer workflow history, broader keyboard/operator control, branch/resume step-level visibility, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, operator timeline, pane model, direct artifact/workflow draft handoff, operator terminal, and saved-layout composition model
+- [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight, repair, bounded bootstrap, and first studio save flows
+- [ ] richer workflow history, broader keyboard/operator control, visual branch/resume step-level visibility, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, operator timeline, pane model, extension studio, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 

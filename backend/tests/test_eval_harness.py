@@ -594,6 +594,21 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] == "approval_gate"
     assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] == "Approval gate"
+    assert details_by_name["workflow_approval_threading_behavior"]["branch_kind"] == "approval_resume"
+    assert (
+        details_by_name["workflow_approval_threading_behavior"]["root_run_identity_matches_source"]
+        is True
+    )
+    assert details_by_name["workflow_approval_threading_behavior"]["checkpoint_candidate_kinds"] == [
+        "approval_gate",
+    ]
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_plan_branch_kind"] == (
+        "approval_resume"
+    )
+    assert (
+        details_by_name["workflow_approval_threading_behavior"]["resume_plan_requires_manual_execution"]
+        is True
+    )
     assert (
         details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"]
         == "Continue once the web brief is approved"
@@ -613,7 +628,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["threaded_operator_timeline_behavior"]["latest_kind"] == "notification"
     assert details_by_name["threaded_operator_timeline_behavior"]["workflow_thread_id"] == "thread-1"
     assert (
-        details_by_name["threaded_operator_timeline_behavior"]["workflow_continue_message_matches_replay"]
+        details_by_name["threaded_operator_timeline_behavior"]["workflow_continue_message_matches_retry_plan"]
         is True
     )
     assert details_by_name["threaded_operator_timeline_behavior"]["workflow_replay_allowed"] is True
@@ -621,6 +636,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert (
         details_by_name["threaded_operator_timeline_behavior"]["workflow_resume_checkpoint_label"]
         == "Retry failed step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_run_identity"] == (
+        "thread-1:workflow_web_brief_to_file:web-brief"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_branch_kind"] == (
+        "retry_failed_step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_resume_plan_kind"] == (
+        "retry_failed_step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_failed_step_tool"] == (
+        "write_file"
+    )
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["workflow_checkpoint_candidate_count"]
+        == 2
     )
     assert details_by_name["threaded_operator_timeline_behavior"]["approval_thread_matches"] is True
     assert (

@@ -217,6 +217,8 @@ class TestWorkflowManager:
         assert audit_payload[1]["artifact_paths"] == ["notes/brief.md"]
         assert audit_payload[1]["continued_error_steps"] == []
         assert audit_payload[1]["failed_step_ids"] == []
+        assert audit_payload[1]["checkpoint_step_ids"] == ["search", "save"]
+        assert audit_payload[1]["last_completed_step_id"] == "save"
         assert audit_payload[1]["content_redacted"] is True
         assert isinstance(audit_payload[1]["run_fingerprint"], str)
         assert len(audit_payload[1]["step_records"]) == 2
@@ -261,6 +263,51 @@ class TestWorkflowManager:
         assert mgr.get_tool_metadata(tool.name)["policy_modes"] == ["full"]
         assert mgr.get_tool_metadata(tool.name)["execution_boundaries"] == ["external_mcp", "workspace_write"]
         assert mgr.get_tool_metadata(tool.name)["accepts_secret_refs"] is True
+
+    def test_build_tools_tracks_last_completed_step_before_continued_error(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "retryable.md").write_text(
+            "---\n"
+            "name: retryable-save\n"
+            "description: Continue after a write failure\n"
+            "requires:\n"
+            "  tools: [web_search, write_file]\n"
+            "inputs:\n"
+            "  query:\n"
+            "    type: string\n"
+            "  file_path:\n"
+            "    type: string\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments:\n"
+            "      query: \"{{ query }}\"\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    continue_on_error: true\n"
+            "    arguments:\n"
+            "      file_path: \"{{ file_path }}\"\n"
+            "      content: \"{{ steps.search.result }}\"\n"
+            "---\n"
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir))
+        search = DummyTool("web_search", lambda query: f"SEARCH<{query}>")
+
+        def _write_file(**_kwargs):
+            raise PermissionError("workspace write denied")
+
+        write = DummyTool("write_file", _write_file)
+        workflow_tool = mgr.build_workflow_tools([search, write], active_skill_names=[])[0]
+
+        workflow_tool(query="seraph", file_path="notes/brief.md")
+        audit_payload = workflow_tool.get_audit_result_payload({}, "ignored")
+
+        assert audit_payload[1]["continued_error_steps"] == ["save"]
+        assert audit_payload[1]["failed_step_ids"] == ["save"]
+        assert audit_payload[1]["last_completed_step_id"] == "search"
 
 
 @pytest.mark.asyncio
@@ -379,6 +426,15 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert run["parameter_schema"]["file_path"]["type"] == "string"
     assert run["resume_from_step"] == "approval_gate"
     assert run["resume_checkpoint_label"] == "Approval gate"
+    assert run["branch_kind"] == "approval_resume"
+    assert run["parent_run_identity"] is None
+    assert run["root_run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
+    assert run["checkpoint_candidates"][0]["step_id"] == "approval_gate"
+    assert run["checkpoint_candidates"][1]["step_id"] == "search"
+    assert run["resume_plan"]["source_run_identity"] == run["run_identity"]
+    assert run["resume_plan"]["parent_run_identity"] == run["run_identity"]
+    assert run["resume_plan"]["branch_kind"] == "approval_resume"
+    assert run["resume_plan"]["checkpoint_candidates"][0]["kind"] == "approval_gate"
     assert run["thread_continue_message"] == "Continue the web brief once approved"
     assert run["approval_recovery_message"]
     assert run["timeline"][0]["kind"] == "workflow_started"
@@ -635,6 +691,271 @@ async def test_workflow_runs_endpoint_does_not_suggest_tool_policy_for_unrelated
 
 
 @pytest.mark.asyncio
+async def test_workflow_resume_plan_endpoint_returns_structured_branch_metadata(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file degraded",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-error",
+                        "step_tools": ["web_search", "write_file"],
+                        "step_records": [
+                            {
+                                "id": "search",
+                                "index": 1,
+                                "tool": "web_search",
+                                "status": "succeeded",
+                                "argument_keys": ["query"],
+                                "artifact_paths": [],
+                                "result_summary": "text (14 chars)",
+                                "error_kind": None,
+                            },
+                            {
+                                "id": "save",
+                                "index": 2,
+                                "tool": "write_file",
+                                "status": "continued_error",
+                                "argument_keys": ["file_path", "content"],
+                                "artifact_paths": ["notes/brief.md"],
+                                "result_summary": "Error: denied",
+                                "error_kind": "PermissionError",
+                                "error_summary": "denied",
+                            },
+                        ],
+                        "checkpoint_step_ids": ["search", "save"],
+                        "last_completed_step_id": "save",
+                        "artifact_paths": ["notes/brief.md"],
+                        "continued_error_steps": ["save"],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "web-brief-error",
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.post(
+            "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-error/resume-plan",
+            json={"step_id": "save"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief-error"
+    assert payload["workflow_name"] == "web-brief-to-file"
+    assert payload["resume_plan"]["branch_kind"] == "retry_failed_step"
+    assert payload["resume_plan"]["resume_from_step"] == "save"
+    assert payload["resume_plan"]["resume_checkpoint_label"] == "save (write_file)"
+    assert payload["resume_plan"]["parent_run_identity"] == payload["run_identity"]
+    assert payload["resume_plan"]["root_run_identity"] == payload["run_identity"]
+    assert payload["resume_plan"]["requires_manual_execution"] is True
+    assert payload["resume_plan"]["checkpoint_candidates"][1]["step_id"] == "save"
+    assert payload["resume_plan"]["draft"].endswith('Resume from step "save".')
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_plan_rejects_approval_gate_for_non_approval_run(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded (2 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-ok",
+                        "step_tools": ["web_search"],
+                        "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+                        "checkpoint_step_ids": ["search"],
+                        "last_completed_step_id": "search",
+                        "continued_error_steps": [],
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={"risk_level": "medium", "execution_boundaries": ["external_read"], "accepts_secret_refs": False},
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[{"name": "web-brief-to-file", "inputs": {}, "enabled": True, "is_available": True, "missing_tools": [], "missing_skills": []}],
+        ),
+        patch("src.api.workflows.session_manager.list_sessions", return_value=[{"id": "session-1", "title": "Research thread"}]),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.post(
+            "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-ok/resume-plan",
+            json={"step_id": "approval_gate"},
+        )
+
+    assert response.status_code == 404
+    assert "approval_gate" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_plan_blocks_branching_past_pending_approval_gate(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "web-brief-pending",
+                        "arguments": {"query": "seraph"},
+                    },
+                },
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded (1 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-pending",
+                        "step_tools": ["web_search"],
+                        "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+                        "checkpoint_step_ids": ["search"],
+                        "last_completed_step_id": "search",
+                        "continued_error_steps": [],
+                    },
+                },
+            ],
+        ),
+        patch(
+            "src.api.workflows.approval_repository.list_pending",
+            return_value=[{
+                "id": "approval-1",
+                "tool_name": "workflow_web_brief_to_file",
+                "session_id": "session-1",
+                "fingerprint": "web-brief-pending",
+                "summary": "Approval pending",
+                "risk_level": "medium",
+                "created_at": "2026-03-18T12:02:00Z",
+                "resume_message": "Continue after approval",
+            }],
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={"risk_level": "medium", "execution_boundaries": ["external_read"], "accepts_secret_refs": False},
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[{"name": "web-brief-to-file", "inputs": {}, "enabled": True, "is_available": True, "missing_tools": [], "missing_skills": []}],
+        ),
+        patch("src.api.workflows.session_manager.list_sessions", return_value=[{"id": "session-1", "title": "Research thread"}]),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.post(
+            "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-pending/resume-plan",
+            json={"step_id": "search"},
+        )
+
+    assert response.status_code == 409
+    assert "approval gate" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_plan_falls_back_to_scoped_run_lookup(client):
+    run_identity = "session-1:workflow_web_brief_to_file:older-run"
+    fallback_run = {
+        "run_identity": run_identity,
+        "workflow_name": "web-brief-to-file",
+        "pending_approvals": [],
+        "continued_error_steps": ["save"],
+        "step_records": [
+            {"id": "search", "tool": "web_search", "status": "succeeded"},
+            {"id": "save", "tool": "write_file", "status": "continued_error"},
+        ],
+        "thread_continue_message": None,
+        "approval_recovery_message": None,
+        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+        "session_id": "session-1",
+        "workflow_name": "web-brief-to-file",
+    }
+
+    with (
+        patch("src.api.workflows._list_workflow_runs", AsyncMock(side_effect=[[], [fallback_run]])) as list_runs,
+        patch(
+            "src.api.workflows._load_workflow_events_for_identity",
+            AsyncMock(return_value=([{"id": "evt"}], "session-1")),
+        ) as load_events,
+    ):
+        response = await client.post(
+            f"/api/workflows/runs/{run_identity}/resume-plan",
+            json={"step_id": "save"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_identity"] == run_identity
+    assert payload["resume_plan"]["resume_from_step"] == "save"
+    assert list_runs.await_count == 2
+    load_events.assert_awaited_once_with(run_identity)
+
+
+@pytest.mark.asyncio
 async def test_workflow_diagnostics_endpoint_exposes_load_errors(client):
     with patch(
         "src.api.workflows.workflow_manager.get_diagnostics",
@@ -769,6 +1090,37 @@ class TestWorkflowApi:
         assert payload["status"] == "reloaded"
         assert payload["count"] == 2
         mock_log.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_save_workflow_draft_rejects_path_traversal(self, client):
+        content = (
+            "---\n"
+            "name: Retryable Save\n"
+            "description: Save a note\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/brief.md\n"
+            "      content: hello\n"
+            "---\n"
+        )
+        with (
+            patch("src.api.workflows.workflow_manager._workflows_dir", "/tmp/workflows"),
+            patch(
+                "src.api.workflows.get_base_tools_and_active_skills",
+                return_value=([SimpleNamespace(name="write_file")], [], "disabled"),
+            ),
+        ):
+            resp = await client.post(
+                "/api/workflows/save",
+                json={"content": content, "file_name": "../outside.md"},
+            )
+
+        assert resp.status_code == 400
+        assert "managed workflows directory" in resp.json()["detail"]
 
 
 class TestWorkflowSurfaces:

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 import shutil
+import tempfile
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -14,6 +15,11 @@ from sqlmodel import select
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
+from src.api.catalog import (
+    catalog_skill_by_name,
+    install_catalog_item_by_name,
+    load_catalog_items,
+)
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
@@ -31,13 +37,12 @@ from src.tools.policy import (
     is_tool_allowed,
 )
 from src.workflows.manager import workflow_manager
+from src.workflows.loader import scan_workflows, sanitize_workflow_name
 
 router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
 _STARTER_PACKS_PATH = os.path.join(_DEFAULTS_DIR, "starter-packs.json")
-_CATALOG_PATH = os.path.join(_DEFAULTS_DIR, "skill-catalog.json")
-_BUNDLED_SKILLS_DIR = os.path.join(_DEFAULTS_DIR, "skills")
 _BUNDLED_WORKFLOWS_DIR = os.path.join(_DEFAULTS_DIR, "workflows")
 _SAFE_AUTOREPAIR_ACTION_TYPES = {
     "toggle_skill",
@@ -64,6 +69,10 @@ class CapabilityBootstrapRequest(BaseModel):
     name: str
 
 
+class WorkflowDraftRequest(BaseModel):
+    content: str
+
+
 def _load_starter_packs() -> list[dict[str, Any]]:
     path = os.path.normpath(_STARTER_PACKS_PATH)
     if not os.path.isfile(path):
@@ -72,22 +81,6 @@ def _load_starter_packs() -> list[dict[str, Any]]:
         payload = json.load(handle)
     packs = payload.get("packs", [])
     return packs if isinstance(packs, list) else []
-
-
-def _load_catalog_items() -> dict[str, list[dict[str, Any]]]:
-    path = os.path.normpath(_CATALOG_PATH)
-    if not os.path.isfile(path):
-        return {"skills": [], "mcp_servers": []}
-    with open(path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    return {
-        "skills": payload.get("skills", []) if isinstance(payload.get("skills"), list) else [],
-        "mcp_servers": (
-            payload.get("mcp_servers", [])
-            if isinstance(payload.get("mcp_servers"), list)
-            else []
-        ),
-    }
 
 
 async def _persist_runtime_mode(column: str, mode: str) -> None:
@@ -117,32 +110,6 @@ async def _set_mcp_policy_mode(mode: str) -> bool:
     return True
 
 
-def _catalog_skill_by_name() -> dict[str, dict[str, Any]]:
-    return {
-        str(item["name"]): item
-        for item in _load_catalog_items().get("skills", [])
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-
-
-def _catalog_mcp_by_name() -> dict[str, dict[str, Any]]:
-    return {
-        str(item["name"]): item
-        for item in _load_catalog_items().get("mcp_servers", [])
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-
-
-def _seed_bundled_skill(name: str) -> bool:
-    source = os.path.join(os.path.normpath(_BUNDLED_SKILLS_DIR), f"{name}.md")
-    if not os.path.isfile(source):
-        return False
-    destination_dir = os.path.join(settings.workspace_dir, "skills")
-    os.makedirs(destination_dir, exist_ok=True)
-    shutil.copy2(source, os.path.join(destination_dir, f"{name}.md"))
-    return True
-
-
 def _seed_bundled_workflow(name: str) -> bool:
     source = os.path.join(os.path.normpath(_BUNDLED_WORKFLOWS_DIR), f"{name}.md")
     if not os.path.isfile(source):
@@ -151,38 +118,6 @@ def _seed_bundled_workflow(name: str) -> bool:
     os.makedirs(destination_dir, exist_ok=True)
     shutil.copy2(source, os.path.join(destination_dir, f"{name}.md"))
     return True
-
-
-def _install_catalog_item_by_name(name: str) -> tuple[bool, str]:
-    catalog_skill = _catalog_skill_by_name().get(name)
-    if catalog_skill is not None:
-        if skill_manager.get_skill(name) is not None:
-            return False, "already_installed"
-        if not bool(catalog_skill.get("bundled", False)):
-            return False, "not_bundled"
-        if not _seed_bundled_skill(name):
-            return False, "missing_bundle"
-        skill_manager.reload()
-        return True, "installed"
-
-    catalog_mcp = _catalog_mcp_by_name().get(name)
-    if catalog_mcp is not None:
-        if any(server.get("name") == name for server in mcp_manager.get_config()):
-            return False, "already_installed"
-        url = catalog_mcp.get("url")
-        if not isinstance(url, str) or not url.strip():
-            return False, "missing_url"
-        mcp_manager.add_server(
-            name=name,
-            url=url,
-            description=str(catalog_mcp.get("description") or ""),
-            enabled=False,
-            headers=catalog_mcp.get("headers"),
-            auth_hint=str(catalog_mcp.get("auth_hint") or ""),
-        )
-        return True, "installed"
-
-    return False, "not_found"
 
 
 def _skill_status_map(available_tool_names: list[str]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -312,6 +247,37 @@ def _starter_pack_activation_would_change_state(
     return False
 
 
+def _starter_pack_install_item_statuses(pack: dict[str, Any]) -> list[dict[str, Any]]:
+    catalog_skills = catalog_skill_by_name()
+    mcp_status = {
+        str(server["name"]): server
+        for server in _mcp_status_list(get_current_mcp_policy_mode())
+    }
+    statuses: list[dict[str, Any]] = []
+    for item_name in [str(item) for item in pack.get("install_items", [])]:
+        if item_name in catalog_skills:
+            statuses.append({
+                "name": item_name,
+                "type": "skill",
+                "installed": skill_manager.get_skill(item_name) is not None,
+                "availability": (
+                    "ready"
+                    if skill_manager.get_skill(item_name) is not None
+                    else "missing"
+                ),
+            })
+            continue
+        server = mcp_status.get(item_name)
+        statuses.append({
+            "name": item_name,
+            "type": "mcp_server",
+            "installed": server is not None,
+            "availability": str(server.get("availability")) if server is not None else "missing",
+            "blocked_reason": None if server is None else server.get("blocked_reason"),
+        })
+    return statuses
+
+
 def _recommended_actions(
     *,
     skills_by_name: dict[str, dict[str, Any]],
@@ -323,8 +289,8 @@ def _recommended_actions(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     tool_status = {str(tool["name"]): tool for tool in native_tools}
     starter_pack_index = _starter_pack_index()
-    catalog = _load_catalog_items()
-    catalog_skills = _catalog_skill_by_name()
+    catalog = load_catalog_items()
+    catalog_skills = catalog_skill_by_name()
     catalog_items: list[dict[str, Any]] = []
     recommendations: list[dict[str, Any]] = []
     seen_recommendations: set[str] = set()
@@ -511,7 +477,8 @@ def _starter_pack_recommended_actions(
     workflows_by_name: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
-    catalog_skills = _catalog_skill_by_name()
+    catalog_skills = catalog_skill_by_name()
+    seen_install_items: set[str] = set()
     if pack.get("availability") != "ready" and _starter_pack_activation_would_change_state(
         pack,
         skills_by_name=skills_by_name,
@@ -521,6 +488,23 @@ def _starter_pack_recommended_actions(
             "type": "activate_starter_pack",
             "label": "Activate pack",
             "name": pack["name"],
+        })
+    for install_item in pack.get("install_item_statuses", []) or []:
+        if not isinstance(install_item, dict):
+            continue
+        install_name = str(install_item.get("name") or "")
+        if (
+            not install_name
+            or install_name in seen_install_items
+            or bool(install_item.get("installed"))
+        ):
+            continue
+        seen_install_items.add(install_name)
+        actions.append({
+            "type": "install_catalog_item",
+            "label": f"Install {install_name}",
+            "name": install_name,
+            "target": str(install_item.get("type") or "item"),
         })
 
     tool_status = {str(tool["name"]): tool for tool in native_tools}
@@ -564,16 +548,31 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
 
     changed_skills: list[str] = []
     changed_workflows: list[str] = []
+    installed_catalog_items: list[dict[str, Any]] = []
     missing_entries: list[str] = []
+
+    for item_name in [str(item) for item in pack.get("install_items", [])]:
+        install_result = install_catalog_item_by_name(item_name)
+        if install_result["ok"]:
+            installed_catalog_items.append({
+                "name": item_name,
+                "type": install_result["type"],
+                "status": install_result["status"],
+            })
+            continue
+        if install_result["status"] != "already_installed":
+            missing_entries.append(f"{install_result['type']}:{item_name}")
 
     for skill_name in pack.get("skills", []):
         if skill_manager.get_skill(skill_name) is None:
-            if not _seed_bundled_skill(str(skill_name)):
+            install_result = install_catalog_item_by_name(str(skill_name))
+            if not install_result["ok"] and install_result["status"] != "already_installed":
                 missing_entries.append(f"skill:{skill_name}")
                 continue
-            skill_manager.reload()
         if skill_manager.enable(str(skill_name)):
             changed_skills.append(str(skill_name))
+        else:
+            missing_entries.append(f"skill:{skill_name}")
 
     for workflow_name in pack.get("workflows", []):
         if workflow_manager.get_workflow(str(workflow_name)) is None:
@@ -583,20 +582,57 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
             workflow_manager.reload()
         if workflow_manager.enable(str(workflow_name)):
             changed_workflows.append(str(workflow_name))
+        else:
+            missing_entries.append(f"workflow:{workflow_name}")
+
+    overview_after = _build_capability_overview()
+    pack_after = next(
+        (item for item in overview_after.get("starter_packs", []) if item.get("name") == name),
+        None,
+    )
+    post_activation_issues: list[str] = []
+    if isinstance(pack_after, dict) and pack_after.get("availability") != "ready":
+        post_activation_issues.extend(
+            f"install_item:{item_name}"
+            for item_name in pack_after.get("missing_install_items", [])
+            if f"install_item:{item_name}" not in missing_entries
+        )
+        post_activation_issues.extend(
+            f"skill:{item.get('name')}"
+            for item in pack_after.get("blocked_skills", [])
+            if isinstance(item, dict)
+            and item.get("name")
+            and f"skill:{item.get('name')}" not in missing_entries
+        )
+        post_activation_issues.extend(
+            f"workflow:{item.get('name')}"
+            for item in pack_after.get("blocked_workflows", [])
+            if isinstance(item, dict)
+            and item.get("name")
+            and f"workflow:{item.get('name')}" not in missing_entries
+        )
+    missing_entries.extend(post_activation_issues)
 
     await log_integration_event(
         integration_type="starter_pack",
         name=str(name),
         outcome="succeeded" if not missing_entries else "degraded",
         details={
-            "enabled_skills": changed_skills,
-            "enabled_workflows": changed_workflows,
-            "missing_entries": missing_entries,
+        "installed_catalog_items": installed_catalog_items,
+        "enabled_skills": changed_skills,
+        "enabled_workflows": changed_workflows,
+        "missing_entries": missing_entries,
+        "post_activation_availability": (
+            pack_after.get("availability")
+            if isinstance(pack_after, dict)
+            else "unknown"
+        ),
         },
     )
     return {
         "status": "activated" if not missing_entries else "degraded",
         "name": name,
+        "installed_catalog_items": installed_catalog_items,
         "enabled_skills": changed_skills,
         "enabled_workflows": changed_workflows,
         "missing_entries": missing_entries,
@@ -688,13 +724,14 @@ async def _apply_safe_capability_action(action: dict[str, Any]) -> dict[str, Any
         case "install_catalog_item":
             if not name:
                 return {"type": action_type, "label": label, "status": "invalid"}
-            ok, detail = _install_catalog_item_by_name(name)
+            result = install_catalog_item_by_name(name)
             return {
                 "type": action_type,
                 "label": label,
                 "name": name,
-                "status": "applied" if ok else "noop",
-                "detail": detail,
+                "status": "applied" if result["ok"] else "noop",
+                "detail": result["status"],
+                "item_type": result["type"],
             }
         case "activate_starter_pack":
             if not name:
@@ -728,9 +765,50 @@ def _manual_bootstrap_actions(preflight: dict[str, Any], *, seen: set[tuple[str,
     return results
 
 
+def _doctor_plan(
+    *,
+    preflight: dict[str, Any],
+    applied_actions: list[dict[str, Any]] | None = None,
+    manual_actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    recommended_actions = [
+        action for action in preflight.get("recommended_actions", []) or []
+        if isinstance(action, dict)
+    ]
+    autorepair_actions = [
+        action for action in preflight.get("autorepair_actions", []) or []
+        if isinstance(action, dict)
+    ]
+    install_actions = [
+        action
+        for action in recommended_actions
+        if str(action.get("type") or "") in {"install_catalog_item", "activate_starter_pack"}
+    ]
+    repair_actions = [
+        action
+        for action in recommended_actions
+        if str(action.get("type") or "") not in {"install_catalog_item", "activate_starter_pack"}
+    ]
+    return {
+        "ready": bool(preflight.get("ready", False)),
+        "availability": preflight.get("availability"),
+        "blocking_reasons": list(preflight.get("blocking_reasons", []) or []),
+        "install_actions": install_actions,
+        "repair_actions": repair_actions,
+        "autorepair_actions": autorepair_actions,
+        "manual_actions": manual_actions or [],
+        "applied_actions": applied_actions or [],
+        "command_preview": preflight.get("command"),
+        "command_ready": bool(preflight.get("command")) and bool(preflight.get("ready")),
+        "parameter_schema": preflight.get("parameter_schema", {}),
+        "risk_level": preflight.get("risk_level"),
+        "execution_boundaries": list(preflight.get("execution_boundaries", []) or []),
+    }
+
+
 def _action_made_progress(action: dict[str, Any]) -> bool:
     status = str(action.get("status") or "")
-    return status in {"applied", "activated"}
+    return status in {"applied", "activated", "degraded"}
 
 
 def _attach_skill_actions(
@@ -772,7 +850,7 @@ def _attach_workflow_actions(
     tool_mode: str,
 ) -> None:
     tool_status = {str(tool["name"]): tool for tool in native_tools}
-    catalog_skills = _catalog_skill_by_name()
+    catalog_skills = catalog_skill_by_name()
     for workflow in workflows:
         actions: list[dict[str, Any]] = []
         blocked_skill_tools: list[str] = []
@@ -961,11 +1039,23 @@ def _starter_pack_statuses(
     for pack in _load_starter_packs():
         skill_names = [str(item) for item in pack.get("skills", [])]
         workflow_names = [str(item) for item in pack.get("workflows", [])]
+        install_items = [str(item) for item in pack.get("install_items", [])]
+        install_item_statuses = _starter_pack_install_item_statuses(pack)
 
         ready_skills = [name for name in skill_names if skills_by_name.get(name, {}).get("availability") == "ready"]
         ready_workflows = [
             name for name in workflow_names
             if workflows_by_name.get(name, {}).get("availability") == "ready"
+        ]
+        ready_install_items = [
+            str(item.get("name"))
+            for item in install_item_statuses
+            if bool(item.get("installed"))
+        ]
+        missing_install_items = [
+            str(item.get("name"))
+            for item in install_item_statuses
+            if not bool(item.get("installed"))
         ]
         blocked_skills = [
             {
@@ -987,9 +1077,11 @@ def _starter_pack_statuses(
             if name not in ready_workflows
         ]
 
-        if len(ready_skills) == len(skill_names) and len(ready_workflows) == len(workflow_names):
+        total_required = len(skill_names) + len(workflow_names) + len(install_items)
+        total_ready = len(ready_skills) + len(ready_workflows) + len(ready_install_items)
+        if total_ready == total_required:
             availability = "ready"
-        elif ready_skills or ready_workflows:
+        elif total_ready > 0:
             availability = "partial"
         else:
             availability = "blocked"
@@ -1001,8 +1093,12 @@ def _starter_pack_statuses(
             "sample_prompt": pack.get("sample_prompt", ""),
             "skills": skill_names,
             "workflows": workflow_names,
+            "install_items": install_items,
             "ready_skills": ready_skills,
             "ready_workflows": ready_workflows,
+            "ready_install_items": ready_install_items,
+            "missing_install_items": missing_install_items,
+            "install_item_statuses": install_item_statuses,
             "blocked_skills": blocked_skills,
             "blocked_workflows": blocked_workflows,
             "availability": availability,
@@ -1011,6 +1107,8 @@ def _starter_pack_statuses(
                     "name": pack["name"],
                     "skills": skill_names,
                     "workflows": workflow_names,
+                    "install_items": install_items,
+                    "install_item_statuses": install_item_statuses,
                     "availability": availability,
                     "blocked_skills": blocked_skills,
                     "blocked_workflows": blocked_workflows,
@@ -1208,25 +1306,107 @@ def _capability_preflight_payload(
     }
 
 
+def _validate_workflow_draft(content: str) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="seraph-workflow-draft-") as temp_dir:
+        draft_path = os.path.join(temp_dir, "draft.md")
+        with open(draft_path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        workflows, errors = scan_workflows(temp_dir)
+    workflow = workflows[0] if workflows else None
+    return {
+        "valid": workflow is not None and not errors,
+        "errors": errors,
+        "workflow": (
+            None
+            if workflow is None
+            else {
+                "name": workflow.name,
+                "tool_name": workflow.tool_name,
+                "description": workflow.description,
+                "requires_tools": workflow.requires_tools,
+                "requires_skills": workflow.requires_skills,
+                "user_invocable": workflow.user_invocable,
+                "step_count": len(workflow.steps),
+                "step_tools": workflow.step_tools,
+                "inputs": workflow.inputs,
+            }
+        ),
+    }
+
+
 @router.get("/capabilities/preflight")
 async def get_capability_preflight(
     target_type: str = Query(...),
     name: str = Query(...),
 ):
     overview = _build_capability_overview()
-    return _capability_preflight_payload(
+    preflight = _capability_preflight_payload(
         overview=overview,
         target_type=target_type,
         name=name,
     )
+    return {
+        **preflight,
+        "doctor_plan": _doctor_plan(preflight=preflight),
+    }
+
+
+@router.post("/capabilities/workflow-drafts/validate")
+async def validate_workflow_draft(body: WorkflowDraftRequest):
+    return _validate_workflow_draft(body.content)
+
+
+@router.post("/capabilities/workflow-drafts/save")
+async def save_workflow_draft(body: WorkflowDraftRequest):
+    validation = _validate_workflow_draft(body.content)
+    if not validation["valid"] or not validation["workflow"]:
+        raise HTTPException(status_code=400, detail="Workflow draft is invalid")
+    workflow_name = str(validation["workflow"]["name"])
+    file_name = f"{sanitize_workflow_name(workflow_name)}.md"
+    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
+    os.makedirs(workflows_dir, exist_ok=True)
+    file_path = os.path.join(workflows_dir, file_name)
+    with open(file_path, "w", encoding="utf-8") as handle:
+        handle.write(body.content)
+    workflow_manager.reload()
+    await log_integration_event(
+        integration_type="workflow_draft",
+        name=workflow_name,
+        outcome="succeeded",
+        details={
+            "status": "saved",
+            "file_path": file_path,
+            "step_count": validation["workflow"]["step_count"],
+            "step_tools": validation["workflow"]["step_tools"],
+        },
+    )
+    return {
+        "status": "saved",
+        "name": workflow_name,
+        "file_path": file_path,
+        "workflow": validation["workflow"],
+    }
 
 
 @router.post("/capabilities/starter-packs/{name}/activate")
 async def activate_starter_pack(name: str):
+    overview_before = _build_capability_overview()
+    preflight_before = _capability_preflight_payload(
+        overview=overview_before,
+        target_type="starter_pack",
+        name=name,
+    )
     result = await _activate_starter_pack_by_name(name)
     overview = _build_capability_overview()
+    preflight_after = _capability_preflight_payload(
+        overview=overview,
+        target_type="starter_pack",
+        name=name,
+    )
     return {
         **result,
+        "doctor_plan_before": _doctor_plan(preflight=preflight_before),
+        "doctor_plan_after": _doctor_plan(preflight=preflight_after),
         "overview": overview,
     }
 
@@ -1297,5 +1477,10 @@ async def bootstrap_capability(body: CapabilityBootstrapRequest):
         "parameter_schema": preflight["parameter_schema"],
         "risk_level": preflight["risk_level"],
         "execution_boundaries": preflight["execution_boundaries"],
+        "doctor_plan": _doctor_plan(
+            preflight=preflight,
+            applied_actions=applied_actions,
+            manual_actions=manual_actions,
+        ),
         "overview": _build_capability_overview(),
     }

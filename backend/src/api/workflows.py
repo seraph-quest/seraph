@@ -3,10 +3,13 @@
 from collections import defaultdict
 from datetime import datetime
 import json
+import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from sqlmodel import col, select
 
 from src.api.capabilities import _recommended_tool_policy_mode
 from src.agent.session import session_manager
@@ -15,14 +18,105 @@ from src.approval.repository import fingerprint_tool_call
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
+from src.db.engine import get_session
+from src.db.models import AuditEvent
 from src.tools.policy import get_current_tool_policy_mode
+from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import workflow_manager
 
 router = APIRouter()
 
+_WORKFLOW_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
 
 class UpdateWorkflowRequest(BaseModel):
     enabled: bool
+
+
+class WorkflowResumePlanRequest(BaseModel):
+    step_id: str | None = None
+
+
+class WorkflowDraftRequest(BaseModel):
+    content: str
+    file_name: str | None = None
+
+
+def _safe_markdown_filename(name: str) -> str:
+    value = _WORKFLOW_FILENAME_RE.sub("-", name.strip()).strip("-_").lower()
+    return f"{value or 'workflow'}.md"
+
+
+def _resolve_workflow_file_name(file_name: str | None, *, default_name: str) -> str:
+    if not file_name:
+        return default_name
+    candidate = file_name.strip()
+    normalized = os.path.normpath(candidate)
+    if (
+        not candidate
+        or os.path.isabs(candidate)
+        or normalized.startswith("..")
+        or os.path.basename(normalized) != normalized
+    ):
+        raise HTTPException(status_code=400, detail="Workflow file name must stay within the managed workflows directory")
+    stem, _ = os.path.splitext(normalized)
+    return _safe_markdown_filename(stem or normalized)
+
+
+def _validate_workflow_content(content: str, *, path: str = "<draft>") -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    workflow = parse_workflow_content(content, path=path, errors=errors)
+    if workflow is None:
+        return {
+            "valid": False,
+            "errors": errors,
+            "workflow": None,
+            "runtime_ready": False,
+            "missing_tools": [],
+            "missing_skills": [],
+        }
+
+    base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
+    available_tool_names = [tool.name for tool in base_tools]
+    missing_tools = [
+        tool_name for tool_name in workflow.step_tools
+        if tool_name not in set(available_tool_names)
+    ]
+    missing_skills = [
+        skill_name for skill_name in workflow.requires_skills
+        if skill_name not in set(active_skill_names)
+    ]
+    execution_boundaries = workflow_manager._infer_execution_boundaries(workflow)
+    risk_level = workflow_manager._infer_risk_level(workflow)
+    policy_modes = workflow_manager._infer_policy_modes(workflow)
+    requires_approval = (
+        risk_level == "high"
+        or ("external_mcp" in execution_boundaries and mcp_mode == "approval")
+    )
+    return {
+        "valid": True,
+        "errors": [],
+        "workflow": {
+            "name": workflow.name,
+            "tool_name": workflow.tool_name,
+            "description": workflow.description,
+            "inputs": workflow.inputs,
+            "requires_tools": workflow.requires_tools,
+            "requires_skills": workflow.requires_skills,
+            "user_invocable": workflow.user_invocable,
+            "enabled": workflow.enabled,
+            "file_path": workflow.file_path,
+            "step_count": len(workflow.steps),
+            "policy_modes": policy_modes,
+            "execution_boundaries": execution_boundaries,
+            "risk_level": risk_level,
+            "accepts_secret_refs": workflow_manager._accepts_secret_refs(workflow),
+        },
+        "runtime_ready": not missing_tools and not missing_skills and workflow.enabled,
+        "missing_tools": missing_tools,
+        "missing_skills": missing_skills,
+        "requires_approval": requires_approval,
+    }
 
 
 def _as_record(value: Any) -> dict[str, Any]:
@@ -129,6 +223,220 @@ def _workflow_retry_from_step_draft(
         f"{_workflow_replay_draft(workflow_name, arguments).rstrip('.')} "
         f"Resume from step \"{step_id}\"."
     )
+
+
+def _workflow_branch_lineage(
+    *,
+    run_identity: str,
+    details: dict[str, Any],
+    approvals: list[dict[str, Any]],
+    continued_error_steps: list[str],
+) -> dict[str, Any]:
+    parent_run_identity = details.get("parent_run_identity")
+    if not isinstance(parent_run_identity, str) or not parent_run_identity.strip():
+        parent_run_identity = None
+    root_run_identity = details.get("root_run_identity")
+    if not isinstance(root_run_identity, str) or not root_run_identity.strip():
+        root_run_identity = parent_run_identity or run_identity
+    branch_kind = details.get("branch_kind")
+    if not isinstance(branch_kind, str) or not branch_kind.strip():
+        if approvals:
+            branch_kind = "approval_resume"
+        elif continued_error_steps:
+            branch_kind = "retry_failed_step"
+        else:
+            branch_kind = "replay_from_start"
+    branch_depth = details.get("branch_depth")
+    if not isinstance(branch_depth, int) or branch_depth < 0:
+        branch_depth = 1 if parent_run_identity else 0
+    return {
+        "parent_run_identity": parent_run_identity,
+        "root_run_identity": root_run_identity,
+        "branch_kind": branch_kind,
+        "branch_depth": branch_depth,
+        "is_branch_run": parent_run_identity is not None,
+    }
+
+
+def _workflow_checkpoint_candidates(
+    run: dict[str, Any],
+    *,
+    approvals: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    workflow_name = str(run["workflow_name"])
+    arguments = run.get("arguments")
+    continued_error_steps = set(str(step_id) for step_id in run.get("continued_error_steps", []))
+    candidates: list[dict[str, Any]] = []
+    if approvals:
+        candidates.append({
+            "step_id": "approval_gate",
+            "label": "Approval gate",
+            "kind": "approval_gate",
+            "status": "pending",
+            "step_tool": None,
+            "resume_draft": None,
+            "continue_message": (
+                approvals[0].get("resume_message")
+                if approvals and isinstance(approvals[0], dict)
+                else None
+            ),
+        })
+    for step in run.get("step_records", []) or []:
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id") or "").strip()
+        if not step_id:
+            continue
+        step_tool = str(step.get("tool") or "tool")
+        step_status = str(step.get("status") or "unknown")
+        is_failed = step_id in continued_error_steps or step_status in {"failed", "continued_error"}
+        candidates.append({
+            "step_id": step_id,
+            "label": f"{step_id} ({step_tool})",
+            "kind": "retry_failed_step" if is_failed else "branch_from_checkpoint",
+            "status": step_status,
+            "step_tool": step_tool,
+            "resume_draft": _workflow_retry_from_step_draft(
+                workflow_name,
+                step_id=step_id,
+                arguments=arguments,
+            ),
+            "continue_message": None,
+        })
+    return candidates
+
+
+def _resolve_resume_step_id(
+    run: dict[str, Any],
+    *,
+    checkpoint_candidates: list[dict[str, Any]],
+    requested_step_id: str | None = None,
+) -> str | None:
+    candidate_ids = {
+        str(checkpoint.get("step_id") or "")
+        for checkpoint in checkpoint_candidates
+        if isinstance(checkpoint, dict)
+    }
+    has_pending_approval = "approval_gate" in candidate_ids
+    if isinstance(requested_step_id, str) and requested_step_id.strip():
+        normalized = requested_step_id.strip()
+        if normalized not in candidate_ids:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow run '{run['run_identity']}' has no checkpoint '{normalized}'",
+            )
+        if has_pending_approval and normalized != "approval_gate":
+            raise HTTPException(
+                status_code=409,
+                detail="Workflow run must clear the approval gate before branching from a later checkpoint",
+            )
+        if normalized == "approval_gate":
+            return normalized
+        return normalized
+    if run.get("resume_from_step"):
+        normalized = str(run["resume_from_step"])
+        if normalized in candidate_ids:
+            return normalized
+    return None
+
+
+def _workflow_resume_plan(
+    run: dict[str, Any],
+    *,
+    approvals: list[dict[str, Any]],
+    requested_step_id: str | None = None,
+) -> dict[str, Any]:
+    checkpoint_candidates = _workflow_checkpoint_candidates(run, approvals=approvals)
+    resume_step_id = _resolve_resume_step_id(
+        run,
+        checkpoint_candidates=checkpoint_candidates,
+        requested_step_id=requested_step_id,
+    )
+    selected_checkpoint = next(
+        (
+            checkpoint for checkpoint in checkpoint_candidates
+            if str(checkpoint.get("step_id") or "") == str(resume_step_id or "")
+        ),
+        None,
+    )
+    branch_kind = str(run.get("branch_kind") or "replay_from_start")
+    if resume_step_id == "approval_gate":
+        branch_kind = "approval_resume"
+    elif isinstance(selected_checkpoint, dict):
+        checkpoint_kind = str(selected_checkpoint.get("kind") or "")
+        if checkpoint_kind == "retry_failed_step":
+            branch_kind = "retry_failed_step"
+        elif checkpoint_kind == "branch_from_checkpoint":
+            branch_kind = "branch_from_checkpoint"
+    replay_draft = (
+        str(selected_checkpoint.get("resume_draft"))
+        if isinstance(selected_checkpoint, dict) and selected_checkpoint.get("resume_draft")
+        else run.get("retry_from_step_draft")
+    )
+    if not replay_draft and run.get("replay_draft"):
+        replay_draft = str(run["replay_draft"])
+    return {
+        "source_run_identity": run["run_identity"],
+        "parent_run_identity": run["run_identity"],
+        "root_run_identity": run.get("root_run_identity") or run["run_identity"],
+        "branch_kind": branch_kind,
+        "resume_from_step": resume_step_id,
+        "resume_checkpoint_label": (
+            selected_checkpoint.get("label")
+            if isinstance(selected_checkpoint, dict)
+            else run.get("resume_checkpoint_label")
+        ),
+        "replay_allowed": bool(run.get("replay_allowed")),
+        "replay_block_reason": run.get("replay_block_reason"),
+        "draft": replay_draft,
+        "continue_message": (
+            selected_checkpoint.get("continue_message")
+            if isinstance(selected_checkpoint, dict)
+            else None
+        ) or run.get("thread_continue_message") or run.get("approval_recovery_message"),
+        "requires_manual_execution": True,
+        "checkpoint_candidates": checkpoint_candidates,
+    }
+
+
+def _parse_run_identity(run_identity: str) -> tuple[str | None, str, str]:
+    try:
+        session_key, tool_name, run_fingerprint = run_identity.rsplit(":", 2)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found") from exc
+    return (None if session_key == "global" else session_key, tool_name, run_fingerprint)
+
+
+def _serialize_audit_event(event: AuditEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "session_id": event.session_id,
+        "actor": event.actor,
+        "event_type": event.event_type,
+        "tool_name": event.tool_name,
+        "risk_level": event.risk_level,
+        "policy_mode": event.policy_mode,
+        "summary": event.summary,
+        "details": json.loads(event.details_json) if event.details_json else None,
+        "created_at": event.created_at.isoformat(),
+    }
+
+
+async def _load_workflow_events_for_identity(run_identity: str) -> tuple[list[dict[str, Any]], str | None]:
+    session_id, tool_name, _ = _parse_run_identity(run_identity)
+    async with get_session() as db:
+        stmt = (
+            select(AuditEvent)
+            .where(AuditEvent.tool_name == tool_name)
+            .order_by(col(AuditEvent.created_at).desc())
+        )
+        if session_id is None:
+            stmt = stmt.where(col(AuditEvent.session_id).is_(None))
+        else:
+            stmt = stmt.where(AuditEvent.session_id == session_id)
+        result = await db.execute(stmt)
+        events = result.scalars().all()
+    return [_serialize_audit_event(event) for event in events], session_id
 
 
 def _workflow_replay_policy(
@@ -339,8 +647,10 @@ async def _list_workflow_runs(
     *,
     limit: int,
     session_id: str | None,
+    events: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    events = await audit_repository.list_events(limit=max(limit * 6, 30), session_id=session_id)
+    if events is None:
+        events = await audit_repository.list_events(limit=max(limit * 6, 30), session_id=session_id)
     workflow_events = [
         event for event in events
         if isinstance(event.get("tool_name"), str) and str(event["tool_name"]).startswith("workflow_")
@@ -388,6 +698,8 @@ async def _list_workflow_runs(
                 "summary": event.get("summary") or "",
                 "step_tools": [],
                 "step_records": [],
+                "checkpoint_step_ids": [],
+                "last_completed_step_id": None,
                 "artifact_paths": _extract_artifact_paths(arguments),
                 "continued_error_steps": [],
                 "arguments": arguments,
@@ -422,6 +734,8 @@ async def _list_workflow_runs(
             "summary": event.get("summary") or "",
             "step_tools": [],
             "step_records": [],
+            "checkpoint_step_ids": [],
+            "last_completed_step_id": None,
             "artifact_paths": [],
             "continued_error_steps": [],
             "arguments": _as_record(details.get("arguments")) or None,
@@ -457,6 +771,15 @@ async def _list_workflow_runs(
                 value for value in details.get("step_records", [])
                 if isinstance(value, dict)
             ] or run.get("step_records", []),
+            "checkpoint_step_ids": [
+                value for value in details.get("checkpoint_step_ids", [])
+                if isinstance(value, str)
+            ] or run.get("checkpoint_step_ids", []),
+            "last_completed_step_id": (
+                str(details.get("last_completed_step_id"))
+                if details.get("last_completed_step_id") is not None
+                else run.get("last_completed_step_id")
+            ),
             "artifact_paths": artifact_paths,
             "continued_error_steps": [
                 value for value in details.get("continued_error_steps", [])
@@ -499,6 +822,27 @@ async def _list_workflow_runs(
             accepts_secret_refs=bool(run["accepts_secret_refs"]),
             pending_approval_count=len(approvals),
         )
+        run_identity = f"{run.get('session_id') or 'global'}:{tool_name}:{run_fingerprint}"
+        lineage = _workflow_branch_lineage(
+            run_identity=run_identity,
+            details=details,
+            approvals=approvals,
+            continued_error_steps=list(run.get("continued_error_steps", [])),
+        )
+        resume_from_step = (
+            "approval_gate"
+            if approvals
+            else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+        )
+        retry_from_step_draft = (
+            _workflow_retry_from_step_draft(
+                str(run["workflow_name"]),
+                step_id=str(run["continued_error_steps"][0]),
+                arguments=run.get("arguments"),
+            )
+            if replay_allowed and run.get("continued_error_steps")
+            else None
+        )
         run.update({
             "thread_id": run.get("session_id"),
             "thread_label": (
@@ -514,20 +858,8 @@ async def _list_workflow_runs(
                 if replay_allowed
                 else None
             ),
-            "resume_from_step": (
-                "approval_gate"
-                if approvals
-                else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
-            ),
-            "retry_from_step_draft": (
-                _workflow_retry_from_step_draft(
-                    str(run["workflow_name"]),
-                    step_id=str(run["continued_error_steps"][0]),
-                    arguments=run.get("arguments"),
-                )
-                if replay_allowed and run.get("continued_error_steps")
-                else None
-            ),
+            "resume_from_step": resume_from_step,
+            "retry_from_step_draft": retry_from_step_draft,
             "resume_checkpoint_label": _resume_checkpoint_label(
                 approvals=approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
@@ -546,7 +878,7 @@ async def _list_workflow_runs(
                 if approvals and isinstance(approvals[0], dict)
                 else None
             ),
-            "run_identity": f"{run.get('session_id') or 'global'}:{tool_name}:{run_fingerprint}",
+            "run_identity": run_identity,
             "timeline": _timeline_entries_for_run(run, approvals=approvals),
             "failed_step_tool": (
                 next(
@@ -559,7 +891,10 @@ async def _list_workflow_runs(
                     None,
                 )
             ),
+            **lineage,
         })
+        run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
+        run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
         completed.append(run)
 
     for run_queue in pending_by_key.values():
@@ -585,6 +920,8 @@ async def _list_workflow_runs(
                     else "unknown"
                 ),
                 "replay_inputs": run.get("arguments") or {},
+                "checkpoint_step_ids": list(run.get("checkpoint_step_ids", [])),
+                "last_completed_step_id": run.get("last_completed_step_id"),
                 "parameter_schema": (
                     workflow_status.get("inputs", {})
                     if workflow_status is not None and isinstance(workflow_status.get("inputs"), dict)
@@ -610,6 +947,18 @@ async def _list_workflow_runs(
                 accepts_secret_refs=bool(run["accepts_secret_refs"]),
                 pending_approval_count=len(approvals),
             )
+            run_identity = f"{run.get('session_id') or 'global'}:{run['tool_name']}:{run.get('run_fingerprint') or 'none'}"
+            lineage = _workflow_branch_lineage(
+                run_identity=run_identity,
+                details={},
+                approvals=approvals,
+                continued_error_steps=list(run.get("continued_error_steps", [])),
+            )
+            resume_from_step = (
+                "approval_gate"
+                if approvals
+                else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+            )
             run.update({
                 "thread_id": run.get("session_id"),
                 "thread_label": (
@@ -625,10 +974,15 @@ async def _list_workflow_runs(
                     if replay_allowed
                     else None
                 ),
-                "resume_from_step": (
-                    "approval_gate"
-                    if approvals
-                    else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+                "resume_from_step": resume_from_step,
+                "retry_from_step_draft": (
+                    _workflow_retry_from_step_draft(
+                        str(run["workflow_name"]),
+                        step_id=str(run["continued_error_steps"][0]),
+                        arguments=run.get("arguments"),
+                    )
+                    if replay_allowed and run.get("continued_error_steps")
+                    else None
                 ),
                 "resume_checkpoint_label": _resume_checkpoint_label(
                     approvals=approvals,
@@ -648,7 +1002,7 @@ async def _list_workflow_runs(
                     if approvals and isinstance(approvals[0], dict)
                     else None
                 ),
-                "run_identity": f"{run.get('session_id') or 'global'}:{run['tool_name']}:{run.get('run_fingerprint') or 'none'}",
+                "run_identity": run_identity,
                 "timeline": _timeline_entries_for_run(run, approvals=approvals),
                 "failed_step_tool": (
                     next(
@@ -661,7 +1015,10 @@ async def _list_workflow_runs(
                         None,
                     )
                 ),
+                **lineage,
             })
+            run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
+            run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
             completed.append(run)
 
     completed.sort(
@@ -703,6 +1060,64 @@ async def list_workflows():
 async def workflow_diagnostics():
     diagnostics = workflow_manager.get_diagnostics()
     return diagnostics
+
+
+@router.get("/workflows/{name}/source")
+async def get_workflow_source(name: str):
+    workflow = workflow_manager.get_workflow(name)
+    if workflow is None or not workflow.file_path:
+        raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
+    try:
+        with open(workflow.file_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read workflow source: {exc}") from exc
+    validation = _validate_workflow_content(content, path=workflow.file_path)
+    return {
+        "name": name,
+        "file_path": workflow.file_path,
+        "content": content,
+        **validation,
+    }
+
+
+@router.post("/workflows/validate")
+async def validate_workflow_draft(req: WorkflowDraftRequest):
+    return _validate_workflow_content(req.content, path=req.file_name or "<draft>")
+
+
+@router.post("/workflows/save")
+async def save_workflow_draft(req: WorkflowDraftRequest):
+    validation = _validate_workflow_content(req.content, path=req.file_name or "<draft>")
+    if not bool(validation["valid"]) or not isinstance(validation["workflow"], dict):
+        raise HTTPException(status_code=400, detail={"message": "Workflow draft is invalid", **validation})
+    file_name = _resolve_workflow_file_name(
+        req.file_name,
+        default_name=_safe_markdown_filename(str(validation["workflow"]["name"])),
+    )
+    workflows_dir = workflow_manager._workflows_dir
+    if not workflows_dir:
+        raise HTTPException(status_code=500, detail="Workflow manager is not initialized")
+    os.makedirs(workflows_dir, exist_ok=True)
+    target_path = os.path.join(workflows_dir, file_name)
+    with open(target_path, "w", encoding="utf-8") as handle:
+        handle.write(req.content)
+    workflows = workflow_manager.reload()
+    await log_integration_event(
+        integration_type="workflow",
+        name=str(validation["workflow"]["name"]),
+        outcome="succeeded",
+        details={
+            "saved_path": target_path,
+            "validation": validation,
+        },
+    )
+    return {
+        "status": "saved",
+        "file_path": target_path,
+        "workflows": workflows,
+        **_validate_workflow_content(req.content, path=target_path),
+    }
 
 
 @router.put("/workflows/{name}")
@@ -750,3 +1165,29 @@ async def list_workflow_runs(
     session_id: str | None = Query(default=None),
 ):
     return {"runs": await _list_workflow_runs(limit=limit, session_id=session_id)}
+
+
+@router.post("/workflows/runs/{run_identity:path}/resume-plan")
+async def build_workflow_resume_plan(
+    run_identity: str,
+    req: WorkflowResumePlanRequest | None = None,
+):
+    runs = await _list_workflow_runs(limit=100, session_id=None)
+    run = next((item for item in runs if item.get("run_identity") == run_identity), None)
+    if run is None:
+        scoped_events, scoped_session_id = await _load_workflow_events_for_identity(run_identity)
+        if scoped_events:
+            runs = await _list_workflow_runs(limit=max(len(scoped_events), 1), session_id=scoped_session_id, events=scoped_events)
+            run = next((item for item in runs if item.get("run_identity") == run_identity), None)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
+    resume_plan = _workflow_resume_plan(
+        run,
+        approvals=list(run.get("pending_approvals", [])),
+        requested_step_id=req.step_id if req is not None else None,
+    )
+    return {
+        "run_identity": run_identity,
+        "workflow_name": run["workflow_name"],
+        "resume_plan": resume_plan,
+    }

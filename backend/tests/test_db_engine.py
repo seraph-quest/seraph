@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from src.db.engine import _ensure_legacy_columns
 
 
-async def test_ensure_legacy_columns_adds_queued_insight_intervention_id():
+async def test_ensure_legacy_columns_adds_queued_insight_columns():
     engine = create_async_engine("sqlite+aiosqlite://")
     async with engine.begin() as conn:
         await conn.exec_driver_sql(
@@ -25,3 +25,4 @@ async def test_ensure_legacy_columns_adds_queued_insight_intervention_id():
     await engine.dispose()
 
     assert "intervention_id" in columns
+    assert "session_id" in columns

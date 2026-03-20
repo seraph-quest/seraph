@@ -476,6 +476,46 @@ body {
   padding: 14px;
 }
 
+.cockpit-studio {
+  width: min(1240px, calc(100vw - 40px));
+  max-height: min(78vh, 880px);
+}
+
+.cockpit-studio-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.cockpit-studio-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 14px;
+  border-right: 1px solid rgba(141, 226, 255, 0.08);
+  background: rgba(7, 20, 31, 0.38);
+}
+
+.cockpit-studio-main {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px 18px;
+}
+
+.cockpit-studio-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cockpit-studio-textarea {
+  min-height: 180px;
+  resize: vertical;
+}
+
 .cockpit-list--palette {
   max-height: min(56vh, 620px);
 }
@@ -1014,6 +1054,7 @@ body {
 .cockpit-feedback-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }
@@ -1149,11 +1190,44 @@ body {
   gap: 12px;
 }
 
+.cockpit-inspector-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cockpit-inspector-stack-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(141, 226, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(13, 33, 52, 0.3);
+}
+
 .cockpit-inspector-detail {
   border: 1px solid rgba(141, 226, 255, 0.08);
   border-radius: 12px;
   padding: 10px 12px;
   background: rgba(13, 33, 52, 0.38);
+}
+
+.cockpit-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cockpit-chip {
+  border: 1px solid rgba(141, 226, 255, 0.12);
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cockpit-muted);
+  background: rgba(10, 23, 35, 0.72);
 }
 
 .cockpit-inspector-value {
@@ -1278,6 +1352,19 @@ body {
   }
 
   .cockpit-inspector-details {
+    grid-template-columns: 1fr;
+  }
+
+  .cockpit-studio-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .cockpit-studio-sidebar {
+    border-right: none;
+    border-bottom: 1px solid rgba(141, 226, 255, 0.08);
+  }
+
+  .cockpit-inspector-stack-row {
     grid-template-columns: 1fr;
   }
 }

@@ -47,6 +47,10 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN intervention_id VARCHAR"
         )
+    if queued_insight_columns and "session_id" not in queued_insight_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE queued_insights ADD COLUMN session_id VARCHAR"
+        )
 
 
 async def init_db() -> None:

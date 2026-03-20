@@ -151,7 +151,7 @@ interface ToolInfo {
 }
 
 interface OperatorEntity {
-  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition";
+  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "operator_timeline_item";
   name: string;
   meta: string;
   summary: string;
@@ -196,6 +196,9 @@ interface CapabilityAction {
   mode?: string;
   enabled?: boolean;
   target?: string;
+  status?: string;
+  detail?: string;
+  [key: string]: unknown;
 }
 
 interface CapabilityBootstrapResponse {
@@ -213,6 +216,56 @@ interface CapabilityBootstrapResponse {
   risk_level?: string | null;
   execution_boundaries?: string[];
   overview?: CapabilityOverview;
+}
+
+interface CapabilityPreflightResponse {
+  target_type: string;
+  name: string;
+  label: string;
+  description: string;
+  availability: string;
+  blocking_reasons: string[];
+  recommended_actions: CapabilityAction[];
+  autorepair_actions: CapabilityAction[];
+  command?: string | null;
+  parameter_schema?: Record<string, unknown>;
+  risk_level?: string | null;
+  execution_boundaries?: string[];
+  can_autorepair: boolean;
+  ready: boolean;
+}
+
+interface WorkflowDiagnosticsPayload {
+  loaded_count: number;
+  error_count: number;
+  workflows: Array<Record<string, unknown>>;
+  load_errors: Array<{ file_path: string; message: string }>;
+}
+
+interface DoctorPlanRecord {
+  id: string;
+  label: string;
+  source: string;
+  createdAt: string;
+  availability: string;
+  blockingReasons: string[];
+  autorepairActions: CapabilityAction[];
+  recommendedActions: CapabilityAction[];
+  manualActions: CapabilityAction[];
+  appliedActions: string[];
+  command?: string | null;
+  riskLevel?: string | null;
+  executionBoundaries?: string[];
+}
+
+interface ExtensionStudioEntry {
+  id: string;
+  entityType: "workflow_definition" | "skill" | "mcp";
+  name: string;
+  summary: string;
+  availability: string;
+  meta: string;
+  entity: OperatorEntity;
 }
 
 type LoggedOperatorError = Error & { operatorLogged?: boolean };
@@ -355,6 +408,152 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   const detail = typeof action.detail === "string" ? action.detail : null;
   const target = name ?? mode ?? detail ?? "";
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
+}
+
+function readActionList(value: unknown): CapabilityAction[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.type !== "string" || typeof record.label !== "string") return [];
+    return [{
+      ...record,
+      type: record.type,
+      label: record.label,
+    } as CapabilityAction];
+  });
+}
+
+function shortIdentifier(value: string | null | undefined, size = 8): string | null {
+  if (!value) return null;
+  return value.length > size ? value.slice(0, size) : value;
+}
+
+function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
+  return {
+    entityType: "workflow_definition",
+    name: workflow.name,
+    meta: `${workflow.risk_level} risk · ${workflow.availability ?? (workflow.is_available === false ? "blocked" : "ready")}`,
+    summary: workflow.description,
+    details: {
+      file_path: workflow.file_path,
+      tool_name: workflow.tool_name,
+      enabled: workflow.enabled,
+      user_invocable: workflow.user_invocable,
+      inputs: workflow.inputs,
+      requires_tools: workflow.requires_tools,
+      requires_skills: workflow.requires_skills,
+      missing_tools: workflow.missing_tools ?? [],
+      missing_skills: workflow.missing_skills ?? [],
+      execution_boundaries: workflow.execution_boundaries,
+      approval_behavior: workflow.approval_behavior,
+      risk_level: workflow.risk_level,
+      availability: workflow.availability ?? (workflow.is_available === false ? "blocked" : "ready"),
+      recommended_actions: workflow.recommended_actions ?? [],
+    },
+  };
+}
+
+function buildSkillEntity(skill: SkillInfo): OperatorEntity {
+  return {
+    entityType: "skill",
+    name: skill.name,
+    meta: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
+    summary: skill.description ?? "Skill capability",
+    details: {
+      enabled: skill.enabled,
+      user_invocable: skill.user_invocable ?? false,
+      file_path: skill.file_path ?? "",
+      requires_tools: skill.requires_tools ?? [],
+      missing_tools: skill.missing_tools ?? [],
+      recommended_actions: skill.recommended_actions ?? [],
+      availability: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
+    },
+  };
+}
+
+function buildMcpEntity(server: McpServerInfo): OperatorEntity {
+  return {
+    entityType: "mcp",
+    name: server.name,
+    meta: server.status ?? "unknown",
+    summary: server.description || server.url || "MCP server",
+    details: {
+      availability: server.availability ?? "unknown",
+      blocked_reason: server.blocked_reason ?? "none",
+      tool_count: server.tool_count ?? 0,
+      url: server.url ?? "",
+      description: server.description ?? "",
+      auth_hint: server.auth_hint ?? "",
+      status_message: server.status_message ?? "",
+      enabled: server.enabled,
+      has_headers: server.has_headers ?? false,
+      recommended_actions: server.recommended_actions ?? [],
+    },
+  };
+}
+
+function buildExtensionStudioDraft(entity: OperatorEntity): string {
+  const filePath = typeof entity.details.file_path === "string" ? entity.details.file_path : "";
+  const requiresTools = Array.isArray(entity.details.requires_tools)
+    ? entity.details.requires_tools.filter((item): item is string => typeof item === "string")
+    : [];
+  const missingTools = Array.isArray(entity.details.missing_tools)
+    ? entity.details.missing_tools.filter((item): item is string => typeof item === "string")
+    : [];
+  const missingSkills = Array.isArray(entity.details.missing_skills)
+    ? entity.details.missing_skills.filter((item): item is string => typeof item === "string")
+    : [];
+
+  if (entity.entityType === "workflow_definition") {
+    return [
+      filePath
+        ? `Open "${filePath}" and update workflow "${entity.name}".`
+        : `Update workflow "${entity.name}".`,
+      "Validation focus: keep requires.tools aligned with every step tool, preserve input schema clarity, and keep execution boundaries/risk truthful.",
+      missingTools.length || missingSkills.length
+        ? `Current blockers: ${[
+          missingTools.length ? `tools ${missingTools.join(", ")}` : "",
+          missingSkills.length ? `skills ${missingSkills.join(", ")}` : "",
+        ].filter(Boolean).join(" · ")}.`
+        : "Current runtime blockers: none detected from the latest cockpit snapshot.",
+      "After editing, reload workflows and review diagnostics plus capability preflight before rerunning.",
+    ].join("\n");
+  }
+
+  if (entity.entityType === "skill") {
+    return [
+      filePath
+        ? `Open "${filePath}" and update skill "${entity.name}".`
+        : `Update skill "${entity.name}".`,
+      requiresTools.length
+        ? `Keep tool assumptions aligned with runtime availability: ${requiresTools.join(", ")}.`
+        : "This skill has no declared tool requirements today.",
+      "After editing, reload skills and verify the skill remains available in the cockpit capability surface.",
+    ].join("\n");
+  }
+
+  const url = typeof entity.details.url === "string" ? entity.details.url : "";
+  const description = typeof entity.details.description === "string" ? entity.details.description : "";
+  return [
+    `Review MCP server "${entity.name}" configuration.`,
+    url ? `Current URL: ${url}` : "No URL configured.",
+    description ? `Description: ${description}` : "No description configured.",
+    "Validate auth hints, headers, and connectivity before enabling or rerunning dependent workflows.",
+  ].join("\n");
+}
+
+function workflowResumeDetails(workflow: WorkflowRunRecord): string[] {
+  const details: string[] = [];
+  if (workflow.runIdentity) details.push(`run ${shortIdentifier(workflow.runIdentity)}`);
+  if (workflow.branchKind) details.push(workflow.branchKind.replace(/_/g, " "));
+  if (typeof workflow.branchDepth === "number" && workflow.branchDepth > 0) details.push(`depth ${workflow.branchDepth}`);
+  if (workflow.runFingerprint) details.push(`fingerprint ${shortIdentifier(workflow.runFingerprint)}`);
+  if (workflow.resumeCheckpointLabel) details.push(`checkpoint ${workflow.resumeCheckpointLabel}`);
+  if (workflow.resumeFromStep) details.push(`resume ${workflow.resumeFromStep}`);
+  if (workflow.threadContinueMessage) details.push("thread continue ready");
+  if (workflow.approvalRecoveryMessage) details.push("approval recovery ready");
+  return details;
 }
 
 const RUNBOOK_MACROS_KEY = "seraph_operator_runbook_macros";
@@ -536,8 +735,24 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
         : null,
     runFingerprint: typeof value.run_fingerprint === "string" ? value.run_fingerprint : null,
     runIdentity: typeof value.run_identity === "string" ? value.run_identity : null,
+    parentRunIdentity:
+      typeof value.parent_run_identity === "string" ? value.parent_run_identity : null,
+    rootRunIdentity:
+      typeof value.root_run_identity === "string" ? value.root_run_identity : null,
+    branchKind: typeof value.branch_kind === "string" ? value.branch_kind : null,
+    branchDepth: typeof value.branch_depth === "number" ? value.branch_depth : null,
+    isBranchRun: typeof value.is_branch_run === "boolean" ? value.is_branch_run : undefined,
     retryFromStepDraft:
       typeof value.retry_from_step_draft === "string" ? value.retry_from_step_draft : null,
+    checkpointCandidates: Array.isArray(value.checkpoint_candidates)
+      ? value.checkpoint_candidates.filter(
+          (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+        )
+      : undefined,
+    resumePlan:
+      value.resume_plan && typeof value.resume_plan === "object" && !Array.isArray(value.resume_plan)
+        ? (value.resume_plan as Record<string, unknown>)
+        : null,
     timeline: normalizedTimeline,
   };
 }
@@ -683,6 +898,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
   const [operatorFeed, setOperatorFeed] = useState<OperatorFeedEntry[]>([]);
+  const [doctorPlans, setDoctorPlans] = useState<DoctorPlanRecord[]>([]);
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [studioSelectedId, setStudioSelectedId] = useState<string | null>(null);
+  const [studioDraft, setStudioDraft] = useState("");
+  const [studioStatus, setStudioStatus] = useState<string | null>(null);
+  const [studioBusy, setStudioBusy] = useState<string | null>(null);
+  const [studioPreflight, setStudioPreflight] = useState<CapabilityPreflightResponse | null>(null);
+  const [studioWorkflowDiagnostics, setStudioWorkflowDiagnostics] = useState<WorkflowDiagnosticsPayload | null>(null);
+  const [studioDraftValidation, setStudioDraftValidation] = useState<Record<string, unknown> | null>(null);
+  const [studioMcpTestResult, setStudioMcpTestResult] = useState<Record<string, unknown> | null>(null);
+  const [studioMcpUrl, setStudioMcpUrl] = useState("");
+  const [studioMcpDescription, setStudioMcpDescription] = useState("");
+  const studioSelectionRef = useRef<string | null>(null);
+  const studioLoadRequestRef = useRef(0);
+  const studioValidationRequestRef = useRef(0);
+  const studioSaveRequestRef = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
@@ -740,118 +971,98 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [savedRunbooks]);
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
-    try {
-      const [
-        observerResponse,
-        auditResponse,
-        approvalsResponse,
-        continuityResponse,
-        capabilitiesResponse,
-        operatorTimelineResponse,
-        workflowRunsResponse,
-        toolModeResponse,
-        mcpModeResponse,
-        approvalModeResponse,
-      ] = await Promise.all([
-        fetch(`${API_URL}/api/observer/state`),
-        fetch(`${API_URL}/api/audit/events?limit=12`),
-        fetch(`${API_URL}/api/approvals/pending?limit=8`),
-        fetch(`${API_URL}/api/observer/continuity`),
-        fetch(`${API_URL}/api/capabilities/overview`),
-        fetch(`${API_URL}/api/operator/timeline?limit=12${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-        fetch(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-        fetch(`${API_URL}/api/settings/tool-policy-mode`),
-        fetch(`${API_URL}/api/settings/mcp-policy-mode`),
-        fetch(`${API_URL}/api/settings/approval-mode`),
-      ]);
+    const fetchJson = async (url: string) => {
+      try {
+        const response = await fetch(url);
+        if (isCancelled() || !response.ok) {
+          return { ok: false, payload: null };
+        }
+        const payload = await response.json().catch(() => null);
+        if (isCancelled()) {
+          return { ok: false, payload: null };
+        }
+        return { ok: true, payload };
+      } catch {
+        return { ok: false, payload: null };
+      }
+    };
 
-      if (!isCancelled() && observerResponse.ok) {
-        const observerPayload = await observerResponse.json();
-        setObserverState(observerPayload);
-      }
+    const [
+      observerResult,
+      auditResult,
+      approvalsResult,
+      continuityResult,
+      capabilitiesResult,
+      operatorTimelineResult,
+      workflowRunsResult,
+      toolModeResult,
+      mcpModeResult,
+      approvalModeResult,
+    ] = await Promise.all([
+      fetchJson(`${API_URL}/api/observer/state`),
+      fetchJson(`${API_URL}/api/audit/events?limit=12`),
+      fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
+      fetchJson(`${API_URL}/api/observer/continuity`),
+      fetchJson(`${API_URL}/api/capabilities/overview`),
+      fetchJson(`${API_URL}/api/operator/timeline?limit=12${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
+      fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
+      fetchJson(`${API_URL}/api/settings/approval-mode`),
+    ]);
 
-      if (!isCancelled() && auditResponse.ok) {
-        const auditPayload = await auditResponse.json();
-        setAuditEvents(Array.isArray(auditPayload) ? auditPayload : []);
-      }
+    if (isCancelled()) return;
 
-      if (!isCancelled() && approvalsResponse.ok) {
-        const approvalsPayload = await approvalsResponse.json();
-        setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
-      }
-
-      if (!isCancelled() && continuityResponse.ok) {
-        const continuityPayload: ObserverContinuitySnapshot = await continuityResponse.json();
-        setDaemonPresence(continuityPayload.daemon);
-        setDesktopNotifications(continuityPayload.notifications ?? []);
-        setQueuedInsights(continuityPayload.queued_insights ?? []);
-        setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
-        setRecentInterventions(continuityPayload.recent_interventions ?? []);
-      }
-      if (!isCancelled() && capabilitiesResponse.ok) {
-        const capabilityPayload: CapabilityOverview = await capabilitiesResponse.json();
-        setWorkflows(Array.isArray(capabilityPayload.workflows) ? capabilityPayload.workflows : []);
-        setSkills(Array.isArray(capabilityPayload.skills) ? capabilityPayload.skills : []);
-        setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
-        setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
-        setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
-        setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
-        setCapabilityRecommendations(
-          Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
-        );
-        setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
-      }
-      if (!isCancelled() && operatorTimelineResponse.ok) {
-        const operatorTimelinePayload = await operatorTimelineResponse.json();
-        setOperatorTimeline(
-          Array.isArray(operatorTimelinePayload.items)
-            ? operatorTimelinePayload.items
-            : [],
-        );
-      }
-      if (!isCancelled() && workflowRunsResponse.ok) {
-        const workflowRunsPayload = await workflowRunsResponse.json();
-        setWorkflowRuns(
-          Array.isArray(workflowRunsPayload.runs)
-            ? workflowRunsPayload.runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-            : [],
-        );
-      }
-      if (!isCancelled() && toolModeResponse.ok) {
-        const toolModePayload = await toolModeResponse.json();
-        setToolPolicyMode(toolModePayload.mode ?? "unknown");
-      }
-      if (!isCancelled() && mcpModeResponse.ok) {
-        const mcpModePayload = await mcpModeResponse.json();
-        setMcpPolicyMode(mcpModePayload.mode ?? "unknown");
-      }
-      if (!isCancelled() && approvalModeResponse.ok) {
-        const approvalModePayload = await approvalModeResponse.json();
-        setApprovalMode(approvalModePayload.mode ?? "unknown");
-      }
-    } catch {
-      if (!isCancelled()) {
-        setAuditEvents([]);
-        setPendingApprovals([]);
-        setDaemonPresence(null);
-        setDesktopNotifications([]);
-        setQueuedInsights([]);
-        setQueuedBundleCount(0);
-        setRecentInterventions([]);
-        setWorkflows([]);
-        setWorkflowRuns([]);
-        setSkills([]);
-        setMcpServers([]);
-        setTools([]);
-        setStarterPacks([]);
-        setCatalogItems([]);
-        setCapabilityRecommendations([]);
-        setRunbooks([]);
-        setOperatorTimeline([]);
-        setToolPolicyMode("unknown");
-        setMcpPolicyMode("unknown");
-        setApprovalMode("unknown");
-      }
+    if (observerResult.ok) {
+      setObserverState((observerResult.payload as ObserverState | null) ?? {});
+    }
+    if (auditResult.ok) {
+      setAuditEvents(Array.isArray(auditResult.payload) ? auditResult.payload : []);
+    }
+    if (approvalsResult.ok) {
+      setPendingApprovals(Array.isArray(approvalsResult.payload) ? approvalsResult.payload : []);
+    }
+    if (continuityResult.ok && continuityResult.payload) {
+      const continuityPayload = continuityResult.payload as ObserverContinuitySnapshot;
+      setDaemonPresence(continuityPayload.daemon);
+      setDesktopNotifications(continuityPayload.notifications ?? []);
+      setQueuedInsights(continuityPayload.queued_insights ?? []);
+      setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
+      setRecentInterventions(continuityPayload.recent_interventions ?? []);
+    }
+    if (capabilitiesResult.ok && capabilitiesResult.payload) {
+      const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
+      setWorkflows(Array.isArray(capabilityPayload.workflows) ? capabilityPayload.workflows : []);
+      setSkills(Array.isArray(capabilityPayload.skills) ? capabilityPayload.skills : []);
+      setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
+      setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
+      setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
+      setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
+      setCapabilityRecommendations(
+        Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
+      );
+      setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
+    }
+    if (operatorTimelineResult.ok && operatorTimelineResult.payload && typeof operatorTimelineResult.payload === "object") {
+      const items = (operatorTimelineResult.payload as { items?: unknown }).items;
+      setOperatorTimeline(Array.isArray(items) ? items : []);
+    }
+    if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
+      const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
+      setWorkflowRuns(
+        Array.isArray(runs)
+          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+          : [],
+      );
+    }
+    if (toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
+      setToolPolicyMode(((toolModeResult.payload as { mode?: string }).mode ?? "unknown") as ToolPolicyMode | "unknown");
+    }
+    if (mcpModeResult.ok && mcpModeResult.payload && typeof mcpModeResult.payload === "object") {
+      setMcpPolicyMode(((mcpModeResult.payload as { mode?: string }).mode ?? "unknown") as McpPolicyMode | "unknown");
+    }
+    if (approvalModeResult.ok && approvalModeResult.payload && typeof approvalModeResult.payload === "object") {
+      setApprovalMode(((approvalModeResult.payload as { mode?: string }).mode ?? "unknown") as ApprovalMode | "unknown");
     }
   }, [sessionId]);
 
@@ -1017,6 +1228,131 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => savedRunbooks,
     [savedRunbooks],
   );
+  const studioEntries = useMemo<ExtensionStudioEntry[]>(
+    () => [
+      ...workflows.map((workflow) => ({
+        id: `workflow:${workflow.name}`,
+        entityType: "workflow_definition" as const,
+        name: workflow.name,
+        summary: workflow.description,
+        availability: workflow.availability ?? (workflow.is_available === false ? "blocked" : "ready"),
+        meta: `${workflow.risk_level} risk · ${workflow.step_count} steps`,
+        entity: buildWorkflowDefinitionEntity(workflow),
+      })),
+      ...skills.map((skill) => ({
+        id: `skill:${skill.name}`,
+        entityType: "skill" as const,
+        name: skill.name,
+        summary: skill.description ?? "Skill capability",
+        availability: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
+        meta: skill.user_invocable ? "invocable skill" : "support skill",
+        entity: buildSkillEntity(skill),
+      })),
+      ...mcpServers.map((server) => ({
+        id: `mcp:${server.name}`,
+        entityType: "mcp" as const,
+        name: server.name,
+        summary: server.description || server.url || "MCP server",
+        availability: server.availability ?? server.status ?? "unknown",
+        meta: `${server.status ?? "unknown"} · ${server.tool_count ?? 0} tools`,
+        entity: buildMcpEntity(server),
+      })),
+    ],
+    [mcpServers, skills, workflows],
+  );
+  const selectedStudioEntry = useMemo(
+    () => studioEntries.find((entry) => entry.id === studioSelectedId) ?? studioEntries[0] ?? null,
+    [studioEntries, studioSelectedId],
+  );
+  useEffect(() => {
+    studioSelectionRef.current = selectedStudioEntry?.id ?? null;
+  }, [selectedStudioEntry?.id]);
+  const studioRecommendedActions = useMemo(
+    () => readActionList(selectedStudioEntry?.entity.details.recommended_actions),
+    [selectedStudioEntry],
+  );
+
+  useEffect(() => {
+    if (!studioOpen) return;
+    if (!studioSelectedId && studioEntries[0]) {
+      setStudioSelectedId(studioEntries[0].id);
+      return;
+    }
+    if (studioSelectedId && !studioEntries.some((entry) => entry.id === studioSelectedId)) {
+      setStudioSelectedId(studioEntries[0]?.id ?? null);
+    }
+  }, [studioEntries, studioOpen, studioSelectedId]);
+  const studioWorkflowErrors = useMemo(() => {
+    if (!studioWorkflowDiagnostics || !selectedStudioEntry) return [];
+    const filePath = typeof selectedStudioEntry.entity.details.file_path === "string"
+      ? selectedStudioEntry.entity.details.file_path
+      : null;
+    const errors = Array.isArray(studioWorkflowDiagnostics.load_errors)
+      ? studioWorkflowDiagnostics.load_errors
+      : [];
+    if (!filePath) return errors;
+    return errors.filter((entry) => entry.file_path === filePath || entry.message.includes(selectedStudioEntry.name));
+  }, [selectedStudioEntry, studioWorkflowDiagnostics]);
+  useEffect(() => {
+    if (!studioOpen || !selectedStudioEntry) return;
+    const entryId = selectedStudioEntry.id;
+    const requestId = ++studioLoadRequestRef.current;
+    let cancelled = false;
+    const fallbackDraft = buildExtensionStudioDraft(selectedStudioEntry.entity);
+    setStudioDraft(fallbackDraft);
+    setStudioStatus(null);
+    setStudioPreflight(null);
+    setStudioWorkflowDiagnostics(null);
+    setStudioDraftValidation(null);
+    setStudioMcpTestResult(null);
+    setStudioMcpUrl(typeof selectedStudioEntry.entity.details.url === "string" ? selectedStudioEntry.entity.details.url : "");
+    setStudioMcpDescription(
+      typeof selectedStudioEntry.entity.details.description === "string"
+        ? selectedStudioEntry.entity.details.description
+        : "",
+    );
+    const loadStudioSource = async () => {
+      try {
+        if (selectedStudioEntry.entityType === "workflow_definition") {
+          const response = await fetch(`${API_URL}/api/workflows/${encodeURIComponent(selectedStudioEntry.name)}/source`);
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(payload && typeof payload === "object" ? payload : null);
+          }
+          return;
+        }
+        if (selectedStudioEntry.entityType === "skill") {
+          const response = await fetch(`${API_URL}/api/skills/${encodeURIComponent(selectedStudioEntry.name)}/source`);
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(payload && typeof payload === "object" ? payload : null);
+          }
+        }
+      } catch {
+        if (!cancelled && requestId === studioLoadRequestRef.current && studioSelectionRef.current === entryId) {
+          setStudioStatus(`Using generated draft for ${selectedStudioEntry.name}`);
+        }
+      }
+    };
+    void loadStudioSource();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStudioEntry?.id, studioOpen]);
   const recentOperatorFeed = useMemo(
     () => {
       const timelineFeed: OperatorFeedEntry[] = recentOperatorTimeline.map((entry) => ({
@@ -1184,6 +1520,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return recentInterventions.filter((intervention) => intervention.session_id === workflow.sessionId);
   }
 
+  function studioEntryForWorkflowRun(workflow: WorkflowRunRecord): ExtensionStudioEntry | null {
+    return studioEntries.find(
+      (entry) => entry.entityType === "workflow_definition" && entry.name === workflow.workflowName,
+    ) ?? null;
+  }
+
   function appendOperatorFeed(summary: string, status: OperatorFeedEntry["status"]) {
     const entry: OperatorFeedEntry = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1192,6 +1534,226 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       createdAt: new Date().toISOString(),
     };
     setOperatorFeed((current) => [entry, ...current].slice(0, 18));
+  }
+
+  function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
+    const next: DoctorPlanRecord = {
+      ...plan,
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: new Date().toISOString(),
+    };
+    setDoctorPlans((current) => [next, ...current].slice(0, 6));
+  }
+
+  function openExtensionStudio(entry: ExtensionStudioEntry | null) {
+    if (!entry) return;
+    setStudioSelectedId(entry.id);
+    setStudioOpen(true);
+  }
+
+  function openExtensionStudioForEntity(entity: OperatorEntity | null) {
+    if (!entity) return;
+    const match = studioEntries.find(
+      (entry) => entry.entityType === entity.entityType && entry.name === entity.name,
+    );
+    if (match) {
+      openExtensionStudio(match);
+      return;
+    }
+    if (entity.entityType === "workflow_definition" || entity.entityType === "skill" || entity.entityType === "mcp") {
+      setStudioSelectedId(`${entity.entityType === "workflow_definition" ? "workflow" : entity.entityType}:${entity.name}`);
+      setStudioOpen(true);
+    }
+  }
+
+  async function refreshStudioValidation() {
+    if (!selectedStudioEntry) return;
+    const entry = selectedStudioEntry;
+    const entryId = entry.id;
+    const requestId = ++studioValidationRequestRef.current;
+    setStudioBusy("validation");
+    setStudioStatus(`Validating ${entry.name}...`);
+    try {
+      if (entry.entityType === "workflow_definition") {
+        const [validationResponse, preflightResponse, diagnosticsResponse] = await Promise.all([
+          fetch(`${API_URL}/api/workflows/validate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: studioDraft }),
+          }),
+          fetch(
+            `${API_URL}/api/capabilities/preflight?target_type=workflow&name=${encodeURIComponent(entry.name)}`,
+          ),
+          fetch(`${API_URL}/api/workflows/diagnostics`),
+        ]);
+
+        const validationPayload = await validationResponse.json().catch(() => null);
+        const preflightPayload = preflightResponse.ok
+          ? await preflightResponse.json() as CapabilityPreflightResponse
+          : null;
+        const diagnosticsPayload = diagnosticsResponse.ok
+          ? await diagnosticsResponse.json() as WorkflowDiagnosticsPayload
+          : null;
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(validationPayload && typeof validationPayload === "object" ? validationPayload : null);
+        setStudioPreflight(preflightPayload);
+        setStudioWorkflowDiagnostics(diagnosticsPayload);
+        setStudioStatus(
+          validationPayload?.valid === false
+            ? `${entry.name} has draft validation errors`
+            : preflightPayload?.ready
+            ? `${entry.name} is runtime-ready`
+            : `${entry.name} still has runtime blockers`,
+        );
+        return;
+      }
+
+      if (entry.entityType === "skill") {
+        const response = await fetch(`${API_URL}/api/skills/validate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: studioDraft }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(payload && typeof payload === "object" ? payload : null);
+        if (!response.ok) {
+          setStudioStatus(typeof payload?.detail === "string" ? payload.detail : `Failed to validate ${entry.name}`);
+        } else if (payload?.valid === false) {
+          setStudioStatus(`${entry.name} has draft validation errors`);
+        } else if (Array.isArray(payload?.missing_tools) && payload.missing_tools.length > 0) {
+          setStudioStatus(`${entry.name} saves cleanly but still needs runtime tools`);
+        } else {
+          setStudioStatus(`${entry.name} is valid and runtime-ready`);
+        }
+        return;
+      }
+
+      if (entry.entityType === "mcp") {
+        const response = await fetch(`${API_URL}/api/mcp/servers/${encodeURIComponent(entry.name)}/test`, {
+          method: "POST",
+        });
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioMcpTestResult(payload && typeof payload === "object" ? payload : null);
+        if (!response.ok) {
+          setStudioStatus(
+            typeof payload?.detail === "string" ? payload.detail : `${entry.name} test failed`,
+          );
+        } else {
+          const toolCount = typeof payload?.tool_count === "number" ? payload.tool_count : null;
+          setStudioStatus(
+            toolCount !== null
+              ? `OK — ${toolCount} tools`
+              : typeof payload?.message === "string"
+                ? payload.message
+                : `${entry.name}: ${String(payload?.status ?? "validation")}`,
+          );
+        }
+        return;
+      }
+    } catch {
+      if (requestId === studioValidationRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioStatus(`Failed to validate ${entry.name}`);
+      }
+    } finally {
+      if (requestId === studioValidationRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioBusy(null);
+      }
+    }
+  }
+
+  async function saveStudioDraft() {
+    if (!selectedStudioEntry || selectedStudioEntry.entityType === "mcp") {
+      await saveStudioMcpConfig();
+      return;
+    }
+    const entry = selectedStudioEntry;
+    const entryId = entry.id;
+    const requestId = ++studioSaveRequestRef.current;
+    setStudioBusy("save");
+    setStudioStatus(`Saving ${entry.name}...`);
+    try {
+      const endpoint = entry.entityType === "workflow_definition"
+        ? `${API_URL}/api/workflows/save`
+        : `${API_URL}/api/skills/save`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: studioDraft,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload?.detail;
+        if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+          setStudioStatus(
+            typeof detail === "string"
+              ? detail
+              : `Failed to save ${entry.name}`,
+          );
+          if (detail && typeof detail === "object") {
+            setStudioDraftValidation(detail as Record<string, unknown>);
+          }
+        }
+        return;
+      }
+      await refreshCockpit();
+      if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+      await refreshStudioValidation();
+      if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+      setStudioStatus(`${entry.name} saved`);
+      appendOperatorFeed(`${entry.name} saved`, "success");
+    } catch {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioStatus(`Failed to save ${entry.name}`);
+      }
+    } finally {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioBusy(null);
+      }
+    }
+  }
+
+  async function saveStudioMcpConfig() {
+    if (!selectedStudioEntry || selectedStudioEntry.entityType !== "mcp") return;
+    const entry = selectedStudioEntry;
+    const entryId = entry.id;
+    const requestId = ++studioSaveRequestRef.current;
+    setStudioBusy("save");
+    setStudioStatus(`Saving ${entry.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/mcp/servers/${entry.name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: studioMcpUrl.trim(),
+          description: studioMcpDescription.trim(),
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+          setStudioStatus(
+            typeof payload?.detail === "string" ? payload.detail : `Failed to save ${entry.name}`,
+          );
+        }
+        return;
+      }
+      await refreshCockpit();
+      if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+      setStudioStatus(`${entry.name} config saved`);
+      appendOperatorFeed(`${entry.name} config saved`, "success");
+    } catch {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioStatus(`Failed to save ${entry.name}`);
+      }
+    } finally {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioBusy(null);
+      }
+    }
   }
 
   function saveRunbookMacro(runbook: RunbookInfo) {
@@ -1330,7 +1892,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     try {
       const payload = await bootstrapCapability("starter_pack", pack.name, pack.label);
       if (payload.ready) {
-        const command = payload.command || pack.samplePrompt;
+        const command = payload.command || pack.sample_prompt;
         if (command) {
           queueComposerDraft(command);
           appendOperatorFeed(`${pack.label} drafted`, "success");
@@ -1373,28 +1935,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!response.ok) {
       throw new Error(payload?.detail || "Capability preflight failed");
     }
-    return payload as {
-      target_type: string;
-      name: string;
-      label: string;
-      description: string;
-      availability: string;
-      blocking_reasons: string[];
-      autorepair_actions: CapabilityAction[];
-      recommended_actions: CapabilityAction[];
-      command?: string | null;
-      parameter_schema?: Record<string, unknown>;
-      risk_level?: string | null;
-      execution_boundaries?: string[];
-      can_autorepair: boolean;
-      ready: boolean;
-    };
+    return payload as CapabilityPreflightResponse;
   }
 
   async function bootstrapCapability(
     targetType: "runbook" | "workflow" | "starter_pack",
     name: string,
     label: string,
+    preflight?: CapabilityPreflightResponse | null,
   ) {
     const response = await fetch(`${API_URL}/api/capabilities/bootstrap`, {
       method: "POST",
@@ -1412,6 +1960,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     const result = payload as CapabilityBootstrapResponse;
     await refreshCockpit();
+    rememberDoctorPlan({
+      label,
+      source: targetType,
+      availability: result.availability,
+      blockingReasons: result.blocking_reasons ?? [],
+      autorepairActions: preflight?.autorepair_actions ?? [],
+      recommendedActions: preflight?.recommended_actions ?? [],
+      manualActions: result.manual_actions ?? [],
+      appliedActions: (result.applied_actions ?? []).map((action) => formatCapabilityAction(action)),
+      command: result.command ?? preflight?.command ?? null,
+      riskLevel: result.risk_level ?? preflight?.risk_level ?? null,
+      executionBoundaries: result.execution_boundaries ?? preflight?.execution_boundaries ?? [],
+    });
     if (result.applied_actions?.length) {
       appendOperatorFeed(
         `${label}: ${result.applied_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
@@ -1442,7 +2003,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     try {
       const preflight = await preflightCapability("runbook", runbook.id);
       if (!preflight.ready) {
-        const bootstrap = await bootstrapCapability("runbook", runbook.id, runbook.label);
+        const bootstrap = await bootstrapCapability("runbook", runbook.id, runbook.label, preflight);
         if (bootstrap.ready && bootstrap.command) {
           queueComposerDraft(bootstrap.command);
           appendOperatorFeed(`${runbook.label} drafted`, "success");
@@ -1519,6 +2080,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   async function installCatalogItem(item: CatalogItemInfo) {
     setOperatorStatus(`Installing ${item.name}...`);
+    rememberDoctorPlan({
+      label: item.name,
+      source: `catalog ${item.type}`,
+      availability: item.installed ? "installed" : "missing",
+      blockingReasons: item.missing_tools?.length ? [`missing tools: ${item.missing_tools.join(", ")}`] : [],
+      autorepairActions: [],
+      recommendedActions: item.recommended_actions ?? [],
+      manualActions: item.recommended_actions ?? [],
+      appliedActions: [],
+      command: null,
+      riskLevel: null,
+      executionBoundaries: [],
+    });
     try {
       const response = await fetch(`${API_URL}/api/catalog/install/${item.name}`, {
         method: "POST",
@@ -1932,6 +2506,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     Retry From Step
                   </button>
                 )}
+                {studioEntryForWorkflowRun(selectedInspector.workflow) && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => openExtensionStudio(studioEntryForWorkflowRun(selectedInspector.workflow))}
+                  >
+                    Open Studio
+                  </button>
+                )}
               </>
             ) : (
               <span className="cockpit-feedback-status">
@@ -1980,8 +2562,41 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
           </div>
         )}
+        {selectedInspector.kind === "workflow" && workflowResumeDetails(selectedInspector.workflow).length > 0 && (
+          <div className="cockpit-chip-row">
+            {workflowResumeDetails(selectedInspector.workflow).map((detail) => (
+              <span key={`${selectedInspector.workflow.id}:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedInspector.workflow.timeline?.length && (
+          <div className="cockpit-inspector-stack">
+            {selectedInspector.workflow.timeline.map((entry) => (
+              <div key={`${selectedInspector.workflow.id}:${entry.kind}:${entry.at}`} className="cockpit-inspector-stack-row">
+                <div className="cockpit-key">{entry.kind.replace(/_/g, " ")}</div>
+                <div className="cockpit-value">
+                  {entry.summary}
+                  {entry.stepId ? ` · ${entry.stepId}` : ""}
+                  {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {selectedInspector.kind === "operator" && (
           <div className="cockpit-feedback-row">
+            {(selectedInspector.entity.entityType === "workflow_definition"
+              || selectedInspector.entity.entityType === "skill"
+              || selectedInspector.entity.entityType === "mcp") && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => openExtensionStudioForEntity(selectedInspector.entity)}
+              >
+                Open Studio
+              </button>
+            )}
             {typeof selectedInspector.entity.details.file_path === "string" && (
               <>
                 <button
@@ -2018,6 +2633,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 }
               >
                 Repair
+              </button>
+            )}
+            {selectedInspector.entity.entityType === "workflow_definition" && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => void refreshStudioValidation()}
+                disabled={studioBusy === "validation"}
+              >
+                Validate
               </button>
             )}
             {selectedInspector.entity.entityType === "mcp"
@@ -2136,6 +2760,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               title="Open the capability command palette"
             >
               Capability palette
+            </button>
+            <button
+              className="cockpit-action cockpit-action--ghost"
+              onClick={() => {
+                setStudioSelectedId(studioEntries[0]?.id ?? null);
+                setStudioOpen(true);
+              }}
+              title="Open the extension studio for workflows, skills, and MCP configuration"
+            >
+              Extension studio
             </button>
             <button
               className="cockpit-action cockpit-action--ghost"
@@ -2487,7 +3121,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         setSelectedInspector({
                           kind: "operator",
                           entity: {
-                            entityType: "workflow_definition",
+                            entityType: "operator_timeline_item",
                             name: item.title,
                             meta: timelineStatusLabel(item),
                             summary: item.summary,
@@ -2631,6 +3265,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflow.timeline.map((entry) => `${entry.kind.replace(/_/g, " ")}: ${entry.summary}`).join(" · ")}
                           </div>
                         ) : null}
+                        {workflowResumeDetails(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowResumeDetails(workflow).join(" · ")}
+                          </div>
+                        ) : null}
                       </button>
                       <div className="cockpit-feedback-row">
                         {(approval?.resume_message || workflow.threadContinueMessage) && (
@@ -2690,11 +3329,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <button
                             className="cockpit-feedback-button"
                             onClick={() => void runCapabilityActions(
-                              failedStep.recoveryActions as CapabilityAction[],
+                              readActionList(failedStep.recoveryActions),
                               `${workflow.workflowName} ${failedStep.id}`,
                             )}
                           >
                             Repair step
+                          </button>
+                        ) : null}
+                        {studioEntryForWorkflowRun(workflow) ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => openExtensionStudio(studioEntryForWorkflowRun(workflow))}
+                          >
+                            Studio
                           </button>
                         ) : null}
                       </div>
@@ -3109,6 +3756,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           type="button"
                           className="cockpit-operator-button"
+                          onClick={() => {
+                            setStudioSelectedId(studioEntries[0]?.id ?? null);
+                            setStudioOpen(true);
+                          }}
+                        >
+                          studio
+                        </button>
+                        <button
+                          type="button"
+                          className="cockpit-operator-button"
                           onClick={() => setPaletteOpen(true)}
                         >
                           palette
@@ -3129,6 +3786,81 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-sublist-item">
                         Search commands, install missing capabilities, and run starter packs from one place.
                       </div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">doctor plans</span>
+                      <span className="cockpit-operator-link">{doctorPlans.length} recent</span>
+                    </div>
+                    {doctorPlans.map((plan) => (
+                      <div key={plan.id} className="cockpit-operator-row">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: "workflow_definition",
+                                name: plan.label,
+                                meta: `${plan.source} · ${plan.availability}`,
+                                summary: plan.blockingReasons[0] ?? "Capability plan snapshot",
+                                details: {
+                                  blocking_reasons: plan.blockingReasons,
+                                  autorepair_actions: plan.autorepairActions,
+                                  recommended_actions: plan.recommendedActions,
+                                  manual_actions: plan.manualActions,
+                                  applied_actions: plan.appliedActions,
+                                  command: plan.command ?? "",
+                                  risk_level: plan.riskLevel ?? "unknown",
+                                  execution_boundaries: plan.executionBoundaries ?? [],
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{plan.label}</div>
+                          <div className="cockpit-operator-note">
+                            {plan.source} · {plan.availability}
+                            {plan.blockingReasons[0] ? ` · ${plan.blockingReasons[0]}` : ""}
+                            {plan.manualActions.length ? ` · ${plan.manualActions.length} manual` : ""}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {plan.command ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => queueComposerDraft(plan.command ?? "")}
+                            >
+                              draft
+                            </button>
+                          ) : null}
+                          {plan.manualActions.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityActions(plan.manualActions, plan.label)}
+                            >
+                              run manual
+                            </button>
+                          ) : null}
+                          {plan.autorepairActions.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityActions(plan.autorepairActions, plan.label)}
+                            >
+                              run safe
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                    {doctorPlans.length === 0 && (
+                      <div className="cockpit-empty">No bootstrap or doctor plans captured yet.</div>
                     )}
                   </div>
 
@@ -3554,26 +4286,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() =>
-                            setSelectedInspector({
-                              kind: "operator",
-                              entity: {
-                                entityType: "mcp",
-                                name: server.name,
-                                meta: server.status ?? "unknown",
-                                summary: server.description || server.url || "MCP server",
-                                details: {
-                                  availability: server.availability ?? "unknown",
-                                  blocked_reason: server.blocked_reason ?? "none",
-                                  tool_count: server.tool_count ?? 0,
-                                  url: server.url ?? "",
-                                  auth_hint: server.auth_hint ?? "",
-                                  status_message: server.status_message ?? "",
-                                  recommended_actions: server.recommended_actions ?? [],
-                                },
-                              },
-                            })
-                          }
+                          onClick={() => setSelectedInspector({ kind: "operator", entity: buildMcpEntity(server) })}
                         >
                           <div className="cockpit-value">{server.name}</div>
                           <div className="cockpit-operator-note">
@@ -3614,6 +4327,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               repair
                             </button>
                           ) : null}
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => openExtensionStudio(
+                              studioEntries.find((entry) => entry.id === `mcp:${server.name}`) ?? null,
+                            )}
+                          >
+                            studio
+                          </button>
                           {(server.status === "auth_required" || server.has_headers) && (
                             <button
                               type="button"
@@ -3648,25 +4370,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() =>
-                            setSelectedInspector({
-                              kind: "operator",
-                              entity: {
-                                entityType: "skill",
-                                name: skill.name,
-                                meta: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
-                                summary: skill.description ?? "Skill capability",
-                                details: {
-                                  enabled: skill.enabled,
-                                  user_invocable: skill.user_invocable ?? false,
-                                  file_path: skill.file_path ?? "",
-                                  requires_tools: skill.requires_tools ?? [],
-                                  missing_tools: skill.missing_tools ?? [],
-                                  recommended_actions: skill.recommended_actions ?? [],
-                                },
-                              },
-                            })
-                          }
+                          onClick={() => setSelectedInspector({ kind: "operator", entity: buildSkillEntity(skill) })}
                         >
                           <div className="cockpit-value">{skill.name}</div>
                           <div className="cockpit-operator-note">
@@ -3695,6 +4399,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               repair
                             </button>
                           ) : null}
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => openExtensionStudio(
+                              studioEntries.find((entry) => entry.id === `skill:${skill.name}`) ?? null,
+                            )}
+                          >
+                            studio
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -3725,27 +4438,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() =>
-                            setSelectedInspector({
-                              kind: "operator",
-                              entity: {
-                                entityType: "workflow_definition",
-                                name: workflow.name,
-                                meta: `${workflow.risk_level} risk`,
-                                summary: workflow.description,
-                                details: {
-                                  file_path: workflow.file_path,
-                                  requires_tools: workflow.requires_tools,
-                                  requires_skills: workflow.requires_skills,
-                                  missing_tools: workflow.missing_tools ?? [],
-                                  missing_skills: workflow.missing_skills ?? [],
-                                  execution_boundaries: workflow.execution_boundaries,
-                                  approval_behavior: workflow.approval_behavior,
-                                  recommended_actions: workflow.recommended_actions ?? [],
-                                },
-                              },
-                            })
-                          }
+                          onClick={() => setSelectedInspector({ kind: "operator", entity: buildWorkflowDefinitionEntity(workflow) })}
                         >
                           <div className="cockpit-value">blocked {workflow.name}</div>
                           <div className="cockpit-operator-note">
@@ -3759,7 +4452,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             <button
                               type="button"
                               className="cockpit-operator-button"
-                              onClick={() => void runCapabilityActions(workflow.recommended_actions ?? [], workflow.name)}
+                              onClick={() => void runCapabilityActions(readActionList(workflow.recommended_actions), workflow.name)}
                             >
                               repair
                             </button>
@@ -3767,11 +4460,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <button
                             type="button"
                             className="cockpit-operator-button"
+                            onClick={() => openExtensionStudio(
+                              studioEntries.find((entry) => entry.id === `workflow:${workflow.name}`) ?? null,
+                            )}
+                          >
+                            studio
+                          </button>
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
                             onClick={async () => {
                               try {
                                 const preflight = await preflightCapability("workflow", workflow.name);
                                 if (!preflight.ready) {
-                                  const bootstrap = await bootstrapCapability("workflow", workflow.name, workflow.name);
+                                  const bootstrap = await bootstrapCapability("workflow", workflow.name, workflow.name, preflight);
                                   if (bootstrap.ready && bootstrap.command) {
                                     queueComposerDraft(bootstrap.command);
                                   }
@@ -3815,6 +4517,216 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </>
         )}
       </div>
+
+      {studioOpen && selectedStudioEntry && (
+        <div className="cockpit-overlay-backdrop" onClick={() => setStudioOpen(false)}>
+          <section
+            className="cockpit-palette cockpit-studio"
+            onClick={(event) => event.stopPropagation()}
+            aria-label="Extension studio"
+          >
+            <div className="cockpit-window-header">
+              <div>
+                <div className="cockpit-window-title">Extension studio</div>
+                <div className="cockpit-window-meta">
+                  validate, repair, and author workflows, skills, and MCP config from the cockpit
+                </div>
+              </div>
+              <div className="cockpit-window-grip">
+                {selectedStudioEntry.entityType.replace(/_/g, " ")} · {selectedStudioEntry.availability}
+              </div>
+            </div>
+            <div className="cockpit-studio-shell">
+              <aside className="cockpit-studio-sidebar">
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-key">extensions</span>
+                  <span className="cockpit-operator-link">{studioEntries.length} loaded</span>
+                </div>
+                <div className="cockpit-list cockpit-list--palette">
+                  {studioEntries.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className={`cockpit-sublist-button ${selectedStudioEntry.id === entry.id ? "active" : ""}`}
+                      onClick={() => setStudioSelectedId(entry.id)}
+                    >
+                      <span>{entry.name}</span>
+                      <span className="cockpit-row-age">{entry.entityType === "workflow_definition" ? "workflow" : entry.entityType}</span>
+                    </button>
+                  ))}
+                </div>
+              </aside>
+              <div className="cockpit-studio-main">
+                <div className="cockpit-inspector">
+                  <div className="cockpit-inspector-title">{selectedStudioEntry.name}</div>
+                  <div className="cockpit-inspector-meta">{selectedStudioEntry.meta}</div>
+                  <div className="cockpit-inspector-body">{selectedStudioEntry.summary}</div>
+                  <div className="cockpit-chip-row">
+                    <span className="cockpit-chip">{selectedStudioEntry.availability}</span>
+                    {typeof selectedStudioEntry.entity.details.file_path === "string" && selectedStudioEntry.entity.details.file_path
+                      ? <span className="cockpit-chip">{String(selectedStudioEntry.entity.details.file_path)}</span>
+                      : null}
+                    {typeof selectedStudioEntry.entity.details.url === "string" && selectedStudioEntry.entity.details.url
+                      ? <span className="cockpit-chip">{String(selectedStudioEntry.entity.details.url)}</span>
+                      : null}
+                  </div>
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void refreshStudioValidation()}
+                      disabled={studioBusy === "validation"}
+                    >
+                      {selectedStudioEntry.entityType === "mcp" ? "Validate config" : "Refresh validation"}
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void saveStudioDraft()}
+                      disabled={studioBusy === "save"}
+                    >
+                      {selectedStudioEntry.entityType === "mcp" ? "Save config" : "Save draft"}
+                    </button>
+                    {selectedStudioEntry.entityType !== "mcp" ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => queueComposerDraft(studioDraft)}
+                      >
+                        Queue authoring draft
+                      </button>
+                    ) : null}
+                    {studioRecommendedActions.length ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void runCapabilityActions(studioRecommendedActions, selectedStudioEntry.name)}
+                      >
+                        Run repairs
+                      </button>
+                    ) : null}
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => setStudioOpen(false)}
+                    >
+                      Close
+                    </button>
+                  </div>
+                  {studioStatus && (
+                    <div className="cockpit-sublist-item">{studioStatus}</div>
+                  )}
+                  <div className="cockpit-inspector-stack">
+                    <div className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">doctor plan</div>
+                      <div className="cockpit-value">
+                        {studioPreflight
+                          ? `${studioPreflight.ready ? "ready" : "blocked"} · ${studioPreflight.blocking_reasons.join(" · ") || "no blockers"}`
+                          : selectedStudioEntry.entityType === "skill"
+                            ? "Use validation to check draft syntax and current runtime blockers."
+                            : "Run validation to capture a current plan."}
+                      </div>
+                    </div>
+                    {studioDraftValidation ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">draft status</div>
+                        <div className="cockpit-value">
+                          {"valid" in studioDraftValidation
+                            ? studioDraftValidation.valid === false
+                              ? "invalid"
+                              : "valid"
+                            : "captured"}
+                          {Array.isArray(studioDraftValidation.missing_tools) && studioDraftValidation.missing_tools.length
+                            ? ` · tools ${studioDraftValidation.missing_tools.join(", ")}`
+                            : ""}
+                          {Array.isArray(studioDraftValidation.missing_skills) && studioDraftValidation.missing_skills.length
+                            ? ` · skills ${studioDraftValidation.missing_skills.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioDraftValidation && Array.isArray(studioDraftValidation.errors) && studioDraftValidation.errors.length > 0 ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">draft errors</div>
+                        <div className="cockpit-value">
+                          {studioDraftValidation.errors.map((entry) => {
+                            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "";
+                            const record = entry as Record<string, unknown>;
+                            return typeof record.message === "string" ? record.message : JSON.stringify(record);
+                          }).filter(Boolean).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioPreflight?.autorepair_actions?.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">safe actions</div>
+                        <div className="cockpit-value">
+                          {studioPreflight.autorepair_actions.map((action) => formatCapabilityAction(action)).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioPreflight?.recommended_actions?.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">manual actions</div>
+                        <div className="cockpit-value">
+                          {studioPreflight.recommended_actions.map((action) => formatCapabilityAction(action)).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioWorkflowErrors.length > 0 ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">load errors</div>
+                        <div className="cockpit-value">
+                          {studioWorkflowErrors.map((entry) => entry.message).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioMcpTestResult ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">mcp test</div>
+                        <div className="cockpit-value">
+                          {typeof studioMcpTestResult.status === "string" ? studioMcpTestResult.status : "result"}
+                          {typeof studioMcpTestResult.tool_count === "number"
+                            ? ` · ${studioMcpTestResult.tool_count} tools`
+                            : ""}
+                          {typeof studioMcpTestResult.message === "string"
+                            ? ` · ${studioMcpTestResult.message}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  {selectedStudioEntry.entityType === "mcp" ? (
+                    <div className="cockpit-studio-form">
+                      <label className="cockpit-key" htmlFor="studio-mcp-url">mcp url</label>
+                      <input
+                        id="studio-mcp-url"
+                        className="cockpit-input"
+                        value={studioMcpUrl}
+                        onChange={(event) => setStudioMcpUrl(event.target.value)}
+                        placeholder="http://host.docker.internal:9001/mcp"
+                      />
+                      <label className="cockpit-key" htmlFor="studio-mcp-description">description</label>
+                      <input
+                        id="studio-mcp-description"
+                        className="cockpit-input"
+                        value={studioMcpDescription}
+                        onChange={(event) => setStudioMcpDescription(event.target.value)}
+                        placeholder="What this MCP server provides"
+                      />
+                    </div>
+                  ) : (
+                    <div className="cockpit-studio-form">
+                      <label className="cockpit-key" htmlFor="studio-authoring-draft">authoring draft</label>
+                      <textarea
+                        id="studio-authoring-draft"
+                        className="cockpit-input cockpit-studio-textarea"
+                        value={studioDraft}
+                        onChange={(event) => setStudioDraft(event.target.value)}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       {paletteOpen && (
         <div className="cockpit-overlay-backdrop" onClick={() => setPaletteOpen(false)}>

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 
-from src.skills.loader import Skill, load_skills
+from src.skills.loader import Skill, load_skills, scan_skills
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class SkillManager:
     def __init__(self) -> None:
         self._skills: list[Skill] = []
+        self._load_errors: list[dict[str, str]] = []
         self._skills_dir: str = ""
         self._config_path: str = ""
         self._disabled: set[str] = set()
@@ -23,7 +24,7 @@ class SkillManager:
             os.path.dirname(skills_dir), "skills-config.json"
         )
         self._load_config()
-        self._skills = load_skills(skills_dir)
+        self._skills, self._load_errors = scan_skills(skills_dir)
         self._apply_disabled()
         logger.info(
             "SkillManager initialized: %d skills loaded", len(self._skills)
@@ -115,9 +116,17 @@ class SkillManager:
     def reload(self) -> list[dict]:
         """Re-scan skills directory and return updated list."""
         if self._skills_dir:
-            self._skills = load_skills(self._skills_dir)
+            self._skills, self._load_errors = scan_skills(self._skills_dir)
             self._apply_disabled()
         return self.list_skills()
+
+    def get_diagnostics(self) -> dict[str, object]:
+        return {
+            "skills": self.list_skills(),
+            "load_errors": list(self._load_errors),
+            "loaded_count": len(self._skills),
+            "error_count": len(self._load_errors),
+        }
 
 
 skill_manager = SkillManager()

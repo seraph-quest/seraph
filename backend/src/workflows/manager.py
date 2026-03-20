@@ -232,6 +232,17 @@ class WorkflowTool(Tool):
                 "step_count": len(self.workflow.steps),
                 "step_tools": [step.tool for step in self.workflow.steps],
                 "step_records": step_records,
+                "checkpoint_step_ids": [str(step["id"]) for step in step_records if step.get("id")],
+                "last_completed_step_id": (
+                    next(
+                        (
+                            str(step["id"])
+                            for step in reversed(step_records)
+                            if step.get("id") and str(step.get("status") or "") not in {"failed", "continued_error"}
+                        ),
+                        None,
+                    )
+                ),
                 "artifact_paths": artifact_paths,
                 "continued_error_steps": continued_error_steps,
                 "failed_step_ids": continued_error_steps,

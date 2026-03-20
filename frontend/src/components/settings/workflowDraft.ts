@@ -79,5 +79,19 @@ export function buildWorkflowDraft(workflow: WorkflowInfo, artifactPath?: string
       : "This workflow should run without approval in the current policy mode.",
   ];
 
+  if (workflow.is_available === false) {
+    const blockers = [
+      workflow.missing_tools?.length
+        ? `missing tools: ${workflow.missing_tools.join(", ")}`
+        : "",
+      workflow.missing_skills?.length
+        ? `missing skills: ${workflow.missing_skills.join(", ")}`
+        : "",
+    ].filter(Boolean);
+    if (blockers.length > 0) {
+      notes.push(`Current blockers: ${blockers.join(" · ")}.`);
+    }
+  }
+
   return [header, ...notes].join("\n");
 }

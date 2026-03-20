@@ -55,7 +55,7 @@ export interface WorkflowRunRecord {
   toolName: string;
   workflowName: string;
   sessionId?: string | null;
-  status: "succeeded" | "failed" | "running" | "awaiting_approval";
+  status: "succeeded" | "failed" | "running" | "awaiting_approval" | "approved" | "denied" | "degraded";
   startedAt: string;
   updatedAt: string;
   summary: string;
@@ -95,7 +95,14 @@ export interface WorkflowRunRecord {
   approvalRecoveryMessage?: string | null;
   runFingerprint?: string | null;
   runIdentity?: string | null;
+  parentRunIdentity?: string | null;
+  rootRunIdentity?: string | null;
+  branchKind?: string | null;
+  branchDepth?: number | null;
+  isBranchRun?: boolean;
   retryFromStepDraft?: string | null;
+  checkpointCandidates?: Array<Record<string, unknown>>;
+  resumePlan?: Record<string, unknown> | null;
   timeline?: WorkflowTimelineEntry[];
 }
 

@@ -65,7 +65,7 @@ const Seraph: React.FC<SeraphProps> = ({
     tool_use: 'A tool or workflow step is running now.',
     approval_wait: 'Execution is paused behind approval.',
     error: 'Runtime degraded. Operator attention recommended.',
-    offline: 'Cockpit transport is offline.',
+    offline: 'Workspace transport is offline.',
   };
 
   const telemetryFallback: SeraphTelemetryEntry[] = [

@@ -529,7 +529,7 @@ function buildExtensionStudioDraft(entity: OperatorEntity): string {
           missingTools.length ? `tools ${missingTools.join(", ")}` : "",
           missingSkills.length ? `skills ${missingSkills.join(", ")}` : "",
         ].filter(Boolean).join(" · ")}.`
-        : "Current runtime blockers: none detected from the latest cockpit snapshot.",
+        : "Current runtime blockers: none detected from the latest workspace snapshot.",
       "After editing, reload workflows and review diagnostics plus capability preflight before rerunning.",
     ].join("\n");
   }
@@ -542,7 +542,7 @@ function buildExtensionStudioDraft(entity: OperatorEntity): string {
       requiresTools.length
         ? `Keep tool assumptions aligned with runtime availability: ${requiresTools.join(", ")}.`
         : "This skill has no declared tool requirements today.",
-      "After editing, reload skills and verify the skill remains available in the cockpit capability surface.",
+      "After editing, reload skills and verify the skill remains available in the live capability surface.",
     ].join("\n");
   }
 

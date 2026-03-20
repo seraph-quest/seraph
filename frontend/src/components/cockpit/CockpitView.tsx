@@ -42,6 +42,17 @@ interface ObserverState {
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
+interface RuntimeStatus {
+  version: string;
+  build_id: string;
+  provider: string;
+  model: string;
+  model_label: string;
+  api_base?: string;
+  timezone?: string;
+  llm_logging_enabled?: boolean;
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -901,6 +912,7 @@ function CockpitWorkspaceWindow({
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -1019,6 +1031,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
 
     const [
+      runtimeStatusResult,
       observerResult,
       auditResult,
       approvalsResult,
@@ -1030,6 +1043,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       mcpModeResult,
       approvalModeResult,
     ] = await Promise.all([
+      fetchJson(`${API_URL}/api/runtime/status`),
       fetchJson(`${API_URL}/api/observer/state`),
       fetchJson(`${API_URL}/api/audit/events?limit=12`),
       fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
@@ -1044,6 +1058,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     if (isCancelled()) return;
 
+    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
+      setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
+    }
     if (observerResult.ok) {
       setObserverState((observerResult.payload as ObserverState | null) ?? {});
     }
@@ -1159,7 +1176,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
-  const activeSessionLabel = activeSession?.title ?? "fresh thread";
   const recentConversation = messages.slice(-18);
   const latestResponse = useMemo(
     () =>
@@ -1246,6 +1262,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     [starterPacks],
   );
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
+  const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
+    .replace(/^openrouter\//, "")
+    .replace(/^anthropic\//, "")
+    .replace(/[_/-]+/g, " ")
+    .toUpperCase();
+  const runtimeBuildLabel = runtimeStatus?.build_id ?? SERAPH_BUILD_ID;
+  const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
+  const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
+  const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
     () => runbooks,
@@ -4899,11 +4925,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       <form className="cockpit-composer" onSubmit={handleSubmit}>
         <div className="cockpit-composer-meta">
-          <span>command bar</span>
+          <span>{workspaceTelemetryLeft}</span>
           <span className="cockpit-composer-meta-center">
-            {activeLayout.label} workspace · 16px grid snap · {activeSessionLabel}
+            {workspaceTelemetryCenter}
           </span>
-          <span>{isAgentBusy ? "Seraph is responding" : `thread ${activeSessionLabel}`}</span>
+          <span>{isAgentBusy ? "SERAPH RESPONDING" : workspaceTelemetryRight}</span>
         </div>
         <div className="cockpit-composer-row">
           <input

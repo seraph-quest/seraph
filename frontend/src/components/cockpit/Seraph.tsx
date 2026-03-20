@@ -231,22 +231,22 @@ const Seraph: React.FC<SeraphProps> = ({
 
   return (
     <div
-      className="scanline relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-[#05090d] text-[#dbefff]"
+      className="relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-[#05090d] text-[#dbefff]"
       style={{
         boxShadow: `inset 0 1px 0 rgba(255,255,255,0.02), 0 0 24px ${glow}`,
       }}
     >
-      <div className="absolute inset-0 opacity-30 pointer-events-none" style={{
-        backgroundImage:
-          'linear-gradient(rgba(141,226,255,0.018) 1px, transparent 1px), linear-gradient(90deg, rgba(141,226,255,0.018) 1px, transparent 1px)',
-        backgroundSize: '28px 28px',
-      }} />
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{ background: `radial-gradient(circle at 50% 48%, ${glow}, transparent 46%)` }}
-      />
+      <div className="scanline relative flex min-h-0 flex-1 items-center justify-center overflow-hidden px-3 pb-3 pt-3">
+        <div className="absolute inset-0 opacity-30 pointer-events-none" style={{
+          backgroundImage:
+            'linear-gradient(rgba(141,226,255,0.018) 1px, transparent 1px), linear-gradient(90deg, rgba(141,226,255,0.018) 1px, transparent 1px)',
+          backgroundSize: '28px 28px',
+        }} />
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{ background: `radial-gradient(circle at 50% 48%, ${glow}, transparent 46%)` }}
+        />
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center px-3 pb-3 pt-3">
         <div className="relative w-full max-w-[760px] aspect-video flex items-center justify-center float">
           <svg viewBox="-300 -200 600 400" className={`w-full h-full transition-colors duration-700 ${colorMap[state]}`}>
             {[0, 1, 2].map(i => (

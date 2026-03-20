@@ -90,6 +90,25 @@ def _approval_projection_key(
     return f"{session_id or 'global'}:{tool_name}:{fingerprint or 'none'}"
 
 
+def _workflow_run_approval_key(run: dict[str, Any]) -> str:
+    tool_name = str(run.get("tool_name") or "workflow")
+    run_fingerprint = run.get("run_fingerprint")
+    fingerprint = (
+        run_fingerprint
+        if isinstance(run_fingerprint, str) and run_fingerprint.strip()
+        else (
+            fingerprint_tool_call(tool_name, run.get("arguments") or {})
+            if run.get("arguments")
+            else None
+        )
+    )
+    return _approval_projection_key(
+        session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+        tool_name=tool_name,
+        fingerprint=fingerprint,
+    )
+
+
 def _workflow_replay_draft(workflow_name: str, arguments: dict[str, Any] | None) -> str:
     if not arguments:
         return f'Run workflow "{workflow_name}".'
@@ -365,15 +384,7 @@ async def _list_workflow_runs(
 
         workflow_meta = workflow_manager.get_tool_metadata(tool_name) or {}
         workflow_status = workflow_statuses.get(str(run["workflow_name"]))
-        approval_key = _approval_projection_key(
-            session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-            tool_name=tool_name,
-            fingerprint=(
-                fingerprint_tool_call(tool_name, run.get("arguments") or {})
-                if run.get("arguments")
-                else None
-            ),
-        )
+        approval_key = _workflow_run_approval_key(run)
         approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
             (run.get("session_id"), tool_name),
             [],
@@ -478,15 +489,7 @@ async def _list_workflow_runs(
         for run in run_queue:
             workflow_meta = workflow_manager.get_tool_metadata(str(run["tool_name"])) or {}
             workflow_status = workflow_statuses.get(str(run["workflow_name"]))
-            approval_key = _approval_projection_key(
-                session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-                tool_name=str(run["tool_name"]),
-                fingerprint=(
-                    fingerprint_tool_call(str(run["tool_name"]), run.get("arguments") or {})
-                    if run.get("arguments")
-                    else None
-                ),
-            )
+            approval_key = _workflow_run_approval_key(run)
             approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
                 (run.get("session_id"), str(run["tool_name"])),
                 [],

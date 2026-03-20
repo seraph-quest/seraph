@@ -175,6 +175,35 @@ async def test_learning_signal_tracks_timing_and_blocked_state_biases(async_db):
     assert signal.blocked_state_bias == "avoid_blocked_state_interruptions"
 
 
+async def test_learning_signal_keeps_blocked_state_async_bias_from_overriding_direct_delivery(async_db):
+    for feedback_type in ("helpful", "helpful", "acknowledged", "acknowledged"):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Surface this asynchronously while blocked.",
+            reasoning="active_goals",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="act",
+            policy_reason="active_goals",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+
+    assert signal.blocked_state_bias == "prefer_async_for_blocked_state"
+    assert signal.channel_bias == "prefer_native_notification"
+    assert signal.bias == "neutral"
+
+
 async def test_list_recent_can_scope_to_single_session(async_db):
     base_time = datetime.now(timezone.utc)
 

@@ -190,3 +190,72 @@ async def test_operator_timeline_keeps_queued_insight_thread_mapping_for_session
     queued_item = next(item for item in payload["items"] if item["kind"] == "queued_insight")
     assert queued_item["thread_id"] == "session-1"
     assert queued_item["thread_label"] == "Session 1"
+
+
+@pytest.mark.asyncio
+async def test_operator_timeline_projects_routing_metadata(client):
+    with (
+        patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.operator.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.operator.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-routing-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "chat_agent",
+                        "summary": "Selected openrouter/gpt-4o-mini for chat_agent",
+                        "created_at": "2026-03-19T10:04:00Z",
+                        "session_id": "session-1",
+                        "details": {
+                            "runtime_path": "chat_agent",
+                            "runtime_profile": "balanced",
+                            "selected_model": "openrouter/gpt-4o-mini",
+                            "selected_profile": "default",
+                            "selected_source": "fallback",
+                            "selected_reason_codes": ["policy_score", "healthy"],
+                            "selected_policy_score": 8.5,
+                            "required_policy_intents": ["fast", "cheap"],
+                            "max_cost_tier": "medium",
+                            "max_latency_tier": "medium",
+                            "required_task_class": "interactive",
+                            "max_budget_class": "standard",
+                            "attempt_order": ["gpt-4o-mini", "gpt-4.1-mini"],
+                            "reroute_cause": "primary_timeout",
+                            "rerouted_from_unhealthy_primary": False,
+                            "rerouted_from_policy_guardrails": True,
+                            "guardrail_compliant_targets_present": True,
+                            "rejected_target_count": 2,
+                            "candidate_targets": ["gpt-4o-mini", "gpt-4.1-mini", "local-model"],
+                            "rejected_targets": [
+                                {"target": "local-model", "reason": "task_class_mismatch"},
+                                {"target": "gpt-4.1-mini", "reason": "latency_tier_exceeded"},
+                            ],
+                        },
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Session 1"}]),
+        ),
+    ):
+        resp = await client.get("/api/operator/timeline", params={"session_id": "session-1", "limit": 8})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    routing_item = next(item for item in payload["items"] if item["kind"] == "routing")
+    assert routing_item["status"] == "selected"
+    assert routing_item["thread_id"] == "session-1"
+    assert routing_item["metadata"]["runtime_path"] == "chat_agent"
+    assert routing_item["metadata"]["runtime_profile"] == "balanced"
+    assert routing_item["metadata"]["selected_model"] == "openrouter/gpt-4o-mini"
+    assert routing_item["metadata"]["selected_reason_codes"] == ["policy_score", "healthy"]
+    assert routing_item["metadata"]["reroute_cause"] == "primary_timeout"
+    assert routing_item["metadata"]["rejected_target_count"] == 2
+    assert routing_item["metadata"]["guardrail_compliant_targets_present"] is True

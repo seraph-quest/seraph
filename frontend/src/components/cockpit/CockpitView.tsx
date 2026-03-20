@@ -92,6 +92,8 @@ interface ObserverContinuitySnapshot {
     session_id?: string | null;
     thread_id?: string | null;
     thread_label?: string | null;
+    thread_source?: string | null;
+    continuation_mode?: string | null;
     resume_message?: string | null;
   }>;
   queued_insights: Array<{
@@ -195,6 +197,25 @@ interface CapabilityAction {
   enabled?: boolean;
   target?: string;
 }
+
+interface CapabilityBootstrapResponse {
+  target_type: string;
+  name: string;
+  label: string;
+  status: string;
+  ready: boolean;
+  availability: string;
+  blocking_reasons: string[];
+  applied_actions: Array<Record<string, unknown>>;
+  manual_actions: CapabilityAction[];
+  command?: string | null;
+  parameter_schema?: Record<string, unknown>;
+  risk_level?: string | null;
+  execution_boundaries?: string[];
+  overview?: CapabilityOverview;
+}
+
+type LoggedOperatorError = Error & { operatorLogged?: boolean };
 
 interface CatalogItemInfo {
   name: string;
@@ -326,6 +347,16 @@ function formatFeedStatus(value: OperatorFeedEntry["status"]): string {
   return "info";
 }
 
+function formatCapabilityAction(action: Record<string, unknown>): string {
+  const type = typeof action.type === "string" ? action.type : "action";
+  const name = typeof action.name === "string" ? action.name : null;
+  const mode = typeof action.mode === "string" ? action.mode : null;
+  const status = typeof action.status === "string" ? action.status : null;
+  const detail = typeof action.detail === "string" ? action.detail : null;
+  const target = name ?? mode ?? detail ?? "";
+  return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
+}
+
 const RUNBOOK_MACROS_KEY = "seraph_operator_runbook_macros";
 
 function readRunbookMacros(): RunbookInfo[] {
@@ -385,6 +416,17 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
           : [],
         resultSummary: typeof record.result_summary === "string" ? record.result_summary : null,
         errorKind: typeof record.error_kind === "string" ? record.error_kind : null,
+        errorSummary: typeof record.error_summary === "string" ? record.error_summary : null,
+        startedAt: typeof record.started_at === "string" ? record.started_at : null,
+        completedAt: typeof record.completed_at === "string" ? record.completed_at : null,
+        durationMs: typeof record.duration_ms === "number" ? record.duration_ms : null,
+        recoveryActions: Array.isArray(record.recovery_actions)
+          ? record.recovery_actions.filter(
+              (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+            )
+          : undefined,
+        recoveryHint: typeof record.recovery_hint === "string" ? record.recovery_hint : null,
+        isRecoverable: typeof record.is_recoverable === "boolean" ? record.is_recoverable : undefined,
       });
       return records;
     }, [])
@@ -405,6 +447,8 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
         stepTool: typeof record.step_tool === "string" ? record.step_tool : null,
         resultSummary: typeof record.result_summary === "string" ? record.result_summary : null,
         errorKind: typeof record.error_kind === "string" ? record.error_kind : null,
+        errorSummary: typeof record.error_summary === "string" ? record.error_summary : null,
+        durationMs: typeof record.duration_ms === "number" ? record.duration_ms : null,
       });
       return entries;
     }, [])
@@ -962,20 +1006,35 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
-    () => runbooks.slice(0, 6),
+    () => runbooks,
     [runbooks],
   );
   const recentOperatorTimeline = useMemo(
-    () => operatorTimeline.slice(0, 10),
+    () => operatorTimeline.slice(0, 16),
     [operatorTimeline],
   );
   const operatorMacros = useMemo(
-    () => savedRunbooks.slice(0, 6),
+    () => savedRunbooks,
     [savedRunbooks],
   );
   const recentOperatorFeed = useMemo(
-    () => operatorFeed.slice(0, 8),
-    [operatorFeed],
+    () => {
+      const timelineFeed: OperatorFeedEntry[] = recentOperatorTimeline.map((entry) => ({
+        id: `timeline:${entry.id}`,
+        summary: `${entry.title}: ${entry.summary}`,
+        status:
+          entry.status === "failed"
+            ? "failed"
+            : entry.status === "selected" || entry.status === "delivered" || entry.status === "queued"
+              ? "success"
+              : "info",
+        createdAt: entry.updated_at || entry.created_at,
+      }));
+      return [...operatorFeed, ...timelineFeed]
+        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+        .slice(0, 14);
+    },
+    [operatorFeed, recentOperatorTimeline],
   );
   const paletteItems = useMemo(() => {
     const query = paletteQuery.trim().toLowerCase();
@@ -1003,7 +1062,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `runbook:${item.id}`,
         kind: "runbook",
         label: item.label,
-        detail: `${item.availability ?? "unknown"} · ${item.description}`,
+        detail: `${item.availability ?? "unknown"} · ${item.description}${item.blocking_reasons?.length ? ` · ${item.blocking_reasons.join(", ")}` : ""}`,
         action: item.action ?? null,
         draft: item.command,
       });
@@ -1023,7 +1082,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `starter-pack:${pack.name}`,
         kind: "starter pack",
         label: pack.label,
-        detail: `${pack.availability} · ${pack.description}`,
+        detail: `${pack.availability} · ${pack.description}${pack.blocked_skills[0] ? ` · blocked skill ${pack.blocked_skills[0].name}` : pack.blocked_workflows[0] ? ` · blocked workflow ${pack.blocked_workflows[0].name}` : ""}`,
         action: { type: "activate_starter_pack", label: "Activate pack", name: pack.name },
       });
     });
@@ -1032,7 +1091,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `workflow:${workflow.name}`,
         kind: "workflow",
         label: workflow.name,
-        detail: `${workflow.is_available === false ? "blocked" : "ready"} · ${workflow.description}`,
+        detail: `${workflow.is_available === false ? "blocked" : "ready"} · ${workflow.description}${workflow.missing_tools?.length ? ` · tools ${workflow.missing_tools.join(", ")}` : ""}${workflow.missing_skills?.length ? ` · skills ${workflow.missing_skills.join(", ")}` : ""}`,
         action: workflow.is_available === false
           ? workflow.missing_skills?.[0]
             ? { type: "open_settings", label: "Open settings", target: "workflows" }
@@ -1073,13 +1132,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `catalog:${item.type}:${item.name}`,
         kind: `install ${item.type}`,
         label: item.name,
-        detail: item.description,
+        detail: `${item.description}${item.missing_tools?.length ? ` · missing tools ${item.missing_tools.join(", ")}` : ""}`,
         action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: "Install", name: item.name },
       });
     });
 
-    if (!query) return items.slice(0, 24);
-    return items.filter((item) => `${item.kind} ${item.label} ${item.detail}`.toLowerCase().includes(query)).slice(0, 24);
+    if (!query) return items.slice(0, 40);
+    return items.filter((item) => `${item.kind} ${item.label} ${item.detail}`.toLowerCase().includes(query)).slice(0, 40);
   }, [
     capabilityRecommendations,
     operatorRunbooks,
@@ -1267,30 +1326,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
 
   async function activateStarterPack(pack: StarterPackInfo) {
-    setOperatorStatus(`Activating ${pack.label}...`);
+    setOperatorStatus(`Bootstrapping ${pack.label}...`);
     try {
-      const response = await fetch(`${API_URL}/api/capabilities/starter-packs/${pack.name}/activate`, {
-        method: "POST",
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        setOperatorStatus(payload?.detail || `Failed to activate ${pack.label}`);
-        appendOperatorFeed(`Failed to activate ${pack.label}`, "failed");
-        return;
+      const payload = await bootstrapCapability("starter_pack", pack.name, pack.label);
+      if (payload.ready) {
+        const command = payload.command || pack.samplePrompt;
+        if (command) {
+          queueComposerDraft(command);
+          appendOperatorFeed(`${pack.label} drafted`, "success");
+          setOperatorStatus(`${pack.label} drafted to command bar`);
+        } else {
+          setOperatorStatus(`${pack.label} is ready`);
+        }
       }
-      await refreshCockpit();
-      setOperatorStatus(
-        payload?.status === "degraded"
-          ? `${pack.label} activated with missing entries`
-          : `${pack.label} activated`,
-      );
-      if (typeof pack.sample_prompt === "string" && pack.sample_prompt.trim()) {
-        queueComposerDraft(pack.sample_prompt.trim());
-      }
-      appendOperatorFeed(`${pack.label} activated`, "success");
     } catch {
-      setOperatorStatus(`Failed to activate ${pack.label}`);
-      appendOperatorFeed(`Failed to activate ${pack.label}`, "failed");
+      // bootstrapCapability already reports failures into the operator surface
     }
   }
 
@@ -1341,27 +1391,62 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
   }
 
+  async function bootstrapCapability(
+    targetType: "runbook" | "workflow" | "starter_pack",
+    name: string,
+    label: string,
+  ) {
+    const response = await fetch(`${API_URL}/api/capabilities/bootstrap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_type: targetType, name }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload) {
+      const detail = payload?.detail || `Failed to bootstrap ${label}`;
+      setOperatorStatus(detail);
+      appendOperatorFeed(detail, "failed");
+      const error = new Error(detail) as LoggedOperatorError;
+      error.operatorLogged = true;
+      throw error;
+    }
+    const result = payload as CapabilityBootstrapResponse;
+    await refreshCockpit();
+    if (result.applied_actions?.length) {
+      appendOperatorFeed(
+        `${label}: ${result.applied_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
+        result.ready ? "success" : "info",
+      );
+    }
+    if (!result.ready && result.manual_actions?.length) {
+      appendOperatorFeed(
+        `${label}: ${result.manual_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
+        "info",
+      );
+      await runCapabilityActions(result.manual_actions, `${label} bootstrap`);
+    }
+    if (result.ready) {
+      setOperatorStatus(`${label} ready`);
+    } else {
+      setOperatorStatus(
+        result.blocking_reasons?.[0]
+          ? `${label} still blocked: ${result.blocking_reasons[0]}`
+          : `${label} still blocked`,
+      );
+    }
+    return result;
+  }
+
   async function executeRunbook(runbook: RunbookInfo) {
     setOperatorStatus(`Preflighting ${runbook.label}...`);
     try {
       const preflight = await preflightCapability("runbook", runbook.id);
       if (!preflight.ready) {
-        const repairActions = preflight.autorepair_actions?.length
-          ? preflight.autorepair_actions
-          : preflight.recommended_actions;
-        if (repairActions?.length) {
-          await runCapabilityActions(repairActions, runbook.label);
-          await refreshCockpit();
-          setOperatorStatus(`${runbook.label} repaired`);
-          appendOperatorFeed(`${runbook.label} repaired`, "success");
-          return;
+        const bootstrap = await bootstrapCapability("runbook", runbook.id, runbook.label);
+        if (bootstrap.ready && bootstrap.command) {
+          queueComposerDraft(bootstrap.command);
+          appendOperatorFeed(`${runbook.label} drafted`, "success");
         }
-        setOperatorStatus(
-          preflight.blocking_reasons?.[0]
-            ? `${runbook.label} blocked: ${preflight.blocking_reasons[0]}`
-            : `${runbook.label} is blocked`,
-        );
-        appendOperatorFeed(`${runbook.label} blocked`, "failed");
         return;
       }
       if (preflight.command) {
@@ -1373,8 +1458,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Capability preflight failed";
-      setOperatorStatus(message);
-      appendOperatorFeed(message, "failed");
+      if (!(error instanceof Error && (error as LoggedOperatorError).operatorLogged)) {
+        setOperatorStatus(message);
+        appendOperatorFeed(message, "failed");
+      }
     }
   }
 
@@ -1398,6 +1485,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     await runCapabilityActions(actions, `${workflow.workflowName} replay`);
+  }
+
+  function failedWorkflowStep(workflow: WorkflowRunRecord): WorkflowStepRecord | null {
+    return (
+      workflow.stepRecords?.find((step) =>
+        step.status !== "succeeded" || workflow.continuedErrorSteps.includes(step.id),
+      ) ?? null
+    );
   }
 
   async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
@@ -2419,13 +2514,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {item.thread_label ? ` · ${item.thread_label}` : ""}
                       </div>
                       {item.kind === "routing" && item.metadata && (
-                        <div className="cockpit-row-meta">
-                          model {String(item.metadata.selected_model ?? "unknown")}
-                          {item.metadata.max_budget_class ? ` · budget ${String(item.metadata.max_budget_class)}` : ""}
-                          {Array.isArray(item.metadata.required_policy_intents) && item.metadata.required_policy_intents.length
-                            ? ` · intents ${item.metadata.required_policy_intents.join(", ")}`
-                            : ""}
-                        </div>
+                        <>
+                          <div className="cockpit-row-meta">
+                            model {String(item.metadata.selected_model ?? "unknown")}
+                            {item.metadata.selected_source ? ` · ${String(item.metadata.selected_source)}` : ""}
+                            {item.metadata.reroute_cause ? ` · ${String(item.metadata.reroute_cause)}` : ""}
+                            {item.metadata.max_budget_class ? ` · budget ${String(item.metadata.max_budget_class)}` : ""}
+                            {item.metadata.required_task_class ? ` · task ${String(item.metadata.required_task_class)}` : ""}
+                          </div>
+                          <div className="cockpit-row-meta">
+                            {Array.isArray(item.metadata.required_policy_intents) && item.metadata.required_policy_intents.length
+                              ? `intents ${item.metadata.required_policy_intents.join(", ")}`
+                              : "no required intents"}
+                            {item.metadata.max_cost_tier ? ` · cost ${String(item.metadata.max_cost_tier)}` : ""}
+                            {item.metadata.max_latency_tier ? ` · latency ${String(item.metadata.max_latency_tier)}` : ""}
+                            {typeof item.metadata.rejected_target_count === "number"
+                              ? ` · rejected ${String(item.metadata.rejected_target_count)}`
+                              : ""}
+                          </div>
+                        </>
                       )}
                     </button>
                     <div className="cockpit-feedback-row">
@@ -2485,6 +2592,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 {workflowRunsWithArtifacts.map((workflow) => {
                   const approval = approvalForWorkflow(workflow);
                   const linkedInterventions = interventionsForWorkflow(workflow);
+                  const failedStep = failedWorkflowStep(workflow);
                   return (
                     <div key={workflow.id} className="cockpit-row">
                       <button
@@ -2514,7 +2622,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <div className="cockpit-row-meta">
                             {workflow.stepRecords
                               .slice(0, 3)
-                              .map((step) => `${step.id} ${step.status}${step.resultSummary ? ` · ${step.resultSummary}` : ""}`)
+                              .map((step) => `${step.id} ${step.status}${step.durationMs ? ` · ${step.durationMs}ms` : ""}${step.resultSummary ? ` · ${step.resultSummary}` : ""}${step.errorSummary ? ` · ${step.errorSummary}` : ""}`)
                               .join(" · ")}
                           </div>
                         ) : null}
@@ -2578,6 +2686,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             ) : null}
                           </>
                         )}
+                        {failedStep?.recoveryActions?.length ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void runCapabilityActions(
+                              failedStep.recoveryActions as CapabilityAction[],
+                              `${workflow.workflowName} ${failedStep.id}`,
+                            )}
+                          >
+                            Repair step
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   );
@@ -2816,6 +2935,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{notification.body}</div>
                       <div className="cockpit-row-meta">
                         {notification.surface ?? "notification"}
+                        {notification.continuation_mode ? ` · ${notification.continuation_mode.replace(/_/g, " ")}` : ""}
                         {(notification.thread_label ?? (notification.thread_id ? sessionTitleById[notification.thread_id] : null))
                           ? ` · ${notification.thread_label ?? sessionTitleById[notification.thread_id ?? ""]}`
                           : notification.thread_id
@@ -3037,7 +3157,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">recommendations</span>
                       <span className="cockpit-operator-link">{capabilityRecommendations.length} queued</span>
                     </div>
-                    {capabilityRecommendations.slice(0, 3).map((item) => (
+                    {capabilityRecommendations.map((item) => (
                       <div key={item.id} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3250,7 +3370,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">starter packs</span>
                       <span className="cockpit-operator-link">{readyStarterPacks.length}/{starterPacks.length} ready</span>
                     </div>
-                    {starterPacks.slice(0, 3).map((pack) => (
+                    {starterPacks.map((pack) => (
                       <div key={pack.name} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3331,7 +3451,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {catalogItems.filter((item) => !item.installed).length} missing
                       </span>
                     </div>
-                    {catalogItems.filter((item) => !item.installed).slice(0, 3).map((item) => (
+                    {catalogItems.filter((item) => !item.installed).map((item) => (
                       <div key={`${item.type}:${item.name}`} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3383,7 +3503,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">tool inventory</span>
                       <span className="cockpit-operator-link">{blockedTools.length} blocked</span>
                     </div>
-                    {tools.slice(0, 4).map((tool) => (
+                    {tools.map((tool) => (
                       <div key={tool.name} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3429,7 +3549,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         full settings
                       </button>
                     </div>
-                    {mcpServers.slice(0, 3).map((server) => (
+                    {mcpServers.map((server) => (
                       <div key={server.name} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3523,7 +3643,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         reload
                       </button>
                     </div>
-                    {skills.slice(0, 4).map((skill) => (
+                    {skills.map((skill) => (
                       <div key={skill.name} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3600,7 +3720,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <div className="cockpit-sublist-item">
                       approval {approvalWorkflows.length} · blocked {blockedWorkflows.length}
                     </div>
-                    {blockedWorkflows.slice(0, 2).map((workflow) => (
+                    {blockedWorkflows.map((workflow) => (
                       <div key={workflow.name} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3650,11 +3770,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             onClick={async () => {
                               try {
                                 const preflight = await preflightCapability("workflow", workflow.name);
-                                const repairActions = preflight.autorepair_actions?.length
-                                  ? preflight.autorepair_actions
-                                  : preflight.recommended_actions;
-                                if (!preflight.ready && repairActions?.length) {
-                                  await runCapabilityActions(repairActions, workflow.name);
+                                if (!preflight.ready) {
+                                  const bootstrap = await bootstrapCapability("workflow", workflow.name, workflow.name);
+                                  if (bootstrap.ready && bootstrap.command) {
+                                    queueComposerDraft(bootstrap.command);
+                                  }
                                   return;
                                 }
                                 queueComposerDraft(preflight.command ?? buildWorkflowDraft(workflow));

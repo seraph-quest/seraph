@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from src.observer.context import CurrentContext
+
+if TYPE_CHECKING:
+    from src.guardian.feedback import GuardianLearningSignal
 
 _TAG_PREFIX_RE = re.compile(r"^\[[^\]]+\]\s*")
 
@@ -31,6 +35,7 @@ class GuardianWorldModel:
     collaborators: tuple[str, ...] = ()
     recurring_obligations: tuple[str, ...] = ()
     project_timeline: tuple[str, ...] = ()
+    corroboration_sources: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
         lines = [
@@ -38,6 +43,8 @@ class GuardianWorldModel:
             f"Focus alignment: {self.focus_alignment}",
             f"Intervention receptivity: {self.intervention_receptivity}",
         ]
+        if self.corroboration_sources:
+            lines.append(f"Corroboration sources: {', '.join(self.corroboration_sources)}")
 
         if self.active_commitments:
             lines.append("Active commitments:")
@@ -166,14 +173,30 @@ def _derive_focus_alignment(observer_context: CurrentContext) -> str:
     return "low"
 
 
-def _derive_intervention_receptivity(observer_context: CurrentContext) -> str:
+def _derive_intervention_receptivity(
+    observer_context: CurrentContext,
+    learning_signal: GuardianLearningSignal | None,
+) -> str:
     if (
         observer_context.interruption_mode == "focus"
         or observer_context.user_state in {"deep_work", "in_meeting", "away"}
         or observer_context.interruption_cost == "high"
         or observer_context.attention_budget_remaining <= 1
     ):
+        if (
+            learning_signal is not None
+            and learning_signal.blocked_state_bias == "prefer_async_for_blocked_state"
+            and learning_signal.channel_bias == "prefer_native_notification"
+        ):
+            return "guarded_async"
         return "low"
+    if (
+        learning_signal is not None
+        and learning_signal.timing_bias == "prefer_available_windows"
+        and observer_context.user_state == "available"
+        and observer_context.interruption_cost != "high"
+    ):
+        return "high"
     if (
         observer_context.user_state == "winding_down"
         or observer_context.interruption_cost == "medium"
@@ -192,19 +215,23 @@ def build_guardian_world_model(
     recent_intervention_feedback: str,
     active_projects: tuple[str, ...] = (),
     recent_execution_summary: str = "",
+    memory_buckets: dict[str, tuple[str, ...]] | None = None,
+    learning_signal: GuardianLearningSignal | None = None,
 ) -> GuardianWorldModel:
     """Build a first explicit working-state / commitments model from current signals."""
     memory_lines = _extract_lines(memory_context, limit=3)
     recent_session_lines = _extract_lines(recent_sessions_summary, limit=2)
     feedback_lines = _extract_lines(recent_intervention_feedback, limit=2)
-    goal_memory = _extract_tagged_memory(memory_context, "goal", limit=2)
-    preference_constraints = _extract_tagged_memory(memory_context, "preference", limit=2)
-    recurring_patterns = _extract_tagged_memory(memory_context, "pattern", limit=3)
-    active_routines = _extract_tagged_memory(memory_context, "routine", limit=3)
-    collaborators = _extract_tagged_memory(memory_context, "collaborator", limit=3)
-    recurring_obligations = _extract_tagged_memory(memory_context, "obligation", limit=3)
+    memory_buckets = memory_buckets or {}
+    goal_memory = list(memory_buckets.get("goal", ()))[:2] or _extract_tagged_memory(memory_context, "goal", limit=2)
+    preference_constraints = list(memory_buckets.get("preference", ()))[:2] or _extract_tagged_memory(memory_context, "preference", limit=2)
+    recurring_patterns = list(memory_buckets.get("pattern", ()))[:3] or _extract_tagged_memory(memory_context, "pattern", limit=3)
+    active_routines = list(memory_buckets.get("routine", ()))[:3] or _extract_tagged_memory(memory_context, "routine", limit=3)
+    collaborators = list(memory_buckets.get("collaborator", ()))[:3] or _extract_tagged_memory(memory_context, "collaborator", limit=3)
+    recurring_obligations = list(memory_buckets.get("obligation", ()))[:3] or _extract_tagged_memory(memory_context, "obligation", limit=3)
+    timeline_memory = list(memory_buckets.get("timeline", ()))[:3] or _extract_tagged_memory(memory_context, "timeline", limit=3)
     project_timeline = _dedupe(
-        _extract_tagged_memory(memory_context, "timeline", limit=3)
+        timeline_memory
         + list(active_projects[:1])
         + _extract_lines(recent_execution_summary, limit=2)
         + recent_session_lines[:1]
@@ -281,13 +308,35 @@ def build_guardian_world_model(
     active_constraints.extend(preference_constraints)
     project_state = list(active_projects[:3])
     project_state.extend(execution_pressure[:2])
+    has_observer_focus_signal = any(
+        (
+            observer_context.current_event,
+            observer_context.active_goals_summary,
+            observer_context.active_window,
+            observer_context.screen_context,
+        )
+    )
+
+    corroboration_sources: list[str] = []
+    if has_observer_focus_signal:
+        corroboration_sources.append("observer")
+    if goal_memory or memory_lines:
+        corroboration_sources.append("memory")
+    if current_session_history.strip():
+        corroboration_sources.append("current_session")
+    if recent_session_lines:
+        corroboration_sources.append("recent_sessions")
+    if active_projects:
+        corroboration_sources.append("projects")
+    if execution_pressure:
+        corroboration_sources.append("execution")
 
     return GuardianWorldModel(
         current_focus=current_focus,
         active_commitments=_dedupe(commitments),
         open_loops_or_pressure=_dedupe(open_loops),
         focus_alignment=_derive_focus_alignment(observer_context),
-        intervention_receptivity=_derive_intervention_receptivity(observer_context),
+        intervention_receptivity=_derive_intervention_receptivity(observer_context, learning_signal),
         active_blockers=active_blockers,
         next_up=next_up,
         dominant_thread=dominant_thread,
@@ -302,4 +351,5 @@ def build_guardian_world_model(
         collaborators=_dedupe(collaborators),
         recurring_obligations=_dedupe(recurring_obligations),
         project_timeline=project_timeline,
+        corroboration_sources=_dedupe(corroboration_sources),
     )

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -415,3 +415,127 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
     assert pack["blocked_skills"][0]["missing_tools"] == ["shell_execute"]
     assert any(action["type"] == "set_tool_policy" and action["mode"] == "full" for action in pack["recommended_actions"])
     assert not any(action["type"] == "activate_starter_pack" for action in pack["recommended_actions"])
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
+    blocked_preflight = {
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Research and save",
+        "availability": "blocked",
+        "blocking_reasons": ["missing tool: write_file"],
+        "recommended_actions": [{"type": "set_tool_policy", "label": "Set tool policy to full", "mode": "full"}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "parameter_schema": {"query": {"type": "string"}},
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "autorepair_actions": [{"type": "set_tool_policy", "label": "Set tool policy to full", "mode": "full"}],
+        "can_autorepair": True,
+        "ready": False,
+    }
+    ready_preflight = {
+        **blocked_preflight,
+        "availability": "ready",
+        "blocking_reasons": [],
+        "recommended_actions": [],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": True,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"workflows_ready": 1}},
+                {"summary": {"workflows_ready": 2}},
+                {"summary": {"workflows_ready": 2}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, ready_preflight],
+        ),
+        patch(
+            "src.api.capabilities._apply_safe_capability_action",
+            return_value={"type": "set_tool_policy", "mode": "full", "status": "applied"},
+        ) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()) as log_event,
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "workflow", "name": "web-brief-to-file"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "ready"
+    assert payload["ready"] is True
+    assert payload["availability"] == "ready"
+    assert payload["applied_actions"] == [{"type": "set_tool_policy", "mode": "full", "status": "applied"}]
+    assert payload["manual_actions"] == []
+    assert payload["command"] == blocked_preflight["command"]
+    assert payload["overview"]["summary"]["workflows_ready"] == 2
+    apply_action.assert_awaited_once()
+    log_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_can_apply_mcp_toggle_actions(client):
+    blocked_preflight = {
+        "target_type": "runbook",
+        "name": "starter-pack:research-briefing",
+        "label": "Research briefing",
+        "description": "Repair MCP dependency",
+        "availability": "blocked",
+        "blocking_reasons": ["mcp server browser disabled"],
+        "recommended_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph".',
+        "parameter_schema": {},
+        "risk_level": "medium",
+        "execution_boundaries": ["capability_activation"],
+        "autorepair_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
+        "can_autorepair": True,
+        "ready": False,
+    }
+    ready_preflight = {
+        **blocked_preflight,
+        "availability": "ready",
+        "blocking_reasons": [],
+        "recommended_actions": [],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": True,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"mcp_servers_ready": 0}},
+                {"summary": {"mcp_servers_ready": 1}},
+                {"summary": {"mcp_servers_ready": 1}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, ready_preflight],
+        ),
+        patch(
+            "src.api.capabilities._apply_safe_capability_action",
+            return_value={"type": "toggle_mcp_server", "name": "browser", "enabled": True, "status": "applied"},
+        ) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "runbook", "name": "starter-pack:research-briefing"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "ready"
+    assert payload["applied_actions"][0]["type"] == "toggle_mcp_server"
+    apply_action.assert_awaited_once()

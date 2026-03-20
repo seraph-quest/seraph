@@ -223,6 +223,59 @@ def _workflow_replay_recommended_actions(workflow_status: dict[str, Any] | None)
     return actions
 
 
+def _step_recovery_recommended_actions(
+    *,
+    step: dict[str, Any],
+    workflow_status: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    actions = _workflow_replay_recommended_actions(workflow_status)
+    step_tool = str(step.get("tool") or "")
+    missing_tools = workflow_status.get("missing_tools") if isinstance(workflow_status, dict) else []
+    if not isinstance(missing_tools, list):
+        missing_tools = []
+    step_requires_policy_repair = (
+        step_tool
+        and step_tool != "unknown"
+        and str(workflow_status.get("availability") or "") == "blocked"
+        and step_tool in {str(tool) for tool in missing_tools}
+    )
+    if step_requires_policy_repair:
+        current_tool_mode = get_current_tool_policy_mode()
+        suggested_mode = _recommended_tool_policy_mode(
+            current_mode=current_tool_mode,
+            blocked_reason=None,
+        )
+        if suggested_mode is not None:
+            actions.append({
+                "type": "set_tool_policy",
+                "label": f"Allow {step_tool}",
+                "mode": suggested_mode,
+            })
+    seen: set[tuple[str, str | None, str | None]] = set()
+    deduped: list[dict[str, Any]] = []
+    for action in actions:
+        key = (
+            str(action.get("type") or ""),
+            str(action.get("name")) if action.get("name") is not None else None,
+            str(action.get("mode")) if action.get("mode") is not None else None,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+    return deduped
+
+
+def _step_recovery_hint(step: dict[str, Any]) -> str | None:
+    step_tool = str(step.get("tool") or "step")
+    error_kind = str(step.get("error_kind") or "").strip()
+    error_summary = str(step.get("error_summary") or "").strip()
+    if error_kind or error_summary:
+        base = error_summary or error_kind.replace("_", " ")
+        return f"{step_tool} failed and needs repair before replay"
+    return f"Review {step_tool} inputs and retry this step"
+
+
 def _resume_checkpoint_label(*, approvals: list[dict[str, Any]], continued_error_steps: list[str]) -> str | None:
     if approvals:
         return "Approval gate"
@@ -252,7 +305,7 @@ def _timeline_entries_for_run(
         result_summary = str(step.get("result_summary") or "").strip()
         entries.append({
             "kind": f"workflow_step_{step_status}",
-            "at": run["updated_at"],
+            "at": step.get("completed_at") or step.get("started_at") or run["updated_at"],
             "summary": (
                 f"{step_id} ({step_tool}) {step_status.replace('_', ' ')}"
                 + (f" · {result_summary}" if result_summary else "")
@@ -261,6 +314,8 @@ def _timeline_entries_for_run(
             "step_tool": step_tool,
             "result_summary": result_summary,
             "error_kind": step.get("error_kind"),
+            "error_summary": step.get("error_summary"),
+            "duration_ms": step.get("duration_ms"),
         })
     for approval in approvals:
         entries.append({
@@ -426,6 +481,17 @@ async def _list_workflow_runs(
             ),
             "replay_recommended_actions": _workflow_replay_recommended_actions(workflow_status),
         })
+        step_records = run.get("step_records") or []
+        if isinstance(step_records, list):
+            for step in step_records:
+                if not isinstance(step, dict):
+                    continue
+                step["recovery_actions"] = _step_recovery_recommended_actions(
+                    step=step,
+                    workflow_status=workflow_status,
+                )
+                step["recovery_hint"] = _step_recovery_hint(step)
+                step["is_recoverable"] = bool(step["recovery_actions"])
         replay_allowed, replay_block_reason = _workflow_replay_policy(
             availability=str(run["availability"]),
             risk_level=str(run["risk_level"]),
@@ -482,6 +548,17 @@ async def _list_workflow_runs(
             ),
             "run_identity": f"{run.get('session_id') or 'global'}:{tool_name}:{run_fingerprint}",
             "timeline": _timeline_entries_for_run(run, approvals=approvals),
+            "failed_step_tool": (
+                next(
+                    (
+                        str(step.get("tool") or "")
+                        for step in run.get("step_records", []) or []
+                        if isinstance(step, dict)
+                        and str(step.get("id") or "") in set(run.get("continued_error_steps", []))
+                    ),
+                    None,
+                )
+            ),
         })
         completed.append(run)
 
@@ -515,6 +592,17 @@ async def _list_workflow_runs(
                 ),
                 "replay_recommended_actions": _workflow_replay_recommended_actions(workflow_status),
             })
+            step_records = run.get("step_records") or []
+            if isinstance(step_records, list):
+                for step in step_records:
+                    if not isinstance(step, dict):
+                        continue
+                    step["recovery_actions"] = _step_recovery_recommended_actions(
+                        step=step,
+                        workflow_status=workflow_status,
+                    )
+                    step["recovery_hint"] = _step_recovery_hint(step)
+                    step["is_recoverable"] = bool(step["recovery_actions"])
             replay_allowed, replay_block_reason = _workflow_replay_policy(
                 availability=str(run["availability"]),
                 risk_level=str(run["risk_level"]),
@@ -562,6 +650,17 @@ async def _list_workflow_runs(
                 ),
                 "run_identity": f"{run.get('session_id') or 'global'}:{run['tool_name']}:{run.get('run_fingerprint') or 'none'}",
                 "timeline": _timeline_entries_for_run(run, approvals=approvals),
+                "failed_step_tool": (
+                    next(
+                        (
+                            str(step.get("tool") or "")
+                            for step in run.get("step_records", []) or []
+                            if isinstance(step, dict)
+                            and str(step.get("id") or "") in set(run.get("continued_error_steps", []))
+                        ),
+                        None,
+                    )
+                ),
             })
             completed.append(run)
 
@@ -598,6 +697,12 @@ async def list_workflows():
             "approval_behavior": approval_behavior,
         })
     return {"workflows": workflows}
+
+
+@router.get("/workflows/diagnostics")
+async def workflow_diagnostics():
+    diagnostics = workflow_manager.get_diagnostics()
+    return diagnostics
 
 
 @router.put("/workflows/{name}")

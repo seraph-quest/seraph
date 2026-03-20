@@ -550,32 +550,142 @@ async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(cl
     assert any(action["type"] == "set_tool_policy" for action in run["replay_recommended_actions"])
     assert run["timeline"][1]["kind"] == "approval_pending"
 
-    def test_list_workflows_includes_policy_metadata(self, workflows_dir):
-        mgr = WorkflowManager()
-        mgr.init(workflows_dir)
 
-        workflows = mgr.list_workflows()
-        web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_does_not_suggest_tool_policy_for_unrelated_step_failures(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file degraded",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-error",
+                        "step_tools": ["web_search"],
+                        "step_records": [
+                            {
+                                "id": "search",
+                                "index": 1,
+                                "tool": "web_search",
+                                "status": "continued_error",
+                                "argument_keys": ["query"],
+                                "artifact_paths": [],
+                                "result_summary": "Error: upstream timeout",
+                                "error_kind": "TimeoutError",
+                                "error_summary": "upstream timeout while fetching results",
+                            }
+                        ],
+                        "artifact_paths": [],
+                        "continued_error_steps": ["search"],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {"run_fingerprint": "web-brief-error", "arguments": {"query": "seraph"}},
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {"query": {"type": "string", "description": "Search query"}},
+                    "enabled": True,
+                    "is_available": True,
+                    "availability": "ready",
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
 
-        assert set(web_brief["inputs"]) == {"query", "file_path"}
-        assert web_brief["policy_modes"] == ["balanced", "full"]
-        assert web_brief["execution_boundaries"] == ["external_read", "workspace_write"]
-        assert web_brief["risk_level"] == "medium"
-        assert web_brief["accepts_secret_refs"] is False
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    step = run["step_records"][0]
+    assert step["status"] == "continued_error"
+    assert not any(action["type"] == "set_tool_policy" for action in step["recovery_actions"])
 
-    def test_list_workflows_includes_runtime_availability(self, workflows_dir):
-        mgr = WorkflowManager()
-        mgr.init(workflows_dir)
 
-        workflows = mgr.list_workflows(
-            available_tool_names=["web_search"],
-            active_skill_names=[],
-        )
-        web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
+@pytest.mark.asyncio
+async def test_workflow_diagnostics_endpoint_exposes_load_errors(client):
+    with patch(
+        "src.api.workflows.workflow_manager.get_diagnostics",
+        return_value={
+            "loaded_count": 1,
+            "error_count": 2,
+            "workflows": [{"name": "web-brief-to-file"}],
+            "load_errors": [
+                {"file_path": "/tmp/broken.md", "message": "Workflow must define at least one step."},
+                {"file_path": "/tmp/other.md", "message": "Step tool not declared."},
+            ],
+        },
+    ):
+        response = await client.get("/api/workflows/diagnostics")
 
-        assert web_brief["is_available"] is False
-        assert web_brief["missing_tools"] == ["write_file"]
-        assert web_brief["missing_skills"] == []
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["loaded_count"] == 1
+    assert payload["error_count"] == 2
+    assert payload["workflows"][0]["name"] == "web-brief-to-file"
+    assert payload["load_errors"][0]["file_path"] == "/tmp/broken.md"
+    assert payload["load_errors"][0]["message"] == "Workflow must define at least one step."
+
+
+def test_list_workflows_includes_policy_metadata(workflows_dir):
+    mgr = WorkflowManager()
+    mgr.init(workflows_dir)
+
+    workflows = mgr.list_workflows()
+    web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
+
+    assert set(web_brief["inputs"]) == {"query", "file_path"}
+    assert web_brief["policy_modes"] == ["balanced", "full"]
+    assert web_brief["execution_boundaries"] == ["external_read", "workspace_write"]
+    assert web_brief["risk_level"] == "medium"
+    assert web_brief["accepts_secret_refs"] is False
+
+
+def test_list_workflows_includes_runtime_availability(workflows_dir):
+    mgr = WorkflowManager()
+    mgr.init(workflows_dir)
+
+    workflows = mgr.list_workflows(
+        available_tool_names=["web_search"],
+        active_skill_names=[],
+    )
+    web_brief = next(workflow for workflow in workflows if workflow["name"] == "web-brief-to-file")
+
+    assert web_brief["is_available"] is False
+    assert web_brief["missing_tools"] == ["write_file"]
+    assert web_brief["missing_skills"] == []
 
 
 class TestWorkflowApi:

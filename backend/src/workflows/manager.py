@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from smolagents import Tool
 
 from src.approval.repository import fingerprint_tool_call
 from src.plugins.registry import TOOL_METADATA
-from src.workflows.loader import Workflow, load_workflows
+from src.workflows.loader import Workflow, scan_workflows
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,10 @@ def _summarize_value_shape(value: Any) -> str:
     return type(value).__name__
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -159,6 +165,9 @@ class WorkflowTool(Tool):
             step_artifact_paths = _collect_artifact_paths(rendered_arguments)
             step_status = "succeeded"
             error_kind: str | None = None
+            error_summary: str | None = None
+            step_started_at = _utc_now_iso()
+            started = time.perf_counter()
             try:
                 result = tool(
                     **rendered_arguments,
@@ -171,6 +180,9 @@ class WorkflowTool(Tool):
                 continued_error_steps.append(step.id)
                 step_status = "continued_error"
                 error_kind = type(exc).__name__
+                error_summary = str(exc).strip()[:160] or error_kind
+            step_completed_at = _utc_now_iso()
+            duration_ms = int((time.perf_counter() - started) * 1000)
             context["steps"][step.id] = {
                 "tool": step.tool,
                 "arguments": rendered_arguments,
@@ -193,6 +205,10 @@ class WorkflowTool(Tool):
                 "artifact_paths": step_artifact_paths,
                 "result_summary": _summarize_value_shape(result),
                 "error_kind": error_kind,
+                "error_summary": error_summary,
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+                "duration_ms": duration_ms,
             })
 
         result_text = ""
@@ -262,6 +278,7 @@ class WorkflowTool(Tool):
 class WorkflowManager:
     def __init__(self) -> None:
         self._workflows: list[Workflow] = []
+        self._load_errors: list[dict[str, str]] = []
         self._workflows_dir: str = ""
         self._config_path: str = ""
         self._disabled: set[str] = set()
@@ -273,7 +290,7 @@ class WorkflowManager:
             "workflows-config.json",
         )
         self._load_config()
-        self._workflows = load_workflows(workflows_dir)
+        self._workflows, self._load_errors = scan_workflows(workflows_dir)
         self._apply_disabled()
         logger.info(
             "WorkflowManager initialized: %d workflows loaded",
@@ -372,9 +389,17 @@ class WorkflowManager:
 
     def reload(self) -> list[dict[str, Any]]:
         if self._workflows_dir:
-            self._workflows = load_workflows(self._workflows_dir)
+            self._workflows, self._load_errors = scan_workflows(self._workflows_dir)
             self._apply_disabled()
         return self.list_workflows()
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        return {
+            "workflows": self.list_workflows(),
+            "load_errors": list(self._load_errors),
+            "loaded_count": len(self._workflows),
+            "error_count": len(self._load_errors),
+        }
 
     def get_active_workflows(
         self,

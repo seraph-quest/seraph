@@ -160,6 +160,7 @@ def _world_model_status(world_model: GuardianWorldModel) -> str:
         world_model.current_focus != "No clear focus signal"
         and world_model.active_commitments
         and world_model.dominant_thread != "No dominant thread"
+        and len(world_model.corroboration_sources) >= 2
     ):
         return "grounded"
     if (
@@ -275,6 +276,7 @@ async def build_guardian_state(
     memory_requested = bool(query.strip())
     memory_results: list[dict[str, object]] = []
     memory_degraded = False
+    memory_buckets: dict[str, tuple[str, ...]] = {}
     if memory_requested:
         memory_results, memory_degraded = await asyncio.to_thread(search_with_status, query)
     memory_context = "\n".join(
@@ -282,6 +284,16 @@ async def build_guardian_state(
         for item in memory_results
         if isinstance(item.get("category"), str) and isinstance(item.get("text"), str)
     )
+    grouped_memory: dict[str, list[str]] = {}
+    for item in memory_results:
+        category = item.get("category")
+        text = item.get("text")
+        if not isinstance(category, str) or not isinstance(text, str):
+            continue
+        grouped_memory.setdefault(category, [])
+        if text not in grouped_memory[category]:
+            grouped_memory[category].append(text)
+    memory_buckets = {key: tuple(values) for key, values in grouped_memory.items()}
     world_model = build_guardian_world_model(
         observer_context=observer_context,
         memory_context=memory_context,
@@ -290,6 +302,8 @@ async def build_guardian_state(
         recent_intervention_feedback=recent_intervention_feedback,
         active_projects=active_projects,
         recent_execution_summary=recent_execution_summary,
+        memory_buckets=memory_buckets,
+        learning_signal=advisory_learning_signal,
     )
     world_model_status = _world_model_status(world_model)
     memory_status = (

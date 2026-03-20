@@ -34,25 +34,28 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The last delivery batch is now complete on this branch: village/editor retirement, execution hardening v7, workflow step debugging v1, cockpit density v2, capability bootstrap v1, provider explainability/budgets v1, extension debugging/authoring v1, world-model fusion v7, guardian-learning policy v7, and guardian behavioral evals v7 all landed together.
+- [x] The last delivery batch is now complete on this branch: execution hardening v8, workflow step debugging v2, cockpit density v3, capability bootstrap v2, provider explainability/budgets v2, extension debugging/authoring v2, native-channel expansion v4, world-model fusion v8, guardian-learning policy v8, and guardian behavioral evals v8 all landed together.
 - [x] The roadmap has now refreshed to a new next-10 batch rather than leaving the just-shipped batch as future work.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now `execution-safety-hardening-v8`, because cockpit leverage, workflow recovery, and capability bootstrap are now strong enough that stricter mutation boundaries and deeper step-level control are the sharpest remaining gaps.
-- [x] `retire-village-and-editor-v1`, `execution-safety-hardening-v7`, `workflow-step-debugging-and-recovery-v1`, `cockpit-density-and-live-operator-views-v2`, `capability-bootstrap-and-pack-install-v1`, `provider-policy-explainability-and-budgets-v1`, `extension-debugging-and-authoring-v1`, `world-model-memory-fusion-v7`, `guardian-learning-policy-v7`, and `guardian-behavioral-evals-v7` are now shipped on this branch.
+- [x] The next strategic focus is now `capability-pack-autoinstall-and-bootstrap-v3`, because Seraph already exposes meaningful capability and repair surfaces, but the biggest remaining leverage gain is making a fresh or partially blocked workspace feel powerful with less manual operator stitching.
+- [x] `execution-safety-hardening-v8`, `workflow-step-debugging-and-recovery-v2`, `cockpit-density-and-live-operator-views-v3`, `capability-bootstrap-and-pack-install-v2`, `provider-policy-explainability-and-budgets-v2`, `extension-debugging-and-authoring-v2`, `native-channel-expansion-v4`, `world-model-memory-fusion-v8`, `guardian-learning-policy-v8`, and `guardian-behavioral-evals-v8` are now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape
 
 - [x] dense guardian cockpit as the primary operator surface
 - [x] first clear capability discovery, activation, preflight, and repair for tools, skills, workflows, MCP surfaces, starter packs, installable catalog items, and runbooks from inside that cockpit
+- [x] bounded capability bootstrap that can apply safe install or repair actions for workflows, runbooks, and starter packs directly from the operator surface
 - [x] first browser reload and reconnect continuity for the active thread, with explicit fresh-thread semantics and background-activity badges
 - [x] explicit cross-surface thread model that links approvals, workflow runs, notifications, queued interventions, and recent interventions back to browser threads
+- [x] operator timeline routing summaries and native thread metadata that make live continuation state easier to inspect
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
 - [x] non-browser presence through a first coherent desktop surface, notifications, native reach, and action-card continuation payloads
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops
+- [x] workflow diagnostics with stored load errors, step timestamps and durations, error summaries, and recovery hints
 
 ## Shipped On `develop`
 
@@ -157,7 +160,7 @@ title: Seraph Development Status
 - [ ] richer provider selection policy beyond the shipped weighted scoring, required capability safeguards, tier guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
 - [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, strategist-learning continuity, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
 - [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
-- [ ] richer capability installation, recommendation, and recovery beyond the new starter-pack repair guidance, catalog-install, runbook preflight, and first policy-aware autorepair surfaces
+- [ ] richer capability installation, recommendation, and recovery beyond the new starter-pack repair guidance, catalog-install, runbook preflight, first policy-aware autorepair surfaces, and bounded bootstrap flow
 
 ### Guardian intelligence
 
@@ -180,7 +183,7 @@ title: Seraph Development Status
 
 - [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are deeper execution hardening, richer capability bootstrap and repair, stronger intervention learning beyond the new world-model plus timing/suppression/thread layer, broader native reach, and deeper step-level cockpit operation.
+- [ ] The biggest gaps against the reference systems are deeper execution hardening, fuller install-doctor/bootstrap depth, stronger intervention learning beyond the new world-model plus timing/suppression/thread layer, broader native reach, and deeper step-level or branch-level cockpit operation.
 - [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
 
 ## Workstream View

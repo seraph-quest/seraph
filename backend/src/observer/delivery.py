@@ -236,6 +236,9 @@ async def deliver_or_queue(
                         urgency=urgency,
                         surface="action_card" if learning_signal.escalation_bias == "prefer_async_native" else "notification",
                         session_id=session_id,
+                        thread_id=session_id,
+                        thread_source="session" if session_id else "ambient",
+                        continuation_mode="resume_thread" if session_id else "open_thread",
                         resume_message=f"Continue from this guardian intervention: {message.content}",
                     )
                     context_manager.record_native_notification(

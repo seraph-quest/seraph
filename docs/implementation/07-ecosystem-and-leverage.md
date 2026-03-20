@@ -25,6 +25,8 @@
 - [x] guided repair and install flows for blocked skills, workflows, tools, and MCP servers instead of only static blocked-state reasons
 - [x] policy-aware starter-pack repair guidance, live operator-feed status, saved runbook macros, and approval-aware workflow timeline actions in the cockpit
 - [x] capability preflight and autorepair payloads for workflows, starter packs, and runbooks before execution
+- [x] bounded capability bootstrap that can apply safe install/repair actions for workflows, runbooks, and starter packs from the cockpit
+- [x] workflow diagnostics that expose stored load errors plus richer step timing, error summaries, and recovery hints for extension debugging
 - [x] threaded operator timeline surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, and surfaced failures
 
 ## Working On Now
@@ -35,13 +37,13 @@
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships `capability-discovery-and-activation-v1`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, and `extension-debugging-and-recovery-v1`
 - [x] this workstream now also ships `capability-preflight-and-autorepair-v1`, `threaded-operator-timeline-v1`, and `workflow-runbooks-and-parameterized-replay-v1`
-- [x] this workstream now hands the queue forward to broader bootstrap flows, richer live operator control, deeper workflow-step debugging, and better extension authoring rather than first-pass visibility
+- [x] this workstream now hands the queue forward to fuller install-doctor/bootstrap depth, richer live operator control, branch/resume workflow recovery, and better extension authoring rather than first-pass visibility
 
 ## Still To Do On `develop`
 
-- [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, and installable catalog surfaces
-- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, replay guardrails, parameterized reruns, approval-aware recovery, and operator terminal
-- [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, and first debug metadata
+- [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, installable catalog surfaces, and bounded bootstrap flow
+- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, replay guardrails, parameterized reruns, approval-aware recovery, diagnostics endpoint, and operator terminal
+- [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, and first debug metadata
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 
 ## Non-Goals
@@ -60,4 +62,5 @@
 - [x] Seraph now has a first "available now / blocked now / enable, install, or repair next" surface instead of only starter-pack visibility
 - [x] Seraph now has a first live operator console for capability state, repair actions, saved runbooks, and workflow timeline recovery
 - [x] Seraph now has a first preflight/autorepair layer for workflows, starter packs, and runbooks instead of forcing blind execution attempts
+- [x] Seraph now has a first bounded bootstrap layer that can safely apply capability repair/install steps rather than only describing what must change
 - [ ] Seraph compounds capability through extensions and workflows in a way that is simple to operate

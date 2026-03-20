@@ -1755,8 +1755,21 @@ describe("CockpitView", () => {
       if (url.includes("/api/mcp/servers/github") && init?.method === "PUT") {
         return Promise.resolve(mockResponse({ status: "updated", name: "github" }));
       }
-      if (url.includes("/api/mcp/servers/github/test")) {
-        return Promise.resolve(mockResponse({ status: "ok", tool_count: 3, tools: ["list_prs", "create_issue", "read_repo"] }));
+      if (url.includes("/api/mcp/servers/validate")) {
+        return Promise.resolve(mockResponse({
+          valid: true,
+          name: "github",
+          url: "http://localhost:9010/mcp",
+          status: "ready_to_test",
+          issues: [],
+          warnings: [],
+          missing_env_vars: [],
+          enabled: true,
+          description: "GitHub MCP",
+          has_headers: true,
+          auth_hint: "Add a GitHub token",
+          existing: true,
+        }));
       }
       return Promise.resolve(mockResponse({}));
     });
@@ -1785,11 +1798,137 @@ describe("CockpitView", () => {
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/mcp/servers/github/test"),
-        expect.objectContaining({ method: "POST" }),
+        expect.stringContaining("/api/mcp/servers/validate"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"url":"http://localhost:9010/mcp"'),
+        }),
       ),
     );
-    await waitFor(() => expect(within(studio).getByText(/OK — 3 tools/i)).toBeInTheDocument());
+    await waitFor(() => expect(within(studio).getByText(/github config is ready to test/i)).toBeInTheDocument());
+  });
+
+  it("preserves the existing workflow file when saving studio drafts", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [{
+            name: "summarize-file",
+            tool_name: "workflow_summarize_file",
+            description: "Summarize an existing workspace file",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "defaults/workflows/custom-file.md",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "direct",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+            recommended_actions: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/workflows/summarize-file/source")) {
+        return Promise.resolve(mockResponse({ content: "name: summarize-file\nsummary: workflow draft" }));
+      }
+      if (url.includes("/api/workflows/save")) {
+        return Promise.resolve(mockResponse({ status: "saved", name: "renamed-workflow", file_name: "custom-file.md" }));
+      }
+      if (url.includes("/api/workflows/validate")) {
+        return Promise.resolve(mockResponse({ valid: true, issues: [], warnings: [] }));
+      }
+      if (url.includes("/api/capabilities/preflight?target_type=workflow&name=summarize-file")) {
+        return Promise.resolve(mockResponse({
+          target_type: "workflow",
+          name: "summarize-file",
+          label: "summarize-file",
+          description: "Summarize an existing workspace file",
+          availability: "ready",
+          blocking_reasons: [],
+          recommended_actions: [],
+          autorepair_actions: [],
+          can_autorepair: false,
+          ready: true,
+        }));
+      }
+      if (url.includes("/api/workflows/diagnostics")) {
+        return Promise.resolve(mockResponse({ loaded_count: 1, error_count: 0, workflows: [], load_errors: [] }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    const draftInput = await within(studio).findByLabelText("authoring draft");
+    fireEvent.change(draftInput, { target: { value: "name: renamed-workflow\nsummary: workflow draft" } });
+    fireEvent.click(within(studio).getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => {
+      const saveCall = fetchMock.mock.calls.find(
+        ([input]) => String(input).includes("/api/workflows/save"),
+      );
+      expect(saveCall).toBeDefined();
+      const init = saveCall?.[1] as RequestInit | undefined;
+      const body = JSON.parse(String(init?.body ?? "{}")) as { file_name?: string };
+      expect(body.file_name).toBe("custom-file.md");
+    });
   });
 
   it("keeps successful cockpit surfaces visible when one refresh endpoint fails", async () => {

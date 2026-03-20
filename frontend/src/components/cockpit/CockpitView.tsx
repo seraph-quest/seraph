@@ -128,6 +128,7 @@ interface McpServerInfo {
   enabled: boolean;
   url?: string;
   description?: string;
+  headers?: Record<string, string> | null;
   connected?: boolean;
   tool_count?: number;
   status?: "disconnected" | "connected" | "auth_required" | "error";
@@ -429,6 +430,15 @@ function shortIdentifier(value: string | null | undefined, size = 8): string | n
   return value.length > size ? value.slice(0, size) : value;
 }
 
+function managedFileName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const segments = trimmed.split(/[\\/]/).filter(Boolean);
+  const candidate = segments[segments.length - 1];
+  return candidate && candidate.trim() ? candidate.trim() : null;
+}
+
 function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
   return {
     entityType: "workflow_definition",
@@ -484,6 +494,7 @@ function buildMcpEntity(server: McpServerInfo): OperatorEntity {
       tool_count: server.tool_count ?? 0,
       url: server.url ?? "",
       description: server.description ?? "",
+      headers: server.headers ?? null,
       auth_hint: server.auth_hint ?? "",
       status_message: server.status_message ?? "",
       enabled: server.enabled,
@@ -1570,6 +1581,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!selectedStudioEntry) return;
     const entry = selectedStudioEntry;
     const entryId = entry.id;
+    const fileName = managedFileName(entry.entity.details.file_path);
     const requestId = ++studioValidationRequestRef.current;
     setStudioBusy("validation");
     setStudioStatus(`Validating ${entry.name}...`);
@@ -1579,7 +1591,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           fetch(`${API_URL}/api/workflows/validate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: studioDraft }),
+            body: JSON.stringify({ content: studioDraft, file_name: fileName }),
           }),
           fetch(
             `${API_URL}/api/capabilities/preflight?target_type=workflow&name=${encodeURIComponent(entry.name)}`,
@@ -1612,7 +1624,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         const response = await fetch(`${API_URL}/api/skills/validate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: studioDraft }),
+          body: JSON.stringify({ content: studioDraft, file_name: fileName }),
         });
         const payload = await response.json().catch(() => null);
         if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
@@ -1630,8 +1642,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
 
       if (entry.entityType === "mcp") {
-        const response = await fetch(`${API_URL}/api/mcp/servers/${encodeURIComponent(entry.name)}/test`, {
+        const response = await fetch(`${API_URL}/api/mcp/servers/validate`, {
           method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: entry.name,
+            url: studioMcpUrl.trim(),
+            description: studioMcpDescription.trim(),
+            enabled: Boolean(entry.entity.details.enabled ?? true),
+            headers:
+              entry.entity.details.headers && typeof entry.entity.details.headers === "object"
+                ? entry.entity.details.headers
+                : null,
+            auth_hint:
+              typeof entry.entity.details.auth_hint === "string"
+                ? entry.entity.details.auth_hint
+                : "",
+          }),
         });
         const payload = await response.json().catch(() => null);
         if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
@@ -1640,14 +1667,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           setStudioStatus(
             typeof payload?.detail === "string" ? payload.detail : `${entry.name} test failed`,
           );
-        } else {
-          const toolCount = typeof payload?.tool_count === "number" ? payload.tool_count : null;
+        } else if (payload?.valid === false) {
+          const issues = Array.isArray(payload?.issues)
+            ? payload.issues.filter((item: unknown): item is string => typeof item === "string")
+            : [];
           setStudioStatus(
-            toolCount !== null
-              ? `OK — ${toolCount} tools`
-              : typeof payload?.message === "string"
-                ? payload.message
-                : `${entry.name}: ${String(payload?.status ?? "validation")}`,
+            issues.length > 0
+              ? issues[0]
+              : `${entry.name} config has validation issues`,
+          );
+        } else {
+          const warnings = Array.isArray(payload?.warnings)
+            ? payload.warnings.filter((item: unknown): item is string => typeof item === "string")
+            : [];
+          setStudioStatus(
+            payload?.status === "auth_required"
+              ? `${entry.name} config is valid but still needs auth`
+              : warnings.length > 0
+                ? warnings[0]
+                : `${entry.name} config is ready to test`,
           );
         }
         return;
@@ -1670,6 +1708,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     const entry = selectedStudioEntry;
     const entryId = entry.id;
+    const fileName = managedFileName(entry.entity.details.file_path);
     const requestId = ++studioSaveRequestRef.current;
     setStudioBusy("save");
     setStudioStatus(`Saving ${entry.name}...`);
@@ -1682,6 +1721,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           content: studioDraft,
+          file_name: fileName,
         }),
       });
       const payload = await response.json().catch(() => null);

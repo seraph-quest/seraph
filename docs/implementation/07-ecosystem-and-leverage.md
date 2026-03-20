@@ -28,6 +28,7 @@
 - [x] bounded capability bootstrap that can apply safe install/repair actions for workflows, runbooks, and starter packs from the cockpit
 - [x] workflow diagnostics that expose stored load errors plus richer step timing, error summaries, and recovery hints for extension debugging
 - [x] threaded operator timeline surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, and surfaced failures
+- [x] separate activity-ledger surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, surfaced failures, and attributed LLM spend instead of leaving autonomous work opaque
 - [x] cockpit-native extension studio for workflows, skills, and MCP configs with validation, diagnostics, save flows, and repair handoff
 - [x] first workflow branch/resume control with checkpoint candidates, lineage metadata, approval-gated resume plans, and resume drafts tied to existing inputs
 

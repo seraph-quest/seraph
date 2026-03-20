@@ -165,7 +165,7 @@ interface ToolInfo {
 }
 
 interface OperatorEntity {
-  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "operator_timeline_item";
+  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "activity_item";
   name: string;
   meta: string;
   summary: string;
@@ -344,9 +344,28 @@ interface CapabilityOverview {
   runbooks: RunbookInfo[];
 }
 
-interface OperatorTimelineEntry {
+interface ActivityLedgerSummary {
+  window_hours: number;
+  started_at: string;
+  total_items: number;
+  pending_approvals: number;
+  failure_count: number;
+  llm_call_count: number;
+  llm_cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  user_triggered_llm_calls: number;
+  autonomous_llm_calls: number;
+  categories: Record<string, number>;
+}
+
+type ActivityLedgerCategory = "llm" | "workflow" | "approval" | "guardian" | "agent" | "system";
+type ActivityLedgerFilter = "all" | ActivityLedgerCategory;
+
+interface ActivityLedgerEntry {
   id: string;
-  kind: "workflow_run" | "approval" | "notification" | "queued_insight" | "intervention" | "audit" | "routing";
+  kind: string;
+  category: ActivityLedgerCategory;
   title: string;
   summary: string;
   status: string;
@@ -360,6 +379,12 @@ interface OperatorTimelineEntry {
   replay_block_reason?: string | null;
   recommended_actions?: CapabilityAction[];
   source: string;
+  model?: string | null;
+  provider?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  cost_usd?: number | null;
+  duration_ms?: number | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -831,8 +856,93 @@ function replayBlockCopy(reason: string | null | undefined): string {
   }
 }
 
-function timelineStatusLabel(value: OperatorTimelineEntry): string {
+function activityStatusLabel(value: ActivityLedgerEntry): string {
   return `${value.kind.replace(/_/g, " ")} · ${value.status.replace(/_/g, " ")}`;
+}
+
+function activityCategoryLabel(value: ActivityLedgerFilter): string {
+  return value === "all" ? "All" : value.replace(/_/g, " ");
+}
+
+function formatUsd(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return null;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function _modelLabelForRow(model: string): string {
+  return model.replace(/^openrouter\//, "").replace(/^anthropic\//, "").replace(/[_/-]+/g, " ");
+}
+
+function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSummary {
+  const llmItems = items.filter((item) => item.kind === "llm_call");
+  return {
+    window_hours: 24,
+    started_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    total_items: items.length,
+    pending_approvals: items.filter((item) => item.kind === "approval").length,
+    failure_count: items.filter((item) => ["failed", "timed_out"].includes(item.status)).length,
+    llm_call_count: llmItems.length,
+    llm_cost_usd: llmItems.reduce((sum, item) => sum + (item.cost_usd ?? 0), 0),
+    input_tokens: llmItems.reduce((sum, item) => sum + (item.prompt_tokens ?? 0), 0),
+    output_tokens: llmItems.reduce((sum, item) => sum + (item.completion_tokens ?? 0), 0),
+    user_triggered_llm_calls: llmItems.filter((item) => ["rest_chat", "websocket_chat"].includes(item.source)).length,
+    autonomous_llm_calls: llmItems.filter((item) => !["rest_chat", "websocket_chat"].includes(item.source)).length,
+    categories: {
+      llm: items.filter((item) => item.category === "llm").length,
+      workflow: items.filter((item) => item.category === "workflow").length,
+      approval: items.filter((item) => item.category === "approval").length,
+      guardian: items.filter((item) => item.category === "guardian").length,
+      agent: items.filter((item) => item.category === "agent").length,
+      system: items.filter((item) => item.category === "system").length,
+    },
+  };
+}
+
+function normalizeActivityLedgerEntry(raw: Record<string, unknown>): ActivityLedgerEntry {
+  const kind = typeof raw.kind === "string" ? raw.kind : "system";
+  const category = (typeof raw.category === "string" ? raw.category : (
+    kind === "llm_call" || kind === "routing"
+      ? "llm"
+      : kind === "workflow_run"
+        ? "workflow"
+        : kind === "approval"
+          ? "approval"
+          : ["notification", "queued_insight", "intervention"].includes(kind)
+            ? "guardian"
+            : kind === "agent_run"
+              ? "agent"
+              : "system"
+  )) as ActivityLedgerCategory;
+
+  return {
+    id: typeof raw.id === "string" ? raw.id : crypto.randomUUID(),
+    kind,
+    category,
+    title: typeof raw.title === "string" ? raw.title : kind.replace(/_/g, " "),
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    status: typeof raw.status === "string" ? raw.status : "unknown",
+    created_at: typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString(),
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : (typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString()),
+    thread_id: typeof raw.thread_id === "string" ? raw.thread_id : null,
+    thread_label: typeof raw.thread_label === "string" ? raw.thread_label : null,
+    continue_message: typeof raw.continue_message === "string" ? raw.continue_message : null,
+    replay_draft: typeof raw.replay_draft === "string" ? raw.replay_draft : null,
+    replay_allowed: typeof raw.replay_allowed === "boolean" ? raw.replay_allowed : false,
+    replay_block_reason: typeof raw.replay_block_reason === "string" ? raw.replay_block_reason : null,
+    recommended_actions: readActionList(raw.recommended_actions),
+    source: typeof raw.source === "string" ? raw.source : "activity",
+    model: typeof raw.model === "string" ? raw.model : null,
+    provider: typeof raw.provider === "string" ? raw.provider : null,
+    prompt_tokens: typeof raw.prompt_tokens === "number" ? raw.prompt_tokens : null,
+    completion_tokens: typeof raw.completion_tokens === "number" ? raw.completion_tokens : null,
+    cost_usd: typeof raw.cost_usd === "number" ? raw.cost_usd : null,
+    duration_ms: typeof raw.duration_ms === "number" ? raw.duration_ms : null,
+    metadata: (raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata))
+      ? raw.metadata as Record<string, unknown>
+      : {},
+  };
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
@@ -852,7 +962,7 @@ const COCKPIT_WINDOW_HINTS = {
   outputs: "Recent workspace artifacts produced in the current audit window.",
   approvals: "Pending approvals block workflow and tool execution until you inspect or approve them.",
   guardianState: "The live synthesis Seraph is using for timing, confidence, and next actions.",
-  operatorTimeline: "A thread-aware feed of approvals, interventions, notifications, and surfaced failures.",
+  operatorTimeline: "Browse what Seraph did, why it did it, and what spent budget across user, guardian, workflow, and system activity.",
   interventions: "Recent proactive nudges, delivery outcomes, and feedback signal.",
   workflowTimeline: "Inspect runs, branch from failures, and resume repaired steps.",
   audit: "Durable tool, memory, workflow, and integration events for the current window.",
@@ -863,6 +973,16 @@ const COCKPIT_WINDOW_HINTS = {
   desktopShell: "Native continuity, queued notifications, and browser-closed follow-up state.",
   operatorTerminal: "Run packs, workflows, macros, and repair actions from one dense control surface.",
 } as const;
+
+const ACTIVITY_LEDGER_FILTERS: ActivityLedgerFilter[] = [
+  "all",
+  "llm",
+  "workflow",
+  "approval",
+  "guardian",
+  "agent",
+  "system",
+];
 
 function CockpitWorkspaceWindow({
   panelId,
@@ -934,7 +1054,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
-  const [operatorTimeline, setOperatorTimeline] = useState<OperatorTimelineEntry[]>([]);
+  const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
+  const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
+  const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -1037,7 +1159,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       approvalsResult,
       continuityResult,
       capabilitiesResult,
-      operatorTimelineResult,
+      activityLedgerResult,
       workflowRunsResult,
       toolModeResult,
       mcpModeResult,
@@ -1049,7 +1171,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
       fetchJson(`${API_URL}/api/observer/continuity`),
       fetchJson(`${API_URL}/api/capabilities/overview`),
-      fetchJson(`${API_URL}/api/operator/timeline?limit=12${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
       fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
@@ -1091,9 +1213,45 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
       setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
     }
-    if (operatorTimelineResult.ok && operatorTimelineResult.payload && typeof operatorTimelineResult.payload === "object") {
-      const items = (operatorTimelineResult.payload as { items?: unknown }).items;
-      setOperatorTimeline(Array.isArray(items) ? items : []);
+    if (
+      activityLedgerResult.ok
+      && activityLedgerResult.payload
+      && typeof activityLedgerResult.payload === "object"
+      && Array.isArray((activityLedgerResult.payload as { items?: unknown }).items)
+    ) {
+      const payload = activityLedgerResult.payload as { items?: unknown; summary?: unknown };
+      const items = Array.isArray(payload.items)
+        ? payload.items.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item)
+          ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+          : []))
+        : [];
+      const derivedSummary = deriveActivitySummary(items);
+      setActivityLedger(
+        items,
+      );
+      setActivitySummary(
+        payload.summary && typeof payload.summary === "object"
+          ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
+          : derivedSummary,
+      );
+    } else {
+      const fallbackTimelineResult = await fetchJson(
+        `${API_URL}/api/operator/timeline?limit=16${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      );
+      if (fallbackTimelineResult.ok && fallbackTimelineResult.payload && typeof fallbackTimelineResult.payload === "object") {
+        const items = Array.isArray((fallbackTimelineResult.payload as { items?: unknown }).items)
+          ? ((fallbackTimelineResult.payload as { items?: unknown }).items as unknown[]).flatMap((item) => (
+            item && typeof item === "object" && !Array.isArray(item)
+              ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+              : []
+          ))
+          : [];
+        setActivityLedger(items);
+        setActivitySummary(deriveActivitySummary(items));
+      } else {
+        setActivityLedger([]);
+        setActivitySummary(deriveActivitySummary([]));
+      }
     }
     if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
       const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
@@ -1277,9 +1435,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => runbooks,
     [runbooks],
   );
-  const recentOperatorTimeline = useMemo(
-    () => operatorTimeline.slice(0, 16),
-    [operatorTimeline],
+  const visibleActivityLedger = useMemo(
+    () => (activityFilter === "all"
+      ? activityLedger
+      : activityLedger.filter((item) => item.category === activityFilter)),
+    [activityFilter, activityLedger],
   );
   const seraphPresenceSnapshot = useMemo(
     () => ({
@@ -3220,16 +3380,43 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         {activeLayout.sections.timeline && (
           <CockpitWorkspaceWindow
             panelId="operator_timeline_pane"
-            title="Operator timeline"
-            meta={`${recentOperatorTimeline.length} live`}
+            title="Activity ledger"
+            meta={`${visibleActivityLedger.length} items · ${activitySummary?.llm_call_count ?? 0} llm`}
             hint={COCKPIT_WINDOW_HINTS.operatorTimeline}
             showHint={cockpitHintsEnabled}
             minWidth={360}
             minHeight={220}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
+              <div className="cockpit-ledger-toolbar">
+                <div className="cockpit-ledger-summary">
+                  <span className="cockpit-ledger-badge">
+                    spend {formatUsd(activitySummary?.llm_cost_usd ?? 0) ?? "$0.0000"}
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.user_triggered_llm_calls ?? 0} user llm
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.autonomous_llm_calls ?? 0} auto llm
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.failure_count ?? 0} failures
+                  </span>
+                </div>
+                <div className="cockpit-ledger-filter-row">
+                  {ACTIVITY_LEDGER_FILTERS.map((filter) => (
+                    <button
+                      key={filter}
+                      className={`cockpit-ledger-filter ${activityFilter === filter ? "active" : ""}`}
+                      onClick={() => setActivityFilter(filter)}
+                    >
+                      {activityCategoryLabel(filter)}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="cockpit-list">
-                {recentOperatorTimeline.map((item) => (
+                {visibleActivityLedger.map((item) => (
                   <div key={item.id} className="cockpit-row">
                     <button
                       className="cockpit-row-button"
@@ -3237,17 +3424,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         setSelectedInspector({
                           kind: "operator",
                           entity: {
-                            entityType: "operator_timeline_item",
+                            entityType: "activity_item",
                             name: item.title,
-                            meta: timelineStatusLabel(item),
+                            meta: activityStatusLabel(item),
                             summary: item.summary,
                             details: {
+                              category: item.category,
                               source: item.source,
                               thread: item.thread_label ?? item.thread_id ?? "ambient",
                               status: item.status,
                               continue_message: item.continue_message ?? "",
                               replay_allowed: item.replay_allowed ?? false,
                               replay_block_reason: item.replay_block_reason ?? "none",
+                              model: item.model ?? "n/a",
+                              provider: item.provider ?? "n/a",
+                              prompt_tokens: item.prompt_tokens ?? 0,
+                              completion_tokens: item.completion_tokens ?? 0,
+                              cost_usd: item.cost_usd ?? 0,
+                              duration_ms: item.duration_ms ?? 0,
                               metadata: item.metadata ?? {},
                             },
                           },
@@ -3260,13 +3454,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                       <div className="cockpit-row-body">{item.summary}</div>
                       <div className="cockpit-row-meta">
-                        {timelineStatusLabel(item)}
+                        {activityStatusLabel(item)}
                         {item.thread_label ? ` · ${item.thread_label}` : ""}
+                      </div>
+                      <div className="cockpit-row-meta">
+                        {item.model ? _modelLabelForRow(item.model) : null}
+                        {item.provider ? ` · ${item.provider}` : ""}
+                        {typeof item.duration_ms === "number" && item.duration_ms > 0 ? ` · ${Math.round(item.duration_ms)}ms` : ""}
+                        {formatUsd(item.cost_usd) ? ` · ${formatUsd(item.cost_usd)}` : ""}
+                        {typeof item.prompt_tokens === "number" && typeof item.completion_tokens === "number"
+                          && item.prompt_tokens + item.completion_tokens > 0
+                          ? ` · ${item.prompt_tokens + item.completion_tokens} tok`
+                          : ""}
                       </div>
                       {item.kind === "routing" && item.metadata && (
                         <>
                           <div className="cockpit-row-meta">
-                            model {String(item.metadata.selected_model ?? "unknown")}
+                            model {String(item.metadata.selected_model ?? item.model ?? "unknown")}
                             {item.metadata.selected_source ? ` · ${String(item.metadata.selected_source)}` : ""}
                             {item.metadata.reroute_cause ? ` · ${String(item.metadata.reroute_cause)}` : ""}
                             {item.metadata.max_budget_class ? ` · budget ${String(item.metadata.max_budget_class)}` : ""}
@@ -3321,8 +3525,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </div>
                   </div>
                 ))}
-                {recentOperatorTimeline.length === 0 && (
-                  <div className="cockpit-empty">No threaded operator timeline entries yet.</div>
+                {visibleActivityLedger.length === 0 && (
+                  <div className="cockpit-empty">No recent activity ledger entries for this filter.</div>
                 )}
               </div>
             </section>

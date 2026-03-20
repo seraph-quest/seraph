@@ -1313,6 +1313,50 @@ body {
   cursor: pointer;
 }
 
+.cockpit-ledger-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 4px;
+  border-bottom: 1px solid rgba(141, 226, 255, 0.08);
+  background: rgba(10, 25, 38, 0.28);
+}
+
+.cockpit-ledger-summary,
+.cockpit-ledger-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cockpit-ledger-badge,
+.cockpit-ledger-filter {
+  border: 1px solid rgba(141, 226, 255, 0.12);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cockpit-ledger-badge {
+  color: var(--cockpit-muted);
+  background: rgba(8, 20, 31, 0.52);
+}
+
+.cockpit-ledger-filter {
+  background: rgba(10, 26, 40, 0.34);
+  color: var(--cockpit-text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.cockpit-ledger-filter:hover,
+.cockpit-ledger-filter.active {
+  border-color: var(--cockpit-state-selected-border);
+  background: rgba(16, 44, 67, 0.56);
+}
+
 .cockpit-sublist-button {
   display: flex;
   align-items: center;

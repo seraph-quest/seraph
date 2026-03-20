@@ -1296,8 +1296,16 @@ body {
 }
 
 .cockpit-presence-panel {
+  display: flex;
+  min-height: 0;
   padding: 0;
   background: transparent;
+  overflow: hidden;
+}
+
+.cockpit-presence-panel > * {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .cockpit-prime-shell {

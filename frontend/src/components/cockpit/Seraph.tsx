@@ -1,14 +1,28 @@
 // @ts-nocheck
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 
 export type SeraphState = 'idle' | 'thinking' | 'tool_use' | 'approval_wait' | 'error' | 'offline';
 
-interface SeraphProps {
-  state: SeraphState;
+export interface SeraphTelemetryEntry {
+  label: string;
+  value: string;
+  hint?: string;
 }
 
-const Seraph: React.FC<SeraphProps> = ({ state }) => {
+interface SeraphProps {
+  state: SeraphState;
+  detail?: string;
+  telemetry?: SeraphTelemetryEntry[];
+  statusLabel?: string;
+}
+
+const Seraph: React.FC<SeraphProps> = ({
+  state,
+  detail,
+  telemetry,
+  statusLabel,
+}) => {
   const [frame, setFrame] = useState(0);
 
   useEffect(() => {
@@ -27,6 +41,15 @@ const Seraph: React.FC<SeraphProps> = ({ state }) => {
     offline: 'text-zinc-800',
   };
 
+  const barColorMap = {
+    idle: '#f59e0b',
+    thinking: '#22d3ee',
+    tool_use: '#34d399',
+    approval_wait: '#fb923c',
+    error: '#ef4444',
+    offline: '#3f3f46',
+  };
+
   const glowMap = {
     idle: 'rgba(245, 158, 11, 0.3)',
     thinking: 'rgba(34, 211, 238, 0.3)',
@@ -35,6 +58,26 @@ const Seraph: React.FC<SeraphProps> = ({ state }) => {
     error: 'rgba(239, 68, 68, 0.3)',
     offline: 'rgba(39, 39, 42, 0.1)',
   };
+
+  const detailMap: Record<SeraphState, string> = {
+    idle: 'Guardian linked and awaiting a directive.',
+    thinking: 'Inference is active across the current thread.',
+    tool_use: 'A tool or workflow step is running now.',
+    approval_wait: 'Execution is paused behind approval.',
+    error: 'Runtime degraded. Operator attention recommended.',
+    offline: 'Cockpit transport is offline.',
+  };
+
+  const telemetryFallback: SeraphTelemetryEntry[] = [
+    { label: 'Context', value: state === 'error' ? 'DEGRADED' : 'GOOD', hint: 'runtime fidelity' },
+    { label: 'Queue', value: state === 'approval_wait' ? '01' : 'CLEAR', hint: 'live queue' },
+  ];
+
+  const glow = glowMap[state];
+  const barColor = barColorMap[state];
+  const displayTelemetry = (telemetry?.length ? telemetry : telemetryFallback).slice(0, 2);
+  const displayDetail = detail ?? detailMap[state];
+  const displayLabel = statusLabel ?? state.toUpperCase().replace('_', ' ');
 
   const Wing = ({ side, index, state }: { side: 'left' | 'right', index: number, state: SeraphState }) => {
     const isLeft = side === 'left';
@@ -187,68 +230,71 @@ const Seraph: React.FC<SeraphProps> = ({ state }) => {
   };
 
   return (
-    <div className="relative w-full h-full bg-[#050505] rounded-2xl border border-white/10 overflow-hidden flex flex-col items-center justify-center scanline">
-      {/* Background Blueprint Grid */}
-      <div className="absolute inset-0 pointer-events-none opacity-[0.05]" 
-           style={{ 
-             backgroundImage: `radial-gradient(circle at 2px 2px, rgba(255,255,255,0.15) 1px, transparent 0)`,
-             backgroundSize: '32px 32px' 
-           }}>
-      </div>
+    <div
+      className="relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-[#05090d] text-[#dbefff]"
+      style={{
+        boxShadow: `inset 0 1px 0 rgba(255,255,255,0.02), 0 0 24px ${glow}`,
+      }}
+    >
+      <div className="absolute inset-0 opacity-30 pointer-events-none" style={{
+        backgroundImage:
+          'linear-gradient(rgba(141,226,255,0.018) 1px, transparent 1px), linear-gradient(90deg, rgba(141,226,255,0.018) 1px, transparent 1px)',
+        backgroundSize: '28px 28px',
+      }} />
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{ background: `radial-gradient(circle at 50% 48%, ${glow}, transparent 46%)` }}
+      />
+      <div className="cockpit-prime-scanline" />
 
-      {/* Entity Display */}
-      <div className="relative w-full max-w-2xl aspect-video flex items-center justify-center float">
-        <svg viewBox="-300 -200 600 400" className={`w-full h-full transition-colors duration-700 ${colorMap[state]}`}>
-          {/* Wings */}
-          {[0, 1, 2].map(i => (
-            <React.Fragment key={i}>
-              <Wing side="left" index={i} state={state} />
-              <Wing side="right" index={i} state={state} />
-            </React.Fragment>
-          ))}
-        </svg>
+      <div className="relative flex min-h-0 flex-1 items-center justify-center px-3 pb-3 pt-3">
+        <div className="relative w-full max-w-[760px] aspect-video flex items-center justify-center float">
+          <svg viewBox="-300 -200 600 400" className={`w-full h-full transition-colors duration-700 ${colorMap[state]}`}>
+            {[0, 1, 2].map(i => (
+              <React.Fragment key={i}>
+                <Wing side="left" index={i} state={state} />
+                <Wing side="right" index={i} state={state} />
+              </React.Fragment>
+            ))}
+          </svg>
 
-        {/* Central Core */}
-        <div className="absolute">
-          <Core />
+          <div className="absolute">
+            <Core />
+          </div>
         </div>
       </div>
 
-      {/* Bottom Technical Overlay */}
-      <div className="absolute bottom-0 left-0 w-full p-6 flex justify-between items-end glass-panel border-t-0">
-        <div className="space-y-1">
-          <div className="text-[9px] text-white/30 uppercase tracking-[0.3em]">Neural Protocol</div>
-          <div className={`text-lg font-bold tracking-tighter glow-text ${colorMap[state]}`}>
-            {state.toUpperCase().replace('_', ' ')}
+      <div className="border-t border-[#173547] bg-[linear-gradient(180deg,rgba(7,19,29,0.9),rgba(6,16,25,0.97))] px-4 py-2.5 backdrop-blur-xl">
+        <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
+          <div className="min-w-0 flex-1">
+            <div className={`text-[18px] font-bold uppercase tracking-[-0.04em] glow-text ${colorMap[state]}`}>
+              {displayLabel}
+            </div>
+            <div className="mt-1 flex gap-1.5">
+              {Array.from({ length: 10 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="h-1 w-3 rounded-full transition-all duration-300"
+                  style={{
+                    background: i < (frame % 10) ? barColor : 'rgba(255,255,255,0.05)',
+                    boxShadow: i < (frame % 10) ? `0 0 8px ${barColor}` : 'none',
+                  }}
+                />
+              ))}
+            </div>
+            <div className="mt-1.5 max-w-[420px] text-[10px] leading-5 text-[#7a98ad]">{displayDetail}</div>
           </div>
-          <div className="flex gap-2 mt-2">
-            {Array.from({ length: 10 }).map((_, i) => (
-              <div 
-                key={i} 
-                className={`h-1 w-3 rounded-full transition-all duration-300 ${
-                  i < (frame % 10) ? colorMap[state].replace('text-', 'bg-') : 'bg-white/5'
-                }`} 
-              />
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            {displayTelemetry.map((entry) => (
+              <div key={entry.label} className="min-w-[88px] border-l border-[#1f4358] pl-3">
+                <div className="text-[8px] uppercase tracking-[0.22em] text-[#55758a]">{entry.label}</div>
+                <div className="mt-0.5 text-[13px] font-bold tracking-[-0.03em] text-[#e3f4ff]">{entry.value}</div>
+                <div className="text-[8px] uppercase tracking-[0.1em] text-[#6d8ba0]">{entry.hint ?? 'live'}</div>
+              </div>
             ))}
           </div>
         </div>
-        <div className="text-right space-y-1">
-          <div className="text-[9px] text-white/30 uppercase tracking-[0.3em]">System ID</div>
-          <div className="text-xs text-white/60 font-mono">SERAPH_PRIME_v2.5</div>
-          <div className="text-[9px] text-white/20 font-mono mt-1">
-            {new Date().toISOString().split('T')[1].slice(0, 8)} // {frame.toString().padStart(4, '0')}
-          </div>
-        </div>
-      </div>
-
-      {/* HUD Elements */}
-      <div className="absolute top-6 left-6 flex flex-col gap-1">
-        <div className="w-12 h-[1px] bg-white/20" />
-        <div className="text-[8px] text-white/20 uppercase tracking-widest">A_LINK: OK</div>
-      </div>
-      <div className="absolute top-6 right-6 flex flex-col items-end gap-1">
-        <div className="w-12 h-[1px] bg-white/20" />
-        <div className="text-[8px] text-white/20 uppercase tracking-widest">RES_SYNC: 99.4%</div>
       </div>
     </div>
   );

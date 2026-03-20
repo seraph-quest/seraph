@@ -859,7 +859,7 @@ const COCKPIT_WINDOW_HINTS = {
   audit: "Durable tool, memory, workflow, and integration events for the current window.",
   trace: "In-flight routing, tool, and error activity while work is happening.",
   inspector: "Select a run, approval, intervention, or event to inspect details and recovery actions.",
-  presence: "A runtime-driven sentinel glyph showing whether Seraph is idle, thinking, using tools, waiting on approval, or faulted.",
+  presence: "Live guardian state mirror.",
   conversation: "Latest replies, pending drafts, and quick thread context for the current session.",
   desktopShell: "Native continuity, queued notifications, and browser-closed follow-up state.",
   operatorTerminal: "Run packs, workflows, macros, and repair actions from one dense control surface.",
@@ -3653,7 +3653,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               title="Seraph presence"
               meta={connectionStatus === "connected" ? "runtime linked" : connectionLabel}
               hint={COCKPIT_WINDOW_HINTS.presence}
-              showHint={cockpitHintsEnabled}
+              showHint={false}
               minWidth={368}
               minHeight={256}
             >

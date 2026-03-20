@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,29 @@ from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 _LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+
+def _runtime_provider_label() -> str:
+    model = settings.default_model.strip()
+    api_base = settings.llm_api_base.strip()
+    if model.startswith("openrouter/") or "openrouter" in api_base:
+        return "openrouter"
+    if model.startswith("ollama/") or settings.local_model.strip().startswith("ollama/"):
+        return "local"
+    if api_base:
+        parsed = urlparse(api_base)
+        if parsed.netloc:
+            return parsed.netloc
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return "unknown"
+
+
+def _runtime_model_label(model: str) -> str:
+    normalized = model.strip()
+    if not normalized:
+        return "unknown"
+    return normalized.split("/")[-1]
 
 
 def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
@@ -132,6 +156,20 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/api/runtime/status")
+    async def runtime_status():
+        model = settings.default_model.strip()
+        return {
+            "version": app.version,
+            "build_id": f"SERAPH_PRIME_v{app.version}",
+            "provider": _runtime_provider_label(),
+            "model": model,
+            "model_label": _runtime_model_label(model),
+            "api_base": settings.llm_api_base.strip(),
+            "timezone": settings.user_timezone,
+            "llm_logging_enabled": settings.llm_log_enabled,
+        }
 
     from src.api.router import api_router
 

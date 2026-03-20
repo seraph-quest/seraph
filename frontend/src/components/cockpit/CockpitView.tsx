@@ -42,6 +42,17 @@ interface ObserverState {
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
+interface RuntimeStatus {
+  version: string;
+  build_id: string;
+  provider: string;
+  model: string;
+  model_label: string;
+  api_base?: string;
+  timezone?: string;
+  llm_logging_enabled?: boolean;
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -333,13 +344,6 @@ interface CapabilityOverview {
   runbooks: RunbookInfo[];
 }
 
-interface OperatorFeedEntry {
-  id: string;
-  summary: string;
-  status: "info" | "success" | "failed";
-  createdAt: string;
-}
-
 interface OperatorTimelineEntry {
   id: string;
   kind: "workflow_run" | "approval" | "notification" | "queued_insight" | "intervention" | "audit" | "routing";
@@ -395,12 +399,6 @@ function formatContinuityLabel(value: string | null | undefined): string {
 
 function formatOperatorMode(value: string): string {
   return value.replace(/_/g, " ");
-}
-
-function formatFeedStatus(value: OperatorFeedEntry["status"]): string {
-  if (value === "success") return "ok";
-  if (value === "failed") return "failed";
-  return "info";
 }
 
 function formatCapabilityAction(action: Record<string, unknown>): string {
@@ -914,6 +912,7 @@ function CockpitWorkspaceWindow({
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -940,7 +939,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
-  const [operatorFeed, setOperatorFeed] = useState<OperatorFeedEntry[]>([]);
   const [doctorPlans, setDoctorPlans] = useState<DoctorPlanRecord[]>([]);
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioSelectedId, setStudioSelectedId] = useState<string | null>(null);
@@ -1033,6 +1031,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     };
 
     const [
+      runtimeStatusResult,
       observerResult,
       auditResult,
       approvalsResult,
@@ -1044,6 +1043,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       mcpModeResult,
       approvalModeResult,
     ] = await Promise.all([
+      fetchJson(`${API_URL}/api/runtime/status`),
       fetchJson(`${API_URL}/api/observer/state`),
       fetchJson(`${API_URL}/api/audit/events?limit=12`),
       fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
@@ -1058,6 +1058,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
     if (isCancelled()) return;
 
+    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
+      setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
+    }
     if (observerResult.ok) {
       setObserverState((observerResult.payload as ObserverState | null) ?? {});
     }
@@ -1173,7 +1176,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
-  const activeSessionLabel = activeSession?.title ?? "fresh thread";
   const recentConversation = messages.slice(-18);
   const latestResponse = useMemo(
     () =>
@@ -1260,6 +1262,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     [starterPacks],
   );
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
+  const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
+    .replace(/^openrouter\//, "")
+    .replace(/^anthropic\//, "")
+    .replace(/[_/-]+/g, " ")
+    .toUpperCase();
+  const runtimeBuildLabel = runtimeStatus?.build_id ?? SERAPH_BUILD_ID;
+  const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
+  const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
+  const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
     () => runbooks,
@@ -1425,25 +1437,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       cancelled = true;
     };
   }, [selectedStudioEntry?.id, studioOpen]);
-  const recentOperatorFeed = useMemo(
-    () => {
-      const timelineFeed: OperatorFeedEntry[] = recentOperatorTimeline.map((entry) => ({
-        id: `timeline:${entry.id}`,
-        summary: `${entry.title}: ${entry.summary}`,
-        status:
-          entry.status === "failed"
-            ? "failed"
-            : entry.status === "selected" || entry.status === "delivered" || entry.status === "queued"
-              ? "success"
-              : "info",
-        createdAt: entry.updated_at || entry.created_at,
-      }));
-      return [...operatorFeed, ...timelineFeed]
-        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
-        .slice(0, 14);
-    },
-    [operatorFeed, recentOperatorTimeline],
-  );
   const paletteItems = useMemo(() => {
     const query = paletteQuery.trim().toLowerCase();
     const items: Array<{
@@ -1598,14 +1591,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ) ?? null;
   }
 
-  function appendOperatorFeed(summary: string, status: OperatorFeedEntry["status"]) {
-    const entry: OperatorFeedEntry = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      summary,
-      status,
-      createdAt: new Date().toISOString(),
-    };
-    setOperatorFeed((current) => [entry, ...current].slice(0, 18));
+  function appendOperatorFeed(summary: string, status: "info" | "success" | "failed") {
+    setOperatorStatus(
+      status === "failed"
+        ? `Action failed: ${summary}`
+        : status === "success"
+          ? summary
+          : `Action recorded: ${summary}`,
+    );
   }
 
   function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
@@ -4017,26 +4010,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
                   <div className="cockpit-operator-section">
                     <div className="cockpit-operator-row">
-                      <span className="cockpit-key">live logs</span>
-                      <span className="cockpit-operator-link">{recentOperatorFeed.length} recent</span>
-                    </div>
-                    {recentOperatorFeed.map((entry) => (
-                      <div key={entry.id} className="cockpit-operator-row">
-                        <div className="cockpit-operator-details">
-                          <div className="cockpit-value">{entry.summary}</div>
-                          <div className="cockpit-operator-note">
-                            {formatFeedStatus(entry.status)} · {formatAge(entry.createdAt)}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                    {recentOperatorFeed.length === 0 && (
-                      <div className="cockpit-empty">No operator actions recorded yet.</div>
-                    )}
-                  </div>
-
-                  <div className="cockpit-operator-section">
-                    <div className="cockpit-operator-row">
                       <span className="cockpit-key">recommendations</span>
                       <span className="cockpit-operator-link">{capabilityRecommendations.length} queued</span>
                     </div>
@@ -4952,11 +4925,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       <form className="cockpit-composer" onSubmit={handleSubmit}>
         <div className="cockpit-composer-meta">
-          <span>command bar</span>
+          <span>{workspaceTelemetryLeft}</span>
           <span className="cockpit-composer-meta-center">
-            {activeLayout.label} workspace · 16px grid snap · {activeSessionLabel}
+            {workspaceTelemetryCenter}
           </span>
-          <span>{isAgentBusy ? "Seraph is responding" : `thread ${activeSessionLabel}`}</span>
+          <span>{isAgentBusy ? "SERAPH RESPONDING" : workspaceTelemetryRight}</span>
         </div>
         <div className="cockpit-composer-row">
           <input

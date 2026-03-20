@@ -69,8 +69,9 @@ export function useDragResize(
   panelId: string,
   opts: { minWidth: number; minHeight: number },
 ) {
-  const { setRect, bringToFront, getZIndex, panels } = usePanelLayoutStore();
+  const { setRect, bringToFront, getZIndex, panels, zStack } = usePanelLayoutStore();
   const rect = panels[panelId];
+  const isFront = zStack[zStack.length - 1] === panelId;
   const minW = opts.minWidth ?? PANEL_MIN_SIZES[panelId]?.width ?? 200;
   const minH = opts.minHeight ?? PANEL_MIN_SIZES[panelId]?.height ?? 200;
 
@@ -232,5 +233,12 @@ export function useDragResize(
     style: { cursor: CURSOR_MAP[edge] } as CSSProperties,
   });
 
-  return { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront: () => bringToFront(panelId) };
+  return {
+    panelRef,
+    dragHandleProps,
+    resizeHandleProps,
+    style,
+    isFront,
+    bringToFront: () => bringToFront(panelId),
+  };
 }

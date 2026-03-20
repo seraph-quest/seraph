@@ -32,6 +32,7 @@ function resetStore() {
     chatMaximized: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
+    cockpitHintsEnabled: true,
     onboardingCompleted: null,
     toolRegistry: [],
   });
@@ -55,6 +56,12 @@ describe("chatStore sync actions", () => {
     useChatStore.getState().setSessionId("abc123");
     expect(useChatStore.getState().sessionId).toBe("abc123");
     expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_last_session_id", "abc123");
+  });
+
+  it("setCockpitHintsEnabled persists the hint preference", () => {
+    useChatStore.getState().setCockpitHintsEnabled(false);
+    expect(useChatStore.getState().cockpitHintsEnabled).toBe(false);
+    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_cockpit_hints_enabled", "0");
   });
 
   it("setAgentVisual merges partial state", () => {

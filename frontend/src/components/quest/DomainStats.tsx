@@ -30,24 +30,19 @@ export function DomainStats({ dashboard }: Props) {
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
         Five Pillars
       </div>
-      <div className="flex flex-col gap-1">
+      <div className="cockpit-domain-stack">
         {DOMAIN_ORDER.map((domain) => {
           const stat = dashboard.domains[domain];
           const progress = stat?.progress ?? 0;
           const label = DOMAIN_LABELS[domain] ?? domain;
 
           return (
-            <div key={domain} className="flex items-center gap-2 text-[11px]">
-              <span className="w-[80px] text-retro-text/70 truncate">{label}</span>
-              <div className="flex-1 h-[6px] bg-retro-bg rounded-sm overflow-hidden pixel-border-thin">
-                <div
-                  className="h-full bg-retro-border transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
+            <div key={domain} className="cockpit-domain-row">
+              <span className="cockpit-domain-label" title={label}>{label}</span>
+              <div className="cockpit-domain-bar">
+                <div className="cockpit-domain-fill" style={{ width: `${progress}%` }} />
               </div>
-              <span className="w-[28px] text-right text-retro-highlight text-[10px]">
-                {progress}%
-              </span>
+              <span className="cockpit-domain-value">{progress}%</span>
             </div>
           );
         })}

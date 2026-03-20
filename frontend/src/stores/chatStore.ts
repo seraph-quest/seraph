@@ -24,6 +24,7 @@ interface ChatStore {
   chatMaximized: boolean;
   questPanelOpen: boolean;
   settingsPanelOpen: boolean;
+  cockpitHintsEnabled: boolean;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
 
@@ -43,6 +44,7 @@ interface ChatStore {
   toggleChatMaximized: () => void;
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsPanelOpen: (open: boolean) => void;
+  setCockpitHintsEnabled: (enabled: boolean) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
   fetchToolRegistry: () => Promise<void>;
@@ -59,6 +61,7 @@ interface ChatStore {
 }
 
 const LAST_SESSION_KEY = "seraph_last_session_id";
+const COCKPIT_HINTS_KEY = "seraph_cockpit_hints_enabled";
 const MAX_MESSAGES = 500;
 let restoreLastSessionPromise: Promise<void> | null = null;
 
@@ -95,6 +98,14 @@ function safeStorageRemove(key: string): void {
   }
 }
 
+function safeStorageBool(key: string, fallback: boolean): boolean {
+  const value = safeStorageGet(key);
+  if (value === null) {
+    return fallback;
+  }
+  return value !== "0" && value.toLowerCase() !== "false";
+}
+
 const defaultVisual: AgentVisualState = {
   animationState: "idle",
   positionX: 50,
@@ -116,6 +127,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   chatMaximized: false,
   questPanelOpen: false,
   settingsPanelOpen: false,
+  cockpitHintsEnabled: safeStorageBool(COCKPIT_HINTS_KEY, true),
   onboardingCompleted: null,
   toolRegistry: [],
 
@@ -175,6 +187,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setQuestPanelOpen: (open) => set({ questPanelOpen: open }),
 
   setSettingsPanelOpen: (open) => set({ settingsPanelOpen: open }),
+
+  setCockpitHintsEnabled: (enabled) => {
+    safeStorageSet(COCKPIT_HINTS_KEY, enabled ? "1" : "0");
+    set({ cockpitHintsEnabled: enabled });
+  },
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
 

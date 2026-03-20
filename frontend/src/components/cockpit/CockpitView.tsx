@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 
 import { appEventBus } from "../../lib/appEventBus";
 import { API_URL } from "../../config/constants";
+import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
@@ -20,6 +21,7 @@ import {
   type WorkflowTimelineEntry,
 } from "./inspector";
 import { COCKPIT_LAYOUTS, getCockpitLayout } from "./layouts";
+import { SeraphPresencePane } from "./SeraphPresencePane";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
@@ -527,7 +529,7 @@ function buildExtensionStudioDraft(entity: OperatorEntity): string {
           missingTools.length ? `tools ${missingTools.join(", ")}` : "",
           missingSkills.length ? `skills ${missingSkills.join(", ")}` : "",
         ].filter(Boolean).join(" · ")}.`
-        : "Current runtime blockers: none detected from the latest cockpit snapshot.",
+        : "Current runtime blockers: none detected from the latest workspace snapshot.",
       "After editing, reload workflows and review diagnostics plus capability preflight before rerunning.",
     ].join("\n");
   }
@@ -540,7 +542,7 @@ function buildExtensionStudioDraft(entity: OperatorEntity): string {
       requiresTools.length
         ? `Keep tool assumptions aligned with runtime availability: ${requiresTools.join(", ")}.`
         : "This skill has no declared tool requirements today.",
-      "After editing, reload skills and verify the skill remains available in the cockpit capability surface.",
+      "After editing, reload skills and verify the skill remains available in the live capability surface.",
     ].join("\n");
   }
 
@@ -839,10 +841,37 @@ function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
   return Object.prototype.hasOwnProperty.call(workflow.inputs, "file_path");
 }
 
+const COCKPIT_GLOBAL_HINTS = [
+  "Shift+1/2/3 switch layouts",
+  "Shift+K or Ctrl+K opens the capability palette",
+  "Drag headers to move panes",
+  "Reset view repacks the current workspace",
+];
+
+const COCKPIT_WINDOW_HINTS = {
+  sessions: "Thread control, saved conversations, and continuity markers for the active thread.",
+  goals: "Keep current priorities visible here; open the full goals overlay for planning.",
+  outputs: "Recent workspace artifacts produced in the current audit window.",
+  approvals: "Pending approvals block workflow and tool execution until you inspect or approve them.",
+  guardianState: "The live synthesis Seraph is using for timing, confidence, and next actions.",
+  operatorTimeline: "A thread-aware feed of approvals, interventions, notifications, and surfaced failures.",
+  interventions: "Recent proactive nudges, delivery outcomes, and feedback signal.",
+  workflowTimeline: "Inspect runs, branch from failures, and resume repaired steps.",
+  audit: "Durable tool, memory, workflow, and integration events for the current window.",
+  trace: "In-flight routing, tool, and error activity while work is happening.",
+  inspector: "Select a run, approval, intervention, or event to inspect details and recovery actions.",
+  presence: "Live guardian state mirror.",
+  conversation: "Latest replies, pending drafts, and quick thread context for the current session.",
+  desktopShell: "Native continuity, queued notifications, and browser-closed follow-up state.",
+  operatorTerminal: "Run packs, workflows, macros, and repair actions from one dense control surface.",
+} as const;
+
 function CockpitWorkspaceWindow({
   panelId,
   title,
   meta,
+  hint,
+  showHint,
   minWidth,
   minHeight,
   children,
@@ -850,11 +879,13 @@ function CockpitWorkspaceWindow({
   panelId: string;
   title: string;
   meta: string;
+  hint?: string | null;
+  showHint?: boolean;
   minWidth: number;
   minHeight: number;
   children: ReactNode;
 }) {
-  const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize(panelId, {
+  const { panelRef, dragHandleProps, resizeHandleProps, style, isFront, bringToFront } = useDragResize(panelId, {
     minWidth,
     minHeight,
   });
@@ -862,7 +893,7 @@ function CockpitWorkspaceWindow({
   return (
     <section
       ref={panelRef}
-      className="cockpit-window"
+      className={`cockpit-window ${isFront ? "cockpit-window--active" : ""}`}
       style={style}
       onPointerDown={bringToFront}
     >
@@ -874,6 +905,7 @@ function CockpitWorkspaceWindow({
         </div>
         <div className="cockpit-window-grip">drag / resize</div>
       </div>
+      {showHint && hint ? <div className="cockpit-window-hint">{hint}</div> : null}
       <div className="cockpit-window-body">{children}</div>
     </section>
   );
@@ -942,6 +974,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const isAgentBusy = useChatStore((s) => s.isAgentBusy);
   const ambientState = useChatStore((s) => s.ambientState);
   const ambientTooltip = useChatStore((s) => s.ambientTooltip);
+  const cockpitHintsEnabled = useChatStore((s) => s.cockpitHintsEnabled);
+  const agentVisual = useChatStore((s) => s.agentVisual);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restoreLastSession = useChatStore((s) => s.restoreLastSession);
   const switchSession = useChatStore((s) => s.switchSession);
@@ -1234,6 +1268,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const recentOperatorTimeline = useMemo(
     () => operatorTimeline.slice(0, 16),
     [operatorTimeline],
+  );
+  const seraphPresenceSnapshot = useMemo(
+    () => ({
+      connectionStatus,
+      animationState: agentVisual.animationState,
+      isAgentBusy,
+      pendingApprovalCount: pendingApprovals.length,
+      recentTraceRole: recentTrace[0]?.role ?? null,
+      recentTraceTool: recentTrace.find((message) => message.toolUsed)?.toolUsed ?? null,
+      latestResponseRole: latestResponse?.role ?? null,
+      ambientState,
+      dataQuality: observerState?.data_quality ?? null,
+      recentInterventionCount: recentInterventions.length,
+      operatorStatus,
+    }),
+    [
+      agentVisual.animationState,
+      ambientState,
+      connectionStatus,
+      isAgentBusy,
+      latestResponse?.role,
+      observerState?.data_quality,
+      operatorStatus,
+      pendingApprovals.length,
+      recentInterventions.length,
+      recentTrace,
+    ],
   );
   const operatorMacros = useMemo(
     () => savedRunbooks,
@@ -2736,10 +2797,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     <div className="cockpit-shell">
       <header className="cockpit-topbar">
         <div className="cockpit-brand">
-          <div className="cockpit-eyebrow cockpit-brandmark">Seraph</div>
-          <div className="cockpit-subtitle">
-            dense operator surface for state, evidence, interventions, and action
-          </div>
+          <div className="cockpit-eyebrow cockpit-brandmark">SERAPH</div>
+          <div className="cockpit-toolbar-hint">{SERAPH_BUILD_ID}</div>
         </div>
 
         <div className="cockpit-topbar-right">
@@ -2842,6 +2901,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         </div>
       </header>
 
+      {cockpitHintsEnabled && (
+        <section className="cockpit-hint-strip" aria-label="Workspace hints">
+          {COCKPIT_GLOBAL_HINTS.map((hint) => (
+            <span key={hint} className="cockpit-hint-chip">
+              {hint}
+            </span>
+          ))}
+        </section>
+      )}
+
       <div className="cockpit-workspace">
         {activeLayout.sections.rail && (
           <>
@@ -2849,6 +2918,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               panelId="sessions_pane"
               title="Sessions"
               meta={activeSession ? activeSession.title : "fresh thread"}
+              hint={COCKPIT_WINDOW_HINTS.sessions}
+              showHint={cockpitHintsEnabled}
               minWidth={260}
               minHeight={180}
             >
@@ -2902,6 +2973,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               panelId="goals_pane"
               title="Goals"
               meta={loadingGoals ? "refreshing" : `${dashboard?.active_count ?? 0} active`}
+              hint={COCKPIT_WINDOW_HINTS.goals}
+              showHint={cockpitHintsEnabled}
               minWidth={280}
               minHeight={220}
             >
@@ -2939,6 +3012,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               panelId="outputs_pane"
               title="Recent outputs"
               meta={`${artifacts.length} files`}
+              hint={COCKPIT_WINDOW_HINTS.outputs}
+              showHint={cockpitHintsEnabled}
               minWidth={280}
               minHeight={180}
             >
@@ -2969,6 +3044,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               panelId="approvals_pane"
               title="Pending approvals"
               meta={`${pendingApprovals.length} waiting`}
+              hint={COCKPIT_WINDOW_HINTS.approvals}
+              showHint={cockpitHintsEnabled}
               minWidth={300}
               minHeight={220}
             >
@@ -3056,6 +3133,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 ? `${labelForRole(latestResponse)} · ${formatAge(latestResponse.timestamp)}`
                 : "awaiting first reply"
             }
+            hint="The newest assistant output stays pinned here while you keep the rest of the workspace visible."
+            showHint={cockpitHintsEnabled}
             minWidth={420}
             minHeight={160}
           >
@@ -3092,6 +3171,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="guardian_state_pane"
             title="Guardian state"
             meta={`${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`}
+            hint={COCKPIT_WINDOW_HINTS.guardianState}
+            showHint={cockpitHintsEnabled}
             minWidth={420}
             minHeight={260}
           >
@@ -3148,6 +3229,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="operator_timeline_pane"
             title="Operator timeline"
             meta={`${recentOperatorTimeline.length} live`}
+            hint={COCKPIT_WINDOW_HINTS.operatorTimeline}
+            showHint={cockpitHintsEnabled}
             minWidth={360}
             minHeight={220}
           >
@@ -3258,6 +3341,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="workflows_pane"
             title="Workflow timeline"
             meta={`${workflowRunsWithArtifacts.length} recent`}
+            hint={COCKPIT_WINDOW_HINTS.workflowTimeline}
+            showHint={cockpitHintsEnabled}
             minWidth={380}
             minHeight={220}
           >
@@ -3401,6 +3486,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="interventions_pane"
             title="Interventions"
             meta={`${recentInterventions.length} recent`}
+            hint={COCKPIT_WINDOW_HINTS.interventions}
+            showHint={cockpitHintsEnabled}
             minWidth={380}
             minHeight={220}
           >
@@ -3472,6 +3559,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="audit_pane"
             title="Audit surface"
             meta={`${auditEvents.length} events`}
+            hint={COCKPIT_WINDOW_HINTS.audit}
+            showHint={cockpitHintsEnabled}
             minWidth={340}
             minHeight={220}
           >
@@ -3510,6 +3599,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="trace_pane"
             title="Live trace"
             meta={isAgentBusy ? "agent active" : "idle"}
+            hint={COCKPIT_WINDOW_HINTS.trace}
+            showHint={cockpitHintsEnabled}
             minWidth={320}
             minHeight={180}
           >
@@ -3545,6 +3636,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             panelId="inspector_pane"
             title="Operations inspector"
             meta={selectedInspector ? selectedInspector.kind : "nothing selected"}
+            hint={COCKPIT_WINDOW_HINTS.inspector}
+            showHint={cockpitHintsEnabled}
             minWidth={480}
             minHeight={240}
           >
@@ -3557,9 +3650,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         {activeLayout.sections.conversation && (
           <>
             <CockpitWorkspaceWindow
+              panelId="presence_pane"
+              title="Seraph presence"
+              meta={connectionStatus === "connected" ? "runtime linked" : connectionLabel}
+              hint={COCKPIT_WINDOW_HINTS.presence}
+              showHint={false}
+              minWidth={368}
+              minHeight={256}
+            >
+              <SeraphPresencePane snapshot={seraphPresenceSnapshot} />
+            </CockpitWorkspaceWindow>
+
+            <CockpitWorkspaceWindow
               panelId="conversation_pane"
               title="Conversation"
               meta={activeSession?.title ?? "fresh thread · saved after first reply"}
+              hint={COCKPIT_WINDOW_HINTS.conversation}
+              showHint={cockpitHintsEnabled}
               minWidth={360}
               minHeight={260}
             >
@@ -3603,6 +3710,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               panelId="desktop_shell_pane"
               title="Desktop shell"
               meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
+              hint={COCKPIT_WINDOW_HINTS.desktopShell}
+              showHint={cockpitHintsEnabled}
               minWidth={340}
               minHeight={220}
             >
@@ -3748,6 +3857,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               panelId="operator_surface_pane"
               title="Operator terminal"
               meta={`tool ${toolPolicyMode} · mcp ${mcpPolicyMode}`}
+              hint={COCKPIT_WINDOW_HINTS.operatorTerminal}
+              showHint={cockpitHintsEnabled}
               minWidth={360}
               minHeight={260}
             >
@@ -3835,7 +3946,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">{doctorPlans.length} recent</span>
                     </div>
                     {doctorPlans.map((plan) => (
-                      <div key={plan.id} className="cockpit-operator-row">
+                      <div key={plan.id} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4038,7 +4149,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </span>
                     </div>
                     {operatorRunbooks.map((runbook) => (
-                      <div key={runbook.id} className="cockpit-operator-row">
+                      <div key={runbook.id} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4105,7 +4216,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">{operatorMacros.length} saved</span>
                     </div>
                     {operatorMacros.map((runbook) => (
-                      <div key={`macro:${runbook.id}`} className="cockpit-operator-row">
+                      <div key={`macro:${runbook.id}`} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4143,7 +4254,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">{readyStarterPacks.length}/{starterPacks.length} ready</span>
                     </div>
                     {starterPacks.map((pack) => (
-                      <div key={pack.name} className="cockpit-operator-row">
+                      <div key={pack.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4224,7 +4335,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </span>
                     </div>
                     {catalogItems.filter((item) => !item.installed).map((item) => (
-                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row">
+                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4322,7 +4433,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </button>
                     </div>
                     {mcpServers.map((server) => (
-                      <div key={server.name} className="cockpit-operator-row">
+                      <div key={server.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4406,7 +4517,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </button>
                     </div>
                     {skills.map((skill) => (
-                      <div key={skill.name} className="cockpit-operator-row">
+                      <div key={skill.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4474,7 +4585,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       approval {approvalWorkflows.length} · blocked {blockedWorkflows.length}
                     </div>
                     {blockedWorkflows.map((workflow) => (
-                      <div key={workflow.name} className="cockpit-operator-row">
+                      <div key={workflow.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -4569,7 +4680,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <div>
                 <div className="cockpit-window-title">Extension studio</div>
                 <div className="cockpit-window-meta">
-                  validate, repair, and author workflows, skills, and MCP config from the cockpit
+                  validate, repair, and author workflows, skills, and MCP config from one workspace
                 </div>
               </div>
               <div className="cockpit-window-grip">
@@ -4843,7 +4954,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <div className="cockpit-composer-meta">
           <span>command bar</span>
           <span className="cockpit-composer-meta-center">
-            {activeLayout.label} · drag panes on 16px grid · resize edges · Shift+1/2/3 layouts · Shift+K palette
+            {activeLayout.label} workspace · 16px grid snap · {activeSessionLabel}
           </span>
           <span>{isAgentBusy ? "Seraph is responding" : `thread ${activeSessionLabel}`}</span>
         </div>

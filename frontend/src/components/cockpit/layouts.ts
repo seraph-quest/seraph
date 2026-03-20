@@ -25,7 +25,7 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
   default: {
     id: "default",
     label: "Default",
-    description: "Full guardian cockpit with state, evidence, approvals, and conversation.",
+    description: "Full guardian workspace with state, evidence, approvals, and conversation.",
     centerSingleColumn: false,
     sections: {
       rail: true,

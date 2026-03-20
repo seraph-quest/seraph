@@ -58,7 +58,7 @@ function WorkflowRow({
           <button
             onClick={() => onDraft(workflow)}
             className="text-[9px] text-retro-highlight hover:text-retro-text px-0.5"
-            title="Draft a workflow command in the cockpit composer"
+            title="Draft a workflow command in the command bar"
           >
             draft
           </button>

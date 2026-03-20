@@ -17,7 +17,12 @@ interface SeraphProps {
   statusLabel?: string;
 }
 
-function SeraphStatusMeter({ barColor }: { barColor: string }) {
+const Seraph: React.FC<SeraphProps> = ({
+  state,
+  detail,
+  telemetry,
+  statusLabel,
+}) => {
   const [frame, setFrame] = useState(0);
 
   useEffect(() => {
@@ -27,28 +32,6 @@ function SeraphStatusMeter({ barColor }: { barColor: string }) {
     return () => clearInterval(interval);
   }, []);
 
-  return (
-    <div className="mt-1 flex gap-1.5">
-      {Array.from({ length: 10 }).map((_, i) => (
-        <div
-          key={i}
-          className="h-1 w-3 rounded-full transition-all duration-300"
-          style={{
-            background: i < (frame % 10) ? barColor : 'rgba(255,255,255,0.05)',
-            boxShadow: i < (frame % 10) ? `0 0 8px ${barColor}` : 'none',
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-const Seraph: React.FC<SeraphProps> = ({
-  state,
-  detail,
-  telemetry,
-  statusLabel,
-}) => {
   const colorMap = {
     idle: 'text-amber-500',
     thinking: 'text-cyan-400',
@@ -283,12 +266,23 @@ const Seraph: React.FC<SeraphProps> = ({
       <div className="border-t border-[#173547] bg-[linear-gradient(180deg,rgba(7,19,29,0.9),rgba(6,16,25,0.97))] px-4 py-2.5 backdrop-blur-xl">
         <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
           <div className="min-w-0 flex-1">
-          <div className={`text-[18px] font-bold uppercase tracking-[-0.04em] glow-text ${colorMap[state]}`}>
-            {displayLabel}
+            <div className={`text-[18px] font-bold uppercase tracking-[-0.04em] glow-text ${colorMap[state]}`}>
+              {displayLabel}
+            </div>
+            <div className="mt-1 flex gap-1.5">
+              {Array.from({ length: 10 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="h-1 w-3 rounded-full transition-all duration-300"
+                  style={{
+                    background: i < (frame % 10) ? barColor : 'rgba(255,255,255,0.05)',
+                    boxShadow: i < (frame % 10) ? `0 0 8px ${barColor}` : 'none',
+                  }}
+                />
+              ))}
+            </div>
+            <div className="mt-1.5 max-w-[420px] text-[10px] leading-5 text-[#7a98ad]">{displayDetail}</div>
           </div>
-          <SeraphStatusMeter barColor={barColor} />
-          <div className="mt-1.5 max-w-[420px] text-[10px] leading-5 text-[#7a98ad]">{displayDetail}</div>
-        </div>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
             {displayTelemetry.map((entry) => (

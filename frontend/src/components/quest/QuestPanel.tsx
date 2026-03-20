@@ -145,7 +145,7 @@ export function QuestPanel() {
           <div className="cockpit-modal-header">
             <div>
               <div className="cockpit-card-title">Goals</div>
-              <div className="cockpit-card-meta">cockpit view</div>
+              <div className="cockpit-card-meta">live view</div>
             </div>
             <button
               type="button"

@@ -55,7 +55,7 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
     return {
       state: "offline",
       label: snapshot.connectionStatus === "connecting" ? "Linking" : "Offline",
-      detail: "The cockpit is not fully linked to live runtime transport.",
+      detail: "The live workspace is not fully linked to runtime transport.",
       tone: "muted",
       cadenceMs: 1200,
     };

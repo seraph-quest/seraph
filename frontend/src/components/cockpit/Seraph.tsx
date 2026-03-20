@@ -231,7 +231,7 @@ const Seraph: React.FC<SeraphProps> = ({
 
   return (
     <div
-      className="relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-[#05090d] text-[#dbefff]"
+      className="scanline relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-[#05090d] text-[#dbefff]"
       style={{
         boxShadow: `inset 0 1px 0 rgba(255,255,255,0.02), 0 0 24px ${glow}`,
       }}
@@ -245,7 +245,6 @@ const Seraph: React.FC<SeraphProps> = ({
         className="absolute inset-0 pointer-events-none"
         style={{ background: `radial-gradient(circle at 50% 48%, ${glow}, transparent 46%)` }}
       />
-      <div className="cockpit-prime-scanline" />
 
       <div className="relative flex min-h-0 flex-1 items-center justify-center px-3 pb-3 pt-3">
         <div className="relative w-full max-w-[760px] aspect-video flex items-center justify-center float">

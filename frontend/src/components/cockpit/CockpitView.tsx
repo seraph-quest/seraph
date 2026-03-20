@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 
 import { appEventBus } from "../../lib/appEventBus";
 import { API_URL } from "../../config/constants";
+import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
@@ -2796,8 +2797,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     <div className="cockpit-shell">
       <header className="cockpit-topbar">
         <div className="cockpit-brand">
-          <div className="cockpit-eyebrow cockpit-brandmark">Seraph</div>
-          <div className="cockpit-toolbar-hint">Backtick (`) focuses the command bar</div>
+          <div className="cockpit-eyebrow cockpit-brandmark">SERAPH</div>
+          <div className="cockpit-toolbar-hint">{SERAPH_BUILD_ID}</div>
         </div>
 
         <div className="cockpit-topbar-right">
@@ -4679,7 +4680,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <div>
                 <div className="cockpit-window-title">Extension studio</div>
                 <div className="cockpit-window-meta">
-                  validate, repair, and author workflows, skills, and MCP config from the cockpit
+                  validate, repair, and author workflows, skills, and MCP config from one workspace
                 </div>
               </div>
               <div className="cockpit-window-grip">

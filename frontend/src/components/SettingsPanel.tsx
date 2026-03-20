@@ -577,9 +577,9 @@ export function SettingsPanel() {
             )}
             <div className="cockpit-settings-inline-row">
               <div className="cockpit-settings-copy">
-                <div className="cockpit-settings-label">Cockpit hints</div>
+                <div className="cockpit-settings-label">Workspace hints</div>
                 <div className="cockpit-settings-note">
-                  Show workspace and window guidance in the cockpit shell.
+                  Show workspace and window guidance across the live workspace.
                 </div>
               </div>
               <button

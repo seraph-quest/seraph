@@ -333,13 +333,6 @@ interface CapabilityOverview {
   runbooks: RunbookInfo[];
 }
 
-interface OperatorFeedEntry {
-  id: string;
-  summary: string;
-  status: "info" | "success" | "failed";
-  createdAt: string;
-}
-
 interface OperatorTimelineEntry {
   id: string;
   kind: "workflow_run" | "approval" | "notification" | "queued_insight" | "intervention" | "audit" | "routing";
@@ -395,12 +388,6 @@ function formatContinuityLabel(value: string | null | undefined): string {
 
 function formatOperatorMode(value: string): string {
   return value.replace(/_/g, " ");
-}
-
-function formatFeedStatus(value: OperatorFeedEntry["status"]): string {
-  if (value === "success") return "ok";
-  if (value === "failed") return "failed";
-  return "info";
 }
 
 function formatCapabilityAction(action: Record<string, unknown>): string {
@@ -940,7 +927,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
-  const [operatorFeed, setOperatorFeed] = useState<OperatorFeedEntry[]>([]);
   const [doctorPlans, setDoctorPlans] = useState<DoctorPlanRecord[]>([]);
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioSelectedId, setStudioSelectedId] = useState<string | null>(null);
@@ -1425,25 +1411,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       cancelled = true;
     };
   }, [selectedStudioEntry?.id, studioOpen]);
-  const recentOperatorFeed = useMemo(
-    () => {
-      const timelineFeed: OperatorFeedEntry[] = recentOperatorTimeline.map((entry) => ({
-        id: `timeline:${entry.id}`,
-        summary: `${entry.title}: ${entry.summary}`,
-        status:
-          entry.status === "failed"
-            ? "failed"
-            : entry.status === "selected" || entry.status === "delivered" || entry.status === "queued"
-              ? "success"
-              : "info",
-        createdAt: entry.updated_at || entry.created_at,
-      }));
-      return [...operatorFeed, ...timelineFeed]
-        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
-        .slice(0, 14);
-    },
-    [operatorFeed, recentOperatorTimeline],
-  );
   const paletteItems = useMemo(() => {
     const query = paletteQuery.trim().toLowerCase();
     const items: Array<{
@@ -1598,14 +1565,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ) ?? null;
   }
 
-  function appendOperatorFeed(summary: string, status: OperatorFeedEntry["status"]) {
-    const entry: OperatorFeedEntry = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      summary,
-      status,
-      createdAt: new Date().toISOString(),
-    };
-    setOperatorFeed((current) => [entry, ...current].slice(0, 18));
+  function appendOperatorFeed(summary: string, status: "info" | "success" | "failed") {
+    setOperatorStatus(
+      status === "failed"
+        ? `Action failed: ${summary}`
+        : status === "success"
+          ? summary
+          : `Action recorded: ${summary}`,
+    );
   }
 
   function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
@@ -4012,26 +3979,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     ))}
                     {doctorPlans.length === 0 && (
                       <div className="cockpit-empty">No bootstrap or doctor plans captured yet.</div>
-                    )}
-                  </div>
-
-                  <div className="cockpit-operator-section">
-                    <div className="cockpit-operator-row">
-                      <span className="cockpit-key">live logs</span>
-                      <span className="cockpit-operator-link">{recentOperatorFeed.length} recent</span>
-                    </div>
-                    {recentOperatorFeed.map((entry) => (
-                      <div key={entry.id} className="cockpit-operator-row">
-                        <div className="cockpit-operator-details">
-                          <div className="cockpit-value">{entry.summary}</div>
-                          <div className="cockpit-operator-note">
-                            {formatFeedStatus(entry.status)} · {formatAge(entry.createdAt)}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                    {recentOperatorFeed.length === 0 && (
-                      <div className="cockpit-empty">No operator actions recorded yet.</div>
                     )}
                   </div>
 

@@ -3,7 +3,7 @@ import { API_URL, WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { useAgentAnimation } from "./useAgentAnimation";
-import { EventBus } from "../game/EventBus";
+import { appEventBus } from "../lib/appEventBus";
 import type { WSResponse, ChatMessage } from "../types";
 
 function makeId(): string {
@@ -292,22 +292,14 @@ export function useWebSocket() {
             setChatPanelOpen(true);
             addMessage(proactiveMsg);
           } else if (data.intervention_type === "nudge") {
-            // Show as speech bubble, add to chat when opened
-            EventBus.emit("agent-nudge", { text: data.content });
             addMessage(proactiveMsg);
           } else {
-            // ambient — just store for later
             addMessage(proactiveMsg);
           }
         } else if (data.type === "ambient") {
-          // Phase 3: Ambient state change
           if (data.state) {
             setAmbientState(data.state as "idle" | "has_insight" | "goal_behind" | "on_track" | "waiting");
             useChatStore.getState().setAmbientTooltip(data.tooltip ?? "");
-            EventBus.emit("agent-ambient-state", {
-              state: data.state,
-              tooltip: data.tooltip ?? "",
-            });
           }
         }
       } catch (err) {
@@ -366,10 +358,10 @@ export function useWebSocket() {
       }
     };
 
-    EventBus.on("approval-resume", handleApprovalResume);
+    appEventBus.on("approval-resume", handleApprovalResume);
     connect();
     return () => {
-      EventBus.off("approval-resume", handleApprovalResume);
+      appEventBus.off("approval-resume", handleApprovalResume);
       if (pingRef.current) clearInterval(pingRef.current);
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       wsRef.current?.close();

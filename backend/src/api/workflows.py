@@ -61,8 +61,24 @@ def _extract_artifact_paths(value: Any) -> list[str]:
     return paths
 
 
-def _workflow_projection_key(event: dict[str, Any]) -> str:
-    return f"{event.get('session_id') or 'global'}:{event.get('tool_name') or 'workflow'}"
+def _workflow_event_fingerprint(tool_name: str, details: dict[str, Any]) -> str:
+    run_fingerprint = details.get("run_fingerprint")
+    if isinstance(run_fingerprint, str) and run_fingerprint.strip():
+        return run_fingerprint
+    arguments = _as_record(details.get("arguments"))
+    if arguments:
+        return fingerprint_tool_call(tool_name, arguments)
+    return "none"
+
+
+def _workflow_projection_key(event: dict[str, Any], details: dict[str, Any]) -> str:
+    tool_name = str(event.get("tool_name") or "workflow")
+    fingerprint = _workflow_event_fingerprint(tool_name, details)
+    return f"{event.get('session_id') or 'global'}:{tool_name}:{fingerprint}"
+
+
+def _workflow_projection_prefix(session_id: str | None, tool_name: str) -> str:
+    return f"{session_id or 'global'}:{tool_name}:"
 
 
 def _approval_projection_key(
@@ -74,6 +90,25 @@ def _approval_projection_key(
     return f"{session_id or 'global'}:{tool_name}:{fingerprint or 'none'}"
 
 
+def _workflow_run_approval_key(run: dict[str, Any]) -> str:
+    tool_name = str(run.get("tool_name") or "workflow")
+    run_fingerprint = run.get("run_fingerprint")
+    fingerprint = (
+        run_fingerprint
+        if isinstance(run_fingerprint, str) and run_fingerprint.strip()
+        else (
+            fingerprint_tool_call(tool_name, run.get("arguments") or {})
+            if run.get("arguments")
+            else None
+        )
+    )
+    return _approval_projection_key(
+        session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+        tool_name=tool_name,
+        fingerprint=fingerprint,
+    )
+
+
 def _workflow_replay_draft(workflow_name: str, arguments: dict[str, Any] | None) -> str:
     if not arguments:
         return f'Run workflow "{workflow_name}".'
@@ -82,6 +117,18 @@ def _workflow_replay_draft(workflow_name: str, arguments: dict[str, Any] | None)
         for key, value in arguments.items()
     )
     return f'Run workflow "{workflow_name}" with {rendered}.'
+
+
+def _workflow_retry_from_step_draft(
+    workflow_name: str,
+    *,
+    step_id: str,
+    arguments: dict[str, Any] | None,
+) -> str:
+    return (
+        f"{_workflow_replay_draft(workflow_name, arguments).rstrip('.')} "
+        f"Resume from step \"{step_id}\"."
+    )
 
 
 def _workflow_replay_policy(
@@ -196,6 +243,25 @@ def _timeline_entries_for_run(
             "summary": "Workflow started",
         }
     ]
+    for step in run.get("step_records", []) or []:
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id") or "step")
+        step_tool = str(step.get("tool") or "tool")
+        step_status = str(step.get("status") or "succeeded")
+        result_summary = str(step.get("result_summary") or "").strip()
+        entries.append({
+            "kind": f"workflow_step_{step_status}",
+            "at": run["updated_at"],
+            "summary": (
+                f"{step_id} ({step_tool}) {step_status.replace('_', ' ')}"
+                + (f" · {result_summary}" if result_summary else "")
+            ),
+            "step_id": step_id,
+            "step_tool": step_tool,
+            "result_summary": result_summary,
+            "error_kind": step.get("error_kind"),
+        })
     for approval in approvals:
         entries.append({
             "kind": "approval_pending",
@@ -251,7 +317,8 @@ async def _list_workflow_runs(
     for event in workflow_events:
         details = _as_record(event.get("details"))
         tool_name = str(event.get("tool_name") or "workflow")
-        key = _workflow_projection_key(event)
+        key = _workflow_projection_key(event, details)
+        run_fingerprint = _workflow_event_fingerprint(tool_name, details)
         if event.get("event_type") == "tool_call":
             arguments = _as_record(details.get("arguments")) or None
             pending_by_key[key].append({
@@ -259,11 +326,13 @@ async def _list_workflow_runs(
                 "tool_name": tool_name,
                 "workflow_name": str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
                 "session_id": event.get("session_id"),
+                "run_fingerprint": run_fingerprint,
                 "status": "running",
                 "started_at": event["created_at"],
                 "updated_at": event["created_at"],
                 "summary": event.get("summary") or "",
                 "step_tools": [],
+                "step_records": [],
                 "artifact_paths": _extract_artifact_paths(arguments),
                 "continued_error_steps": [],
                 "arguments": arguments,
@@ -271,16 +340,33 @@ async def _list_workflow_runs(
             continue
 
         run_queue = pending_by_key.get(key, [])
+        if not run_queue and run_fingerprint == "none":
+            prefix = _workflow_projection_prefix(
+                event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+                tool_name,
+            )
+            fallback_key = next(
+                (
+                    pending_key for pending_key, queue in pending_by_key.items()
+                    if pending_key.startswith(prefix) and queue
+                ),
+                None,
+            )
+            if fallback_key is not None:
+                key = fallback_key
+                run_queue = pending_by_key.get(fallback_key, [])
         run = run_queue.pop(0) if run_queue else {
             "id": event["id"],
             "tool_name": tool_name,
             "workflow_name": str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
             "session_id": event.get("session_id"),
+            "run_fingerprint": run_fingerprint,
             "status": "running",
             "started_at": event["created_at"],
             "updated_at": event["created_at"],
             "summary": event.get("summary") or "",
             "step_tools": [],
+            "step_records": [],
             "artifact_paths": [],
             "continued_error_steps": [],
             "arguments": _as_record(details.get("arguments")) or None,
@@ -298,15 +384,7 @@ async def _list_workflow_runs(
 
         workflow_meta = workflow_manager.get_tool_metadata(tool_name) or {}
         workflow_status = workflow_statuses.get(str(run["workflow_name"]))
-        approval_key = _approval_projection_key(
-            session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-            tool_name=tool_name,
-            fingerprint=(
-                fingerprint_tool_call(tool_name, run.get("arguments") or {})
-                if run.get("arguments")
-                else None
-            ),
-        )
+        approval_key = _workflow_run_approval_key(run)
         approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
             (run.get("session_id"), tool_name),
             [],
@@ -320,6 +398,10 @@ async def _list_workflow_runs(
                 value for value in details.get("step_tools", [])
                 if isinstance(value, str)
             ] or run.get("step_tools", []),
+            "step_records": [
+                value for value in details.get("step_records", [])
+                if isinstance(value, dict)
+            ] or run.get("step_records", []),
             "artifact_paths": artifact_paths,
             "continued_error_steps": [
                 value for value in details.get("continued_error_steps", [])
@@ -371,6 +453,15 @@ async def _list_workflow_runs(
                 if approvals
                 else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
             ),
+            "retry_from_step_draft": (
+                _workflow_retry_from_step_draft(
+                    str(run["workflow_name"]),
+                    step_id=str(run["continued_error_steps"][0]),
+                    arguments=run.get("arguments"),
+                )
+                if replay_allowed and run.get("continued_error_steps")
+                else None
+            ),
             "resume_checkpoint_label": _resume_checkpoint_label(
                 approvals=approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
@@ -389,6 +480,7 @@ async def _list_workflow_runs(
                 if approvals and isinstance(approvals[0], dict)
                 else None
             ),
+            "run_identity": f"{run.get('session_id') or 'global'}:{tool_name}:{run_fingerprint}",
             "timeline": _timeline_entries_for_run(run, approvals=approvals),
         })
         completed.append(run)
@@ -397,15 +489,7 @@ async def _list_workflow_runs(
         for run in run_queue:
             workflow_meta = workflow_manager.get_tool_metadata(str(run["tool_name"])) or {}
             workflow_status = workflow_statuses.get(str(run["workflow_name"]))
-            approval_key = _approval_projection_key(
-                session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-                tool_name=str(run["tool_name"]),
-                fingerprint=(
-                    fingerprint_tool_call(str(run["tool_name"]), run.get("arguments") or {})
-                    if run.get("arguments")
-                    else None
-                ),
-            )
+            approval_key = _workflow_run_approval_key(run)
             approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
                 (run.get("session_id"), str(run["tool_name"])),
                 [],
@@ -476,6 +560,7 @@ async def _list_workflow_runs(
                     if approvals and isinstance(approvals[0], dict)
                     else None
                 ),
+                "run_identity": f"{run.get('session_id') or 'global'}:{run['tool_name']}:{run.get('run_fingerprint') or 'none'}",
                 "timeline": _timeline_entries_for_run(run, approvals=approvals),
             })
             completed.append(run)

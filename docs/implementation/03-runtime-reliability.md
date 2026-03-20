@@ -28,11 +28,11 @@
 
 ## Working On Now
 
-- [x] Runtime Reliability is no longer the repo-wide active focus after provider safeguards v3 and guardian behavioral evals v6 shipped
+- [x] Runtime Reliability is no longer the repo-wide active focus after provider safeguards v3, provider explainability and budgets v1, and guardian behavioral evals v7 shipped
 - [x] the previous runtime-focused queue is fully shipped on `develop`
-- [x] `provider-policy-safeguards-v3` and `guardian-behavioral-evals-v6` are now shipped on this branch, including budget/task-class routing safeguards and richer deterministic proof for timeline plus repair-adjacent guardian behavior
+- [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v1`, and `guardian-behavioral-evals-v7` are now shipped on this branch, including budget/task-class routing safeguards, richer routing legibility, and deeper deterministic proof for timeline plus repair-adjacent guardian behavior
 - [ ] richer provider policy still remains to do on `develop`, but the new safeguard layer means the remaining work is now deeper explainability and cross-surface legibility rather than first-pass hard requirements and tier guardrails
-- [ ] the next runtime-facing queue item now shifts to `provider-policy-explainability-and-budgets-v1` rather than another first-pass safeguard slice
+- [ ] the next runtime-facing queue item now shifts to `provider-policy-explainability-and-budgets-v2` rather than another first-pass safeguard slice
 
 ## Still To Do On `develop`
 

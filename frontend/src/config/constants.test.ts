@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { TOOL_NAMES, POSITIONS, SCENE } from "./constants";
+import { TOOL_NAMES, POSITIONS } from "./constants";
 
 describe("TOOL_NAMES", () => {
   it("has expected count of native tools", () => {
@@ -15,17 +15,5 @@ describe("POSITIONS", () => {
       expect(value).toBeGreaterThanOrEqual(0);
       expect(value).toBeLessThanOrEqual(100);
     }
-  });
-});
-
-describe("SCENE", () => {
-  it("has map file path", () => {
-    expect(SCENE.MAP_FILE).toBeDefined();
-    expect(SCENE.MAP_FILE).toContain("village.json");
-  });
-
-  it("has wandering timing", () => {
-    expect(SCENE.WANDERING.MIN_DELAY_MS).toBeGreaterThan(0);
-    expect(SCENE.WANDERING.MAX_DELAY_MS).toBeGreaterThan(SCENE.WANDERING.MIN_DELAY_MS);
   });
 });

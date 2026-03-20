@@ -359,6 +359,8 @@ next-env.d.ts
 
 docker-data
 .claude/settings.local.json
+backend/data/*
+!backend/data/mcp-servers.example.json
 backend/data/mcp-servers.json
 seraph-quest.github.io/
 .vite/

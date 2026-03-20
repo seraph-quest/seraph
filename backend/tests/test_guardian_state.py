@@ -34,6 +34,9 @@ def _make_guardian_state() -> GuardianState:
             open_loops_or_pressure=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
             focus_alignment="medium",
             intervention_receptivity="high",
+            active_blockers=("Need workflow write access",),
+            next_up=("Close the roadmap review",),
+            dominant_thread="Ship guardian state",
             active_projects=("Guardian cockpit",),
             execution_pressure=("Workflow brief-sync degraded at write_file",),
             memory_signals=("Ship guardian state", "Prefers dense dashboards"),
@@ -125,6 +128,9 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert "Ship guardian state" in state.world_model.active_commitments
     assert "Guardian cockpit" in state.world_model.active_projects
     assert "Ship guardian state" in state.world_model.memory_signals
+    assert state.world_model.active_blockers
+    assert state.world_model.next_up
+    assert state.world_model.dominant_thread
     assert "Prior roadmap" in state.world_model.continuity_threads[0]
     assert "Guardian cockpit" in state.world_model.project_timeline[0]
     assert any(
@@ -190,6 +196,9 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Current focus: Ship guardian state while in VS Code" in block
     assert "Intervention receptivity: high" in block
     assert "Active projects:" in block
+    assert "Active blockers:" in block
+    assert "Next up:" in block
+    assert "Dominant thread: Ship guardian state" in block
     assert "Memory signals:" in block
     assert "Continuity threads:" in block
     assert "Recent execution pressure:" in block

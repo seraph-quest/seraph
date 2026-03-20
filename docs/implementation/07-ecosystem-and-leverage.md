@@ -39,9 +39,9 @@
 
 ## Still To Do On `develop`
 
-- [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, and policy-aware recovery actions
-- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, replay guardrails, parameterized reruns, approval-aware recovery, and operator terminal
-- [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, and preflight surfaces
+- [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, and installable catalog surfaces
+- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, replay guardrails, parameterized reruns, approval-aware recovery, and operator terminal
+- [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, and first debug metadata
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 
 ## Non-Goals

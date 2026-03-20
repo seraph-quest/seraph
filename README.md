@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a guardian cockpit browser shell, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is cockpit-only: legacy village/editor code is retired and slated for removal rather than future productization.
+  Seraph ships today with a guardian cockpit browser shell, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is cockpit-only.
 </p>
 
 ---
@@ -82,7 +82,7 @@ docs/                Docusaurus docs site
 
 ## Retired Surfaces
 
-Legacy village/editor code still exists in the repo for the moment, but it is no longer part of the product contract, documentation truth, or roadmap direction. Seraph is being built as a cockpit-first guardian system, not a game-shell assistant.
+The retired village/editor line has been removed from the active repo path. Seraph is being built as a cockpit-first guardian system, not a game-shell assistant.
 
 ---
 

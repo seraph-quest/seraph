@@ -1,14 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../game/EventBus", () => ({
-  EventBus: {
-    emit: vi.fn(),
-    on: vi.fn(),
-    off: vi.fn(),
-  },
-}));
-
 import { SettingsPanel } from "../SettingsPanel";
 import { QuestPanel } from "../quest/QuestPanel";
 import { GoalForm } from "../quest/GoalForm";
@@ -36,8 +28,6 @@ describe("cockpit overlays", () => {
       settingsPanelOpen: false,
       questPanelOpen: false,
       onboardingCompleted: true,
-      debugWalkability: false,
-      interfaceMode: "cockpit",
       sessions: [],
       sessionId: null,
       messages: [],

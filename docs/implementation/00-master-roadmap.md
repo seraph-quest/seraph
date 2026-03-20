@@ -56,9 +56,10 @@ Legend for the checklist column:
 - [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian cockpit, not a village-first product.
-- [x] The guardian cockpit is now the only supported interface contract; the village/editor line is retired and should be removed from the repo rather than revived.
+- [x] The guardian cockpit is now the only supported interface contract; the village/editor line is removed from the active repo path and should not be revived.
 - [x] Seraph now exposes a coherent capability surface for tools, skills, workflows, MCP servers, starter packs, workflow runs, reusable runbooks, preflight/autorepair actions, live operator logs, and active thread continuity from inside the cockpit itself.
 - [x] Workflow runs, pending approvals, notifications, queued interventions, recent interventions, and failure events now share explicit thread labels, continue drafts, open-thread links, and one threaded operator timeline instead of living as separate operator silos.
+- [x] Workflow runs now expose step records, retry-from-step drafts, richer fingerprints, blocked-skill repair guidance, and cockpit-native debug/authoring handoff instead of only run-level replay.
 - [x] Guardian state now carries memory signals, continuity threads, collaborators, recurring obligations, project timelines, and learned timing, suppression, blocked-state, plus thread guidance instead of only first-pass focus and delivery bias.
 - [x] Runtime routing now enforces capability, cost, latency, task-class, and budget safeguards with operator-readable audit details instead of only weighted scoring and cooldown rerouting.
 - [ ] Seraph is still behind the strongest reference systems on deeper execution hardening, richer workflow step-debugging density, stronger long-horizon intervention learning, broader native reach, and fuller extension ergonomics.
@@ -69,6 +70,29 @@ Legend for the checklist column:
 Completed batches stay visible instead of being deleted on queue refresh.
 
 ### Latest Completed 10-PR Batch
+
+1. [x] `retire-village-and-editor-v1`:
+   remove the dormant village shell, map editor, Phaser bridge, and game-facing docs so the repo, product story, public docs IA, and cockpit-only direction stop contradicting each other
+2. [x] `execution-safety-hardening-v7`:
+   harden threaded replay, operator-timeline mutations, capability autorepair, provider fallback escalation, and native continuation resume paths so the denser cockpit keeps clear privilege boundaries as leverage increases
+3. [x] `workflow-step-debugging-and-recovery-v1`:
+   deepen workflow history from run-level timelines into step-level diagnostics, checkpoint targeting, failed-step evidence, and safer retry-from-step recovery
+4. [x] `cockpit-density-and-live-operator-views-v2`:
+   tighten the operator timeline, workflow timeline, approvals, evidence, and command surfaces into a faster keyboard-first cockpit with better step/debug density
+5. [x] `capability-bootstrap-and-pack-install-v1`:
+   move from first preflight/autorepair into broader bundled capability bootstrap, dependency install sequencing, and clearer pack-level recovery for skills, workflows, and MCP servers
+6. [x] `provider-policy-explainability-and-budgets-v1`:
+   expose operator-readable routing explanations, budget classes, task/risk-aware degrade paths, and better cross-surface visibility into why the runtime picked or rejected each target
+7. [x] `extension-debugging-and-authoring-v1`:
+   make third-party and user-authored skills, workflows, and MCP surfaces easier to validate, debug, recover, and operate from inside the cockpit
+8. [x] `world-model-memory-fusion-v7`:
+   deepen durable project state with collaborator timelines, recurring obligations, routines, execution-memory fusion, active blockers, next-up sequencing, and dominant-thread synthesis that can hold longer-running commitments more coherently
+9. [x] `guardian-learning-policy-v7`:
+   extend learning from the first suppression/timing/thread bias layer into stronger cooldown, escalation, and context-conditioned intervention policy adaptation with better quality gates
+10. [x] `guardian-behavioral-evals-v7`:
+   add deterministic contracts for workflow step recovery, broader capability bootstrap/autorepair, routing explainability and budgets, deeper learning, and richer native continuity
+
+### Earlier Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v6`:
    harden approval replay, operator-triggered repair, runbook execution, and capability-install flows with stricter mutation guardrails, clearer privilege boundaries, and tighter secret-bearing path containment
@@ -114,7 +138,7 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `guardian-behavioral-evals-v5`:
    prove the new approval-threading, capability-repair, and learned blocked-state/timing behaviors through deterministic eval contracts
 
-### Earlier Completed 10-PR Batch
+### Older Completed 10-PR Batch
 
 1. [x] `capability-discovery-and-activation-v1`:
    make Seraph's shipped tools, skills, workflows, MCP servers, and policy-gated capabilities visible and operable from the cockpit, including clear blocked-state reasons and one-click activation paths
@@ -137,7 +161,7 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `cockpit-layout-composition-v2`:
    deepen operator workspace control with more flexible layout composition, stronger inspector linking, and better history-density inside the cockpit
 
-### Older Completed 10-PR Batch
+### Archived Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v4`:
    harden replay, native action-card resume paths, approval recovery, secret-bearing workflow surfaces, and operator-triggered follow-on execution before the new cockpit leverage compounds further
@@ -160,7 +184,7 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `guardian-learning-policy-v4`:
    make learning change phrasing, cadence, escalation, and bundle-versus-interrupt decisions beyond the new delivery and channel bias layer
 
-### Archived Completed 10-PR Batch
+### Legacy Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v2`:
    tighten isolation, approval propagation, and secret or filesystem containment across shell, browser, workflow, and MCP execution paths before Seraph takes on more leverage
@@ -183,7 +207,7 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `guardian-behavioral-evals-v3`:
    prove the next learning, workflow-density, and cross-surface behaviors with deeper end-to-end guardian contracts
 
-### Legacy Completed 10-PR Batch
+### Historical Completed 10-PR Batch
 
 1. [x] `execution-safety-hardening-v1`:
    deepen privileged execution isolation, policy visibility, and hardening boundaries before Seraph expands more leverage on top of the current action layer
@@ -212,28 +236,28 @@ This is the authoritative PR list for the implementation side.
 It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#1 retire-village-and-editor-v1`
+- the current active item is `#1 execution-safety-hardening-v8`
 
-1. [ ] `retire-village-and-editor-v1`:
-   remove the dormant village shell, map editor, and game-facing docs so the repo, product story, and cockpit-only direction stop contradicting each other
-2. [ ] `execution-safety-hardening-v7`:
-   harden threaded replay, operator-timeline mutations, capability autorepair, provider fallback escalation, and native continuation resume paths so the denser cockpit keeps clear privilege boundaries as leverage increases
-3. [ ] `workflow-step-debugging-and-recovery-v1`:
-   deepen workflow history from run-level timelines into step-level diagnostics, checkpoint targeting, failed-step evidence, and safer retry-from-step recovery
-4. [ ] `cockpit-density-and-live-operator-views-v2`:
-   tighten the operator timeline, workflow timeline, approvals, evidence, and command surfaces into a faster keyboard-first cockpit with better step/debug density
-5. [ ] `capability-bootstrap-and-pack-install-v1`:
-   move from first preflight/autorepair into broader bundled capability bootstrap, dependency install sequencing, and clearer pack-level recovery for skills, workflows, and MCP servers
-6. [ ] `provider-policy-explainability-and-budgets-v1`:
-   expose operator-readable routing explanations, budget classes, task/risk-aware degrade paths, and better cross-surface visibility into why the runtime picked or rejected each target
-7. [ ] `extension-debugging-and-authoring-v1`:
-   make third-party and user-authored skills, workflows, and MCP surfaces easier to validate, debug, recover, and operate from inside the cockpit
-8. [ ] `world-model-memory-fusion-v7`:
-   deepen durable project state with collaborator timelines, recurring obligations, routines, and execution-memory fusion that can hold longer-running commitments more coherently
-9. [ ] `guardian-learning-policy-v7`:
-   extend learning from the first suppression/timing/thread bias layer into stronger cooldown, escalation, and context-conditioned intervention policy adaptation with better quality gates
-10. [ ] `guardian-behavioral-evals-v7`:
-   add deterministic contracts for workflow step recovery, broader capability bootstrap/autorepair, routing explainability and budgets, deeper learning, and richer native continuity
+1. [ ] `execution-safety-hardening-v8`:
+   harden step-targeted workflow recovery, operator-triggered replay, pack install/repair mutations, provider budget escalation, and native continuation resumes so the denser cockpit keeps explicit privilege boundaries as leverage compounds
+2. [ ] `workflow-step-debugging-and-recovery-v2`:
+   deepen workflow history from the first step-record layer into richer failed-step evidence, checkpoint diagnostics, artifact deltas, and safer retry-from-step recovery with clearer operator guidance
+3. [ ] `cockpit-density-and-live-operator-views-v3`:
+   tighten the operator timeline, workflow timeline, approvals, evidence, and command surfaces into a faster keyboard-first cockpit with better live debugging density, fewer dead states, and stronger pane composition
+4. [ ] `capability-bootstrap-and-pack-install-v2`:
+   broaden bundled capability bootstrap with dependency install sequencing, safer first-run pack activation, missing-tool repair, and clearer pack-level recovery for skills, workflows, and MCP servers
+5. [ ] `provider-policy-explainability-and-budgets-v2`:
+   expose operator-readable routing explanations, budget classes, task/risk-aware degrade paths, and cross-surface visibility into why the runtime picked, skipped, or downgraded each target
+6. [ ] `extension-debugging-and-authoring-v2`:
+   make third-party and user-authored skills, workflows, and MCP surfaces easier to validate, debug, repair, and author directly from inside the cockpit
+7. [ ] `native-channel-expansion-v4`:
+   deepen non-browser reach beyond the first desktop-shell continuity layer with better native follow-up control, clearer browser/native arbitration, and broader actionable recents
+8. [ ] `world-model-memory-fusion-v8`:
+   deepen durable project state with collaborator timelines, recurring obligations, routines, execution-memory fusion, and stronger long-horizon pressure synthesis that can hold commitments more coherently over time
+9. [ ] `guardian-learning-policy-v8`:
+   extend learning from the first timing/suppression/thread layer into stronger cooldown, escalation, channel, and context-conditioned intervention adaptation with clearer quality gates
+10. [ ] `guardian-behavioral-evals-v8`:
+   add deterministic contracts for richer step-level workflow recovery, broader capability bootstrap/repair, routing explainability and budgets, deeper learning, and broader native continuity
 
 ## Queue Maintenance Rule
 

@@ -1,7 +1,7 @@
 import type { ChatMessage } from "../../types";
 import { API_URL } from "../../config/constants";
 import { useState } from "react";
-import { EventBus } from "../../game/EventBus";
+import { appEventBus } from "../../lib/appEventBus";
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -45,7 +45,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         if (data?.status) {
           setApprovalStatus(data.status);
           if (decision === "approve" && data.status === "approved" && data.resume_message) {
-            EventBus.emit("approval-resume", {
+            appEventBus.emit("approval-resume", {
               sessionId: data.session_id ?? null,
               message: data.resume_message,
             });

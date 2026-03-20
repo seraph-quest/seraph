@@ -3444,6 +3444,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "current_focus": state.world_model.current_focus,
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
+            "active_blockers": list(state.world_model.active_blockers),
+            "next_up": list(state.world_model.next_up),
+            "dominant_thread": state.world_model.dominant_thread,
             "active_commitments_count": len(state.world_model.active_commitments),
             "active_projects_count": len(state.world_model.active_projects),
             "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
@@ -3467,6 +3470,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
             "agent_instructions_include_projects": "Active projects:" in instructions,
+            "agent_instructions_include_active_blockers": "Active blockers:" in instructions,
+            "agent_instructions_include_next_up": "Next up:" in instructions,
+            "agent_instructions_include_dominant_thread": "Dominant thread:" in instructions,
             "agent_instructions_include_memory_signals": "Memory signals:" in instructions,
             "strategist_instructions_include_receptivity": (
                 "Intervention receptivity: low" in strategist_agent.instructions
@@ -4681,15 +4687,24 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
         "workflow_recommended_action_types": [
             action["type"] for action in workflow_preflight["recommended_actions"]
         ],
+        "workflow_autorepair_action_types": [
+            action["type"] for action in workflow_preflight["autorepair_actions"]
+        ],
         "starter_pack_can_autorepair": starter_pack_preflight["can_autorepair"],
         "starter_pack_blocking_reasons": starter_pack_preflight["blocking_reasons"],
         "starter_pack_command_present": starter_pack_preflight["command"] is not None,
+        "starter_pack_autorepair_action_types": [
+            action["type"] for action in starter_pack_preflight["autorepair_actions"]
+        ],
         "runbook_ready": runbook_preflight["ready"],
         "runbook_can_autorepair": runbook_preflight["can_autorepair"],
         "runbook_parameter_schema_keys": sorted(runbook_preflight["parameter_schema"].keys()),
         "runbook_risk_level": runbook_preflight["risk_level"],
         "runbook_execution_boundaries": runbook_preflight["execution_boundaries"],
         "runbook_blocking_reasons": runbook_preflight["blocking_reasons"],
+        "runbook_autorepair_action_types": [
+            action["type"] for action in runbook_preflight["autorepair_actions"]
+        ],
     }
 
 

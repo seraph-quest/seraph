@@ -10,8 +10,6 @@ import type {
   ToolMeta,
 } from "../types";
 
-export type InterfaceMode = "cockpit" | "village";
-
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
@@ -26,11 +24,8 @@ interface ChatStore {
   chatMaximized: boolean;
   questPanelOpen: boolean;
   settingsPanelOpen: boolean;
-  interfaceMode: InterfaceMode;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
-  magicEffectPoolSize: number;
-  debugWalkability: boolean;
 
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -48,11 +43,8 @@ interface ChatStore {
   toggleChatMaximized: () => void;
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsPanelOpen: (open: boolean) => void;
-  setInterfaceMode: (mode: InterfaceMode) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
-  setMagicEffectPoolSize: (size: number) => void;
-  setDebugWalkability: (on: boolean) => void;
   fetchToolRegistry: () => Promise<void>;
   fetchProfile: () => Promise<void>;
   skipOnboarding: () => Promise<void>;
@@ -67,7 +59,6 @@ interface ChatStore {
 }
 
 const LAST_SESSION_KEY = "seraph_last_session_id";
-const INTERFACE_MODE_KEY = "seraph_interface_mode";
 const MAX_MESSAGES = 500;
 let restoreLastSessionPromise: Promise<void> | null = null;
 
@@ -125,11 +116,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   chatMaximized: false,
   questPanelOpen: false,
   settingsPanelOpen: false,
-  interfaceMode: safeStorageGet(INTERFACE_MODE_KEY) === "village" ? "village" : "cockpit",
   onboardingCompleted: null,
   toolRegistry: [],
-  magicEffectPoolSize: 0,
-  debugWalkability: false,
 
   addMessage: (message) =>
     set((state) => {
@@ -188,18 +176,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setSettingsPanelOpen: (open) => set({ settingsPanelOpen: open }),
 
-  setInterfaceMode: (mode) => {
-    safeStorageSet(INTERFACE_MODE_KEY, mode);
-    set({ interfaceMode: mode });
-  },
-
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
 
   setToolRegistry: (tools) => set({ toolRegistry: tools }),
-
-  setMagicEffectPoolSize: (size) => set({ magicEffectPoolSize: size }),
-
-  setDebugWalkability: (on) => set({ debugWalkability: on }),
 
   fetchToolRegistry: async () => {
     try {

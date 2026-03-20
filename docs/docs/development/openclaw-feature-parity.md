@@ -22,7 +22,7 @@ OpenClaw is a MIT-licensed AI agent by Peter Steinberger with 200k+ GitHub stars
 | **Screen Awareness** | Continuous daemon with structured OCR analysis, activity digests, capture modes — OpenClaw only has on-demand screen recording via device nodes |
 | **Goal System** | Full hierarchical 6-level goal tree with domains, materialized paths, dashboard, scheduled checks — OpenClaw tracks goals in plain markdown |
 | **Attention Guardian** | Sophisticated delivery gate with 6 user states, 3 interruption modes, attention budget, queued bundles — OpenClaw has no equivalent |
-| **Map Editor** | Historical note: the standalone editor is retired and pending removal, so this is no longer an active product advantage. |
+| **Map Editor** | Historical note: the standalone editor is retired and removed from the active repo path, so this is no longer an active product advantage. |
 | **Activity Digests** | Daily + weekly LLM-generated analysis of screen activity patterns — unique |
 
 ## Where OpenClaw is AHEAD (Feature Gaps)

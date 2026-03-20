@@ -64,13 +64,13 @@ This file explains:
 ### 5. Operator cockpit
 
 - [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, direct artifact-to-workflow draft handoff, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, per-layout save/reset composition, first browser-session continuity restore, a first actionable desktop shell, a first cockpit-native capability/operator surface for policy/extension/workflow state, a searchable capability palette, a threaded operator timeline, capability preflight/autorepair, and a denser operator terminal with recommendations, repair actions, installable items, live operator-feed status, and runbooks
-- [ ] still missing: better step-level replay control, richer workflow debugging density, and more flexible workspace control beyond the first dedicated workflow and operator timeline layers
+- [ ] still missing: richer workflow debugging density and more flexible workspace control beyond the shipped step records, retry-from-step recovery, and first dedicated workflow and operator timeline layers
 - owners: Workstream 06
 
 ### 6. Workflow leverage
 
 - [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, starter packs, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, first workflow-runs history with boundary-aware replay metadata, direct artifact-to-workflow draft handoff from cockpit inspectors, a cockpit-native operator surface for workflow availability plus extension/runtime visibility, a richer workflow timeline with approval recovery, thread links, replay guardrails, parameterized reruns, capability preflight/autorepair, and starter-pack repair guidance plus runbooks
-- [ ] still missing: richer direct workflow control, deeper step-level workflow history, and easier extension ergonomics beyond that first cockpit timeline plus operator terminal
+- [ ] still missing: richer direct workflow control, deeper step-level workflow history, and easier extension ergonomics beyond the shipped step records, retry-from-step recovery, first cockpit timeline, and operator terminal
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
@@ -84,10 +84,10 @@ This file explains:
 - [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
 - [x] This file should explain why the queue exists in its current order.
 - [x] The previous 10-item queue is now fully shipped on this branch.
-- [x] `execution-safety-hardening-v6`, `threaded-operator-timeline-v1`, `workflow-runbooks-and-parameterized-replay-v1`, `capability-preflight-and-autorepair-v1`, `provider-policy-safeguards-v3`, `native-channel-expansion-v3`, `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, `cockpit-density-and-live-operator-views-v1`, and `guardian-behavioral-evals-v6` now move into the latest completed batch in the roadmap.
-- [x] The roadmap now refreshes to `retire-village-and-editor-v1` as the next active item so the repo and docs stop carrying a second product line that is no longer part of Seraph's direction.
-- [x] The new queue starts with retirement of the village/editor line, then execution hardening, step-level workflow recovery, cockpit-density work, broader capability bootstrap, and provider-policy explainability because those are now the highest-value trust and operability gaps after the current operator-timeline and preflight batch landed.
-- [x] The refreshed queue keeps extension authoring, world-model fusion, guardian learning, and broader behavioral proof in the top 10 while pushing broader native expansion later, because cockpit-only Seraph needs denser operator control and clearer capability leverage before more surface area.
+- [x] `execution-safety-hardening-v6`, `threaded-operator-timeline-v1`, `workflow-runbooks-and-parameterized-replay-v1`, `capability-preflight-and-autorepair-v1`, `provider-policy-safeguards-v3`, `native-channel-expansion-v3`, `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, `cockpit-density-and-live-operator-views-v1`, and `guardian-behavioral-evals-v6` now remain preserved as the previous completed batch in the roadmap.
+- [x] `retire-village-and-editor-v1`, `execution-safety-hardening-v7`, `workflow-step-debugging-and-recovery-v1`, `cockpit-density-and-live-operator-views-v2`, `capability-bootstrap-and-pack-install-v1`, `provider-policy-explainability-and-budgets-v1`, `extension-debugging-and-authoring-v1`, `world-model-memory-fusion-v7`, `guardian-learning-policy-v7`, and `guardian-behavioral-evals-v7` now move into the latest completed batch in the roadmap.
+- [x] The roadmap now refreshes to `execution-safety-hardening-v8` as the next active item because operator leverage, replay, and capability bootstrap are strong enough that safety and deeper step-level debugging are now the sharpest gaps.
+- [x] The refreshed queue keeps workflow-step debugging, cockpit density, broader capability bootstrap, provider explainability, extension authoring, deeper world-model fusion, stronger guardian learning, native reach, and broader behavioral proof in the top 10 because those remain the highest-value gaps after this batch lands.
 - [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
 
 ## Acceptance Checklist

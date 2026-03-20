@@ -32,6 +32,14 @@ _STARTER_PACKS_PATH = os.path.join(_DEFAULTS_DIR, "starter-packs.json")
 _CATALOG_PATH = os.path.join(_DEFAULTS_DIR, "skill-catalog.json")
 _BUNDLED_SKILLS_DIR = os.path.join(_DEFAULTS_DIR, "skills")
 _BUNDLED_WORKFLOWS_DIR = os.path.join(_DEFAULTS_DIR, "workflows")
+_SAFE_AUTOREPAIR_ACTION_TYPES = {
+    "toggle_skill",
+    "toggle_workflow",
+    "set_tool_policy",
+    "set_mcp_policy",
+    "install_catalog_item",
+    "activate_starter_pack",
+}
 
 
 def _load_starter_packs() -> list[dict[str, Any]]:
@@ -57,6 +65,14 @@ def _load_catalog_items() -> dict[str, list[dict[str, Any]]]:
             if isinstance(payload.get("mcp_servers"), list)
             else []
         ),
+    }
+
+
+def _catalog_skill_by_name() -> dict[str, dict[str, Any]]:
+    return {
+        str(item["name"]): item
+        for item in _load_catalog_items().get("skills", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
     }
 
 
@@ -130,6 +146,8 @@ def _workflow_blocking_reasons(workflow: dict[str, Any]) -> list[str]:
         reasons.append("workflow disabled")
     for skill_name in workflow.get("missing_skills", []) or []:
         reasons.append(f"missing skill: {skill_name}")
+    for tool_name in workflow.get("blocked_skill_tools", []) or []:
+        reasons.append(f"blocked skill tool: {tool_name}")
     for tool_name in workflow.get("missing_tools", []) or []:
         reasons.append(f"missing tool: {tool_name}")
     return reasons
@@ -217,6 +235,7 @@ def _recommended_actions(
     tool_status = {str(tool["name"]): tool for tool in native_tools}
     starter_pack_index = _starter_pack_index()
     catalog = _load_catalog_items()
+    catalog_skills = _catalog_skill_by_name()
     catalog_items: list[dict[str, Any]] = []
     recommendations: list[dict[str, Any]] = []
     seen_recommendations: set[str] = set()
@@ -289,6 +308,18 @@ def _recommended_actions(
             })
 
     for workflow_name, workflow in workflows_by_name.items():
+        for missing_skill in workflow.get("missing_skills", []):
+            if missing_skill in skills_by_name:
+                continue
+            catalog_skill = catalog_skills.get(str(missing_skill))
+            if catalog_skill is None:
+                continue
+            add_recommendation({
+                "id": f"catalog-skill:{missing_skill}",
+                "label": f"Install skill {missing_skill}",
+                "description": catalog_skill.get("description", ""),
+                "action": {"type": "install_catalog_item", "label": "Install skill", "name": missing_skill},
+            })
         pack = next(
             (
                 item
@@ -391,6 +422,7 @@ def _starter_pack_recommended_actions(
     workflows_by_name: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
+    catalog_skills = _catalog_skill_by_name()
     if pack.get("availability") != "ready" and _starter_pack_activation_would_change_state(
         pack,
         skills_by_name=skills_by_name,
@@ -407,6 +439,15 @@ def _starter_pack_recommended_actions(
     for blocked in [*pack.get("blocked_skills", []), *pack.get("blocked_workflows", [])]:
         if not isinstance(blocked, dict):
             continue
+        blocked_name = str(blocked.get("name") or "")
+        if blocked_name and str(blocked.get("availability") or "missing") == "missing":
+            catalog_skill = catalog_skills.get(blocked_name)
+            if catalog_skill is not None:
+                actions.append({
+                    "type": "install_catalog_item",
+                    "label": f"Install {blocked_name}",
+                    "name": blocked_name,
+                })
         for missing_tool in blocked.get("missing_tools", []) or []:
             blocked_tool = tool_status.get(str(missing_tool))
             suggested_mode = _recommended_tool_policy_mode(
@@ -466,8 +507,10 @@ def _attach_workflow_actions(
     tool_mode: str,
 ) -> None:
     tool_status = {str(tool["name"]): tool for tool in native_tools}
+    catalog_skills = _catalog_skill_by_name()
     for workflow in workflows:
         actions: list[dict[str, Any]] = []
+        blocked_skill_tools: list[str] = []
         if not workflow.get("enabled", False):
             actions.append({
                 "type": "toggle_workflow",
@@ -477,14 +520,30 @@ def _attach_workflow_actions(
             })
         for missing_skill in workflow.get("missing_skills", []):
             skill = skills_by_name.get(str(missing_skill))
-            if skill is not None and not skill.get("enabled", False):
+            if skill is not None:
+                if not skill.get("enabled", False):
+                    actions.append({
+                        "type": "toggle_skill",
+                        "label": f"Enable {missing_skill}",
+                        "name": missing_skill,
+                        "enabled": True,
+                    })
+                blocked_skill_tools.extend(
+                    str(tool_name)
+                    for tool_name in skill.get("missing_tools", []) or []
+                    if isinstance(tool_name, str)
+                )
+                continue
+            if str(missing_skill) in catalog_skills:
                 actions.append({
-                    "type": "toggle_skill",
-                    "label": f"Enable {missing_skill}",
-                    "name": missing_skill,
-                    "enabled": True,
+                    "type": "install_catalog_item",
+                    "label": f"Install {missing_skill}",
+                    "name": str(missing_skill),
                 })
-        for missing_tool in workflow.get("missing_tools", []):
+        for missing_tool in [
+            *workflow.get("missing_tools", []),
+            *blocked_skill_tools,
+        ]:
             blocked_tool = tool_status.get(str(missing_tool))
             suggested_mode = _recommended_tool_policy_mode(
                 current_mode=tool_mode,
@@ -496,6 +555,7 @@ def _attach_workflow_actions(
                     "label": f"Allow {missing_tool}",
                     "mode": suggested_mode,
                 })
+        workflow["blocked_skill_tools"] = sorted(set(blocked_skill_tools))
         if workflow.get("availability") == "ready" and bool(workflow.get("user_invocable", False)):
             actions.append({
                 "type": "draft_workflow",
@@ -859,6 +919,12 @@ def _capability_preflight_payload(
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported target_type '{target_type}'")
 
+    autorepair_actions = [
+        action
+        for action in recommended_actions
+        if isinstance(action.get("type"), str) and action["type"] in _SAFE_AUTOREPAIR_ACTION_TYPES
+    ]
+
     return {
         "target_type": target_type,
         "name": name,
@@ -871,7 +937,8 @@ def _capability_preflight_payload(
         "parameter_schema": parameter_schema,
         "risk_level": risk_level,
         "execution_boundaries": execution_boundaries,
-        "can_autorepair": bool(recommended_actions),
+        "autorepair_actions": autorepair_actions,
+        "can_autorepair": bool(autorepair_actions),
         "ready": availability == "ready",
     }
 

@@ -213,6 +213,37 @@ async def get_operator_timeline(
 
     for event in audit_events:
         event_type = str(event.get("event_type") or "")
+        if event_type in {"llm_routing_decision", "llm_target_rerouted"}:
+            details = event.get("details") if isinstance(event.get("details"), dict) else {}
+            summary = str(event.get("summary") or event_type)
+            metadata = {
+                "event_type": event_type,
+                "selected_model": details.get("selected_model"),
+                "selected_profile": details.get("selected_profile"),
+                "required_policy_intents": details.get("required_policy_intents", []),
+                "max_budget_class": details.get("max_budget_class"),
+                "rerouted_from_policy_guardrails": details.get("rerouted_from_policy_guardrails"),
+                "candidate_targets": details.get("candidate_targets", []),
+            }
+            items.append({
+                "id": f"audit:{event['id']}",
+                "kind": "routing",
+                "title": str(event.get("tool_name") or "llm routing"),
+                "summary": summary,
+                "status": "rerouted" if event_type == "llm_target_rerouted" else "selected",
+                "created_at": str(event.get("created_at") or ""),
+                "updated_at": str(event.get("created_at") or ""),
+                "thread_id": event.get("session_id"),
+                "thread_label": session_titles.get(str(event.get("session_id"))) if event.get("session_id") else None,
+                "continue_message": None,
+                "replay_draft": None,
+                "replay_allowed": False,
+                "replay_block_reason": None,
+                "recommended_actions": [],
+                "source": "routing",
+                "metadata": metadata,
+            })
+            continue
         if event_type not in {"tool_failed", "integration_failed", "llm_primary_failure", "llm_fallback_failure"}:
             continue
         items.append({

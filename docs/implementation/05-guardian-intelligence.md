@@ -33,11 +33,11 @@
 - [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the new collaborator/obligation/timeline world-model pass shipped
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
 - [x] the first multi-signal learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
-- [x] `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, and `guardian-behavioral-evals-v6` are now shipped on this branch, so the next gap shifts to deeper durable modeling and stronger policy learning rather than more missing first-pass structure
+- [x] `world-model-memory-fusion-v7`, `guardian-learning-policy-v7`, and `guardian-behavioral-evals-v7` are now shipped on this branch, so the next gap shifts to deeper durable modeling and stronger policy learning rather than more missing first-pass structure
 
 ## Still To Do On `develop`
 
-- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer
+- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus first active blockers, next-up, and dominant-thread synthesis
 - [ ] stronger learning loops based on intervention outcomes beyond the first multi-signal delivery/channel/escalation plus phrasing/cadence/timing/suppression/thread layer
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation

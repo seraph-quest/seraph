@@ -17,8 +17,8 @@ title: Seraph Development Status
 - [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
-- [x] The guardian cockpit is the only supported browser shell; the village/editor line is retired and should be removed rather than revived.
-- [x] The cockpit now exposes capability discovery, starter packs, workflow history, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a threaded operator timeline, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
+- [x] The guardian cockpit is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
+- [x] The cockpit now exposes capability discovery, starter packs, workflow history, step records, retry-from-step recovery, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a threaded operator timeline, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -34,13 +34,13 @@ title: Seraph Development Status
 
 ## Current Focus On `develop`
 
-- [x] The last delivery batch is now complete on this branch: execution hardening v6, threaded operator timelines, parameterized workflow replay plus runbooks, capability preflight/autorepair, provider safeguards v3, native-channel expansion v3, world-model fusion v6, guardian-learning policy v6, denser cockpit operator views, and guardian behavioral evals v6 all landed together.
+- [x] The last delivery batch is now complete on this branch: village/editor retirement, execution hardening v7, workflow step debugging v1, cockpit density v2, capability bootstrap v1, provider explainability/budgets v1, extension debugging/authoring v1, world-model fusion v7, guardian-learning policy v7, and guardian behavioral evals v7 all landed together.
 - [x] The roadmap has now refreshed to a new next-10 batch rather than leaving the just-shipped batch as future work.
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now `retire-village-and-editor-v1`, because the docs, repo, and shipped app should no longer pretend there is a second product line beside the cockpit. After that, the queue now pulls cockpit density and step-level workflow recovery ahead of further native expansion.
-- [x] `execution-safety-hardening-v6`, `threaded-operator-timeline-v1`, `workflow-runbooks-and-parameterized-replay-v1`, `capability-preflight-and-autorepair-v1`, `provider-policy-safeguards-v3`, `native-channel-expansion-v3`, `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, `cockpit-density-and-live-operator-views-v1`, and `guardian-behavioral-evals-v6` are now shipped on this branch.
+- [x] The next strategic focus is now `execution-safety-hardening-v8`, because cockpit leverage, workflow recovery, and capability bootstrap are now strong enough that stricter mutation boundaries and deeper step-level control are the sharpest remaining gaps.
+- [x] `retire-village-and-editor-v1`, `execution-safety-hardening-v7`, `workflow-step-debugging-and-recovery-v1`, `cockpit-density-and-live-operator-views-v2`, `capability-bootstrap-and-pack-install-v1`, `provider-policy-explainability-and-budgets-v1`, `extension-debugging-and-authoring-v1`, `world-model-memory-fusion-v7`, `guardian-learning-policy-v7`, and `guardian-behavioral-evals-v7` are now shipped on this branch.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 
 ## Current Target Shape

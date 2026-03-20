@@ -60,6 +60,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Archived Directions',
+      collapsed: true,
       items: [
         'archive/village-first-vision',
         'archive/village-editor',

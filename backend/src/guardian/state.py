@@ -156,12 +156,18 @@ def _overall_confidence(
 
 
 def _world_model_status(world_model: GuardianWorldModel) -> str:
-    if world_model.current_focus != "No clear focus signal" and world_model.active_commitments:
+    if (
+        world_model.current_focus != "No clear focus signal"
+        and world_model.active_commitments
+        and world_model.dominant_thread != "No dominant thread"
+    ):
         return "grounded"
     if (
         world_model.current_focus != "No clear focus signal"
         or world_model.active_commitments
         or world_model.open_loops_or_pressure
+        or world_model.active_blockers
+        or world_model.next_up
     ):
         return "partial"
     return "empty"

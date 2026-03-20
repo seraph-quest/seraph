@@ -575,7 +575,7 @@ Eight bundled skills: `daily-standup`, `code-review`, `goal-reflection`, `weekly
 
 ## Retired: Village Map Editor
 
-The standalone village map editor is retired and no longer part of the supported Seraph product surface. The `editor/` folder remains only as historical code pending removal.
+The standalone village map editor is retired and no longer part of the supported Seraph product surface. The active repo no longer ships the `editor/` app.
 
 ## Resetting everything
 

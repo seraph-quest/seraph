@@ -20,6 +20,27 @@ export interface ArtifactRecord {
   summary: string;
 }
 
+export interface WorkflowStepRecord {
+  id: string;
+  index: number;
+  tool: string;
+  status: string;
+  argumentKeys: string[];
+  artifactPaths: string[];
+  resultSummary?: string | null;
+  errorKind?: string | null;
+}
+
+export interface WorkflowTimelineEntry {
+  kind: string;
+  at: string;
+  summary: string;
+  stepId?: string | null;
+  stepTool?: string | null;
+  resultSummary?: string | null;
+  errorKind?: string | null;
+}
+
 export interface WorkflowRunRecord {
   id: string;
   toolName: string;
@@ -30,6 +51,7 @@ export interface WorkflowRunRecord {
   updatedAt: string;
   summary: string;
   stepTools: string[];
+  stepRecords?: WorkflowStepRecord[];
   artifactPaths: string[];
   continuedErrorSteps: string[];
   arguments?: Record<string, unknown>;
@@ -62,7 +84,10 @@ export interface WorkflowRunRecord {
   resumeCheckpointLabel?: string | null;
   threadContinueMessage?: string | null;
   approvalRecoveryMessage?: string | null;
-  timeline?: Array<{ kind: string; at: string; summary: string }>;
+  runFingerprint?: string | null;
+  runIdentity?: string | null;
+  retryFromStepDraft?: string | null;
+  timeline?: WorkflowTimelineEntry[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

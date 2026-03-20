@@ -10,6 +10,7 @@ from typing import Any
 
 from smolagents import Tool
 
+from src.approval.repository import fingerprint_tool_call
 from src.plugins.registry import TOOL_METADATA
 from src.workflows.loader import Workflow, load_workflows
 
@@ -92,6 +93,23 @@ def _collect_artifact_paths(value: Any) -> list[str]:
     return paths
 
 
+def _summarize_value_shape(value: Any) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "empty text"
+        return f"text ({len(stripped)} chars)"
+    if isinstance(value, dict):
+        return f"object ({len(value)} keys)"
+    if isinstance(value, list):
+        return f"list ({len(value)} items)"
+    if isinstance(value, tuple):
+        return f"tuple ({len(value)} items)"
+    return type(value).__name__
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -120,6 +138,7 @@ class WorkflowTool(Tool):
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         workflow_inputs = self._normalize_inputs(args, kwargs)
+        run_fingerprint = fingerprint_tool_call(self.name, workflow_inputs)
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -128,6 +147,7 @@ class WorkflowTool(Tool):
         context.update(workflow_inputs)
         continued_error_steps: list[str] = []
         artifact_paths = _collect_artifact_paths(workflow_inputs)
+        step_records: list[dict[str, Any]] = []
 
         for step in self.workflow.steps:
             tool = self.tools_by_name.get(step.tool)
@@ -136,6 +156,9 @@ class WorkflowTool(Tool):
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
                 )
             rendered_arguments = _render_value(step.arguments, context)
+            step_artifact_paths = _collect_artifact_paths(rendered_arguments)
+            step_status = "succeeded"
+            error_kind: str | None = None
             try:
                 result = tool(
                     **rendered_arguments,
@@ -146,15 +169,31 @@ class WorkflowTool(Tool):
                     raise
                 result = f"Error: {exc}"
                 continued_error_steps.append(step.id)
+                step_status = "continued_error"
+                error_kind = type(exc).__name__
             context["steps"][step.id] = {
                 "tool": step.tool,
                 "arguments": rendered_arguments,
                 "result": result,
             }
             context["last_result"] = result
-            for path in _collect_artifact_paths(rendered_arguments):
+            for path in step_artifact_paths:
                 if path not in artifact_paths:
                     artifact_paths.append(path)
+            step_records.append({
+                "id": step.id,
+                "index": len(step_records) + 1,
+                "tool": step.tool,
+                "status": step_status,
+                "argument_keys": (
+                    sorted(str(key) for key in rendered_arguments.keys())
+                    if isinstance(rendered_arguments, dict)
+                    else []
+                ),
+                "artifact_paths": step_artifact_paths,
+                "result_summary": _summarize_value_shape(result),
+                "error_kind": error_kind,
+            })
 
         result_text = ""
         if self.workflow.result_template:
@@ -173,10 +212,13 @@ class WorkflowTool(Tool):
             summary,
             {
                 "workflow_name": self.workflow.name,
+                "run_fingerprint": run_fingerprint,
                 "step_count": len(self.workflow.steps),
                 "step_tools": [step.tool for step in self.workflow.steps],
+                "step_records": step_records,
                 "artifact_paths": artifact_paths,
                 "continued_error_steps": continued_error_steps,
+                "failed_step_ids": continued_error_steps,
                 "content_redacted": True,
             },
         )

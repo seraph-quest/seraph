@@ -76,6 +76,29 @@ describe("cockpitLayoutStore", () => {
     expect(useCockpitLayoutStore.getState().paneVisibility.audit_pane).toBe(false);
   });
 
+  it("migrates legacy persisted layout state with missing pane visibility", async () => {
+    const migrate = useCockpitLayoutStore.persist.getOptions().migrate;
+
+    const migrated = (await migrate?.(
+      {
+        activeLayoutId: "focus",
+        inspectorVisible: false,
+      },
+      0,
+    )) as {
+      activeLayoutId: string;
+      inspectorVisible: boolean;
+      paneVisibility: Record<string, boolean>;
+      savedPaneVisibility: Record<string, Record<string, boolean>>;
+    };
+
+    expect(migrated?.activeLayoutId).toBe("focus");
+    expect(migrated?.inspectorVisible).toBe(false);
+    expect(migrated?.paneVisibility.sessions_pane).toBe(false);
+    expect(migrated?.paneVisibility.inspector_pane).toBe(false);
+    expect(migrated?.savedPaneVisibility.focus?.inspector_pane).toBe(false);
+  });
+
   it("resets to the default layout with inspector visible", () => {
     useCockpitLayoutStore.setState({
       activeLayoutId: "focus",

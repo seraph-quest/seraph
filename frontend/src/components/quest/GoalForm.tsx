@@ -70,8 +70,14 @@ export function GoalForm({ goal, onClose }: Props) {
             <div className="cockpit-card-title">{isEdit ? "Edit Goal" : "New Goal"}</div>
             <div className="cockpit-card-meta">guardian planning</div>
           </div>
-          <button type="button" className="cockpit-modal-close" onClick={onClose}>
-            Close
+          <button
+            type="button"
+            className="cockpit-modal-close"
+            aria-label="Close goal editor"
+            title="Close goal editor"
+            onClick={onClose}
+          >
+            x
           </button>
         </div>
         <div className="cockpit-modal-body cockpit-modal-form cockpit-tone-scope cockpit-goals-scope">

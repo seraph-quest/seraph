@@ -418,7 +418,7 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(screen.getByText("Workflow timeline")).toBeInTheDocument());
     expect(screen.getByText("Activity ledger")).toBeInTheDocument();
-    expect(screen.getByText("Desktop shell")).toBeInTheDocument();
+    expect(screen.queryByText("Desktop shell")).not.toBeInTheDocument();
     expect(screen.getByText("Operator terminal")).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true"),
@@ -439,6 +439,11 @@ describe("CockpitView", () => {
     expect(screen.getByText("blocked web-brief-to-file")).toBeInTheDocument();
     expect(screen.getByText("tools write_file")).toBeInTheDocument();
     expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    const windowsMenu = await screen.findByText("Desktop Shell");
+    fireEvent.click(windowsMenu.closest("button") as HTMLButtonElement);
+
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
@@ -1771,6 +1776,10 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    const menu = await screen.findByText("Desktop Shell");
+    fireEvent.click(menu.closest("button") as HTMLButtonElement);
+
     await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -1983,6 +1992,55 @@ describe("CockpitView", () => {
     const activityTitle = await screen.findByText("Activity ledger", { selector: ".cockpit-window-title" });
     expect(activityTitle).toBeInTheDocument();
     expect(activityTitle.closest(".cockpit-window")).toHaveClass("cockpit-window--active");
+  });
+
+  it("does not repack unrelated panes when toggling window visibility", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
+
+    act(() => {
+      usePanelLayoutStore.getState().setRect("guardian_state_pane", { x: 222, y: 144 });
+    });
+
+    await waitFor(() => expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    const menu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
+    fireEvent.click(within(menu).getByText("Goals").closest("button") as HTMLButtonElement);
+
+    await waitFor(() => expect(screen.queryByText("Goals", { selector: ".cockpit-window-title" })).not.toBeInTheDocument());
+    expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" });
   });
 
   it("hides a pane from its window close control", async () => {

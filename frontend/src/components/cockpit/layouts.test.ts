@@ -14,11 +14,12 @@ describe("cockpit layouts", () => {
     expect(layout.paneVisibility.sessions_pane).toBe(true);
     expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
     expect(layout.paneVisibility.workflows_pane).toBe(true);
-    expect(layout.paneVisibility.audit_pane).toBe(true);
+    expect(layout.paneVisibility.audit_pane).toBe(false);
     expect(layout.paneVisibility.trace_pane).toBe(false);
     expect(layout.paneVisibility.conversation_pane).toBe(true);
     expect(layout.paneVisibility.outputs_pane).toBe(false);
-    expect(layout.paneVisibility.desktop_shell_pane).toBe(true);
+    expect(layout.paneVisibility.desktop_shell_pane).toBe(false);
+    expect(layout.paneVisibility.operator_surface_pane).toBe(true);
   });
 
   it("uses a trimmed single-column operator surface for focus layout", () => {

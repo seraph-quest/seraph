@@ -22,7 +22,7 @@ export const PANEL_MIN_SIZES: Record<string, { width: number; height: number }> 
   sessions_pane: { width: 224, height: 96 },
   goals_pane: { width: 224, height: 112 },
   outputs_pane: { width: 224, height: 96 },
-  presence_pane: { width: 432, height: 320 },
+  presence_pane: { width: 432, height: 384 },
   approvals_pane: { width: 224, height: 112 },
   operator_timeline_pane: { width: 304, height: 176 },
   response_pane: { width: 224, height: 112 },
@@ -34,11 +34,11 @@ export const PANEL_MIN_SIZES: Record<string, { width: number; height: number }> 
   inspector_pane: { width: 240, height: 144 },
   conversation_pane: { width: 240, height: 144 },
   desktop_shell_pane: { width: 224, height: 112 },
-  operator_surface_pane: { width: 240, height: 144 },
+  operator_surface_pane: { width: 240, height: 112 },
 };
 
 const WORKSPACE_GAP = 16;
-const WORKSPACE_LEFT = 56;
+const WORKSPACE_LEFT = 16;
 const WORKSPACE_TOP = 124;
 const WORKSPACE_RIGHT = 16;
 const WORKSPACE_BOTTOM = 140;
@@ -68,14 +68,23 @@ interface LayoutColumn {
   panes: string[];
 }
 
+const DEFAULT_LEFT_COLUMNS: LayoutColumn[] = [
+  { weight: 0.76, panes: ["sessions_pane", "goals_pane", "outputs_pane"] },
+  { weight: 1.12, panes: ["response_pane", "guardian_state_pane", "interventions_pane", "conversation_pane"] },
+  { weight: 1.08, panes: ["operator_timeline_pane", "workflows_pane", "approvals_pane", "inspector_pane"] },
+];
+
+const DEFAULT_RIGHT_ZONE_WEIGHT = 1.84;
+const DEFAULT_RIGHT_ZONE_PRESENCE_ID = "presence_pane";
+const DEFAULT_RIGHT_ZONE_AUX_IDS = [
+  "desktop_shell_pane",
+  "operator_surface_pane",
+  "audit_pane",
+  "trace_pane",
+];
+
 const LAYOUT_COLUMNS: Record<CockpitLayoutId, LayoutColumn[]> = {
-  default: [
-    { weight: 0.82, panes: ["sessions_pane", "goals_pane", "outputs_pane"] },
-    { weight: 1.18, panes: ["response_pane", "guardian_state_pane"] },
-    { weight: 1.08, panes: ["operator_timeline_pane", "workflows_pane", "interventions_pane"] },
-    { weight: 0.98, panes: ["approvals_pane", "audit_pane", "trace_pane", "inspector_pane", "operator_surface_pane"] },
-    { weight: 1.66, panes: ["presence_pane", "conversation_pane", "desktop_shell_pane"] },
-  ],
+  default: DEFAULT_LEFT_COLUMNS,
   focus: [
     { weight: 0.98, panes: ["guardian_state_pane", "operator_timeline_pane", "inspector_pane"] },
     { weight: 1.82, panes: ["presence_pane"] },
@@ -142,23 +151,14 @@ function distributeHeights(
   return heights;
 }
 
-export function getPackedCockpitPanels(
-  layoutId: CockpitLayoutId,
-  paneVisibility: Partial<Record<CockpitPaneId, boolean>> = getDefaultPaneVisibility(layoutId),
-): Record<string, PanelRect> {
-  const frame = getWorkspaceFrame();
-  const columns = LAYOUT_COLUMNS[layoutId]
-    .map((column) => ({
-      weight: column.weight,
-      panes: column.panes.filter((id) => paneVisibility[id as CockpitPaneId] !== false),
-    }))
-    .filter((column) => column.panes.length > 0);
+function buildPanelsForColumns(frame: ReturnType<typeof getWorkspaceFrame>, columns: LayoutColumn[]) {
   const columnCount = columns.length;
   const totalGap = WORKSPACE_GAP * (columnCount - 1);
   const availableWidth = frame.width - totalGap;
   const totalWeight = columns.reduce((sum, column) => sum + column.weight, 0);
   const columnWidths: number[] = [];
   let assignedWidth = 0;
+
   columns.forEach((column, index) => {
     if (index === columnCount - 1) {
       const minWidth = Math.max(...column.panes.map((id) => PANEL_MIN_SIZES[id]?.width ?? 224));
@@ -171,6 +171,7 @@ export function getPackedCockpitPanels(
     columnWidths.push(width);
     assignedWidth += width;
   });
+
   const panels: Record<string, PanelRect> = {};
 
   columns.forEach((column, columnIndex) => {
@@ -201,7 +202,148 @@ export function getPackedCockpitPanels(
     });
   });
 
+  return { panels, columnWidths };
+}
+
+function buildDefaultPackedPanels(
+  frame: ReturnType<typeof getWorkspaceFrame>,
+  paneVisibility: Partial<Record<CockpitPaneId, boolean>>,
+): Record<string, PanelRect> {
+  const leftColumns = DEFAULT_LEFT_COLUMNS
+    .map((column) => ({
+      weight: column.weight,
+      panes: column.panes.filter((id) => paneVisibility[id as CockpitPaneId] !== false),
+    }))
+    .filter((column) => column.panes.length > 0);
+
+  const hasPresence = paneVisibility[DEFAULT_RIGHT_ZONE_PRESENCE_ID as CockpitPaneId] !== false;
+  const auxIds = DEFAULT_RIGHT_ZONE_AUX_IDS.filter((id) => paneVisibility[id as CockpitPaneId] !== false);
+  const zoneWeight = hasPresence || auxIds.length > 0 ? DEFAULT_RIGHT_ZONE_WEIGHT : 0;
+  const columns = zoneWeight > 0 ? [...leftColumns, { weight: zoneWeight, panes: [DEFAULT_RIGHT_ZONE_PRESENCE_ID] }] : leftColumns;
+
+  if (columns.length === 0) return {};
+
+  const { panels, columnWidths } = buildPanelsForColumns(frame, columns);
+
+  if (zoneWeight === 0) return panels;
+
+  const rightColumnIndex = columns.length - 1;
+  const zoneX = snap(
+    frame.x +
+      columnWidths.slice(0, rightColumnIndex).reduce((sum, width) => sum + width, 0) +
+      WORKSPACE_GAP * rightColumnIndex,
+  );
+  const zoneWidth =
+    rightColumnIndex === columns.length - 1
+      ? snap(frame.x + frame.width - zoneX)
+      : columnWidths[rightColumnIndex];
+
+  const zoneHeight = frame.height;
+  const presenceMinHeight = PANEL_MIN_SIZES[DEFAULT_RIGHT_ZONE_PRESENCE_ID]?.height ?? 384;
+
+  if (!hasPresence) {
+    delete panels[DEFAULT_RIGHT_ZONE_PRESENCE_ID];
+  }
+
+  if (hasPresence && auxIds.length === 0) {
+    panels[DEFAULT_RIGHT_ZONE_PRESENCE_ID] = {
+      x: zoneX,
+      y: snap(frame.y),
+      width: Math.max(PANEL_MIN_SIZES[DEFAULT_RIGHT_ZONE_PRESENCE_ID]?.width ?? 224, zoneWidth),
+      height: Math.max(presenceMinHeight, zoneHeight),
+    };
+    return panels;
+  }
+
+  const auxAreaHeight = auxIds.length > 0 ? snap(Math.max(0, zoneHeight - presenceMinHeight - WORKSPACE_GAP)) : 0;
+  const presenceHeight = hasPresence
+    ? snap(Math.max(presenceMinHeight, zoneHeight - auxAreaHeight - (auxIds.length > 0 ? WORKSPACE_GAP : 0)))
+    : 0;
+  const auxStartY = hasPresence ? snap(frame.y + presenceHeight + WORKSPACE_GAP) : snap(frame.y);
+  const effectiveAuxHeight = hasPresence ? zoneHeight - presenceHeight - WORKSPACE_GAP : zoneHeight;
+
+  if (hasPresence) {
+    panels[DEFAULT_RIGHT_ZONE_PRESENCE_ID] = {
+      x: zoneX,
+      y: snap(frame.y),
+      width: Math.max(PANEL_MIN_SIZES[DEFAULT_RIGHT_ZONE_PRESENCE_ID]?.width ?? 224, zoneWidth),
+      height: Math.max(presenceMinHeight, presenceHeight),
+    };
+  }
+
+  if (auxIds.length === 0) return panels;
+
+  const gridColumns = auxIds.length === 1 ? 1 : 2;
+  const rowCount = Math.ceil(auxIds.length / gridColumns);
+  const rowGroups = Array.from({ length: rowCount }, (_, index) =>
+    auxIds.slice(index * gridColumns, index * gridColumns + gridColumns),
+  );
+  const rowMins = rowGroups.map((group) =>
+    Math.max(...group.map((id) => PANEL_MIN_SIZES[id]?.height ?? 96)),
+  );
+  const gaps = WORKSPACE_GAP * (rowCount - 1);
+  const minTotal = rowMins.reduce((sum, value) => sum + value, 0);
+  const usable = Math.max(0, effectiveAuxHeight - gaps);
+  const rowHeights =
+    usable <= minTotal
+      ? rowMins
+      : distributeHeights(
+          rowGroups.map((_, index) => `row-${index}`),
+          effectiveAuxHeight,
+        ).map((height, index) => Math.max(rowMins[index] ?? 96, height));
+
+  const colGap = gridColumns === 2 ? WORKSPACE_GAP : 0;
+  const auxColWidth = gridColumns === 2
+    ? snap((zoneWidth - colGap) / 2)
+    : zoneWidth;
+
+  rowGroups.forEach((group, rowIndex) => {
+    const rowY =
+      rowIndex === 0
+        ? auxStartY
+        : snap(
+            auxStartY +
+              rowHeights.slice(0, rowIndex).reduce((sum, value) => sum + value, 0) +
+              WORKSPACE_GAP * rowIndex,
+          );
+    const rowHeight =
+      rowIndex === rowGroups.length - 1
+        ? snap(auxStartY + effectiveAuxHeight - rowY)
+        : rowHeights[rowIndex] ?? 0;
+
+    group.forEach((id, colIndex) => {
+      const x = gridColumns === 2 ? snap(zoneX + (auxColWidth + WORKSPACE_GAP) * colIndex) : zoneX;
+      const width =
+        gridColumns === 2 && colIndex === group.length - 1
+          ? snap(zoneX + zoneWidth - x)
+          : auxColWidth;
+      panels[id] = {
+        x,
+        y: rowY,
+        width: Math.max(PANEL_MIN_SIZES[id]?.width ?? 224, width),
+        height: Math.max(PANEL_MIN_SIZES[id]?.height ?? 96, rowHeight),
+      };
+    });
+  });
+
   return panels;
+}
+
+export function getPackedCockpitPanels(
+  layoutId: CockpitLayoutId,
+  paneVisibility: Partial<Record<CockpitPaneId, boolean>> = getDefaultPaneVisibility(layoutId),
+): Record<string, PanelRect> {
+  const frame = getWorkspaceFrame();
+  if (layoutId === "default") {
+    return buildDefaultPackedPanels(frame, paneVisibility);
+  }
+  const columns = LAYOUT_COLUMNS[layoutId]
+    .map((column) => ({
+      weight: column.weight,
+      panes: column.panes.filter((id) => paneVisibility[id as CockpitPaneId] !== false),
+    }))
+    .filter((column) => column.panes.length > 0);
+  return buildPanelsForColumns(frame, columns).panels;
 }
 
 function defaultPanels(): Record<string, PanelRect> {

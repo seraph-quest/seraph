@@ -33,6 +33,7 @@ export interface CockpitLayoutDefinition {
 }
 
 export const DEFAULT_COCKPIT_LAYOUT_ID: CockpitLayoutId = "default";
+export const COCKPIT_LAYOUT_IDS: CockpitLayoutId[] = ["default", "focus", "review"];
 
 export const COCKPIT_PANES: CockpitPaneDefinition[] = [
   { id: "sessions_pane", label: "Sessions", group: "Core" },
@@ -74,7 +75,9 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     paneVisibility: {
       ...ALL_VISIBLE,
       outputs_pane: false,
+      audit_pane: false,
       trace_pane: false,
+      desktop_shell_pane: false,
     },
   },
   focus: {

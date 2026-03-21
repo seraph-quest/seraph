@@ -3,6 +3,7 @@ import { createJSONStorage, persist, type StateStorage } from "zustand/middlewar
 
 import {
   COCKPIT_PANE_IDS,
+  COCKPIT_LAYOUT_IDS,
   CORE_PANE_IDS,
   DEFAULT_COCKPIT_LAYOUT_ID,
   getDefaultPaneVisibility,
@@ -24,6 +25,13 @@ interface CockpitLayoutStore {
   showAllPanes: () => void;
   hideNonCorePanes: () => void;
   resetLayout: () => void;
+}
+
+interface PersistedCockpitLayoutStoreState {
+  activeLayoutId?: CockpitLayoutId;
+  inspectorVisible?: boolean;
+  paneVisibility?: Partial<Record<CockpitPaneId, boolean>>;
+  savedPaneVisibility?: Partial<Record<CockpitLayoutId, Partial<Record<CockpitPaneId, boolean>>>>;
 }
 
 const noopStorage: StateStorage = {
@@ -58,6 +66,40 @@ function withSavedVisibility(
     ...savedPaneVisibility,
     [layoutId]: { ...paneVisibility },
   };
+}
+
+function isCockpitLayoutId(value: unknown): value is CockpitLayoutId {
+  return value === "default" || value === "focus" || value === "review";
+}
+
+function normalizePaneVisibility(
+  paneVisibility: Partial<Record<CockpitPaneId, boolean>> | undefined,
+  layoutId: CockpitLayoutId,
+  inspectorVisible?: boolean,
+): Record<CockpitPaneId, boolean> {
+  const nextVisibility = {
+    ...getDefaultPaneVisibility(layoutId),
+    ...(paneVisibility ?? {}),
+  };
+  if (inspectorVisible === false && paneVisibility?.inspector_pane === undefined) {
+    nextVisibility.inspector_pane = false;
+  }
+  return nextVisibility;
+}
+
+function normalizeSavedPaneVisibility(
+  savedPaneVisibility: PersistedCockpitLayoutStoreState["savedPaneVisibility"],
+  activeLayoutId: CockpitLayoutId,
+  paneVisibility: Record<CockpitPaneId, boolean>,
+): Partial<Record<CockpitLayoutId, Record<CockpitPaneId, boolean>>> {
+  const normalized = Object.fromEntries(
+    COCKPIT_LAYOUT_IDS.map((layoutId) => [
+      layoutId,
+      normalizePaneVisibility(savedPaneVisibility?.[layoutId], layoutId),
+    ]),
+  ) as Partial<Record<CockpitLayoutId, Record<CockpitPaneId, boolean>>>;
+  normalized[activeLayoutId] = { ...paneVisibility };
+  return normalized;
 }
 
 export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
@@ -191,7 +233,29 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
     }),
     {
       name: "seraph_cockpit_layout",
+      version: 1,
       storage: createJSONStorage(getSafeBrowserStorage),
+      migrate: (persistedState) => {
+        const legacyState = (persistedState ?? {}) as PersistedCockpitLayoutStoreState;
+        const activeLayoutId = isCockpitLayoutId(legacyState.activeLayoutId)
+          ? legacyState.activeLayoutId
+          : DEFAULT_COCKPIT_LAYOUT_ID;
+        const paneVisibility = normalizePaneVisibility(
+          legacyState.paneVisibility,
+          activeLayoutId,
+          legacyState.inspectorVisible,
+        );
+        return {
+          activeLayoutId,
+          inspectorVisible: syncInspectorVisibility(paneVisibility),
+          paneVisibility,
+          savedPaneVisibility: normalizeSavedPaneVisibility(
+            legacyState.savedPaneVisibility,
+            activeLayoutId,
+            paneVisibility,
+          ),
+        };
+      },
       partialize: (state) => ({
         activeLayoutId: state.activeLayoutId,
         inspectorVisible: state.inspectorVisible,

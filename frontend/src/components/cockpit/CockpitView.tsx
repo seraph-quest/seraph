@@ -6,7 +6,7 @@ import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
-import { usePanelLayoutStore } from "../../stores/panelLayoutStore";
+import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
 import { buildWorkflowDraft, type WorkflowInfo } from "../settings/workflowDraft";
 import { useDragResize } from "../../hooks/useDragResize";
@@ -1318,14 +1318,16 @@ function CockpitWorkspaceWindow({
   meta: string;
   hint?: string | null;
   showHint?: boolean;
-  minWidth: number;
-  minHeight: number;
+  minWidth?: number;
+  minHeight?: number;
   onClose?: () => void;
   children: ReactNode;
 }) {
+  const resolvedMinWidth = PANEL_MIN_SIZES[panelId]?.width ?? minWidth ?? 240;
+  const resolvedMinHeight = PANEL_MIN_SIZES[panelId]?.height ?? minHeight ?? 160;
   const { panelRef, dragHandleProps, resizeHandleProps, style, isFront, bringToFront } = useDragResize(panelId, {
-    minWidth,
-    minHeight,
+    minWidth: resolvedMinWidth,
+    minHeight: resolvedMinHeight,
   });
 
   return (
@@ -1431,8 +1433,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const resetCockpitLayout = usePanelLayoutStore((s) => s.resetCockpitLayout);
   const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
   const syncCockpitPaneStack = usePanelLayoutStore((s) => s.syncCockpitPaneStack);
-  const previousLayoutRef = useRef(activeLayoutId);
-  const previousPaneVisibilityRef = useRef(paneVisibility);
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -1733,16 +1733,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   useEffect(() => {
     syncCockpitPaneStack(paneVisibility);
-    const sameLayout = previousLayoutRef.current === activeLayoutId;
-    const visibilityChanged = COCKPIT_PANES.some(
-      (pane) => previousPaneVisibilityRef.current[pane.id] !== paneVisibility[pane.id],
-    );
-    if (sameLayout && visibilityChanged) {
-      resetCockpitLayout(activeLayoutId, paneVisibility);
-    }
-    previousLayoutRef.current = activeLayoutId;
-    previousPaneVisibilityRef.current = paneVisibility;
-  }, [activeLayoutId, paneVisibility, resetCockpitLayout, syncCockpitPaneStack]);
+  }, [paneVisibility, syncCockpitPaneStack]);
 
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
@@ -3476,6 +3467,64 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               Settings
             </button>
           </div>
+        </div>
+
+        <div className="cockpit-topbar-bottom">
+          <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
+            <button
+              className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
+              onClick={() => setWindowsMenuOpen((current) => !current)}
+              title="Show or hide workspace windows"
+              aria-label="Windows"
+            >
+              Windows {visiblePaneCount}/{COCKPIT_PANES.length}
+            </button>
+            {windowsMenuOpen && (
+              <div className="cockpit-windows-menu cockpit-windows-menu--brand cockpit-window-launcher-drawer retro-scrollbar">
+                <div className="cockpit-window-launcher-header">
+                  <div className="cockpit-window-launcher-title">Windows</div>
+                  <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
+                </div>
+                <div className="cockpit-windows-menu-toolbar">
+                  <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
+                    Show all
+                  </button>
+                  <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
+                    Hide non-core
+                  </button>
+                  <button className="cockpit-windows-menu-action" onClick={handleResetWorkspace}>
+                    Reset workspace
+                  </button>
+                </div>
+                {panesByGroup.map(([group, panes]) => (
+                  <div key={group} className="cockpit-windows-menu-group">
+                    <div className="cockpit-windows-menu-group-title">{group}</div>
+                    {panes.map((pane) => {
+                      const isCorePane = CORE_PANE_IDS.includes(pane.id);
+                      return (
+                        <div key={pane.id} className="cockpit-windows-menu-row">
+                          <button
+                            className={`cockpit-windows-menu-toggle ${paneVisibility[pane.id] ? "active" : ""}`}
+                            onClick={() => togglePaneVisible(pane.id)}
+                          >
+                            <span className="cockpit-windows-menu-check">{paneVisibility[pane.id] ? "■" : "□"}</span>
+                            <span>{pane.label}</span>
+                            {isCorePane ? <span className="cockpit-windows-menu-core">core</span> : null}
+                          </button>
+                          <button
+                            className="cockpit-windows-menu-focus"
+                            onClick={() => focusPane(pane.id)}
+                          >
+                            Focus
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div className="cockpit-layout-row">
             {Object.values(COCKPIT_LAYOUTS).map((layout) => (
@@ -3511,65 +3560,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       )}
 
       <div className="cockpit-workspace">
-        <div
-          className={`cockpit-window-launcher ${windowsMenuOpen ? "is-open" : ""}`}
-          ref={windowsMenuRef}
-        >
-          <button
-            className={`cockpit-window-launcher-tab ${windowsMenuOpen ? "is-open" : ""}`}
-            onClick={() => setWindowsMenuOpen((current) => !current)}
-            title="Show or hide workspace windows"
-            aria-label="Windows"
-          >
-            <span className="cockpit-window-launcher-tab-label">Windows</span>
-            <span className="cockpit-window-launcher-tab-meta">{visiblePaneCount}/{COCKPIT_PANES.length}</span>
-          </button>
-          {windowsMenuOpen && (
-            <div className="cockpit-window-launcher-drawer">
-              <div className="cockpit-window-launcher-header">
-                <div className="cockpit-window-launcher-title">Windows</div>
-                <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
-              </div>
-              <div className="cockpit-windows-menu-toolbar">
-                <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
-                  Show all
-                </button>
-                <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
-                  Hide non-core
-                </button>
-                <button className="cockpit-windows-menu-action" onClick={handleResetWorkspace}>
-                  Reset workspace
-                </button>
-              </div>
-              {panesByGroup.map(([group, panes]) => (
-                <div key={group} className="cockpit-windows-menu-group">
-                  <div className="cockpit-windows-menu-group-title">{group}</div>
-                  {panes.map((pane) => {
-                    const isCorePane = CORE_PANE_IDS.includes(pane.id);
-                    return (
-                      <div key={pane.id} className="cockpit-windows-menu-row">
-                        <button
-                          className={`cockpit-windows-menu-toggle ${paneVisibility[pane.id] ? "active" : ""}`}
-                          onClick={() => togglePaneVisible(pane.id)}
-                        >
-                          <span className="cockpit-windows-menu-check">{paneVisibility[pane.id] ? "■" : "□"}</span>
-                          <span>{pane.label}</span>
-                          {isCorePane ? <span className="cockpit-windows-menu-core">core</span> : null}
-                        </button>
-                        <button
-                          className="cockpit-windows-menu-focus"
-                          onClick={() => focusPane(pane.id)}
-                        >
-                          Focus
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
         {visibleSections.rail && (
           <>
             {paneVisibility.sessions_pane && (
@@ -5382,14 +5372,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             aria-label="Extension studio"
           >
             <div className="cockpit-window-header">
-              <div>
+              <div className="cockpit-window-header-main">
                 <div className="cockpit-window-title">Extension studio</div>
                 <div className="cockpit-window-meta">
                   validate, repair, and author workflows, skills, and MCP config from one workspace
                 </div>
               </div>
-              <div className="cockpit-window-grip">
-                {selectedStudioEntry.entityType.replace(/_/g, " ")} · {selectedStudioEntry.availability}
+              <div className="cockpit-window-controls">
+                <div className="cockpit-window-meta">
+                  {selectedStudioEntry.entityType.replace(/_/g, " ")} · {selectedStudioEntry.availability}
+                </div>
+                <button
+                  type="button"
+                  className="cockpit-window-control cockpit-window-control--close"
+                  title="Close extension studio"
+                  aria-label="Close extension studio"
+                  onClick={() => setStudioOpen(false)}
+                >
+                  x
+                </button>
               </div>
             </div>
             <div className="cockpit-studio-shell">
@@ -5592,13 +5593,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             aria-label="Capability palette"
           >
             <div className="cockpit-window-header">
-              <div>
+              <div className="cockpit-window-header-main">
                 <div className="cockpit-window-title">Capability palette</div>
                 <div className="cockpit-window-meta">
                   keyboard-first launcher for capabilities, installs, repairs, and runbooks
                 </div>
               </div>
-              <div className="cockpit-window-grip">Shift+K / Ctrl+K</div>
+              <div className="cockpit-window-controls">
+                <div className="cockpit-window-meta">Shift+K / Ctrl+K</div>
+                <button
+                  type="button"
+                  className="cockpit-window-control cockpit-window-control--close"
+                  title="Close capability palette"
+                  aria-label="Close capability palette"
+                  onClick={() => setPaletteOpen(false)}
+                >
+                  x
+                </button>
+              </div>
             </div>
             <div className="cockpit-palette-body">
               <input

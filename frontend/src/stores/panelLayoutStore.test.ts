@@ -90,8 +90,10 @@ describe("panelLayoutStore packed cockpit layouts", () => {
 
     const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
 
-    expect(panels.presence_pane.width).toBeGreaterThanOrEqual(panels.response_pane.width * 1.4);
-    expect(panels.presence_pane.height).toBeGreaterThan(panels.workflows_pane.height);
+    expect(panels.presence_pane.width).toBeGreaterThanOrEqual(560);
+    expect(panels.presence_pane.height).toBeGreaterThanOrEqual(384);
+    expect(panels.presence_pane.height).toBeGreaterThan(panels.operator_surface_pane.height);
+    expect(panels.presence_pane.width).toBeGreaterThanOrEqual(panels.sessions_pane.width * 2);
   });
 
   it("gives the default layout more width to the main guardian surfaces than to inventory panes", () => {
@@ -102,7 +104,7 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     expect(panels.response_pane.width).toBeGreaterThan(panels.sessions_pane.width);
     expect(panels.guardian_state_pane.width).toBeGreaterThan(panels.goals_pane.width);
     expect(panels.operator_timeline_pane.width).toBeGreaterThanOrEqual(panels.approvals_pane.width);
-    expect(panels.conversation_pane.width).toBeGreaterThan(panels.audit_pane.width);
+    expect(panels.presence_pane.width).toBeGreaterThan(panels.response_pane.width);
   });
 
   it("keeps focus and review layouts functionally distinct", () => {

@@ -267,7 +267,7 @@ This is the authoritative PR list for the implementation side.
 For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#6 extension-scaffold-tools-v1`
+- the current active item is `#7 extension-authoring-docs-v1`
 - this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
 1. [x] `extension-model-terminology-v1`:
@@ -280,7 +280,7 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    add structured extension validation and doctor outputs for schema errors, missing references, compatibility failures, and permission mismatches so broken packs become diagnosable before install or execution
 5. [x] `extension-package-layout-v1`:
    standardize the on-disk package structure for capability packs and connectors so one package can contribute skills, workflows, runbooks, starter packs, presets, and later connector definitions coherently
-6. [ ] `extension-scaffold-tools-v1`:
+6. [x] `extension-scaffold-tools-v1`:
    ship local scaffolding and validation tools so adding a new capability pack does not require hand-authoring manifests and directory structure from scratch
 7. [ ] `extension-authoring-docs-v1`:
    publish first-class docs for creating capability packs, manifest fields, contribution types, validation, repair, and migration from the current loose-file model

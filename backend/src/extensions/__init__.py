@@ -30,6 +30,7 @@ from .layout import (
     resolve_package_reference,
     validate_contribution_layout,
 )
+from .scaffold import ScaffoldedExtensionPackage, scaffold_extension_package, validate_extension_package
 from .registry import (
     ExtensionContributionRecord,
     ExtensionLoadErrorRecord,
@@ -56,6 +57,7 @@ __all__ = [
     "ExtensionRegistrySnapshot",
     "CONTRIBUTION_LAYOUTS",
     "MANIFEST_FILENAMES",
+    "ScaffoldedExtensionPackage",
     "doctor_extension",
     "doctor_snapshot",
     "extension_registry",
@@ -65,5 +67,7 @@ __all__ = [
     "load_extension_manifest",
     "parse_extension_manifest",
     "resolve_package_reference",
+    "scaffold_extension_package",
     "validate_contribution_layout",
+    "validate_extension_package",
 ]

@@ -44,6 +44,7 @@
 - [x] this workstream now hands the queue forward to the full extension-platform transition program rather than isolated extension UX slices
 - [x] the first extension-platform foundation slices now cover terminology cleanup, canonical manifests, the transitional registry seam, and structured doctor diagnostics
 - [x] the extension-platform foundation now also pins one canonical on-disk package layout and package-boundary resolution rules for contribution files
+- [x] the authoring path now includes first local scaffold and validation commands for capability-pack package creation instead of forcing hand-authored manifests
 
 ## Still To Do On `develop`
 

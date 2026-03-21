@@ -1011,6 +1011,10 @@ body {
   resize: vertical;
 }
 
+.cockpit-studio-textarea--compact {
+  min-height: 120px;
+}
+
 .cockpit-list--palette {
   max-height: min(56vh, 620px);
 }

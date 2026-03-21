@@ -2756,7 +2756,7 @@ describe("CockpitView", () => {
     const studio = await screen.findByLabelText("Extension studio");
     expect(within(studio).getByText("Test Installable")).toBeInTheDocument();
 
-    fireEvent.click(within(studio).getByText("manifest.yaml").closest("button") as HTMLButtonElement);
+    fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -3300,6 +3300,644 @@ describe("CockpitView", () => {
     expect(within(studio).getByRole("button", { name: "Save manifest" })).toBeDisabled();
   }, 15000);
 
+  it("installs extension packages from a local path in extension studio", async () => {
+    let installed = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/install") && init?.method === "POST") {
+        installed = true;
+        return Promise.resolve(mockResponse({
+          status: "installed",
+          extension: {
+            id: "seraph.test-installable",
+            display_name: "Test Installable",
+          },
+        }));
+      }
+      if (url.includes("/api/extensions/validate") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          extension_id: "seraph.test-installable",
+          display_name: "Test Installable",
+          ok: true,
+          results: [],
+        }));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({
+          extensions: installed
+            ? [{
+              id: "seraph.test-installable",
+              display_name: "Test Installable",
+              version: "2026.3.21",
+              kind: "capability-pack",
+              trust: "local",
+              source: "manifest",
+              location: "workspace",
+              status: "ready",
+              summary: "Installed package",
+              issues: [],
+              load_errors: [],
+              toggle_targets: [],
+              toggleable_contribution_types: [],
+              passive_contribution_types: ["runbooks"],
+              enable_supported: false,
+              disable_supported: false,
+              removable: true,
+              enabled_scope: "none",
+              configurable: false,
+              metadata_supported: true,
+              config_scope: "metadata_only",
+              enabled: null,
+              config: {},
+              studio_files: [{
+                key: "seraph.test-installable:manifest",
+                role: "manifest",
+                reference: "manifest.yaml",
+                resolved_path: "/tmp/workspace/extensions/seraph-test-installable/manifest.yaml",
+                label: "manifest.yaml",
+                display_type: "manifest",
+                format: "yaml",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+                name: "Test Installable",
+              }],
+            }]
+            : [],
+        }));
+      }
+      if (url.includes("/api/extensions/seraph.test-installable/source")) {
+        return Promise.resolve(mockResponse({
+          content: "id: seraph.test-installable\nversion: 2026.3.21\n",
+          validation: { valid: true, manifest: { id: "seraph.test-installable", version: "2026.3.21" } },
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.change(within(studio).getByLabelText("Extension package path"), {
+      target: { value: "/tmp/extensions/test-installable" },
+    });
+    fireEvent.click(within(studio).getByRole("button", { name: "Install package" }));
+
+    await waitFor(() => {
+      const installCall = fetchMock.mock.calls.find(
+        ([input, callInit]) => String(input).includes("/api/extensions/install") && (callInit as RequestInit | undefined)?.method === "POST",
+      );
+      expect(installCall).toBeDefined();
+      const body = JSON.parse(String((installCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as { path?: string };
+      expect(body.path).toBe("/tmp/extensions/test-installable");
+    });
+
+    await waitFor(() => expect(within(studio).getAllByText("Test Installable").length).toBeGreaterThan(0));
+  }, 15000);
+
+  it("exposes extension lifecycle controls for manifest entries", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [{
+            name: "local-workflow",
+            tool_name: "workflow_local_workflow",
+            description: "Package-backed workflow",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "/tmp/workspace/extensions/seraph-test-installable/workflows/local-workflow.md",
+            source: "manifest",
+            extension_id: "seraph.test-installable",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "direct",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+            recommended_actions: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/seraph.test-installable/configure") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "configured",
+          extension: { id: "seraph.test-installable" },
+        }));
+      }
+      if (url.includes("/api/extensions/seraph.test-installable/disable") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "disabled",
+          extension: { id: "seraph.test-installable", enabled: false },
+          changed: [],
+        }));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.test-installable",
+            display_name: "Test Installable",
+            version: "2026.3.21",
+            kind: "capability-pack",
+            trust: "local",
+            source: "manifest",
+            location: "workspace",
+            status: "ready",
+            summary: "Managed package",
+            issues: [{ code: "permission_mismatch", severity: "error", message: "Manifest permissions are missing required workflow tools" }],
+            load_errors: [{ source: "/tmp/package/workflows/local-workflow.md", message: "workflow failed to load", phase: "manifest", details: [] }],
+            toggle_targets: [{ type: "workflow", name: "local-workflow" }],
+            toggleable_contribution_types: ["workflows"],
+            passive_contribution_types: ["runbooks"],
+            enable_supported: false,
+            disable_supported: true,
+            removable: true,
+            enabled_scope: "toggleable_contributions",
+            configurable: false,
+            metadata_supported: true,
+            config_scope: "metadata_only",
+            enabled: true,
+            config: { mode: "focus" },
+            studio_files: [
+              {
+                key: "seraph.test-installable:manifest",
+                role: "manifest",
+                reference: "manifest.yaml",
+                resolved_path: "/tmp/workspace/extensions/seraph-test-installable/manifest.yaml",
+                label: "manifest.yaml",
+                display_type: "manifest",
+                format: "yaml",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+                name: "Test Installable",
+              },
+              {
+                key: "seraph.test-installable:workflows:workflows/local-workflow.md",
+                role: "contribution",
+                reference: "workflows/local-workflow.md",
+                resolved_path: "/tmp/workspace/extensions/seraph-test-installable/workflows/local-workflow.md",
+                label: "local-workflow",
+                display_type: "workflow",
+                contribution_type: "workflows",
+                format: "markdown",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+                name: "local-workflow",
+              },
+            ],
+          }],
+        }));
+      }
+      if (url.includes("/api/extensions/seraph.test-installable/source")) {
+        return Promise.resolve(mockResponse({
+          content: "id: seraph.test-installable\nversion: 2026.3.21\n",
+          validation: { valid: true, manifest: { id: "seraph.test-installable", version: "2026.3.21" } },
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
+    expect(await within(studio).findByLabelText("package metadata")).toBeInTheDocument();
+    expect(within(studio).getByText("Manifest permissions are missing required workflow tools")).toBeInTheDocument();
+    expect(within(studio).getByText("workflow failed to load")).toBeInTheDocument();
+
+    fireEvent.change(within(studio).getByLabelText("package metadata"), {
+      target: { value: "{\n  \"mode\": \"review\",\n  \"budget\": \"low\"\n}" },
+    });
+    fireEvent.click(within(studio).getByRole("button", { name: "Save metadata" }));
+
+    await waitFor(() => {
+      const configureCall = fetchMock.mock.calls.find(
+        ([input, callInit]) => String(input).includes("/api/extensions/seraph.test-installable/configure") && (callInit as RequestInit | undefined)?.method === "POST",
+      );
+      expect(configureCall).toBeDefined();
+      const body = JSON.parse(String((configureCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as { config?: Record<string, unknown> };
+      expect(body.config).toEqual({ mode: "review", budget: "low" });
+    });
+
+    fireEvent.click(within(studio).getByRole("button", { name: "Disable contributions" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, callInit]) => String(input).includes("/api/extensions/seraph.test-installable/disable") && (callInit as RequestInit | undefined)?.method === "POST",
+        ),
+      ).toBe(true);
+    });
+  }, 15000);
+
+  it("preserves unsaved package metadata drafts across package refreshes", async () => {
+    let extensionRefreshCount = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { total_items: 0, visible_groups: 0 } }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [{
+            name: "local-workflow",
+            tool_name: "workflow_local_workflow",
+            description: "Package-backed workflow",
+            inputs: {},
+            requires_tools: [],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "/tmp/workspace/extensions/seraph-test-installable/workflows/local-workflow.md",
+            source: "manifest",
+            extension_id: "seraph.test-installable",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "direct",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+            recommended_actions: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/seraph.test-installable/disable") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "disabled",
+          extension: { id: "seraph.test-installable", enabled: false },
+          changed: [],
+        }));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        extensionRefreshCount += 1;
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.test-installable",
+            display_name: "Test Installable",
+            version: "2026.3.21",
+            kind: "capability-pack",
+            trust: "local",
+            source: "manifest",
+            location: "workspace",
+            status: "ready",
+            summary: "Managed package",
+            issues: [],
+            load_errors: [],
+            toggle_targets: [{ type: "workflow", name: "local-workflow" }],
+            toggleable_contribution_types: ["workflows"],
+            passive_contribution_types: [],
+            enable_supported: true,
+            disable_supported: true,
+            removable: true,
+            enabled_scope: "toggleable_contributions",
+            configurable: false,
+            metadata_supported: true,
+            config_scope: "metadata_only",
+            enabled: true,
+            config: extensionRefreshCount >= 2 ? { mode: "server" } : { mode: "focus" },
+            studio_files: [
+              {
+                key: "seraph.test-installable:manifest",
+                role: "manifest",
+                reference: "manifest.yaml",
+                resolved_path: "/tmp/workspace/extensions/seraph-test-installable/manifest.yaml",
+                label: "manifest.yaml",
+                display_type: "manifest",
+                format: "yaml",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+                name: "Test Installable",
+              },
+            ],
+          }],
+        }));
+      }
+      if (url.includes("/api/extensions/seraph.test-installable/source")) {
+        return Promise.resolve(mockResponse({
+          content: "id: seraph.test-installable\nversion: 2026.3.21\n",
+          validation: { valid: true, manifest: { id: "seraph.test-installable", version: "2026.3.21" } },
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
+
+    const metadataField = await within(studio).findByLabelText("package metadata");
+    fireEvent.change(metadataField, {
+      target: { value: "{\n  \"mode\": \"draft\"\n}" },
+    });
+
+    fireEvent.click(within(studio).getByRole("button", { name: "Disable contributions" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, callInit]) => String(input).includes("/api/extensions/seraph.test-installable/disable") && (callInit as RequestInit | undefined)?.method === "POST",
+        ),
+      ).toBe(true);
+    });
+    await waitFor(() => expect(extensionRefreshCount).toBeGreaterThanOrEqual(2));
+    expect(within(studio).getByLabelText("package metadata")).toHaveValue("{\n  \"mode\": \"draft\"\n}");
+  }, 15000);
+
+  it("removes workspace extension packages from extension studio", async () => {
+    let removed = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/seraph.test-installable") && init?.method === "DELETE") {
+        removed = true;
+        return Promise.resolve(mockResponse({ status: "removed", name: "seraph.test-installable" }));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({
+          extensions: removed
+            ? []
+            : [{
+              id: "seraph.test-installable",
+              display_name: "Test Installable",
+              version: "2026.3.21",
+              kind: "capability-pack",
+              trust: "local",
+              source: "manifest",
+              location: "workspace",
+              status: "ready",
+              summary: "Removable package",
+              issues: [],
+              load_errors: [],
+              toggle_targets: [],
+              toggleable_contribution_types: [],
+              passive_contribution_types: [],
+              enable_supported: false,
+              disable_supported: false,
+              removable: true,
+              enabled_scope: "none",
+              configurable: false,
+              metadata_supported: true,
+              config_scope: "metadata_only",
+              enabled: null,
+              config: {},
+              studio_files: [{
+                key: "seraph.test-installable:manifest",
+                role: "manifest",
+                reference: "manifest.yaml",
+                resolved_path: "/tmp/workspace/extensions/seraph-test-installable/manifest.yaml",
+                label: "manifest.yaml",
+                display_type: "manifest",
+                format: "yaml",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+                name: "Test Installable",
+              }],
+            }],
+        }));
+      }
+      if (url.includes("/api/extensions/seraph.test-installable/source")) {
+        return Promise.resolve(mockResponse({
+          content: "id: seraph.test-installable\nversion: 2026.3.21\n",
+          validation: { valid: true, manifest: { id: "seraph.test-installable", version: "2026.3.21" } },
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
+    fireEvent.click(await within(studio).findByRole("button", { name: "Remove package" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, callInit]) => String(input).includes("/api/extensions/seraph.test-installable") && (callInit as RequestInit | undefined)?.method === "DELETE",
+        ),
+      ).toBe(true);
+    });
+    await waitFor(() => expect(within(studio).queryByText("Test Installable")).not.toBeInTheDocument());
+  }, 15000);
+
   it("keeps successful cockpit surfaces visible when one refresh endpoint fails", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -3548,7 +4186,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(11));
+    await waitFor(() => expect(cockpitFetchCount).toBe(12));
     view.unmount();
 
     await act(async () => {

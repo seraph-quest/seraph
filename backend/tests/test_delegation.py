@@ -247,6 +247,9 @@ class TestCreateOrchestrator:
         instructions = orch_kwargs["instructions"]
         assert "You do NOT have any tools yourself" in instructions
         assert "team of specialists" in instructions
+        assert "productivity, performance, health, influence, and growth" in instructions
+        assert "relationships, and growth" not in instructions
+        assert "Treat relationship or collaboration priorities as influence" in instructions
 
 
 class TestStepFormatting:

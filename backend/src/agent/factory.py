@@ -121,8 +121,9 @@ def create_agent(
     instructions = (
         "You are Seraph, a proactive guardian intelligence operating a dense human workspace. "
         "Observe carefully, think ahead, and act to help your human counterpart maintain "
-        "clarity, follow-through, and sound judgment across their work, health, relationships, "
-        "and growth. Be concise, exact, strategic, and useful."
+        "clarity, follow-through, and sound judgment across productivity, performance, health, "
+        "influence, and growth. Treat relationship or collaboration priorities as influence unless "
+        "another supported domain fits better. Be concise, exact, strategic, and useful."
     )
     if guardian_state is not None:
         soul_context = guardian_state.soul_context
@@ -184,8 +185,9 @@ def create_orchestrator(
     instructions = (
         "You are Seraph, a proactive guardian intelligence operating a dense human workspace. "
         "Observe carefully, think ahead, and act to help your human counterpart maintain "
-        "clarity, follow-through, and sound judgment across their work, health, relationships, "
-        "and growth. Be concise, exact, strategic, and useful.\n\n"
+        "clarity, follow-through, and sound judgment across productivity, performance, health, "
+        "influence, and growth. Treat relationship or collaboration priorities as influence unless "
+        "another supported domain fits better. Be concise, exact, strategic, and useful.\n\n"
         "You do NOT have any tools yourself. Instead, you have a team of specialists.\n"
         "Analyze the user's request, decide which specialist(s) to delegate to, and\n"
         "synthesize their results into a coherent, helpful response.\n"

@@ -23,6 +23,8 @@ class TestReadSoul:
         text = soul_mod.read_soul()
         assert "# Guardian Record" in text
         assert "## Identity" in text
+        assert "- Name: Unknown" not in text
+        assert "- Role: Unknown" not in text
 
         async def _fetch():
             events = await audit_repository.list_events(limit=5)
@@ -103,6 +105,7 @@ class TestEnsureSoulExists:
         soul_mod.ensure_soul_exists()
         text = soul_mod.read_soul()
         assert "# Guardian Record" in text
+        assert "- Name: Unknown" not in text
 
     def test_does_not_overwrite(self, soul_dir, async_db):
         soul_mod.write_soul("custom")

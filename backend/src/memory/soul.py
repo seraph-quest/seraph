@@ -11,8 +11,8 @@ _soul_path = os.path.join(settings.workspace_dir, settings.soul_file)
 _DEFAULT_SOUL = """# Guardian Record
 
 ## Identity
-- Name: Unknown
-- Role: Unknown
+- Name:
+- Role:
 - Context: Baseline not yet established
 
 ## Values

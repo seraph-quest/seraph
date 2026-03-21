@@ -136,6 +136,8 @@ interface SkillInfo {
   enabled: boolean;
   description?: string;
   file_path?: string;
+  source?: string;
+  extension_id?: string | null;
   requires_tools?: string[];
   user_invocable?: boolean;
   availability?: "ready" | "blocked" | "disabled";
@@ -172,7 +174,14 @@ interface ToolInfo {
 }
 
 interface OperatorEntity {
-  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "activity_item";
+  entityType:
+    | "tool"
+    | "skill"
+    | "mcp"
+    | "starter_pack"
+    | "workflow_definition"
+    | "extension_manifest"
+    | "activity_item";
   name: string;
   meta: string;
   summary: string;
@@ -281,12 +290,55 @@ interface DoctorPlanRecord {
 
 interface ExtensionStudioEntry {
   id: string;
-  entityType: "workflow_definition" | "skill" | "mcp";
+  entityType: "workflow_definition" | "skill" | "mcp" | "extension_manifest";
   name: string;
   summary: string;
   availability: string;
   meta: string;
   entity: OperatorEntity;
+  extensionId?: string | null;
+  packageReference?: string | null;
+  packageDisplayName?: string | null;
+  packageVersion?: string | null;
+  packageLocation?: string | null;
+  packageTrust?: string | null;
+  studioFormat?: string | null;
+  saveSupported?: boolean;
+  validationSupported?: boolean;
+}
+
+interface ExtensionStudioFileInfo {
+  key: string;
+  role: "manifest" | "contribution";
+  reference: string;
+  resolved_path?: string | null;
+  label: string;
+  display_type: string;
+  contribution_type?: string | null;
+  format: string;
+  editable: boolean;
+  save_supported: boolean;
+  validation_supported: boolean;
+  loaded: boolean;
+  name?: string | null;
+  status?: string | null;
+  source?: string | null;
+}
+
+interface ExtensionPackageInfo {
+  id: string;
+  display_name: string;
+  version?: string | null;
+  kind: string;
+  trust: string;
+  source: string;
+  location: string;
+  status: string;
+  summary?: string | null;
+  description?: string | null;
+  compatibility?: { seraph: string } | null;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  studio_files: ExtensionStudioFileInfo[];
 }
 
 type LoggedOperatorError = Error & { operatorLogged?: boolean };
@@ -499,6 +551,82 @@ function managedFileName(value: unknown): string | null {
   return candidate && candidate.trim() ? candidate.trim() : null;
 }
 
+function normalizeExtensionStudioFile(value: Record<string, unknown>): ExtensionStudioFileInfo | null {
+  if (typeof value.key !== "string" || typeof value.reference !== "string" || typeof value.label !== "string") {
+    return null;
+  }
+  const role = value.role === "manifest" ? "manifest" : "contribution";
+  return {
+    key: value.key,
+    role,
+    reference: value.reference,
+    resolved_path: typeof value.resolved_path === "string" ? value.resolved_path : null,
+    label: value.label,
+    display_type: typeof value.display_type === "string" ? value.display_type : "file",
+    contribution_type: typeof value.contribution_type === "string" ? value.contribution_type : null,
+    format: typeof value.format === "string" ? value.format : "text",
+    editable: Boolean(value.editable),
+    save_supported: Boolean(value.save_supported),
+    validation_supported: Boolean(value.validation_supported),
+    loaded: value.loaded !== false,
+    name: typeof value.name === "string" ? value.name : null,
+    status: typeof value.status === "string" ? value.status : null,
+    source: typeof value.source === "string" ? value.source : null,
+  };
+}
+
+function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPackageInfo | null {
+  if (
+    typeof value.id !== "string"
+    || typeof value.display_name !== "string"
+    || typeof value.kind !== "string"
+    || typeof value.trust !== "string"
+    || typeof value.source !== "string"
+    || typeof value.location !== "string"
+    || typeof value.status !== "string"
+  ) {
+    return null;
+  }
+  const studioFiles = Array.isArray(value.studio_files)
+    ? value.studio_files.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionStudioFile(entry as Record<string, unknown>)].filter(Boolean) as ExtensionStudioFileInfo[]
+        : []
+    ))
+    : [];
+  return {
+    id: value.id,
+    display_name: value.display_name,
+    version: typeof value.version === "string" ? value.version : null,
+    kind: value.kind,
+    trust: value.trust,
+    source: value.source,
+    location: value.location,
+    status: value.status,
+    summary: typeof value.summary === "string" ? value.summary : null,
+    description: typeof value.description === "string" ? value.description : null,
+    compatibility:
+      value.compatibility && typeof value.compatibility === "object" && !Array.isArray(value.compatibility)
+        ? { seraph: String((value.compatibility as Record<string, unknown>).seraph ?? "") }
+        : null,
+    publisher:
+      value.publisher && typeof value.publisher === "object" && !Array.isArray(value.publisher)
+        ? {
+          name: String((value.publisher as Record<string, unknown>).name ?? ""),
+          homepage:
+            typeof (value.publisher as Record<string, unknown>).homepage === "string"
+              ? String((value.publisher as Record<string, unknown>).homepage)
+              : null,
+          support:
+            typeof (value.publisher as Record<string, unknown>).support === "string"
+              ? String((value.publisher as Record<string, unknown>).support)
+              : null,
+        }
+        : null,
+    studio_files: studioFiles,
+  };
+}
+
 function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
   return {
     entityType: "workflow_definition",
@@ -507,6 +635,8 @@ function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
     summary: workflow.description,
     details: {
       file_path: workflow.file_path,
+      source: workflow.source,
+      extension_id: workflow.extension_id ?? null,
       tool_name: workflow.tool_name,
       enabled: workflow.enabled,
       user_invocable: workflow.user_invocable,
@@ -534,6 +664,8 @@ function buildSkillEntity(skill: SkillInfo): OperatorEntity {
       enabled: skill.enabled,
       user_invocable: skill.user_invocable ?? false,
       file_path: skill.file_path ?? "",
+      source: skill.source,
+      extension_id: skill.extension_id ?? null,
       requires_tools: skill.requires_tools ?? [],
       missing_tools: skill.missing_tools ?? [],
       recommended_actions: skill.recommended_actions ?? [],
@@ -560,6 +692,29 @@ function buildMcpEntity(server: McpServerInfo): OperatorEntity {
       enabled: server.enabled,
       has_headers: server.has_headers ?? false,
       recommended_actions: server.recommended_actions ?? [],
+    },
+  };
+}
+
+function buildExtensionManifestEntity(extension: ExtensionPackageInfo): OperatorEntity {
+  return {
+    entityType: "extension_manifest",
+    name: extension.display_name,
+    meta: `${extension.location} · ${extension.trust} · ${extension.version ?? "unknown version"}`,
+    summary: extension.summary || extension.description || "Extension package manifest",
+    details: {
+      extension_id: extension.id,
+      kind: extension.kind,
+      trust: extension.trust,
+      location: extension.location,
+      status: extension.status,
+      version: extension.version ?? "",
+      compatibility: extension.compatibility ?? null,
+      publisher: extension.publisher ?? null,
+      file_path: "manifest.yaml",
+      studio_reference: "manifest.yaml",
+      save_supported: extension.location === "workspace",
+      validation_supported: true,
     },
   };
 }
@@ -1391,6 +1546,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [catalogItems, setCatalogItems] = useState<CatalogItemInfo[]>([]);
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
+  const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
@@ -1415,6 +1571,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const studioLoadRequestRef = useRef(0);
   const studioValidationRequestRef = useRef(0);
   const studioSaveRequestRef = useRef(0);
+  const studioPackagesRequestRef = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [windowsMenuOpen, setWindowsMenuOpen] = useState(false);
@@ -1659,6 +1816,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setApprovalMode(((approvalModeResult.payload as { mode?: string }).mode ?? "unknown") as ApprovalMode | "unknown");
     }
   }, [sessionId]);
+
+  const refreshStudioPackages = useCallback(async (isCancelled: () => boolean = () => false) => {
+    const requestId = ++studioPackagesRequestRef.current;
+    try {
+      const response = await fetch(`${API_URL}/api/extensions`);
+      const payload = await response.json().catch(() => null);
+      if (isCancelled() || requestId !== studioPackagesRequestRef.current) {
+        return;
+      }
+      if (
+        !response.ok
+        || !payload
+        || typeof payload !== "object"
+        || !Array.isArray((payload as { extensions?: unknown }).extensions)
+      ) {
+        setExtensionPackages([]);
+        return;
+      }
+      const extensions = ((payload as { extensions?: unknown }).extensions as unknown[]).flatMap((entry) => (
+        entry && typeof entry === "object" && !Array.isArray(entry)
+          ? [normalizeExtensionPackage(entry as Record<string, unknown>)].filter(Boolean) as ExtensionPackageInfo[]
+          : []
+      ));
+      setExtensionPackages(extensions);
+    } catch {
+      if (!isCancelled() && requestId === studioPackagesRequestRef.current) {
+        setExtensionPackages([]);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1909,9 +2096,57 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => savedRunbooks,
     [savedRunbooks],
   );
+  useEffect(() => {
+    if (!studioOpen) return;
+    let cancelled = false;
+    void refreshStudioPackages(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshStudioPackages, studioOpen]);
+
+  const extensionPackagesById = useMemo(
+    () => new Map(extensionPackages.map((item) => [item.id, item])),
+    [extensionPackages],
+  );
+
+  const matchPackageFile = useCallback(
+    (
+      extensionId: string | null | undefined,
+      displayType: "skill" | "workflow",
+      name: string,
+      filePath: string | null | undefined,
+    ): ExtensionStudioFileInfo | null => {
+      if (!extensionId) return null;
+      const extensionPackage = extensionPackagesById.get(extensionId);
+      if (!extensionPackage) return null;
+      return extensionPackage.studio_files.find((entry) => {
+        if (entry.role !== "contribution" || entry.display_type !== displayType) return false;
+        if (entry.name === name) return true;
+        return typeof entry.resolved_path === "string" && !!filePath && entry.resolved_path === filePath;
+      }) ?? null;
+    },
+    [extensionPackagesById],
+  );
+
   const studioEntries = useMemo<ExtensionStudioEntry[]>(
     () => [
       ...workflows.map((workflow) => ({
+        ...(() => {
+          const packageFile = matchPackageFile(workflow.extension_id, "workflow", workflow.name, workflow.file_path);
+          const extensionPackage = workflow.extension_id ? extensionPackagesById.get(workflow.extension_id) ?? null : null;
+          return {
+            extensionId: workflow.extension_id ?? null,
+            packageReference: packageFile?.reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: packageFile?.format ?? null,
+            saveSupported: workflow.extension_id ? (packageFile?.save_supported ?? false) : true,
+            validationSupported: workflow.extension_id ? (packageFile?.validation_supported ?? false) : true,
+          };
+        })(),
         id: `workflow:${workflow.name}`,
         entityType: "workflow_definition" as const,
         name: workflow.name,
@@ -1928,6 +2163,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         availability: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
         meta: skill.user_invocable ? "invocable skill" : "support skill",
         entity: buildSkillEntity(skill),
+        ...(() => {
+          const packageFile = matchPackageFile(skill.extension_id, "skill", skill.name, skill.file_path ?? null);
+          const extensionPackage = skill.extension_id ? extensionPackagesById.get(skill.extension_id) ?? null : null;
+          return {
+            extensionId: skill.extension_id ?? null,
+            packageReference: packageFile?.reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: packageFile?.format ?? null,
+            saveSupported: skill.extension_id ? (packageFile?.save_supported ?? false) : true,
+            validationSupported: skill.extension_id ? (packageFile?.validation_supported ?? false) : true,
+          };
+        })(),
       })),
       ...mcpServers.map((server) => ({
         id: `mcp:${server.name}`,
@@ -1937,9 +2187,32 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         availability: server.availability ?? server.status ?? "unknown",
         meta: `${server.status ?? "unknown"} · ${server.tool_count ?? 0} tools`,
         entity: buildMcpEntity(server),
+        saveSupported: true,
+        validationSupported: true,
       })),
+      ...extensionPackages.map((extensionPackage) => {
+        const manifestFile = extensionPackage.studio_files.find((entry) => entry.role === "manifest") ?? null;
+        return {
+          id: `extension:${extensionPackage.id}`,
+          entityType: "extension_manifest" as const,
+          name: extensionPackage.display_name,
+          summary: extensionPackage.summary || extensionPackage.description || "Extension package manifest",
+          availability: extensionPackage.status,
+          meta: `${extensionPackage.location} · ${extensionPackage.trust} · ${extensionPackage.version ?? "unknown version"}`,
+          entity: buildExtensionManifestEntity(extensionPackage),
+          extensionId: extensionPackage.id,
+          packageReference: manifestFile?.reference ?? null,
+          packageDisplayName: extensionPackage.display_name,
+          packageVersion: extensionPackage.version ?? null,
+          packageLocation: extensionPackage.location,
+          packageTrust: extensionPackage.trust,
+          studioFormat: manifestFile?.format ?? "yaml",
+          saveSupported: manifestFile?.save_supported ?? false,
+          validationSupported: manifestFile?.validation_supported ?? false,
+        };
+      }),
     ],
-    [mcpServers, skills, workflows],
+    [extensionPackages, extensionPackagesById, matchPackageFile, mcpServers, skills, workflows],
   );
   const selectedStudioEntry = useMemo(
     () => studioEntries.find((entry) => entry.id === studioSelectedId) ?? studioEntries[0] ?? null,
@@ -1952,6 +2225,34 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => readActionList(selectedStudioEntry?.entity.details.recommended_actions),
     [selectedStudioEntry],
   );
+  const studioSidebarSections = useMemo(() => {
+    const grouped = new Map<string, ExtensionStudioEntry[]>();
+    extensionPackages.forEach((extensionPackage) => {
+      grouped.set(extensionPackage.id, []);
+    });
+    const standalone: ExtensionStudioEntry[] = [];
+    studioEntries.forEach((entry) => {
+      if (entry.extensionId && grouped.has(entry.extensionId)) {
+        grouped.get(entry.extensionId)?.push(entry);
+      } else {
+        standalone.push(entry);
+      }
+    });
+    const sortEntries = (entries: ExtensionStudioEntry[]) => entries.slice().sort((left, right) => {
+      if (left.entityType === "extension_manifest" && right.entityType !== "extension_manifest") return -1;
+      if (right.entityType === "extension_manifest" && left.entityType !== "extension_manifest") return 1;
+      return left.name.localeCompare(right.name);
+    });
+    return {
+      packages: extensionPackages
+        .map((extensionPackage) => ({
+          extension: extensionPackage,
+          entries: sortEntries(grouped.get(extensionPackage.id) ?? []),
+        }))
+        .filter((group) => group.entries.length > 0),
+      standalone: sortEntries(standalone),
+    };
+  }, [extensionPackages, studioEntries]);
 
   useEffect(() => {
     if (!studioOpen) return;
@@ -1994,6 +2295,37 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
     const loadStudioSource = async () => {
       try {
+        if (selectedStudioEntry.extensionId && selectedStudioEntry.packageReference && selectedStudioEntry.entityType !== "mcp") {
+          const response = await fetch(
+            `${API_URL}/api/extensions/${encodeURIComponent(selectedStudioEntry.extensionId)}/source?reference=${encodeURIComponent(selectedStudioEntry.packageReference)}`,
+          );
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(
+              payload.validation && typeof payload.validation === "object"
+                ? payload.validation as Record<string, unknown>
+                : null,
+            );
+            if (selectedStudioEntry.entityType === "extension_manifest") {
+              setStudioStatus(`${selectedStudioEntry.packageDisplayName ?? selectedStudioEntry.name} manifest loaded`);
+            }
+          }
+          return;
+        }
+        if (selectedStudioEntry.extensionId && selectedStudioEntry.entityType !== "mcp") {
+          if (!cancelled && requestId === studioLoadRequestRef.current && studioSelectionRef.current === entryId) {
+            setStudioDraftValidation(null);
+            setStudioStatus(`Reload extension package metadata before editing ${selectedStudioEntry.name}`);
+          }
+          return;
+        }
         if (selectedStudioEntry.entityType === "workflow_definition") {
           const response = await fetch(`${API_URL}/api/workflows/${encodeURIComponent(selectedStudioEntry.name)}/source`);
           const payload = await response.json().catch(() => null);
@@ -2237,6 +2569,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("validation");
     setStudioStatus(`Validating ${entry.name}...`);
     try {
+      if (entry.entityType === "extension_manifest" && entry.extensionId && entry.packageReference) {
+        const response = await fetch(
+          `${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source?reference=${encodeURIComponent(entry.packageReference)}`,
+        );
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(
+          payload?.validation && typeof payload.validation === "object"
+            ? payload.validation as Record<string, unknown>
+            : null,
+        );
+        if (!response.ok) {
+          setStudioStatus(typeof payload?.detail === "string" ? payload.detail : `Failed to validate ${entry.name}`);
+        } else {
+          setStudioStatus(`${entry.packageDisplayName ?? entry.name} manifest is valid`);
+        }
+        return;
+      }
+
       if (entry.entityType === "workflow_definition") {
         const [validationResponse, preflightResponse, diagnosticsResponse] = await Promise.all([
           fetch(`${API_URL}/api/workflows/validate`, {
@@ -2358,12 +2709,58 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     const entry = selectedStudioEntry;
+    if (entry.extensionId && !entry.packageReference) {
+      setStudioStatus(`Reload extension packages before saving ${entry.name}`);
+      return;
+    }
     const entryId = entry.id;
     const fileName = managedFileName(entry.entity.details.file_path);
     const requestId = ++studioSaveRequestRef.current;
     setStudioBusy("save");
     setStudioStatus(`Saving ${entry.name}...`);
     try {
+      if (entry.extensionId && entry.packageReference) {
+        const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reference: entry.packageReference,
+            content: studioDraft,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+            setStudioStatus(
+              typeof payload?.detail === "string"
+                ? payload.detail
+                : `Failed to save ${entry.name}`,
+            );
+          }
+          return;
+        }
+        await refreshCockpit();
+        await refreshStudioPackages();
+        if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(
+          payload?.validation && typeof payload.validation === "object"
+            ? payload.validation as Record<string, unknown>
+            : null,
+        );
+        setStudioStatus(
+          entry.entityType === "extension_manifest"
+            ? `${entry.packageDisplayName ?? entry.name} manifest saved`
+            : `${entry.name} saved`,
+        );
+        appendOperatorFeed(
+          entry.entityType === "extension_manifest"
+            ? `${entry.packageDisplayName ?? entry.name} manifest saved`
+            : `${entry.name} saved`,
+          "success",
+        );
+        return;
+      }
+
       const endpoint = entry.entityType === "workflow_definition"
         ? `${API_URL}/api/workflows/save`
         : `${API_URL}/api/skills/save`;
@@ -5375,7 +5772,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <div className="cockpit-window-header-main">
                 <div className="cockpit-window-title">Extension studio</div>
                 <div className="cockpit-window-meta">
-                  validate, repair, and author workflows, skills, and MCP config from one workspace
+                  validate, repair, and author extension packages, workflows, skills, and MCP config from one workspace
                 </div>
               </div>
               <div className="cockpit-window-controls">
@@ -5399,19 +5796,54 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <span className="cockpit-key">extensions</span>
                   <span className="cockpit-operator-link">{studioEntries.length} loaded</span>
                 </div>
-                <div className="cockpit-list cockpit-list--palette">
-                  {studioEntries.map((entry) => (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      className={`cockpit-sublist-button ${selectedStudioEntry.id === entry.id ? "active" : ""}`}
-                      onClick={() => setStudioSelectedId(entry.id)}
-                    >
-                      <span>{entry.name}</span>
-                      <span className="cockpit-row-age">{entry.entityType === "workflow_definition" ? "workflow" : entry.entityType}</span>
-                    </button>
-                  ))}
-                </div>
+                {studioSidebarSections.packages.map((group) => (
+                  <div key={group.extension.id} className="cockpit-studio-sidebar-group">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">{group.extension.display_name}</span>
+                      <span className="cockpit-row-age">{group.extension.location}</span>
+                    </div>
+                    <div className="cockpit-list cockpit-list--palette">
+                      {group.entries.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          className={`cockpit-sublist-button ${selectedStudioEntry.id === entry.id ? "active" : ""}`}
+                          onClick={() => setStudioSelectedId(entry.id)}
+                        >
+                          <span>{entry.entityType === "extension_manifest" ? "manifest.yaml" : entry.name}</span>
+                          <span className="cockpit-row-age">
+                            {entry.entityType === "workflow_definition"
+                              ? "workflow"
+                              : entry.entityType === "extension_manifest"
+                                ? "manifest"
+                                : entry.entityType}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {studioSidebarSections.standalone.length ? (
+                  <div className="cockpit-studio-sidebar-group">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">standalone</span>
+                      <span className="cockpit-row-age">{studioSidebarSections.standalone.length}</span>
+                    </div>
+                    <div className="cockpit-list cockpit-list--palette">
+                      {studioSidebarSections.standalone.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          className={`cockpit-sublist-button ${selectedStudioEntry.id === entry.id ? "active" : ""}`}
+                          onClick={() => setStudioSelectedId(entry.id)}
+                        >
+                          <span>{entry.name}</span>
+                          <span className="cockpit-row-age">{entry.entityType === "workflow_definition" ? "workflow" : entry.entityType}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </aside>
               <div className="cockpit-studio-main">
                 <div className="cockpit-inspector">
@@ -5420,6 +5852,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-inspector-body">{selectedStudioEntry.summary}</div>
                   <div className="cockpit-chip-row">
                     <span className="cockpit-chip">{selectedStudioEntry.availability}</span>
+                    {selectedStudioEntry.packageDisplayName ? (
+                      <span className="cockpit-chip">
+                        {selectedStudioEntry.packageDisplayName}
+                        {selectedStudioEntry.packageVersion ? ` · ${selectedStudioEntry.packageVersion}` : ""}
+                      </span>
+                    ) : null}
+                    {selectedStudioEntry.packageLocation ? (
+                      <span className="cockpit-chip">
+                        {selectedStudioEntry.packageLocation}
+                        {selectedStudioEntry.packageTrust ? ` · ${selectedStudioEntry.packageTrust}` : ""}
+                      </span>
+                    ) : null}
                     {typeof selectedStudioEntry.entity.details.file_path === "string" && selectedStudioEntry.entity.details.file_path
                       ? <span className="cockpit-chip">{String(selectedStudioEntry.entity.details.file_path)}</span>
                       : null}
@@ -5431,18 +5875,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <button
                       className="cockpit-feedback-button"
                       onClick={() => void refreshStudioValidation()}
-                      disabled={studioBusy === "validation"}
+                      disabled={studioBusy === "validation" || selectedStudioEntry.validationSupported === false}
                     >
-                      {selectedStudioEntry.entityType === "mcp" ? "Validate config" : "Refresh validation"}
+                      {selectedStudioEntry.entityType === "mcp"
+                        ? "Validate config"
+                        : selectedStudioEntry.entityType === "extension_manifest"
+                          ? "Validate manifest"
+                          : "Refresh validation"}
                     </button>
                     <button
                       className="cockpit-feedback-button"
                       onClick={() => void saveStudioDraft()}
-                      disabled={studioBusy === "save"}
+                      disabled={studioBusy === "save" || selectedStudioEntry.saveSupported === false}
                     >
-                      {selectedStudioEntry.entityType === "mcp" ? "Save config" : "Save draft"}
+                      {selectedStudioEntry.entityType === "mcp"
+                        ? "Save config"
+                        : selectedStudioEntry.entityType === "extension_manifest"
+                          ? "Save manifest"
+                          : "Save draft"}
                     </button>
-                    {selectedStudioEntry.entityType !== "mcp" ? (
+                    {selectedStudioEntry.entityType !== "mcp" && selectedStudioEntry.entityType !== "extension_manifest" ? (
                       <button
                         className="cockpit-feedback-button"
                         onClick={() => queueComposerDraft(studioDraft)}
@@ -5474,6 +5926,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-value">
                         {studioPreflight
                           ? `${studioPreflight.ready ? "ready" : "blocked"} · ${studioPreflight.blocking_reasons.join(" · ") || "no blockers"}`
+                          : selectedStudioEntry.entityType === "extension_manifest"
+                            ? "Validate the manifest and keep packaged contributions in sync."
                           : selectedStudioEntry.entityType === "skill"
                             ? "Use validation to check draft syntax and current runtime blockers."
                             : "Run validation to capture a current plan."}
@@ -5569,7 +6023,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </div>
                   ) : (
                     <div className="cockpit-studio-form">
-                      <label className="cockpit-key" htmlFor="studio-authoring-draft">authoring draft</label>
+                      <label className="cockpit-key" htmlFor="studio-authoring-draft">
+                        {selectedStudioEntry.entityType === "extension_manifest" ? "manifest draft" : "authoring draft"}
+                      </label>
                       <textarea
                         id="studio-authoring-draft"
                         className="cockpit-input cockpit-studio-textarea"

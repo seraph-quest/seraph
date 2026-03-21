@@ -13,9 +13,11 @@ from src.extensions.lifecycle import (
     disable_extension,
     enable_extension,
     get_extension,
+    get_extension_source,
     install_extension_path,
     list_extensions,
     remove_extension,
+    save_extension_source,
     validate_extension_path,
 )
 
@@ -30,6 +32,11 @@ class ExtensionConfigRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExtensionSourceSaveRequest(BaseModel):
+    reference: str
+    content: str
+
+
 @router.get("/extensions")
 async def list_extension_packages():
     return list_extensions()
@@ -41,6 +48,36 @@ async def get_extension_package(extension_id: str):
         return {"extension": get_extension(extension_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+
+
+@router.get("/extensions/{extension_id}/source")
+async def get_extension_package_source(extension_id: str, reference: str):
+    try:
+        return get_extension_source(extension_id, reference)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/extensions/{extension_id}/source")
+async def save_extension_package_source(extension_id: str, req: ExtensionSourceSaveRequest):
+    try:
+        payload = save_extension_source(extension_id, req.reference, req.content)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await log_integration_event(
+        integration_type="extension",
+        name=extension_id,
+        outcome="succeeded",
+        details={
+            "status": "source_saved",
+            "reference": req.reference,
+        },
+    )
+    return payload
 
 
 @router.post("/extensions/validate")

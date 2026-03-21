@@ -267,7 +267,7 @@ This is the authoritative PR list for the implementation side.
 For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#14 extension-studio-manifest-awareness-v1`
+- the current active item is `#15 extension-lifecycle-ui-v1`
 - this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
 1. [x] `extension-model-terminology-v1`:
@@ -296,8 +296,8 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    convert Seraph’s shipped declarative defaults into real bundled capability packs so startup/runtime loading now prefers bundled skills, workflows, starter packs, and explicit runbooks from `backend/src/defaults/extensions/core-capabilities/` through the same manifest-root registry seam, with workspace packages taking precedence over bundled defaults during the coexistence window while install/bootstrap/catalog flows still finish their legacy-copy migration in later slices
 13. [x] `extension-lifecycle-api-v1`:
    add one lifecycle API for install, validate, enable, disable, configure, inspect, and remove so UI and automation flows stop talking to per-surface install logic, with the backend now shipping `/api/extensions` list/inspect/validate/install/enable/disable/configure/remove endpoints while workspace lifecycle UI still lands in the next slice and the first `configure` step remains metadata-only until typed runtime config contracts arrive
-14. [ ] `extension-studio-manifest-awareness-v1`:
-   make the extension studio package-aware so authors edit manifests and package members together rather than loose skill, workflow, and MCP files in isolation
+14. [x] `extension-studio-manifest-awareness-v1`:
+   make the extension studio package-aware so authors edit manifests and package-backed workflow/skill members together instead of forcing loose-file-only save paths, with `/api/extensions/{id}/source` now backing workspace package manifests and package-backed authoring while the studio sidebar groups manifests with their packaged members and still falls back to legacy loose-file paths where migration slices have not finished yet
 15. [ ] `extension-lifecycle-ui-v1`:
    surface the unified extension lifecycle in the workspace so install, validation, health, enablement, configuration, and removal all happen through one operator path
 16. [ ] `connector-manifest-and-health-v1`:

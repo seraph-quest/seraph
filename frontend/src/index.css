@@ -988,6 +988,12 @@ body {
   background: rgba(7, 20, 31, 0.38);
 }
 
+.cockpit-studio-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .cockpit-studio-main {
   min-height: 0;
   overflow: auto;

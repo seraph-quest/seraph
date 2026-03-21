@@ -133,11 +133,21 @@ Current backend endpoints:
 
 - `GET /api/extensions`
 - `GET /api/extensions/{extension_id}`
+- `GET /api/extensions/{extension_id}/source`
+- `POST /api/extensions/{extension_id}/source`
 - `POST /api/extensions/validate`
 - `POST /api/extensions/install`
 - `POST /api/extensions/{extension_id}/enable`
 - `POST /api/extensions/{extension_id}/disable`
 - `POST /api/extensions/{extension_id}/configure`
 - `DELETE /api/extensions/{extension_id}`
+
+Current Studio support:
+
+- workspace-installed packages can now be opened in Extension Studio with their `manifest.yaml`
+  and package-backed workflow/skill members grouped together
+- manifest, packaged workflow, and packaged skill edits save back through
+  `/api/extensions/{extension_id}/source`
+- MCP config still uses its existing dedicated config path until the connector migration slices land
 
 For the manifest fields themselves, see [Manifest Reference](./manifest-reference.md).

@@ -52,6 +52,7 @@
 - [x] the runtime now also loads manifest-backed starter packs and explicit runbooks through the same registry seam, and the capabilities surface now publishes packaged starter-pack metadata plus extension-backed runbook entries instead of treating both surfaces as legacy-only inventory
 - [x] startup/runtime loading now serves bundled default skills, workflows, starter packs, and explicit runbooks from a real `seraph.core-capabilities` package under `backend/src/defaults/extensions/`, with workspace extension packs taking precedence over bundled defaults while install/bootstrap/catalog flows and legacy loose-file coexistence are still being migrated
 - [x] the backend now ships one `/api/extensions` lifecycle surface for list, inspect, validate, install, enable, disable, configure, and remove so automation no longer has to talk directly to per-surface skill/workflow/package seams even though the workspace UI still needs to adopt that API and the current `configure` step is metadata-only until typed runtime config contracts land
+- [x] extension studio is now manifest-aware for installed packages, with package manifests and package-backed workflow/skill sources loaded and saved through `/api/extensions/{id}/source` instead of always collapsing edits back into loose managed-file save paths
 
 ## Still To Do On `develop`
 
@@ -97,7 +98,7 @@
 ### Phase 4: Lifecycle And Studio
 
 - unified extension lifecycle API
-- manifest-aware extension studio
+- manifest-aware extension studio with package manifest plus package-backed workflow/skill source editing
 - unified workspace lifecycle UI for install, validate, health, enablement, configuration, and removal
 
 ### Phase 5: Connector Unification

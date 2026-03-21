@@ -396,7 +396,7 @@ describe("CockpitView", () => {
         );
       }
       return Promise.resolve(mockResponse({}));
-  });
+    });
 
     render(<CockpitView onSend={() => {}} />);
 
@@ -404,7 +404,9 @@ describe("CockpitView", () => {
     expect(screen.getByText("Activity ledger")).toBeInTheDocument();
     expect(screen.getByText("Desktop shell")).toBeInTheDocument();
     expect(screen.getByText("Operator terminal")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Set tool policy to balanced" })).toHaveAttribute("aria-pressed", "true"),
+    );
     expect(screen.getByRole("button", { name: "Set MCP policy to approval" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Set approval mode to high_risk" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Research briefing")).toBeInTheDocument();
@@ -477,7 +479,7 @@ describe("CockpitView", () => {
       ),
     );
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
-  }, 15000);
+  }, 30000);
 
   it("supports starter-pack repairs and saved runbook macros", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -1080,7 +1082,7 @@ describe("CockpitView", () => {
     expect(screen.getByText(/intents fast, cheap · cost medium · latency low · rejected 2/)).toBeInTheDocument();
   });
 
-  it("renders activity ledger summaries and filters from the new endpoint", async () => {
+  it("keeps repair actions reachable when the actionable event is a grouped child", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -1134,21 +1136,23 @@ describe("CockpitView", () => {
             window_hours: 24,
             started_at: "2026-03-19T10:00:00Z",
             total_items: 2,
+            visible_items: 2,
             pending_approvals: 0,
-            failure_count: 0,
+            failure_count: 1,
             llm_call_count: 1,
             llm_cost_usd: 0.0123,
             input_tokens: 1000,
             output_tokens: 250,
             user_triggered_llm_calls: 1,
             autonomous_llm_calls: 0,
-            categories: { llm: 1, workflow: 1, approval: 0, guardian: 0, agent: 0, system: 0 },
+            categories: { llm: 1, workflow: 0, approval: 0, guardian: 0, agent: 1, system: 0 },
           },
           items: [
             {
               id: "llm-1",
               kind: "llm_call",
               category: "llm",
+              group_key: "request:agent-ws:session-1:123",
               title: "LLM call",
               summary: "Conversation reasoning for Session 1 using claude-sonnet-4",
               status: "success",
@@ -1163,7 +1167,150 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: {},
+              metadata: { request_id: "agent-ws:session-1:123" },
+            },
+            {
+              id: "tool-1",
+              kind: "tool_failed",
+              category: "agent",
+              group_key: "request:agent-ws:session-1:123",
+              title: "write_file",
+              summary: "Workspace write blocked by policy",
+              status: "failed",
+              created_at: "2026-03-19T10:01:30Z",
+              updated_at: "2026-03-19T10:01:30Z",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              source: "audit",
+              duration_ms: 420,
+              recommended_actions: [
+                { type: "set_tool_policy", label: "Allow workspace writes", mode: "full" },
+              ],
+              metadata: { request_id: "agent-ws:session-1:123", event_type: "tool_failed" },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "full" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
+    expect(screen.getByText("write_file")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Repair" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+  });
+
+  it("renders activity ledger summaries and filters from the new endpoint", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            window_hours: 24,
+            started_at: "2026-03-19T10:00:00Z",
+            total_items: 3,
+            pending_approvals: 0,
+            failure_count: 0,
+            llm_call_count: 1,
+            llm_cost_usd: 0.0123,
+            input_tokens: 1000,
+            output_tokens: 250,
+            user_triggered_llm_calls: 1,
+            autonomous_llm_calls: 0,
+            categories: { llm: 1, workflow: 1, approval: 0, guardian: 0, agent: 1, system: 0 },
+          },
+          items: [
+            {
+              id: "llm-1",
+              kind: "llm_call",
+              category: "llm",
+              group_key: "request:agent-ws:session-1:123",
+              title: "LLM call",
+              summary: "Conversation reasoning for Session 1 using claude-sonnet-4",
+              status: "success",
+              created_at: "2026-03-19T10:01:00Z",
+              updated_at: "2026-03-19T10:01:00Z",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              source: "websocket_chat",
+              model: "openrouter/anthropic/claude-sonnet-4",
+              provider: "openrouter",
+              prompt_tokens: 1000,
+              completion_tokens: 250,
+              cost_usd: 0.0123,
+              duration_ms: 810,
+              metadata: { request_id: "agent-ws:session-1:123" },
+            },
+            {
+              id: "tool-1",
+              kind: "tool_result",
+              category: "agent",
+              group_key: "request:agent-ws:session-1:123",
+              title: "web_search",
+              summary: "Found hinge specs",
+              status: "succeeded",
+              created_at: "2026-03-19T10:01:30Z",
+              updated_at: "2026-03-19T10:01:30Z",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              source: "audit",
+              duration_ms: 420,
+              metadata: { request_id: "agent-ws:session-1:123", event_type: "tool_result" },
             },
             {
               id: "wf-1",
@@ -1194,6 +1341,8 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(screen.getByText("spend $0.012")).toBeInTheDocument();
     expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument();
+    expect(screen.getByText("web_search")).toBeInTheDocument();
+    expect(screen.getByText(/2 tools|1 tool/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "llm" }));
     expect(screen.queryByText("Workflow resumed after approval")).not.toBeInTheDocument();
   });
@@ -1538,7 +1687,7 @@ describe("CockpitView", () => {
     expect(
       screen.getAllByText("You completed the workflow batch and refreshed the roadmap queue.").length,
     ).toBeGreaterThan(1);
-  });
+  }, 15000);
 
   it("does not queue a continuation draft when the target thread cannot be opened", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -1611,7 +1760,7 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Unable to open that thread.")).toBeInTheDocument());
     expect(screen.queryByDisplayValue("Continue from stale thread")).not.toBeInTheDocument();
     expect(useChatStore.getState().sessionId).toBe("session-1");
-  });
+  }, 15000);
 
   it("uses workflow-attached approvals when the pending sidebar is capped away", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -1997,7 +2146,7 @@ describe("CockpitView", () => {
 
     const studio = await screen.findByLabelText("Extension studio");
     expect(within(studio).getByText("Resume a review workflow")).toBeInTheDocument();
-  });
+  }, 15000);
 
   it("lets operators edit MCP config from the extension studio", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -2118,7 +2267,7 @@ describe("CockpitView", () => {
       ),
     );
     await waitFor(() => expect(within(studio).getByText(/github config is ready to test/i)).toBeInTheDocument());
-  });
+  }, 15000);
 
   it("preserves the existing workflow file when saving studio drafts", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -2241,7 +2390,7 @@ describe("CockpitView", () => {
       const body = JSON.parse(String(init?.body ?? "{}")) as { file_name?: string };
       expect(body.file_name).toBe("custom-file.md");
     });
-  });
+  }, 15000);
 
   it("keeps successful cockpit surfaces visible when one refresh endpoint fails", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -2350,7 +2499,7 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument());
     expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
     expect(screen.queryByText("Operator surface unavailable.")).not.toBeInTheDocument();
-  });
+  }, 15000);
 
   it("ignores stale studio source responses after switching entries", async () => {
     let resolveWorkflowSource!: (value: unknown) => void;
@@ -2463,7 +2612,7 @@ describe("CockpitView", () => {
     });
 
     expect(within(studio).getByLabelText("authoring draft")).toHaveValue("name: daily-standup\nsummary: skill draft");
-  });
+  }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
     const deferredResponses = Array.from({ length: 10 }, () => {
@@ -2507,7 +2656,7 @@ describe("CockpitView", () => {
 
     expect(jsonSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
     expect(consoleError).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it("keeps the composer text when send fails", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {

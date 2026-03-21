@@ -59,12 +59,16 @@ def _category_for_kind(kind: str) -> str:
         return "approval"
     if kind in {"notification", "queued_insight", "intervention"}:
         return "guardian"
-    if kind in {"agent_run"}:
+    if kind in {"agent_run", "tool_call", "tool_result", "tool_failed"}:
         return "agent"
     return "system"
 
 
 def _status_for_audit_event(event_type: str) -> str:
+    if event_type == "tool_call":
+        return "running"
+    if event_type == "tool_result":
+        return "succeeded"
     if event_type.endswith("_failed") or event_type in {"tool_failed", "integration_failed", "llm_primary_failure", "llm_fallback_failure"}:
         return "failed"
     if event_type.endswith("_timed_out"):
@@ -81,6 +85,8 @@ def _status_for_audit_event(event_type: str) -> str:
 def _title_for_audit_event(event: dict[str, Any]) -> str:
     event_type = str(event.get("event_type") or "")
     tool_name = str(event.get("tool_name") or "")
+    if event_type in {"tool_call", "tool_result", "tool_failed"}:
+        return tool_name or "Tool"
     if event_type.startswith("agent_run_"):
         return "Agent run"
     if event_type.startswith("scheduler_job_"):
@@ -97,6 +103,10 @@ def _title_for_audit_event(event: dict[str, Any]) -> str:
 
 
 def _kind_for_audit_event(event_type: str) -> str | None:
+    if event_type in {"tool_call", "tool_result"}:
+        return event_type
+    if event_type == "tool_failed":
+        return "tool_failed"
     if event_type in {"llm_routing_decision", "llm_target_rerouted"}:
         return "routing"
     if event_type.startswith("agent_run_"):
@@ -112,6 +122,29 @@ def _kind_for_audit_event(event_type: str) -> str | None:
     if event_type in {"tool_failed", "integration_failed", "llm_primary_failure", "llm_fallback_failure"}:
         return "failure"
     return None
+
+
+def _request_id_from_item(item: dict[str, Any]) -> str | None:
+    metadata = item.get("metadata")
+    if isinstance(metadata, dict):
+        request_id = metadata.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            return request_id
+    return None
+
+
+def _group_key_for_item(item: dict[str, Any]) -> str:
+    request_id = _request_id_from_item(item)
+    if request_id:
+        return f"request:{request_id}"
+    if item["kind"] == "workflow_run":
+        return f"workflow:{item['id']}"
+    if item["kind"] == "approval":
+        return f"approval:{item['id']}"
+    if item["kind"] in {"intervention", "notification", "queued_insight"}:
+        return f"guardian:{item['id']}"
+    thread_id = item.get("thread_id") or "ambient"
+    return f"{item['kind']}:{thread_id}:{item['updated_at']}"
 
 
 def _llm_title_and_summary(entry: dict[str, Any], session_titles: dict[str, str]) -> tuple[str, str]:
@@ -137,6 +170,40 @@ def _entry_metric_count(items: list[dict[str, Any]], key: str) -> float:
         if isinstance(value, (int, float)):
             total += float(value)
     return total
+
+
+def _slice_visible_groups(items: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int]:
+    visible: list[dict[str, Any]] = []
+    seen_groups: set[str] = set()
+    for item in items:
+        group_key = str(item.get("group_key") or item["id"])
+        if group_key not in seen_groups:
+            if len(seen_groups) >= limit:
+                continue
+            seen_groups.add(group_key)
+        visible.append(item)
+    return visible, len(seen_groups)
+
+
+def _compact_step_records(step_records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not isinstance(step_records, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for record in step_records:
+        if not isinstance(record, dict):
+            continue
+        compact.append({
+            "id": record.get("id"),
+            "step_id": record.get("step_id"),
+            "tool": record.get("tool"),
+            "status": record.get("status"),
+            "summary": record.get("summary") or record.get("result_summary") or record.get("error_summary"),
+            "duration_ms": record.get("duration_ms"),
+            "error_kind": record.get("error_kind"),
+            "error_summary": record.get("error_summary"),
+            "result_summary": record.get("result_summary"),
+        })
+    return compact
 
 
 @router.get("/activity/ledger")
@@ -205,6 +272,7 @@ async def get_activity_ledger(
                 "risk_level": run.get("risk_level"),
                 "execution_boundaries": run.get("execution_boundaries", []),
                 "step_count": len(run.get("step_records", []) or []),
+                "step_records": _compact_step_records(run.get("step_records")),
                 "failed_step_ids": list(run.get("continued_error_steps", []) or []),
                 "failed_step_tool": run.get("failed_step_tool"),
                 "pending_approval_count": run.get("pending_approval_count", 0),
@@ -253,6 +321,7 @@ async def get_activity_ledger(
             "metadata": {
                 "risk_level": approval.get("risk_level"),
                 "tool_name": approval.get("tool_name"),
+                "approval_id": approval.get("id"),
             },
         })
 
@@ -295,6 +364,7 @@ async def get_activity_ledger(
                 "urgency": notification.urgency,
                 "thread_source": thread_source,
                 "continuation_mode": continuation_mode,
+                "notification_id": notification.id,
             },
         })
 
@@ -347,6 +417,7 @@ async def get_activity_ledger(
             "metadata": {
                 "urgency": insight.urgency,
                 "reasoning": insight.reasoning,
+                "intervention_id": insight.intervention_id,
             },
         })
 
@@ -388,6 +459,7 @@ async def get_activity_ledger(
                 "policy_reason": intervention.policy_reason,
                 "transport": intervention.transport,
                 "feedback_type": intervention.feedback_type,
+                "intervention_id": intervention.id,
             },
         })
 
@@ -437,7 +509,10 @@ async def get_activity_ledger(
                 if isinstance(details.get("duration_ms"), int)
                 else None
             ),
-            "metadata": details,
+            "metadata": {
+                **details,
+                "event_type": event_type,
+            },
         })
 
     for index, call in enumerate(llm_calls):
@@ -482,6 +557,9 @@ async def get_activity_ledger(
             },
         })
 
+    for item in items:
+        item["group_key"] = _group_key_for_item(item)
+
     items = [
         item for item in items
         if _parse_iso(str(item.get("updated_at") or item.get("created_at"))) >= cutoff
@@ -490,7 +568,7 @@ async def get_activity_ledger(
         key=lambda item: _parse_iso(str(item.get("updated_at") or item.get("created_at"))),
         reverse=True,
     )
-    visible_items = items[:limit]
+    visible_items, visible_group_count = _slice_visible_groups(items, limit)
     llm_items = [item for item in items if item["kind"] == "llm_call"]
     partial_sources = [
         source
@@ -509,6 +587,7 @@ async def get_activity_ledger(
         "started_at": cutoff.isoformat(),
         "total_items": len(items),
         "visible_items": len(visible_items),
+        "visible_groups": visible_group_count,
         "is_partial": bool(partial_sources),
         "partial_sources": partial_sources,
         "pending_approvals": sum(1 for item in items if item["kind"] == "approval"),

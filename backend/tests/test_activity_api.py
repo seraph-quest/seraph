@@ -341,3 +341,150 @@ async def test_activity_ledger_dedupes_live_pending_approvals_and_skips_foreign_
     assert [item["kind"] for item in items] == ["approval"]
     assert payload["summary"]["pending_approvals"] == 1
     assert payload["summary"]["total_items"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_groups_request_scoped_tool_and_llm_events(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-tool-call-1",
+                        "event_type": "tool_call",
+                        "tool_name": "web_search",
+                        "summary": "Search for hinge specs",
+                        "created_at": "2026-03-20T09:02:00Z",
+                        "session_id": "session-1",
+                        "details": {"request_id": "agent-ws:session-1:123", "arguments": {"query": "hinge specs"}},
+                    },
+                    {
+                        "id": "audit-tool-result-1",
+                        "event_type": "tool_result",
+                        "tool_name": "web_search",
+                        "summary": "Found hinge specs",
+                        "created_at": "2026-03-20T09:02:02Z",
+                        "session_id": "session-1",
+                        "details": {"request_id": "agent-ws:session-1:123", "result_summary": "Found hinge specs"},
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": "2026-03-20T09:02:20+00:00",
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 1000, "output": 250, "total": 1250},
+                    "cost_usd": 0.0123,
+                    "latency_ms": 812.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:123",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                }
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    items = payload["items"]
+    group_keys = {item["kind"]: item["group_key"] for item in items}
+
+    assert group_keys["llm_call"] == "request:agent-ws:session-1:123"
+    assert group_keys["tool_call"] == "request:agent-ws:session-1:123"
+    assert group_keys["tool_result"] == "request:agent-ws:session-1:123"
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_limit_keeps_full_request_group_visible(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-tool-call-1",
+                        "event_type": "tool_call",
+                        "tool_name": "web_search",
+                        "summary": "Search hinge specs",
+                        "created_at": "2026-03-20T09:02:00Z",
+                        "session_id": "session-1",
+                        "details": {"request_id": "agent-ws:session-1:123"},
+                    },
+                    {
+                        "id": "audit-tool-result-1",
+                        "event_type": "tool_result",
+                        "tool_name": "web_search",
+                        "summary": "Found hinge specs",
+                        "created_at": "2026-03-20T09:02:02Z",
+                        "session_id": "session-1",
+                        "details": {"request_id": "agent-ws:session-1:123"},
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": "2026-03-20T09:02:20+00:00",
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 1000, "output": 250, "total": 1250},
+                    "cost_usd": 0.0123,
+                    "latency_ms": 812.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:123",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+                {
+                    "timestamp": "2026-03-20T09:00:20+00:00",
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-haiku-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 100, "output": 20, "total": 120},
+                    "cost_usd": 0.001,
+                    "latency_ms": 120.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:older",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 1})
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["summary"]["visible_groups"] == 1
+    assert len(payload["items"]) == 3
+    assert {item["group_key"] for item in payload["items"]} == {"request:agent-ws:session-1:123"}

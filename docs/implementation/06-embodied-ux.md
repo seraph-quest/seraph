@@ -19,7 +19,7 @@
 - [x] persisted cockpit workspace presets for `default`, `focus`, and `review`, now implemented as function-based packed pane layouts with inspector visibility persistence, keyboard switching, and per-layout save/reset composition
 - [x] cockpit-native bridge cues through live desktop status, pending native-notification state, deferred bundle visibility, recent intervention continuity, and browser-side native-presence controls in the operator surfaces
 - [x] cockpit-native operator surface for workflow availability, skills, MCP servers, and live policy state with direct reload controls
-- [x] separate Activity Ledger window that links workflow runs, approvals, notifications, queued interventions, recent guardian outputs, surfaced failures, and attributed LLM calls back into one live browser control surface
+- [x] separate Activity Ledger window that links workflow runs, approvals, notifications, queued interventions, recent guardian outputs, surfaced failures, tool steps, and attributed LLM calls back into one live browser control surface
 - [x] cockpit capability preflight and autorepair flows for runbooks, starter packs, and workflows before the operator drafts or reruns them
 - [x] cockpit capability bootstrap now applies bounded safe install/repair actions for workflows, runbooks, and starter packs instead of leaving preflight as a separate manual operator step
 - [x] cockpit workflow views now expose richer step timestamps, duration, error summaries, recovery hints, and stored workflow diagnostics
@@ -28,6 +28,7 @@
 - [x] cockpit session continuity now restores the active thread on reload, preserves explicit fresh-thread semantics, and marks background thread activity in the session list
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
+- [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
 - [x] cockpit is now the active browser shell on load rather than merely the default mode
 - [x] quest and settings overlays now use cockpit modal styling rather than legacy overlay frames
 - [x] dormant village/editor runtime code and legacy browser entry points are removed from the active product path rather than treated as fallback surfaces

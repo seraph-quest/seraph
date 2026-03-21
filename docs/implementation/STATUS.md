@@ -20,7 +20,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
 - [x] The guardian cockpit is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
-- [x] The cockpit now exposes capability discovery, starter packs, workflow history, step records, retry-from-step recovery, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
+- [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, retry-from-step recovery, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -99,7 +99,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] workflow history endpoint now exposes run arguments, risk level, execution boundaries, approval counts, secret-ref acceptance, and artifact lineage for replay and operator inspection
 - [x] workflow history endpoint now also exposes timeline events, replay guardrails, parameterized replay drafts, approval-recovery messaging, pending-approval details, and explicit thread metadata for replay/open-thread control
 - [x] operator timeline API now unifies workflow runs, approvals, notifications, queued insights, recent interventions, and surfaced failures into one threaded live operator feed
-- [x] activity ledger API now projects workflow runs, approvals, guardian events, audit activity, and attributed LLM call spend into one separate accountability feed for the browser workspace
+- [x] activity ledger API now projects workflow runs, approvals, guardian events, audit activity, tool steps, and attributed LLM call spend into one separate accountability feed for the browser workspace
 - [x] catalog/install surfaces for skills and MCP servers
 
 ### Runtime and observability
@@ -144,7 +144,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up, continue, and dismiss controls
 - [x] the cockpit now includes a first operator surface for tool/MCP policy state, workflow availability, tools, skills, starter packs, and MCP server visibility with direct reload and activation controls
 - [x] the cockpit now also includes a searchable capability palette plus a denser operator terminal for recommendations, repair actions, installable items, reusable runbooks, capability preflight, live operator-feed status, and saved runbook macros
-- [x] the cockpit now includes a separate Activity Ledger window that links workflow runs, approvals, queued continuity, recent interventions, surfaced failures, and attributed LLM calls back to one browser thread model
+- [x] the workspace now includes a separate Activity Ledger window that links workflow runs, approvals, queued continuity, recent interventions, surfaced failures, tool steps, and attributed LLM calls back to one browser thread model
+- [x] activity ledger rows now group request-scoped work into compact parent rows with emoji/icon scanability, child tool or routing rows, and completion summaries so operators can skim what Seraph did without opening raw trace panes
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
 - [x] larger more readable settings and goals overlays now support the cockpit-first shell directly
 - [x] capability state, workflow history, the activity ledger, and live status are now visible in the current cockpit surface

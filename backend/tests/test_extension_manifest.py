@@ -89,6 +89,28 @@ contributes:
     assert "must reference a file, not a directory" in str(exc_info.value)
 
 
+def test_parse_rejects_contribution_paths_outside_canonical_layout():
+    with pytest.raises(ExtensionManifestError) as exc_info:
+        parse_extension_manifest(
+            """
+id: seraph.bad-layout
+version: 2026.3.21
+display_name: Bad Layout
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - capabilities/web-briefing.md
+"""
+        )
+
+    assert "must live under skills/" in str(exc_info.value)
+
+
 def test_parse_rejects_empty_contributions():
     with pytest.raises(ExtensionManifestError) as exc_info:
         parse_extension_manifest(
@@ -246,6 +268,49 @@ permissions:
     assert manifest.display_name == "Local Example"
     assert manifest.permissions.network is True
     assert manifest.contributes.mcp_servers == ["mcp/github.json"]
+
+
+def test_parse_accepts_canonical_multi_surface_layout_paths():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.layout-pack
+version: 2026.3.21
+display_name: Layout Pack
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  starter_packs:
+    - starter-packs/research.json
+  provider_presets:
+    - presets/provider/openrouter.yaml
+  prompt_packs:
+    - prompts/guardian.md
+  scheduled_routines:
+    - routines/daily-review.yaml
+  mcp_servers:
+    - mcp/github.json
+  managed_connectors:
+    - connectors/managed/slack.yaml
+  observer_definitions:
+    - observers/definitions/calendar.yaml
+  observer_connectors:
+    - observers/connectors/calendar-sync.yaml
+  channel_adapters:
+    - channels/desktop.yaml
+  workspace_adapters:
+    - workspace/live-view.yaml
+permissions:
+  network: true
+"""
+    )
+
+    assert manifest.contributes.starter_packs == ["starter-packs/research.json"]
+    assert manifest.contributes.provider_presets == ["presets/provider/openrouter.yaml"]
+    assert manifest.contributes.workspace_adapters == ["workspace/live-view.yaml"]
 
 
 def test_parse_rejects_duplicate_paths_within_contribution_list():

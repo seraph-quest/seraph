@@ -249,7 +249,8 @@ def test_registry_surfaces_legacy_mcp_runtime_failures():
 
 
 def test_registry_prefers_manifest_backed_entries_over_matching_legacy_sources(tmp_path: Path):
-    skills_dir = tmp_path / "workspace" / "skills"
+    workspace_dir = tmp_path / "workspace"
+    skills_dir = workspace_dir / "skills"
     skills_dir.mkdir(parents=True)
 
     legacy_skill_path = skills_dir / "research-briefing.md"
@@ -257,7 +258,7 @@ def test_registry_prefers_manifest_backed_entries_over_matching_legacy_sources(t
         "---\nname: research-briefing\ndescription: Legacy skill\n---\n",
         encoding="utf-8",
     )
-    (skills_dir / "manifest.yaml").write_text(
+    (workspace_dir / "manifest.yaml").write_text(
         """
 id: seraph.research-briefing
 version: 2026.3.21
@@ -270,13 +271,13 @@ publisher:
 trust: local
 contributes:
   skills:
-    - research-briefing.md
+    - skills/research-briefing.md
 """.strip(),
         encoding="utf-8",
     )
 
     registry = ExtensionRegistry(
-        manifest_roots=[str(skills_dir)],
+        manifest_roots=[str(workspace_dir)],
         skill_dirs=[str(skills_dir)],
         workflow_dirs=[],
         mcp_runtime=None,
@@ -287,3 +288,47 @@ contributes:
 
     assert snapshot.get_extension("seraph.research-briefing") is not None
     assert not any(item.id.startswith("legacy.skills.") for item in snapshot.extensions)
+
+
+def test_registry_reports_layout_error_for_symlink_escape(tmp_path: Path):
+    package_dir = tmp_path / "extensions" / "escape-pack"
+    skills_dir = package_dir / "skills"
+    external_dir = tmp_path / "external"
+    package_dir.mkdir(parents=True)
+    skills_dir.mkdir()
+    external_dir.mkdir()
+    (package_dir / "manifest.yaml").write_text(
+        """
+id: seraph.escape-pack
+version: 2026.3.21
+display_name: Escape Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/escape.md
+""".strip(),
+        encoding="utf-8",
+    )
+    external_file = external_dir / "outside.md"
+    external_file.write_text("---\nname: outside\ndescription: Outside\n---\n", encoding="utf-8")
+    (skills_dir / "escape.md").symlink_to(external_file)
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+
+    assert snapshot.get_extension("seraph.escape-pack") is None
+    assert len(snapshot.load_errors) == 1
+    assert snapshot.load_errors[0].phase == "layout"
+    assert "escapes the package root" in snapshot.load_errors[0].message

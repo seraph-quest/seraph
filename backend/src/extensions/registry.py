@@ -12,12 +12,11 @@ import tomllib
 from typing import Any
 
 from config.settings import settings
+from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import ExtensionManifest, ExtensionManifestError, load_extension_manifest
 from src.skills.loader import scan_skills
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.loader import scan_workflows
-
-_MANIFEST_FILENAMES = ("manifest.yaml", "manifest.yml")
 
 
 def _slugify(value: str) -> str:
@@ -158,20 +157,7 @@ class ExtensionRegistry:
         return self.snapshot().get_extension(extension_id)
 
     def _iter_manifest_paths(self) -> list[Path]:
-        discovered: dict[str, Path] = {}
-        for root in self._manifest_roots:
-            if not root:
-                continue
-            root_path = Path(root)
-            if not root_path.exists():
-                continue
-            if root_path.is_file() and root_path.name in _MANIFEST_FILENAMES:
-                discovered[str(root_path.resolve())] = root_path
-                continue
-            for manifest_name in _MANIFEST_FILENAMES:
-                for manifest_path in root_path.rglob(manifest_name):
-                    discovered[str(manifest_path.resolve())] = manifest_path
-        return [discovered[key] for key in sorted(discovered)]
+        return iter_extension_manifest_paths(self._manifest_roots)
 
     def _scan_manifest_extensions(self) -> tuple[list[ExtensionRecord], list[ExtensionLoadErrorRecord]]:
         extensions: list[ExtensionRecord] = []
@@ -201,7 +187,16 @@ class ExtensionRegistry:
                     )
                 )
                 continue
-            extensions.append(self._record_from_manifest(manifest, manifest_path))
+            try:
+                extensions.append(self._record_from_manifest(manifest, manifest_path))
+            except ValueError as exc:
+                errors.append(
+                    ExtensionLoadErrorRecord(
+                        source=str(manifest_path),
+                        message=str(exc),
+                        phase="layout",
+                    )
+                )
         return extensions, errors
 
     def _record_from_manifest(self, manifest: ExtensionManifest, manifest_path: Path) -> ExtensionRecord:
@@ -209,6 +204,7 @@ class ExtensionRegistry:
         contributions: list[ExtensionContributionRecord] = []
         for contribution_type in sorted(manifest.contributed_types()):
             for reference in getattr(manifest.contributes, contribution_type):
+                resolved_path = resolve_package_reference(manifest_path.parent, reference)
                 contributions.append(
                     ExtensionContributionRecord(
                         extension_id=manifest.id,
@@ -216,7 +212,7 @@ class ExtensionRegistry:
                         reference=reference,
                         source="manifest",
                         metadata={
-                            "resolved_path": str((manifest_path.parent / reference).resolve()),
+                            "resolved_path": str(resolved_path),
                         },
                     )
                 )

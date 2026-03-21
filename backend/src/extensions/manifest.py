@@ -9,7 +9,9 @@ from typing import Any
 import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+
+from .layout import validate_contribution_layout
 
 _CONTRIBUTION_FIELDS = (
     "skills",
@@ -159,13 +161,15 @@ class ExtensionContributionPaths(BaseModel):
 
     @field_validator(*_CONTRIBUTION_FIELDS)
     @classmethod
-    def _validate_paths(cls, values: list[str]) -> list[str]:
+    def _validate_paths(cls, values: list[str], info: ValidationInfo) -> list[str]:
         normalized: list[str] = []
         seen: set[str] = set()
+        contribution_type = str(info.field_name)
         for value in values:
             if not isinstance(value, str):
                 raise ValueError("must contain path strings")
             path = _normalize_relative_path(value)
+            path = validate_contribution_layout(contribution_type, path)
             if path in seen:
                 raise ValueError(f"duplicate path: {path}")
             normalized.append(path)

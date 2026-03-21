@@ -43,6 +43,7 @@
 - [x] this workstream now also ships `capability-preflight-and-autorepair-v1`, `threaded-operator-timeline-v1`, and `workflow-runbooks-and-parameterized-replay-v1`
 - [x] this workstream now hands the queue forward to the full extension-platform transition program rather than isolated extension UX slices
 - [x] the first extension-platform foundation slices now cover terminology cleanup, canonical manifests, the transitional registry seam, and structured doctor diagnostics
+- [x] the extension-platform foundation now also pins one canonical on-disk package layout and package-boundary resolution rules for contribution files
 
 ## Still To Do On `develop`
 

@@ -480,12 +480,29 @@ capability-pack
 │  └─ web-brief-to-file.md
 ├─ runbooks/
 │  └─ research-briefing.yaml
+├─ starter-packs/
+│  └─ research.json
 ├─ mcp/
 │  └─ http-request.json
 ├─ observers/
-│  └─ calendar-source.yaml
-└─ presets/
-   └─ provider-routing.yaml
+│  ├─ definitions/
+│  │  └─ calendar.yaml
+│  └─ connectors/
+│     └─ calendar-sync.yaml
+├─ presets/
+│  └─ provider/
+│     └─ routing.yaml
+├─ prompts/
+│  └─ guardian.md
+├─ routines/
+│  └─ daily-review.yaml
+├─ connectors/
+│  └─ managed/
+│     └─ slack.yaml
+├─ channels/
+│  └─ desktop.yaml
+└─ workspace/
+   └─ live-view.yaml
 ```
 
 Example:
@@ -518,6 +535,22 @@ permissions:
 
 Here `trust` is package provenance (`bundled`, `local`, or later `verified`),
 not a replacement for the trust-tier architecture above.
+
+For the current migration, these package roots are canonical:
+
+- `skills/`
+- `workflows/`
+- `runbooks/`
+- `starter-packs/`
+- `presets/provider/`
+- `prompts/`
+- `routines/`
+- `mcp/`
+- `connectors/managed/`
+- `observers/definitions/`
+- `observers/connectors/`
+- `channels/`
+- `workspace/`
 
 This lets one package contribute multiple typed surfaces without inventing a universal runtime plugin contract.
 

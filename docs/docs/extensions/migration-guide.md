@@ -17,6 +17,9 @@ If you are adding new reusable capability:
 3. validate it with `validate_pack.py`
 4. expect some runtime loading paths to remain transitional until the packaging slices finish
 
+If you need a concrete reference while migrating, start from the shipped example
+package in `examples/extensions/research-pack/`.
+
 ## Transitional compatibility
 
 Current registry behavior still synthesizes legacy entries for:

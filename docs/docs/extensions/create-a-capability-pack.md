@@ -23,6 +23,10 @@ What this creates:
 - one valid starter workflow
 - one starter runbook
 
+If you want a canonical in-repo reference, compare your package against:
+
+- `examples/extensions/research-pack/`
+
 Current scope:
 
 - the scaffold targets `capability-pack`
@@ -51,6 +55,8 @@ research-pack/
    └─ research-pack.yaml
 ```
 
+The same structure now exists in-repo at `examples/extensions/research-pack/`.
+
 ## 3. Edit the package contents
 
 Typical next steps:
@@ -59,6 +65,11 @@ Typical next steps:
 - update the workflow steps in `workflows/*.md`
 - adjust the runbook metadata in `runbooks/*.yaml`
 - add or remove contribution files, then keep `manifest.yaml` in sync
+
+The shipped example pack keeps the scaffolded runbook placeholder convention:
+
+- `runbooks/research-pack.yaml` uses `workflow: research-pack`
+- that matches the shared file slug used by the example workflow file
 
 The generated workflow is intentionally minimal but valid:
 

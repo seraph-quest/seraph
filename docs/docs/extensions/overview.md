@@ -87,6 +87,10 @@ Each contribution type has a canonical package root:
 
 Current scaffolding focuses on the capability-pack surfaces that are already in scope for authoring.
 
+Seraph now also ships one canonical in-repo example package:
+
+- `examples/extensions/research-pack/`
+
 ## Current local tools
 
 Create a new capability pack:

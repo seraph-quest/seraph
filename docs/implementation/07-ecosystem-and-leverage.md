@@ -46,6 +46,7 @@
 - [x] the extension-platform foundation now also pins one canonical on-disk package layout and package-boundary resolution rules for contribution files
 - [x] the authoring path now includes first local scaffold and validation commands for capability-pack package creation instead of forcing hand-authored manifests
 - [x] the authoring path now also includes first-class public docs for extension overview, package creation, manifest fields, contribution types, validation, and migration instead of leaving the new architecture trapped in research docs
+- [x] the authoring path now includes one canonical in-repo example package that is validated in tests and pinned to current scaffold output so contributors and docs share the same golden reference
 
 ## Still To Do On `develop`
 
@@ -120,9 +121,9 @@
 - [x] contribution-type reference for skills, workflows, runbooks, starter packs, presets, connectors, and later observer/channel adapters
 - [x] validation and doctor guide for package errors and repair flows
 - [x] migration guide from loose skills/workflows/MCP configs to packaged extensions
-- [ ] local scaffold tool for generating a new extension package
-- [ ] local validation tool for checking a package before install
-- [ ] canonical example package in-repo that docs, tests, and contributors can all rely on; it should be schema-valid immediately and become runtime-backed once the packaging slices land
+- [x] local scaffold tool for generating a new extension package
+- [x] local validation tool for checking a package before install
+- [x] canonical example package in-repo that docs, tests, and contributors can all rely on; it should be schema-valid immediately and become runtime-backed once the packaging slices land
 
 ## Non-Goals
 

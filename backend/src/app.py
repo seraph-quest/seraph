@@ -10,6 +10,7 @@ from slowapi.util import get_remote_address
 
 from config.settings import settings
 from src.db import init_db, close_db
+from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.memory.soul import ensure_soul_exists
 from src.runbooks.manager import runbook_manager
@@ -44,36 +45,6 @@ def _runtime_model_label(model: str) -> str:
     if not normalized:
         return "unknown"
     return normalized.split("/")[-1]
-
-
-def _seed_default_skills(defaults_dir: str, skills_dir: str) -> None:
-    """Copy bundled default skills to workspace if they don't already exist."""
-    import shutil
-    bundled_skills = os.path.join(defaults_dir, "skills")
-    if not os.path.isdir(bundled_skills):
-        return
-    for filename in os.listdir(bundled_skills):
-        if not filename.endswith(".md"):
-            continue
-        dst = os.path.join(skills_dir, filename)
-        if not os.path.exists(dst):
-            shutil.copy2(os.path.join(bundled_skills, filename), dst)
-
-
-def _seed_default_workflows(defaults_dir: str, workflows_dir: str) -> None:
-    """Copy bundled default workflows to workspace if they don't already exist."""
-    import shutil
-
-    bundled_workflows = os.path.join(defaults_dir, "workflows")
-    if not os.path.isdir(bundled_workflows):
-        return
-    for filename in os.listdir(bundled_workflows):
-        if not filename.endswith(".md"):
-            continue
-        dst = os.path.join(workflows_dir, filename)
-        if not os.path.exists(dst):
-            shutil.copy2(os.path.join(bundled_workflows, filename), dst)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -123,20 +94,19 @@ async def lifespan(app: FastAPI):
     mcp_manager.load_config(mcp_config)
     extensions_dir = os.path.join(settings.workspace_dir, "extensions")
     os.makedirs(extensions_dir, exist_ok=True)
+    manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
     skills_dir = os.path.join(settings.workspace_dir, "skills")
     os.makedirs(skills_dir, exist_ok=True)
-    _seed_default_skills(defaults_dir, skills_dir)
-    skill_manager.init(skills_dir, manifest_roots=[extensions_dir])
+    skill_manager.init(skills_dir, manifest_roots=manifest_roots)
     runbooks_dir = os.path.join(settings.workspace_dir, "runbooks")
     os.makedirs(runbooks_dir, exist_ok=True)
-    runbook_manager.init(runbooks_dir, manifest_roots=[extensions_dir])
+    runbook_manager.init(runbooks_dir, manifest_roots=manifest_roots)
     workflows_dir = os.path.join(settings.workspace_dir, "workflows")
     os.makedirs(workflows_dir, exist_ok=True)
-    _seed_default_workflows(defaults_dir, workflows_dir)
-    workflow_manager.init(workflows_dir, manifest_roots=[extensions_dir])
+    workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
     starter_pack_manager.init(
-        os.path.join(defaults_dir, "starter-packs.json"),
-        manifest_roots=[extensions_dir],
+        os.path.join(settings.workspace_dir, "starter-packs.json"),
+        manifest_roots=manifest_roots,
     )
     yield
     shutdown_scheduler()

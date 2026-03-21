@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
-import shutil
 import tempfile
 from typing import Any
 
@@ -23,12 +22,12 @@ from src.api.catalog import (
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
+from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
 from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
-from src.starter_packs.loader import load_legacy_starter_packs
-from src.starter_packs.manager import starter_pack_manager
+from src.starter_packs.manager import StarterPackManager, starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import (
     MCP_POLICY_MODES,
@@ -40,13 +39,12 @@ from src.tools.policy import (
     is_tool_allowed,
 )
 from src.workflows.manager import workflow_manager
-from src.workflows.loader import scan_workflows, sanitize_workflow_name
+from src.workflows.loader import scan_workflow_paths, scan_workflows, sanitize_workflow_name
 
 router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
-_STARTER_PACKS_PATH = os.path.join(_DEFAULTS_DIR, "starter-packs.json")
-_BUNDLED_WORKFLOWS_DIR = os.path.join(_DEFAULTS_DIR, "workflows")
+_BUNDLED_CORE_CAPABILITIES_DIR = os.path.join(_DEFAULTS_DIR, "extensions", "core-capabilities")
 _SAFE_AUTOREPAIR_ACTION_TYPES = {
     "toggle_skill",
     "toggle_workflow",
@@ -80,21 +78,26 @@ def _load_starter_packs() -> list[dict[str, Any]]:
     packs = starter_pack_manager.list_packs()
     if packs or starter_pack_manager.is_initialized():
         return packs
-    legacy_packs, _ = load_legacy_starter_packs(os.path.normpath(_STARTER_PACKS_PATH))
+    fallback_manager = StarterPackManager()
+    fallback_manager.init(
+        os.path.join(settings.workspace_dir, "starter-packs.json"),
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+    )
+    bundled_packs = fallback_manager.list_packs()
     return [
         {
-            "name": pack.name,
-            "label": pack.label,
-            "description": pack.description,
-            "skills": list(pack.skills),
-            "workflows": list(pack.workflows),
-            "install_items": list(pack.install_items),
-            "sample_prompt": pack.sample_prompt,
-            "file_path": pack.file_path,
-            "source": pack.source,
-            "extension_id": pack.extension_id,
+            "name": pack["name"],
+            "label": pack["label"],
+            "description": pack["description"],
+            "skills": list(pack.get("skills", [])),
+            "workflows": list(pack.get("workflows", [])),
+            "install_items": list(pack.get("install_items", [])),
+            "sample_prompt": pack.get("sample_prompt", ""),
+            "file_path": pack.get("file_path", ""),
+            "source": pack.get("source", "manifest"),
+            "extension_id": pack.get("extension_id"),
         }
-        for pack in legacy_packs
+        for pack in bundled_packs
     ]
 
 
@@ -129,14 +132,51 @@ async def _set_mcp_policy_mode(mode: str) -> bool:
     return True
 
 
-def _seed_bundled_workflow(name: str) -> bool:
-    source = os.path.join(os.path.normpath(_BUNDLED_WORKFLOWS_DIR), f"{name}.md")
-    if not os.path.isfile(source):
+def _bundled_workflow_source_by_name(name: str) -> str | None:
+    registry = ExtensionRegistry(
+        manifest_roots=[bundled_manifest_root()],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+    contribution_paths = [
+        str(resolved_path)
+        for contribution in registry.snapshot().list_contributions("workflows")
+        if isinstance((resolved_path := contribution.metadata.get("resolved_path")), str) and resolved_path
+    ]
+    workflows, _ = scan_workflow_paths(contribution_paths)
+    for workflow in workflows:
+        if workflow.name == name:
+            return workflow.file_path
+    return None
+
+
+def _ensure_bundled_workflow_available(name: str) -> bool:
+    if workflow_manager.get_workflow(name) is not None:
+        return True
+    workflow_manager.reload()
+    if workflow_manager.get_workflow(name) is not None:
+        return True
+    source = _bundled_workflow_source_by_name(name)
+    if not source or not os.path.isfile(source):
         return False
-    destination_dir = os.path.join(settings.workspace_dir, "workflows")
+    destination_dir = (
+        workflow_manager._workflows_dir
+        if getattr(workflow_manager, "_workflows_dir", "")
+        else os.path.join(settings.workspace_dir, "workflows")
+    )
+    manifest_roots = list(getattr(workflow_manager, "_manifest_roots", []) or [])
+    if not manifest_roots:
+        manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
+    bundled_root = bundled_manifest_root()
+    if bundled_root not in manifest_roots:
+        manifest_roots.append(bundled_root)
     os.makedirs(destination_dir, exist_ok=True)
-    shutil.copy2(source, os.path.join(destination_dir, f"{name}.md"))
-    return True
+    workflow_manager.init(
+        destination_dir,
+        manifest_roots=manifest_roots,
+    )
+    return workflow_manager.get_workflow(name) is not None
 
 
 def _skill_status_map(available_tool_names: list[str]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -704,10 +744,9 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
 
     for workflow_name in pack.get("workflows", []):
         if workflow_manager.get_workflow(str(workflow_name)) is None:
-            if not _seed_bundled_workflow(str(workflow_name)):
+            if not _ensure_bundled_workflow_available(str(workflow_name)):
                 missing_entries.append(f"workflow:{workflow_name}")
                 continue
-            workflow_manager.reload()
         if workflow_manager.enable(str(workflow_name)):
             changed_workflows.append(str(workflow_name))
         else:

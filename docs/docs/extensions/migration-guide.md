@@ -4,9 +4,9 @@ The extension platform is landing in stages.
 
 Current reality:
 
-- skills, workflows, and MCP surfaces still have transitional legacy loading paths
+- skills, workflows, runbooks, starter packs, and MCP surfaces still have transitional legacy loading paths
 - the manifest, registry, doctor, layout, and scaffold seams now exist
-- built-in declarative capabilities have not all moved onto packaged extensions yet
+- built-in declarative defaults now ship as the bundled `seraph.core-capabilities` package, but install/bootstrap/catalog and lifecycle paths still have transitional legacy behavior
 
 ## What this means for contributors right now
 
@@ -26,9 +26,11 @@ Current registry behavior still synthesizes legacy entries for:
 
 - loose skills
 - loose workflows
+- loose runbooks
+- loose starter packs
 - runtime MCP state
 
-That is temporary. The migration slices later in the roadmap remove those parallel paths once packaged loading fully replaces them.
+That is temporary. The migration slices later in the roadmap remove those parallel paths once packaged loading fully replaces them. Until then, some catalog flows still copy bundled skill files into the workspace as transitional compatibility shims, and some bootstrap flows still reinitialize managers against bundled manifest roots to make packaged workflows available. Under the normal manifest-backed startup path those compatibility shims are not the primary source of truth; they exist only to keep legacy install/bootstrap flows working until the lifecycle migration slices land.
 
 ## Recommended migration order for existing content
 

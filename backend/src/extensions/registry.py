@@ -31,8 +31,22 @@ def _legacy_extension_id(kind: str, source_path: str) -> str:
     return f"legacy.{kind}.{_slugify(source_path)}-{fingerprint}"
 
 
+def bundled_manifest_root() -> str:
+    return str(Path(__file__).resolve().parents[1] / "defaults" / "extensions")
+
+
+def default_manifest_roots_for_workspace(workspace_dir: str | None = None) -> list[str]:
+    workspace_root = workspace_dir or settings.workspace_dir
+    roots = [os.path.join(workspace_root, "extensions"), bundled_manifest_root()]
+    deduped: list[str] = []
+    for root in roots:
+        if root not in deduped:
+            deduped.append(root)
+    return deduped
+
+
 def _default_manifest_roots() -> list[str]:
-    return [os.path.join(settings.workspace_dir, "extensions")]
+    return default_manifest_roots_for_workspace(settings.workspace_dir)
 
 
 def _default_skill_dirs() -> list[str]:
@@ -161,6 +175,21 @@ class ExtensionRegistry:
     def _iter_manifest_paths(self) -> list[Path]:
         return iter_extension_manifest_paths(self._manifest_roots)
 
+    def _manifest_root_index(self, manifest_path: Path) -> int:
+        resolved_manifest = manifest_path.resolve()
+        for index, root in enumerate(self._manifest_roots):
+            if not root:
+                continue
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            resolved_root = root_path.resolve()
+            if resolved_root == resolved_manifest:
+                return index
+            if resolved_root in resolved_manifest.parents:
+                return index
+        return len(self._manifest_roots)
+
     def _scan_manifest_extensions(self) -> tuple[list[ExtensionRecord], list[ExtensionLoadErrorRecord]]:
         extensions: list[ExtensionRecord] = []
         errors: list[ExtensionLoadErrorRecord] = []
@@ -205,6 +234,7 @@ class ExtensionRegistry:
 
     def _record_from_manifest(self, manifest: ExtensionManifest, manifest_path: Path) -> ExtensionRecord:
         root_path = str(manifest_path.parent)
+        manifest_root_index = self._manifest_root_index(manifest_path)
         contributions: list[ExtensionContributionRecord] = []
         for contribution_type in sorted(manifest.contributed_types()):
             for reference in getattr(manifest.contributes, contribution_type):
@@ -217,6 +247,8 @@ class ExtensionRegistry:
                         source="manifest",
                         metadata={
                             "resolved_path": str(resolved_path),
+                            "manifest_root_index": manifest_root_index,
+                            "trust": manifest.trust.value,
                         },
                     )
                 )

@@ -1,10 +1,12 @@
-"""Tests for MCP seed config logic in app lifespan."""
+"""Tests for startup config seeding and bundled manifest roots."""
 
 import json
 import os
 import shutil
 
 import pytest
+
+from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
 
 
 class TestSeedConfig:
@@ -114,40 +116,12 @@ class TestSeedConfig:
         assert "auth_hint" in github
         assert "github.com" in github["auth_hint"].lower()
 
-    def test_seed_default_skills(self, tmp_path):
-        """Default skills should be seeded to empty workspace skills dir."""
-        from src.app import _seed_default_skills
+    def test_default_manifest_roots_include_workspace_and_bundled_extensions(self, tmp_path):
+        workspace = tmp_path / "workspace"
 
-        defaults_dir = os.path.join(
-            os.path.dirname(__file__), "../src/defaults"
-        )
-        skills_dir = str(tmp_path / "skills")
-        os.makedirs(skills_dir)
+        roots = default_manifest_roots_for_workspace(str(workspace))
 
-        _seed_default_skills(defaults_dir, skills_dir)
+        assert roots == [str(workspace / "extensions"), bundled_manifest_root()]
 
-        seeded = os.listdir(skills_dir)
-        assert len(seeded) >= 8
-        assert "daily-standup.md" in seeded
-        assert "weekly-planner.md" in seeded
-
-    def test_seed_does_not_overwrite_existing(self, tmp_path):
-        """Seeding should not overwrite skills that already exist."""
-        from src.app import _seed_default_skills
-
-        defaults_dir = os.path.join(
-            os.path.dirname(__file__), "../src/defaults"
-        )
-        skills_dir = str(tmp_path / "skills")
-        os.makedirs(skills_dir)
-
-        # Create a custom version of a skill
-        custom_content = "---\nname: daily-standup\ndescription: My custom version\n---\nCustom."
-        with open(os.path.join(skills_dir, "daily-standup.md"), "w") as f:
-            f.write(custom_content)
-
-        _seed_default_skills(defaults_dir, skills_dir)
-
-        # Custom version should be preserved
-        with open(os.path.join(skills_dir, "daily-standup.md")) as f:
-            assert f.read() == custom_content
+    def test_bundled_extensions_root_exists(self):
+        assert os.path.isdir(bundled_manifest_root())

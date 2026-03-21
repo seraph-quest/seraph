@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.observer.context import CurrentContext
+from src.extensions.registry import bundled_manifest_root
 
 
 @pytest.fixture
@@ -76,17 +77,71 @@ def _setup_manifest_pack_and_runbook_managers(tmp_path):
     runbook_manager._registry = None
 
 
+@pytest.fixture
+def _setup_bundled_core_capabilities_managers(tmp_path):
+    from src.extensions.registry import default_manifest_roots_for_workspace
+    from src.runbooks.manager import runbook_manager
+    from src.skills.manager import skill_manager
+    from src.starter_packs.manager import starter_pack_manager
+    from src.workflows.manager import workflow_manager
+
+    workspace_dir = tmp_path / "workspace"
+    skills_dir = workspace_dir / "skills"
+    workflows_dir = workspace_dir / "workflows"
+    runbooks_dir = workspace_dir / "runbooks"
+    starter_packs_path = workspace_dir / "starter-packs.json"
+    skills_dir.mkdir(parents=True)
+    workflows_dir.mkdir()
+    runbooks_dir.mkdir()
+    manifest_roots = default_manifest_roots_for_workspace(str(workspace_dir))
+
+    skill_manager.init(str(skills_dir), manifest_roots=manifest_roots)
+    workflow_manager.init(str(workflows_dir), manifest_roots=manifest_roots)
+    runbook_manager.init(str(runbooks_dir), manifest_roots=manifest_roots)
+    starter_pack_manager.init(str(starter_packs_path), manifest_roots=manifest_roots)
+
+    yield workspace_dir
+
+    skill_manager._skills = []
+    skill_manager._load_errors = []
+    skill_manager._skills_dir = ""
+    skill_manager._manifest_roots = []
+    skill_manager._config_path = ""
+    skill_manager._disabled = set()
+    skill_manager._registry = None
+    workflow_manager._workflows = []
+    workflow_manager._load_errors = []
+    workflow_manager._shared_manifest_errors = []
+    workflow_manager._workflows_dir = ""
+    workflow_manager._manifest_roots = []
+    workflow_manager._config_path = ""
+    workflow_manager._disabled = set()
+    workflow_manager._registry = None
+    runbook_manager._runbooks = []
+    runbook_manager._load_errors = []
+    runbook_manager._shared_manifest_errors = []
+    runbook_manager._runbooks_dir = ""
+    runbook_manager._manifest_roots = []
+    runbook_manager._registry = None
+    starter_pack_manager._packs = []
+    starter_pack_manager._load_errors = []
+    starter_pack_manager._shared_manifest_errors = []
+    starter_pack_manager._legacy_path = ""
+    starter_pack_manager._manifest_roots = []
+    starter_pack_manager._registry = None
+
+
 def test_load_starter_packs_does_not_fallback_when_manager_is_initialized():
     with (
         patch("src.api.capabilities.starter_pack_manager.list_packs", return_value=[]),
         patch("src.api.capabilities.starter_pack_manager.is_initialized", return_value=True),
-        patch("src.api.capabilities.load_legacy_starter_packs") as load_legacy,
+        patch("src.api.capabilities.StarterPackManager") as fallback_manager_cls,
     ):
         from src.api.capabilities import _load_starter_packs
 
         assert _load_starter_packs() == []
 
-    load_legacy.assert_not_called()
+    fallback_manager_cls.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -320,7 +375,7 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
         patch("src.api.capabilities.skill_manager.get_skill", return_value=None),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=None),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
-        patch("src.api.capabilities._seed_bundled_workflow", return_value=True),
+        patch("src.api.capabilities._ensure_bundled_workflow_available", return_value=True),
         patch("src.api.capabilities.workflow_manager.reload", return_value=[]),
         patch("src.api.capabilities.skill_manager.enable", return_value=True) as enable_skill,
         patch("src.api.capabilities.workflow_manager.enable", return_value=True) as enable_workflow,
@@ -427,6 +482,166 @@ async def test_activate_manifest_backed_starter_pack_works(client, _setup_manife
     assert [call.args[0] for call in install_item.call_args_list] == ["http-request", "web-briefing"]
     enable_skill.assert_called_with("web-briefing")
     enable_workflow.assert_called_with("web-brief-to-file")
+
+
+@pytest.mark.asyncio
+async def test_activate_bundled_core_capability_pack_uses_manifest_runtime(_setup_bundled_core_capabilities_managers):
+    from src.api.capabilities import _activate_starter_pack_by_name
+
+    workspace_dir = _setup_bundled_core_capabilities_managers
+    install_calls: list[str] = []
+
+    def install_side_effect(name: str):
+        install_calls.append(name)
+        if name == "http-request":
+            return {"ok": True, "status": "installed", "name": name, "type": "mcp_server", "bundled": True}
+        return {"ok": False, "status": "not_found", "name": name, "type": "unknown", "bundled": False}
+
+    with (
+        patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=(
+                [
+                    SimpleNamespace(name="web_search"),
+                    SimpleNamespace(name="write_file"),
+                    SimpleNamespace(name="http_request"),
+                ],
+                ["web-briefing"],
+                "approval",
+            ),
+        ),
+        patch(
+            "src.api.capabilities._mcp_status_list",
+            return_value=[{"name": "http-request", "availability": "ready"}],
+        ),
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        payload = await _activate_starter_pack_by_name("research-briefing")
+
+    assert payload["status"] == "activated"
+    assert payload["enabled_skills"] == ["web-briefing"]
+    assert payload["enabled_workflows"] == ["web-brief-to-file"]
+    assert install_calls == ["http-request"]
+    assert not (workspace_dir / "workflows" / "web-brief-to-file.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_setup_bundled_core_capabilities_managers):
+    from src.api.capabilities import _activate_starter_pack_by_name
+    from src.tools.mcp_manager import mcp_manager
+
+    original_config = dict(mcp_manager._config)
+    original_status = dict(mcp_manager._status)
+    original_config_path = mcp_manager._config_path
+    mcp_manager._config = {}
+    mcp_manager._status = {}
+    mcp_manager._config_path = None
+    installed_server_names: list[str] = []
+
+    try:
+        with (
+            patch(
+                "src.api.capabilities.get_base_tools_and_active_skills",
+                return_value=(
+                    [
+                        SimpleNamespace(name="web_search"),
+                        SimpleNamespace(name="write_file"),
+                        SimpleNamespace(name="http_request"),
+                    ],
+                    ["web-briefing"],
+                    "approval",
+                ),
+            ),
+            patch(
+                "src.api.capabilities._mcp_status_list",
+                return_value=[{"name": "http-request", "availability": "ready"}],
+            ),
+            patch("src.api.capabilities.log_integration_event", AsyncMock()),
+        ):
+            payload = await _activate_starter_pack_by_name("research-briefing")
+            installed_server_names = sorted(mcp_manager._config.keys())
+    finally:
+        mcp_manager._config = original_config
+        mcp_manager._status = original_status
+        mcp_manager._config_path = original_config_path
+
+    assert payload["status"] == "activated"
+    assert payload["installed_catalog_items"] == [
+        {"name": "http-request", "type": "mcp_server", "status": "installed"}
+    ]
+    assert payload["enabled_skills"] == ["web-briefing"]
+    assert payload["enabled_workflows"] == ["web-brief-to-file"]
+    assert "http-request" in installed_server_names
+
+
+def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_path):
+    from src.api.capabilities import _ensure_bundled_workflow_available
+    from src.workflows.manager import workflow_manager
+
+    custom_workspace = tmp_path / "custom-workspace"
+    workflows_dir = custom_workspace / "workflows"
+    extra_root = tmp_path / "extra-extensions"
+    package_dir = extra_root / "local-pack"
+    workflows_dir.mkdir(parents=True)
+    (package_dir / "workflows").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.local-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Local Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  workflows:\n"
+        "    - workflows/local-only.md\n"
+        "permissions:\n"
+        "  tools: [read_file]\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (package_dir / "workflows" / "local-only.md").write_text(
+        "---\n"
+        "name: local-only\n"
+        "description: Local-only workflow\n"
+        "requires:\n"
+        "  tools: [read_file]\n"
+        "steps:\n"
+        "  - id: inspect\n"
+        "    tool: read_file\n"
+        "    arguments:\n"
+        "      file_path: notes/source.md\n"
+        "---\n\n"
+        "Local-only workflow.\n",
+        encoding="utf-8",
+    )
+
+    workflow_manager.init(str(workflows_dir), manifest_roots=[str(extra_root)])
+    workflow_manager._workflows = [
+        workflow for workflow in workflow_manager._workflows if workflow.name != "web-brief-to-file"
+    ]
+
+    with patch("src.api.capabilities.settings") as mock_settings:
+        mock_settings.workspace_dir = str(tmp_path / "other-workspace")
+
+        assert _ensure_bundled_workflow_available("web-brief-to-file") is True
+
+    assert workflow_manager._workflows_dir == str(workflows_dir)
+    assert workflow_manager._manifest_roots == [str(extra_root), bundled_manifest_root()]
+    assert workflow_manager.get_workflow("local-only") is not None
+    assert workflow_manager.get_workflow("web-brief-to-file") is not None
+
+    workflow_manager._workflows = []
+    workflow_manager._load_errors = []
+    workflow_manager._shared_manifest_errors = []
+    workflow_manager._workflows_dir = ""
+    workflow_manager._manifest_roots = []
+    workflow_manager._config_path = ""
+    workflow_manager._disabled = set()
+    workflow_manager._registry = None
 
 
 @pytest.mark.asyncio

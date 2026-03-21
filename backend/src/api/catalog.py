@@ -11,6 +11,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from config.settings import settings
+from src.extensions.registry import ExtensionRegistry, bundled_manifest_root
+from src.skills.loader import scan_skill_paths
 from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
 
@@ -20,7 +22,6 @@ router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
 _CATALOG_PATH = os.path.join(_DEFAULTS_DIR, "skill-catalog.json")
-_BUNDLED_SKILLS_DIR = os.path.join(_DEFAULTS_DIR, "skills")
 
 
 def load_catalog_items() -> dict[str, list[dict[str, Any]]]:
@@ -43,7 +44,7 @@ def _load_catalog() -> dict[str, list[dict[str, Any]]]:
 def _skill_installed(name: str) -> bool:
     """Check if a skill .md file exists in the workspace skills directory."""
     skills_dir = os.path.join(settings.workspace_dir, "skills")
-    return os.path.isfile(os.path.join(skills_dir, f"{name}.md"))
+    return _skill_loaded(name) or os.path.isfile(os.path.join(skills_dir, f"{name}.md"))
 
 
 def _skill_loaded(name: str) -> bool:
@@ -53,6 +54,25 @@ def _skill_loaded(name: str) -> bool:
 def _mcp_installed(name: str) -> bool:
     """Check if an MCP server exists in the current config."""
     return name in mcp_manager._config
+
+
+def _bundled_skill_source_by_name(name: str) -> str | None:
+    registry = ExtensionRegistry(
+        manifest_roots=[bundled_manifest_root()],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+    contribution_paths = [
+        str(resolved_path)
+        for contribution in registry.snapshot().list_contributions("skills")
+        if isinstance((resolved_path := contribution.metadata.get("resolved_path")), str) and resolved_path
+    ]
+    skills, _ = scan_skill_paths(contribution_paths)
+    for skill in skills:
+        if skill.name == name:
+            return skill.file_path
+    return None
 
 
 def catalog_skill_by_name() -> dict[str, dict[str, Any]]:
@@ -108,8 +128,17 @@ def install_catalog_item_by_name(name: str) -> dict[str, Any]:
                 "type": "skill",
                 "bundled": False,
             }
-        src = os.path.join(os.path.normpath(_BUNDLED_SKILLS_DIR), f"{name}.md")
-        if not os.path.isfile(src):
+        skill_manager.reload()
+        if _skill_loaded(name):
+            return {
+                "ok": True,
+                "status": "installed",
+                "name": name,
+                "type": "skill",
+                "bundled": True,
+            }
+        src = _bundled_skill_source_by_name(name)
+        if not src or not os.path.isfile(src):
             return {
                 "ok": False,
                 "status": "missing_bundle",

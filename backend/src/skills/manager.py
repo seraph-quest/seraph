@@ -43,22 +43,28 @@ class SkillManager:
     def _reload_from_registry(self) -> None:
         snapshot = self._snapshot()
         contribution_paths: list[str] = []
-        contribution_index: dict[str, tuple[str, str]] = {}
+        contribution_index: dict[str, tuple[str, str | None, int]] = {}
         for contribution in snapshot.list_contributions("skills"):
             resolved_path = contribution.metadata.get("resolved_path")
             path = str(resolved_path) if isinstance(resolved_path, str) and resolved_path else contribution.reference
             normalized_path = os.path.abspath(path)
             contribution_paths.append(path)
-            contribution_index[normalized_path] = (contribution.source, contribution.extension_id)
+            contribution_index[normalized_path] = (
+                contribution.source,
+                contribution.extension_id,
+                int(contribution.metadata.get("manifest_root_index", len(self._manifest_roots))),
+            )
 
         skills, parse_errors = scan_skill_paths(contribution_paths)
+        manifest_priority_by_path: dict[str, int] = {}
         for skill in skills:
-            source, extension_id = contribution_index.get(
+            source, extension_id, manifest_root_index = contribution_index.get(
                 os.path.abspath(skill.file_path),
-                ("legacy", None),
+                ("legacy", None, len(self._manifest_roots)),
             )
             skill.source = source
             skill.extension_id = extension_id
+            manifest_priority_by_path[os.path.abspath(skill.file_path)] = manifest_root_index
 
         load_errors = [
             {
@@ -71,7 +77,10 @@ class SkillManager:
         ]
         for error in parse_errors:
             path = str(error.get("file_path") or "")
-            source, _ = contribution_index.get(os.path.abspath(path), ("legacy", None))
+            source = contribution_index.get(
+                os.path.abspath(path),
+                ("legacy", None, len(self._manifest_roots)),
+            )[0]
             load_errors.append(
                 {
                     "file_path": path,
@@ -82,7 +91,14 @@ class SkillManager:
 
         deduped_skills: list[Skill] = []
         by_name: dict[str, Skill] = {}
-        for skill in sorted(skills, key=lambda item: (0 if item.source == "manifest" else 1, item.file_path)):
+        for skill in sorted(
+            skills,
+            key=lambda item: (
+                0 if item.source == "manifest" else 1,
+                manifest_priority_by_path.get(os.path.abspath(item.file_path), len(self._manifest_roots)),
+                item.file_path,
+            ),
+        ):
             existing = by_name.get(skill.name)
             if existing is not None:
                 load_errors.append(

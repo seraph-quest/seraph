@@ -50,18 +50,27 @@ class RunbookManager:
     def _reload_from_registry(self) -> None:
         snapshot = self._snapshot()
         contribution_paths: list[str] = []
-        contribution_index: dict[str, tuple[str, str]] = {}
+        contribution_index: dict[str, tuple[str, str | None, int]] = {}
         for contribution in snapshot.list_contributions("runbooks"):
             resolved_path = contribution.metadata.get("resolved_path")
             path = str(resolved_path) if isinstance(resolved_path, str) and resolved_path else contribution.reference
             contribution_paths.append(path)
-            contribution_index[os.path.abspath(path)] = (contribution.source, contribution.extension_id)
+            contribution_index[os.path.abspath(path)] = (
+                contribution.source,
+                contribution.extension_id,
+                int(contribution.metadata.get("manifest_root_index", len(self._manifest_roots))),
+            )
 
         manifest_runbooks, manifest_errors = scan_runbook_paths(contribution_paths)
+        manifest_priority_by_path: dict[str, int] = {}
         for runbook in manifest_runbooks:
-            source, extension_id = contribution_index.get(os.path.abspath(runbook.file_path), ("legacy", None))
+            source, extension_id, manifest_root_index = contribution_index.get(
+                os.path.abspath(runbook.file_path),
+                ("legacy", None, len(self._manifest_roots)),
+            )
             runbook.source = source
             runbook.extension_id = extension_id
+            manifest_priority_by_path[os.path.abspath(runbook.file_path)] = manifest_root_index
 
         legacy_runbook_paths = []
         if os.path.isdir(self._runbooks_dir):
@@ -80,7 +89,15 @@ class RunbookManager:
         load_errors: list[dict[str, str]] = []
         shared_manifest_errors: list[dict[str, str]] = []
         by_id: dict[str, Runbook] = {}
-        for runbook in sorted([*manifest_runbooks, *legacy_runbooks], key=lambda item: (0 if item.source == "manifest" else 1, item.file_path, item.id)):
+        for runbook in sorted(
+            [*manifest_runbooks, *legacy_runbooks],
+            key=lambda item: (
+                0 if item.source == "manifest" else 1,
+                manifest_priority_by_path.get(os.path.abspath(item.file_path), len(self._manifest_roots)),
+                item.file_path,
+                item.id,
+            ),
+        ):
             existing = by_id.get(runbook.id)
             if existing is not None:
                 load_errors.append({

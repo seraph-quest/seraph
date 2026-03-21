@@ -322,22 +322,28 @@ class WorkflowManager:
     def _reload_from_registry(self) -> None:
         snapshot = self._snapshot()
         contribution_paths: list[str] = []
-        contribution_index: dict[str, tuple[str, str]] = {}
+        contribution_index: dict[str, tuple[str, str | None, int]] = {}
         for contribution in snapshot.list_contributions("workflows"):
             resolved_path = contribution.metadata.get("resolved_path")
             path = str(resolved_path) if isinstance(resolved_path, str) and resolved_path else contribution.reference
             normalized_path = os.path.abspath(path)
             contribution_paths.append(path)
-            contribution_index[normalized_path] = (contribution.source, contribution.extension_id)
+            contribution_index[normalized_path] = (
+                contribution.source,
+                contribution.extension_id,
+                int(contribution.metadata.get("manifest_root_index", len(self._manifest_roots))),
+            )
 
         workflows, parse_errors = scan_workflow_paths(contribution_paths)
+        manifest_priority_by_path: dict[str, int] = {}
         for workflow in workflows:
-            source, extension_id = contribution_index.get(
+            source, extension_id, manifest_root_index = contribution_index.get(
                 os.path.abspath(workflow.file_path),
-                ("legacy", None),
+                ("legacy", None, len(self._manifest_roots)),
             )
             workflow.source = source
             workflow.extension_id = extension_id
+            manifest_priority_by_path[os.path.abspath(workflow.file_path)] = manifest_root_index
 
         load_errors: list[dict[str, str]] = []
         shared_manifest_errors: list[dict[str, str]] = []
@@ -354,7 +360,10 @@ class WorkflowManager:
                 shared_manifest_errors.append(payload)
         for error in parse_errors:
             path = str(error.get("file_path") or "")
-            source, _ = contribution_index.get(os.path.abspath(path), ("legacy", None))
+            source = contribution_index.get(
+                os.path.abspath(path),
+                ("legacy", None, len(self._manifest_roots)),
+            )[0]
             load_errors.append(
                 {
                     "file_path": path,
@@ -366,7 +375,14 @@ class WorkflowManager:
         deduped_workflows: list[Workflow] = []
         by_name: dict[str, Workflow] = {}
         by_tool_name: dict[str, Workflow] = {}
-        for workflow in sorted(workflows, key=lambda item: (0 if item.source == "manifest" else 1, item.file_path)):
+        for workflow in sorted(
+            workflows,
+            key=lambda item: (
+                0 if item.source == "manifest" else 1,
+                manifest_priority_by_path.get(os.path.abspath(item.file_path), len(self._manifest_roots)),
+                item.file_path,
+            ),
+        ):
             existing_name = by_name.get(workflow.name)
             if existing_name is not None:
                 load_errors.append(

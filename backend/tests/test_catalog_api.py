@@ -51,10 +51,29 @@ def workspace_dir(tmp_path):
 
 @pytest.fixture
 def bundled_skills_dir(tmp_path):
-    """Create a temp directory with a bundled skill file."""
-    d = tmp_path / "bundled"
-    d.mkdir()
-    (d / "test-catalog-skill.md").write_text(
+    """Create a temp bundled extension root with a packaged skill."""
+    package_dir = tmp_path / "bundled" / "catalog-pack"
+    skills_dir = package_dir / "skills"
+    skills_dir.mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.catalog-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Catalog Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: bundled\n"
+        "contributes:\n"
+        "  skills:\n"
+        "    - skills/test-catalog-skill.md\n"
+        "permissions:\n"
+        "  tools: [web_search]\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (skills_dir / "test-catalog-skill.md").write_text(
         "---\n"
         "name: test-catalog-skill\n"
         "description: A test skill\n"
@@ -62,9 +81,10 @@ def bundled_skills_dir(tmp_path):
         "  tools: [web_search]\n"
         "user_invocable: true\n"
         "---\n\n"
-        "Do something useful."
+        "Do something useful.",
+        encoding="utf-8",
     )
-    return str(d)
+    return str(tmp_path / "bundled")
 
 
 # ── TestCatalogAPI ───────────────────────────────────────
@@ -126,10 +146,11 @@ class TestCatalogAPI:
     ):
         with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
              patch("src.api.catalog.settings") as mock_settings, \
-             patch("src.api.catalog._BUNDLED_SKILLS_DIR", bundled_skills_dir), \
+             patch("src.api.catalog.bundled_manifest_root", return_value=bundled_skills_dir), \
+             patch("src.api.catalog._skill_installed", return_value=False), \
+             patch("src.api.catalog._skill_loaded", side_effect=[False, False, True]), \
              patch("src.api.catalog.skill_manager") as mock_skill_mgr:
             mock_settings.workspace_dir = workspace_dir
-            mock_skill_mgr.get_skill.side_effect = [None, object()]
 
             resp = await client.post("/api/catalog/install/test-catalog-skill")
             assert resp.status_code == 201
@@ -140,7 +161,7 @@ class TestCatalogAPI:
             # Verify the file was copied
             installed_path = os.path.join(workspace_dir, "skills", "test-catalog-skill.md")
             assert os.path.isfile(installed_path)
-            mock_skill_mgr.reload.assert_called_once()
+            assert mock_skill_mgr.reload.call_count == 2
 
     @pytest.mark.asyncio
     async def test_install_mcp_success(self, client, catalog_data, workspace_dir):
@@ -253,16 +274,37 @@ class TestCatalogAPI:
         assert result["status"] == "installed_file_invalid"
         mock_skill_mgr.reload.assert_called_once()
 
+    def test_install_catalog_skill_is_already_installed_when_manifest_loaded(
+        self, catalog_data, workspace_dir, bundled_skills_dir
+    ):
+        manifest_roots = [os.path.join(workspace_dir, "extensions"), bundled_skills_dir]
+        manager = SkillManager()
+        manager.init(os.path.join(workspace_dir, "skills"), manifest_roots=manifest_roots)
+
+        with (
+            patch("src.api.catalog._load_catalog", return_value=catalog_data),
+            patch("src.api.catalog.settings") as mock_settings,
+            patch("src.api.catalog.skill_manager", manager),
+        ):
+            mock_settings.workspace_dir = workspace_dir
+
+            result = install_catalog_item_by_name("test-catalog-skill")
+
+        assert result["ok"] is False
+        assert result["status"] == "already_installed"
+        assert not os.path.exists(os.path.join(workspace_dir, "skills", "test-catalog-skill.md"))
+
     @pytest.mark.asyncio
     async def test_install_skill_returns_422_when_bundled_file_cannot_load(
         self, client, catalog_data, workspace_dir, bundled_skills_dir
     ):
         with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
              patch("src.api.catalog.settings") as mock_settings, \
-             patch("src.api.catalog._BUNDLED_SKILLS_DIR", bundled_skills_dir), \
+             patch("src.api.catalog.bundled_manifest_root", return_value=bundled_skills_dir), \
+             patch("src.api.catalog._skill_installed", return_value=False), \
+             patch("src.api.catalog._skill_loaded", side_effect=[False, False, False]), \
              patch("src.api.catalog.skill_manager") as mock_skill_mgr:
             mock_settings.workspace_dir = workspace_dir
-            mock_skill_mgr.get_skill.side_effect = [None, None]
 
             resp = await client.post("/api/catalog/install/test-catalog-skill")
 

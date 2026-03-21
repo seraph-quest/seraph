@@ -73,6 +73,8 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     centerSingleColumn: false,
     paneVisibility: {
       ...ALL_VISIBLE,
+      outputs_pane: false,
+      trace_pane: false,
     },
   },
   focus: {
@@ -88,6 +90,12 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
       approvals_pane: false,
       audit_pane: false,
       trace_pane: false,
+      response_pane: false,
+      workflows_pane: false,
+      interventions_pane: false,
+      inspector_pane: false,
+      operator_surface_pane: false,
+      desktop_shell_pane: false,
     },
   },
   review: {
@@ -97,9 +105,14 @@ export const COCKPIT_LAYOUTS: Record<CockpitLayoutId, CockpitLayoutDefinition> =
     centerSingleColumn: true,
     paneVisibility: {
       ...ALL_VISIBLE,
+      sessions_pane: false,
       goals_pane: false,
       outputs_pane: false,
       guardian_state_pane: false,
+      presence_pane: false,
+      conversation_pane: false,
+      desktop_shell_pane: false,
+      operator_surface_pane: false,
     },
   },
 };

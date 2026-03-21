@@ -45,9 +45,10 @@ describe("cockpitLayoutStore", () => {
     useCockpitLayoutStore.getState().setLayout("focus");
 
     expect(useCockpitLayoutStore.getState().activeLayoutId).toBe("focus");
-    expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(true);
+    expect(useCockpitLayoutStore.getState().inspectorVisible).toBe(false);
     expect(useCockpitLayoutStore.getState().paneVisibility.sessions_pane).toBe(false);
     expect(useCockpitLayoutStore.getState().paneVisibility.operator_timeline_pane).toBe(true);
+    expect(useCockpitLayoutStore.getState().paneVisibility.presence_pane).toBe(true);
   });
 
   it("toggles inspector visibility independently from the active layout", () => {

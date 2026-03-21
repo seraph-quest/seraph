@@ -273,7 +273,7 @@ body {
   align-items: center;
   padding: 4px 7px;
   border: 1px solid rgba(141, 226, 255, 0.12);
-  border-radius: 4px;
+  border-radius: 0;
   background: rgba(10, 23, 35, 0.72);
   color: rgba(180, 208, 227, 0.72);
   font-size: 10px;
@@ -416,22 +416,108 @@ body {
     );
 }
 
-.cockpit-menu-anchor {
-  position: relative;
+.cockpit-window-launcher {
+  position: absolute;
+  top: 12px;
+  left: 8px;
+  z-index: 145;
+  display: flex;
+  align-items: flex-start;
+  pointer-events: none;
 }
 
-.cockpit-windows-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 140;
-  min-width: 320px;
-  max-height: min(70vh, 640px);
+.cockpit-window-launcher > * {
+  pointer-events: auto;
+}
+
+.cockpit-window-launcher-tab {
+  min-width: 34px;
+  min-height: 168px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 8px 8px;
+  border: 1px solid var(--cockpit-border-strong);
+  border-left-color: rgba(141, 226, 255, 0.66);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(8, 20, 31, 0.98), rgba(6, 16, 25, 0.96)),
+    repeating-linear-gradient(
+      180deg,
+      rgba(141, 226, 255, 0.028) 0,
+      rgba(141, 226, 255, 0.028) 1px,
+      transparent 1px,
+      transparent 14px
+    );
+  color: var(--cockpit-text);
+  font: inherit;
+  cursor: pointer;
+  box-shadow: 0 16px 24px rgba(0, 0, 0, 0.28);
+}
+
+.cockpit-window-launcher-tab:hover,
+.cockpit-window-launcher-tab.is-open {
+  border-color: var(--cockpit-state-selected-border);
+  background:
+    linear-gradient(180deg, rgba(12, 29, 44, 0.98), rgba(8, 21, 33, 0.96)),
+    repeating-linear-gradient(
+      180deg,
+      rgba(141, 226, 255, 0.032) 0,
+      rgba(141, 226, 255, 0.032) 1px,
+      transparent 1px,
+      transparent 14px
+    );
+}
+
+.cockpit-window-launcher-tab-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.cockpit-window-launcher-tab-meta {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--cockpit-muted);
+}
+
+.cockpit-window-launcher-drawer {
+  margin-left: 8px;
+  width: min(320px, calc(100vw - 96px));
+  max-height: min(78vh, 720px);
   overflow: auto;
   border: 1px solid var(--cockpit-border-strong);
-  border-radius: 1px;
+  border-radius: 0;
   background: rgba(6, 16, 25, 0.98);
   box-shadow: 0 18px 36px rgba(0, 0, 0, 0.44);
+}
+
+.cockpit-window-launcher-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid rgba(141, 226, 255, 0.12);
+  background: rgba(10, 24, 36, 0.96);
+}
+
+.cockpit-window-launcher-title {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--cockpit-text);
+}
+
+.cockpit-window-launcher-meta {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cockpit-muted);
 }
 
 .cockpit-windows-menu-toolbar {
@@ -534,9 +620,9 @@ body {
   border-width: 1px;
   outline: none;
   box-shadow:
-    0 12px 24px rgba(0, 0, 0, 0.28),
-    0 0 0 1px rgba(141, 226, 255, 0.22),
-    0 0 18px rgba(141, 226, 255, 0.12);
+    0 10px 20px rgba(0, 0, 0, 0.24),
+    0 0 0 1px rgba(141, 226, 255, 0.18),
+    0 0 12px rgba(141, 226, 255, 0.08);
 }
 
 .cockpit-window--active .cockpit-window-header {
@@ -717,7 +803,7 @@ body {
   flex-direction: column;
   min-height: 0;
   border: 1px solid var(--cockpit-border);
-  border-radius: 8px;
+  border-radius: 0;
   background:
     linear-gradient(180deg, rgba(10, 24, 37, 0.96), rgba(7, 20, 31, 0.94)),
     repeating-linear-gradient(
@@ -799,7 +885,7 @@ body {
   background:
     linear-gradient(180deg, rgba(130, 209, 247, 0.92), rgba(89, 171, 215, 0.9));
   border: 2px solid rgba(8, 22, 34, 0.94);
-  border-radius: 3px;
+  border-radius: 0;
   box-shadow:
     inset 0 0 0 1px rgba(216, 243, 255, 0.12),
     0 0 0 1px rgba(141, 226, 255, 0.12);
@@ -856,7 +942,7 @@ body {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--cockpit-border-strong);
-  border-radius: 20px;
+  border-radius: 0;
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(7, 20, 31, 0.98), rgba(9, 24, 37, 0.97)),
@@ -945,7 +1031,7 @@ body {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--cockpit-border-strong);
-  border-radius: 10px;
+  border-radius: 0;
   background:
     linear-gradient(180deg, rgba(7, 21, 32, 0.98), rgba(8, 22, 34, 0.96)),
     radial-gradient(circle at top right, rgba(141, 226, 255, 0.1), transparent 44%);
@@ -985,7 +1071,7 @@ body {
 
 .cockpit-modal-close {
   border: 1px solid var(--cockpit-border);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 7px 10px;
   background: rgba(11, 27, 40, 0.78);
   color: var(--cockpit-muted);
@@ -1047,6 +1133,7 @@ body {
 .cockpit-settings-scope button,
 .cockpit-goals-scope button {
   min-height: 32px;
+  border-radius: 0;
 }
 
 .cockpit-settings-inline-row {
@@ -1057,7 +1144,7 @@ body {
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid rgba(141, 226, 255, 0.1);
-  border-radius: 8px;
+  border-radius: 0;
   background: rgba(9, 24, 36, 0.44);
 }
 
@@ -1083,7 +1170,7 @@ body {
 
 .cockpit-settings-toggle {
   border: 1px solid var(--cockpit-border);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 6px 10px;
   min-width: 58px;
   background: rgba(8, 22, 33, 0.82);
@@ -1156,6 +1243,15 @@ body {
   background: rgba(7, 20, 31, 0.74);
 }
 
+.cockpit-tone-scope [class~="rounded"],
+.cockpit-tone-scope [class~="rounded-sm"],
+.cockpit-tone-scope [class~="rounded-md"],
+.cockpit-tone-scope [class~="rounded-lg"],
+.cockpit-tone-scope [class~="rounded-xl"],
+.cockpit-tone-scope [class~="rounded-2xl"] {
+  border-radius: 0 !important;
+}
+
 .cockpit-tone-scope .pixel-border-thin {
   border-color: rgba(141, 226, 255, 0.18);
   box-shadow:
@@ -1168,7 +1264,7 @@ body {
 .cockpit-tone-scope textarea {
   color: var(--cockpit-text);
   background-color: rgba(7, 20, 31, 0.74);
-  border-radius: 8px;
+  border-radius: 0;
 }
 
 .cockpit-tone-scope input::placeholder,
@@ -1395,7 +1491,7 @@ body {
 
 .cockpit-metric {
   padding: 12px;
-  border-radius: 14px;
+  border-radius: 0;
   background: rgba(16, 39, 60, 0.82);
   border: 1px solid rgba(141, 226, 255, 0.1);
 }
@@ -1685,7 +1781,7 @@ body {
   flex-direction: column;
   min-height: 440px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 22px;
+  border-radius: 0;
   overflow: hidden;
   background: #050505;
   box-shadow:
@@ -1823,7 +1919,7 @@ body {
 .cockpit-prime-progress-bar {
   width: 12px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.05);
 }
 
@@ -1856,7 +1952,7 @@ body {
 .cockpit-prime-telemetry-card {
   padding: 14px 16px;
   border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.01);
 }
 
@@ -2148,13 +2244,13 @@ body {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid rgba(141, 226, 255, 0.08);
-  border-radius: 12px;
+  border-radius: 0;
   background: rgba(13, 33, 52, 0.3);
 }
 
 .cockpit-inspector-detail {
   border: 1px solid rgba(141, 226, 255, 0.08);
-  border-radius: 12px;
+  border-radius: 0;
   padding: 10px 12px;
   background: rgba(13, 33, 52, 0.38);
 }
@@ -2167,7 +2263,7 @@ body {
 
 .cockpit-chip {
   border: 1px solid rgba(141, 226, 255, 0.12);
-  border-radius: 999px;
+  border-radius: 0;
   padding: 5px 9px;
   font-size: 10px;
   letter-spacing: 0.08em;
@@ -2215,7 +2311,7 @@ body {
   flex: 1;
   min-width: 0;
   border: 1px solid rgba(141, 226, 255, 0.14);
-  border-radius: 16px;
+  border-radius: 0;
   background: rgba(10, 23, 35, 0.9);
   color: var(--cockpit-text);
   padding: 14px 16px;
@@ -2239,7 +2335,7 @@ body {
   justify-content: center;
   gap: 8px;
   border: none;
-  border-radius: 16px;
+  border-radius: 0;
   padding: 0 20px;
   background: linear-gradient(135deg, var(--cockpit-accent), var(--cockpit-accent-strong));
   color: #041119;
@@ -2389,7 +2485,7 @@ body {
     inset 0 0 0 2px #1a1a2e,
     inset 0 0 0 4px #e2b714,
     0 4px 12px rgba(0, 0, 0, 0.5);
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 /* ── Scrollbar ────────────────────────────────────────── */

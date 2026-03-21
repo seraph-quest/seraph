@@ -1509,6 +1509,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return Array.from(grouped.entries());
   }, []);
 
+  const visiblePaneCount = useMemo(
+    () => COCKPIT_PANES.filter((pane) => paneVisibility[pane.id]).length,
+    [paneVisibility],
+  );
+
   useEffect(() => {
     void restoreLastSession();
     refreshGoals();
@@ -3470,56 +3475,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             >
               Settings
             </button>
-            <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
-              <button
-                className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
-                onClick={() => setWindowsMenuOpen((current) => !current)}
-                title="Show or hide workspace windows"
-              >
-                Windows
-              </button>
-              {windowsMenuOpen && (
-                <div className="cockpit-windows-menu">
-                  <div className="cockpit-windows-menu-toolbar">
-                    <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
-                      Show all
-                    </button>
-                    <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
-                      Hide non-core
-                    </button>
-                    <button className="cockpit-windows-menu-action" onClick={handleResetWorkspace}>
-                      Reset workspace
-                    </button>
-                  </div>
-                  {panesByGroup.map(([group, panes]) => (
-                    <div key={group} className="cockpit-windows-menu-group">
-                      <div className="cockpit-windows-menu-group-title">{group}</div>
-                      {panes.map((pane) => {
-                        const isCorePane = CORE_PANE_IDS.includes(pane.id);
-                        return (
-                          <div key={pane.id} className="cockpit-windows-menu-row">
-                            <button
-                              className={`cockpit-windows-menu-toggle ${paneVisibility[pane.id] ? "active" : ""}`}
-                              onClick={() => togglePaneVisible(pane.id)}
-                            >
-                              <span className="cockpit-windows-menu-check">{paneVisibility[pane.id] ? "■" : "□"}</span>
-                              <span>{pane.label}</span>
-                              {isCorePane ? <span className="cockpit-windows-menu-core">core</span> : null}
-                            </button>
-                            <button
-                              className="cockpit-windows-menu-focus"
-                              onClick={() => focusPane(pane.id)}
-                            >
-                              Focus
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
 
           <div className="cockpit-layout-row">
@@ -3556,6 +3511,65 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       )}
 
       <div className="cockpit-workspace">
+        <div
+          className={`cockpit-window-launcher ${windowsMenuOpen ? "is-open" : ""}`}
+          ref={windowsMenuRef}
+        >
+          <button
+            className={`cockpit-window-launcher-tab ${windowsMenuOpen ? "is-open" : ""}`}
+            onClick={() => setWindowsMenuOpen((current) => !current)}
+            title="Show or hide workspace windows"
+            aria-label="Windows"
+          >
+            <span className="cockpit-window-launcher-tab-label">Windows</span>
+            <span className="cockpit-window-launcher-tab-meta">{visiblePaneCount}/{COCKPIT_PANES.length}</span>
+          </button>
+          {windowsMenuOpen && (
+            <div className="cockpit-window-launcher-drawer">
+              <div className="cockpit-window-launcher-header">
+                <div className="cockpit-window-launcher-title">Windows</div>
+                <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
+              </div>
+              <div className="cockpit-windows-menu-toolbar">
+                <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
+                  Show all
+                </button>
+                <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
+                  Hide non-core
+                </button>
+                <button className="cockpit-windows-menu-action" onClick={handleResetWorkspace}>
+                  Reset workspace
+                </button>
+              </div>
+              {panesByGroup.map(([group, panes]) => (
+                <div key={group} className="cockpit-windows-menu-group">
+                  <div className="cockpit-windows-menu-group-title">{group}</div>
+                  {panes.map((pane) => {
+                    const isCorePane = CORE_PANE_IDS.includes(pane.id);
+                    return (
+                      <div key={pane.id} className="cockpit-windows-menu-row">
+                        <button
+                          className={`cockpit-windows-menu-toggle ${paneVisibility[pane.id] ? "active" : ""}`}
+                          onClick={() => togglePaneVisible(pane.id)}
+                        >
+                          <span className="cockpit-windows-menu-check">{paneVisibility[pane.id] ? "■" : "□"}</span>
+                          <span>{pane.label}</span>
+                          {isCorePane ? <span className="cockpit-windows-menu-core">core</span> : null}
+                        </button>
+                        <button
+                          className="cockpit-windows-menu-focus"
+                          onClick={() => focusPane(pane.id)}
+                        >
+                          Focus
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         {visibleSections.rail && (
           <>
             {paneVisibility.sessions_pane && (

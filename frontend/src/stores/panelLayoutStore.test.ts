@@ -80,8 +80,18 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     expect(xs.size).toBe(3);
     expect(panels.inspector_pane).toBeUndefined();
     expect(panels.operator_timeline_pane).toBeDefined();
-    expect(panels.response_pane).toBeDefined();
+    expect(panels.guardian_state_pane).toBeDefined();
+    expect(panels.presence_pane).toBeDefined();
     expect(panels.conversation_pane).toBeDefined();
+  });
+
+  it("gives Seraph presence a materially larger frame than the standard panes", () => {
+    vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
+
+    const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
+
+    expect(panels.presence_pane.width).toBeGreaterThanOrEqual(panels.response_pane.width * 1.4);
+    expect(panels.presence_pane.height).toBeGreaterThan(panels.workflows_pane.height);
   });
 
   it("gives the default layout more width to the main guardian surfaces than to inventory panes", () => {
@@ -101,9 +111,9 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     const focusPanels = getPackedCockpitPanels("focus", getDefaultPaneVisibility("focus"));
     const reviewPanels = getPackedCockpitPanels("review", getDefaultPaneVisibility("review"));
 
-    expect(focusPanels.response_pane.width).toBeGreaterThan(focusPanels.workflows_pane.width);
-    expect(reviewPanels.audit_pane.width).toBeGreaterThan(reviewPanels.sessions_pane.width);
-    expect(reviewPanels.trace_pane.width).toBeGreaterThan(reviewPanels.sessions_pane.width);
+    expect(focusPanels.presence_pane.width).toBeGreaterThan(focusPanels.guardian_state_pane.width);
+    expect(reviewPanels.audit_pane.width).toBeGreaterThan(reviewPanels.approvals_pane.width);
+    expect(reviewPanels.trace_pane.width).toBeGreaterThan(0);
   });
 
   it("persists manual pane edits inside the active layout snapshot", () => {
@@ -118,12 +128,12 @@ describe("panelLayoutStore packed cockpit layouts", () => {
     });
     usePanelLayoutStore.getState().applyCockpitLayout("focus", getDefaultPaneVisibility("focus"));
 
-    usePanelLayoutStore.getState().setRect("response_pane", { x: 320, y: 160 });
+    usePanelLayoutStore.getState().setRect("presence_pane", { x: 320, y: 160 });
     usePanelLayoutStore.getState().applyCockpitLayout("default", getDefaultPaneVisibility("default"));
     usePanelLayoutStore.getState().applyCockpitLayout("focus", getDefaultPaneVisibility("focus"));
 
-    expect(usePanelLayoutStore.getState().panels.response_pane.x).toBe(320);
-    expect(usePanelLayoutStore.getState().panels.response_pane.y).toBe(160);
+    expect(usePanelLayoutStore.getState().panels.presence_pane.x).toBe(320);
+    expect(usePanelLayoutStore.getState().panels.presence_pane.y).toBe(160);
   });
 
   it("resetCockpitLayout restores the packed canonical layout for the active preset", () => {

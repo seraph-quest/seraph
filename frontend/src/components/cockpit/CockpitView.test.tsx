@@ -1968,7 +1968,7 @@ describe("CockpitView", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
-    const menu = screen.getByText("Show all").closest(".cockpit-windows-menu") as HTMLElement;
+    const menu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
     const activityToggle = within(menu).getByText("Activity Ledger").closest("button") as HTMLButtonElement;
     fireEvent.click(activityToggle);
 
@@ -1976,7 +1976,7 @@ describe("CockpitView", () => {
       expect(screen.queryByText("Activity ledger", { selector: ".cockpit-window-title" })).not.toBeInTheDocument(),
     );
 
-    const reopenedMenu = screen.getByText("Show all").closest(".cockpit-windows-menu") as HTMLElement;
+    const reopenedMenu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
     const activityRow = within(reopenedMenu).getByText("Activity Ledger").closest(".cockpit-windows-menu-row") as HTMLElement;
     fireEvent.click(within(activityRow).getByRole("button", { name: "Focus" }));
 

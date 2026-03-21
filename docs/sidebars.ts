@@ -42,6 +42,18 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Extensions',
+      items: [
+        'extensions/overview',
+        'extensions/create-a-capability-pack',
+        'extensions/manifest-reference',
+        'extensions/contribution-types',
+        'extensions/validation-and-doctor',
+        'extensions/migration-guide',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Contributing',
       items: [
         'contributing/git-workflow',

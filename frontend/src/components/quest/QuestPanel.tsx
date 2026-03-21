@@ -70,12 +70,12 @@ export function QuestPanel() {
       <div className="px-1">
         <div className="flex items-center justify-between mb-2">
           <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold">
-            Active Quests
+            Active Priorities
           </div>
           <button
             onClick={() => setEditingGoal("new")}
             className="text-[11px] text-retro-text/40 hover:text-retro-highlight px-1"
-            title="Add new quest"
+            title="Add priority"
           >
             +
           </button>
@@ -86,7 +86,7 @@ export function QuestPanel() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search quests..."
+            placeholder="Search priorities..."
             className="w-full bg-transparent text-[10px] text-retro-text border border-retro-text/20 rounded-sm px-1.5 py-0.5 outline-none focus:border-retro-highlight placeholder:text-retro-text/30"
           />
           <div className="flex gap-1">
@@ -118,8 +118,8 @@ export function QuestPanel() {
         ) : filteredTree.length === 0 ? (
           <div className="text-[10px] text-retro-text/40 italic">
             {hasFilters
-              ? "No quests match filters."
-              : "No quests yet. Chat with Seraph to set goals!"}
+              ? "No priorities match the current filters."
+              : "No priorities yet. Ask Seraph to capture the first ones."}
           </div>
         ) : (
           <GoalTree
@@ -139,19 +139,19 @@ export function QuestPanel() {
           type="button"
           className="cockpit-modal-backdrop"
           onClick={() => setQuestPanelOpen(false)}
-          aria-label="Close goals"
+          aria-label="Close priorities"
         />
       <section className="cockpit-modal-card cockpit-modal-card--goals">
           <div className="cockpit-modal-header">
             <div>
-              <div className="cockpit-card-title">Goals</div>
-              <div className="cockpit-card-meta">live view</div>
+              <div className="cockpit-card-title">Priorities</div>
+              <div className="cockpit-card-meta">stored in the structured goal system</div>
             </div>
             <button
               type="button"
               className="cockpit-modal-close"
-              aria-label="Close goals"
-              title="Close goals"
+              aria-label="Close priorities"
+              title="Close priorities"
               onClick={() => setQuestPanelOpen(false)}
             >
               x

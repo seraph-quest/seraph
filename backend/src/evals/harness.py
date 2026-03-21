@@ -1614,7 +1614,7 @@ async def _eval_soul_runtime_audit() -> dict[str, Any]:
             read_success = next(call for call in success_calls if call["details"]["operation"] == "read")
             return {
                 "default_used": empty["details"]["used_default"],
-                "default_contains_title": "# Soul of the Traveler" in default_text,
+                "default_contains_title": "# Guardian Record" in default_text,
                 "write_length": write_success["details"]["length"],
                 "read_length": read_success["details"]["length"],
                 "ensure_created": skipped["details"]["created"],
@@ -3234,11 +3234,11 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
 async def _eval_session_consolidation_behavior() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response(json.dumps({
-        "facts": ["User is building a guardian cockpit"],
+        "facts": ["User is building a guardian workspace"],
         "patterns": [],
         "goals": ["Ship behavioral guardian evals"],
         "reflections": [],
-        "soul_updates": {"Goals": "- Ship the guardian cockpit pivot"},
+        "soul_updates": {"Goals": "- Ship the guardian workspace direction"},
     }))
 
     with (
@@ -3246,7 +3246,7 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
             session_manager,
             "get_history_text",
             AsyncMock(return_value=(
-                "User: I want Seraph to become a dense guardian cockpit.\n"
+                "User: I want Seraph to become a dense guardian workspace.\n"
                 "Assistant: Then we need behavioral evals, stronger state, and better operator UX."
             )),
         ),
@@ -3269,7 +3269,7 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
         "memory_categories": [call.kwargs["category"] for call in mock_add_memory.call_args_list],
         "stored_texts": [call.kwargs["text"] for call in mock_add_memory.call_args_list],
         "updated_soul_section": mock_update_soul.call_args.args[0],
-        "updated_soul_mentions_cockpit": "guardian cockpit" in mock_update_soul.call_args.args[1].lower(),
+        "updated_soul_mentions_workspace": "guardian workspace" in mock_update_soul.call_args.args[1].lower(),
     }
 
 

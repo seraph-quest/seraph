@@ -18,8 +18,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph is usable today as a local guardian prototype with a real UI, memory, observer loop, and action layer.
 - [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
-- [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
-- [x] The guardian cockpit is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
+- [x] The target product shape is now a power-user guardian workspace, not a village-first shell.
+- [x] The guardian workspace is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
 - [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, retry-from-step recovery, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
 - [ ] No workstream is complete yet.
@@ -48,7 +48,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ## Current Target Shape
 
-- [x] dense guardian cockpit as the primary operator surface
+- [x] dense guardian workspace as the primary operator surface
 - [x] first clear capability discovery, activation, preflight, and repair for tools, skills, workflows, MCP surfaces, starter packs, installable catalog items, and runbooks from inside that cockpit
 - [x] bounded capability bootstrap that can apply safe install or repair actions for workflows, runbooks, and starter packs directly from the operator surface
 - [x] cockpit-native extension authoring and validation for workflows, skills, and MCP configs with diagnostics, save, and repair handoff
@@ -66,10 +66,10 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Core guardian platform
 
-- [x] browser-based guardian cockpit as the only supported browser shell
+- [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
-- [x] persistent soul, vector memory, sessions, and goal storage
+- [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control
 
@@ -88,7 +88,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] capability-overview now also exposes installable catalog items, repair/install actions, recommendations, reusable runbooks, policy-aware starter-pack repair guidance, and machine-readable preflight/autorepair metadata for cockpit/operator use
 - [x] shell execution via sandboxed tool path
 - [x] browser automation foundation
-- [x] filesystem, soul, goals, vault, and web-search tool foundations
+- [x] filesystem, guardian-record, goals, vault, and web-search tool foundations
 - [x] MCP server management and runtime-managed server configuration
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
@@ -114,12 +114,12 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with explicit degrade-open audit semantics when no compliant target exists
-- [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search flows
+- [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, guardian-record file, vault repository, filesystem, browser, sandbox, and web search flows
 - [x] deterministic runtime eval harness for fallback, routing, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, workflow composition behavior, storage, observer, and integration seam contracts, including vault repository, the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
 
 ### Guardian intelligence and proactive behavior
 
-- [x] soul-backed persistent identity
+- [x] guardian-record-backed persistent identity
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
@@ -139,7 +139,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Current interface surface
 
-- [x] cockpit-first browser guardian shell with session rail, guardian-state panel, workflow-run views, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, a fixed composer, and live send fallback
+- [x] workspace-first browser guardian shell with session rail, guardian-state panel, workflow-run views, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, a fixed composer, and live send fallback
 - [x] cockpit workflow and artifact inspectors can now draft compatible follow-on workflows directly from existing artifact paths instead of only inserting generic file-context commands
 - [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching, per-layout save, and per-layout reset now define the main cockpit workspace
 - [x] the pane workspace now also supports per-pane close/hide controls, a dedicated Windows menu for visibility and focus, and flatter Godel-style window chrome
@@ -149,7 +149,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] the workspace now includes a separate Activity Ledger window that links workflow runs, approvals, queued continuity, recent interventions, surfaced failures, tool steps, and attributed LLM calls back to one browser thread model
 - [x] activity ledger rows now group request-scoped work into compact parent rows with emoji/icon scanability, child tool or routing rows, and completion summaries so operators can skim what Seraph did without opening raw trace panes
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
-- [x] larger more readable settings and goals overlays now support the cockpit-first shell directly
+- [x] larger more readable settings and priorities overlays now support the guardian workspace directly
 - [x] capability state, workflow history, the activity ledger, and live status are now visible in the current cockpit surface
 - [x] settings and management surfaces for tools, MCP, and system state
 - [x] macOS daemon-backed desktop presence card plus browser-side inspect/dismiss controls for native notifications and notification fallback for non-browser proactive reach

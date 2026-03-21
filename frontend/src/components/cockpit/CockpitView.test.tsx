@@ -2037,9 +2037,9 @@ describe("CockpitView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
     const menu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
-    fireEvent.click(within(menu).getByText("Goals").closest("button") as HTMLButtonElement);
+    fireEvent.click(within(menu).getByText("Priorities").closest("button") as HTMLButtonElement);
 
-    await waitFor(() => expect(screen.queryByText("Goals", { selector: ".cockpit-window-title" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Priorities", { selector: ".cockpit-window-title" })).not.toBeInTheDocument());
     expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" });
   });
 

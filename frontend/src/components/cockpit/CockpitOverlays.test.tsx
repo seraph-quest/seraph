@@ -70,16 +70,16 @@ describe("cockpit overlays", () => {
     });
   });
 
-  it("renders goals and goal editor in cockpit modals", async () => {
+  it("renders priorities and priority editor in cockpit modals", async () => {
     useChatStore.setState({ questPanelOpen: true });
     const { container, rerender } = render(<QuestPanel />);
 
-    expect(screen.getByText("Goals")).toBeInTheDocument();
+    expect(screen.getByText("Priorities")).toBeInTheDocument();
     expect(container.querySelector(".cockpit-modal-card")).not.toBeNull();
     expect(container.querySelector(".quest-overlay")).toBeNull();
 
     rerender(<GoalForm onClose={vi.fn()} />);
-    expect(screen.getByText("New Goal")).toBeInTheDocument();
+    expect(screen.getByText("New Priority")).toBeInTheDocument();
     expect(container.querySelector(".rpg-frame")).toBeNull();
   });
 });

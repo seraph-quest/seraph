@@ -119,7 +119,7 @@ class UserProfile(SQLModel, table=True):
     __tablename__ = "user_profiles"
 
     id: str = Field(default="singleton", primary_key=True)
-    name: str = Field(default="Traveler")
+    name: str = Field(default="Unknown")
     soul_text: Optional[str] = Field(default=None)
     preferences_json: Optional[str] = Field(default=None)
     onboarding_completed: bool = Field(default=False)

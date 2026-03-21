@@ -10,7 +10,7 @@
 
 ## Shipped On `develop`
 
-- [x] browser guardian cockpit shell with dense multi-pane operator surfaces, fixed composer, sessions, goals, recent outputs, pending approvals, latest response, guardian state, workflow runs, interventions, audit surface, live trace, desktop continuity, operator controls, and an operations inspector
+- [x] browser guardian workspace shell with dense multi-pane operator surfaces, fixed composer, sessions, priorities, recent outputs, pending approvals, latest response, guardian state, workflow runs, interventions, audit surface, live trace, desktop continuity, operator controls, and an operations inspector
 - [x] dedicated cockpit workflow-run views with richer workflow inspector actions and artifact-lineage links
 - [x] cockpit artifact and workflow inspectors can now draft compatible follow-on workflows directly from selected artifact paths
 - [x] cockpit capability discovery now exposes tools, skills, workflows, MCP servers, starter packs, and blocked-state reasons in one operator-readable surface
@@ -31,7 +31,7 @@
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
 - [x] cockpit is now the active browser shell on load rather than merely the default mode
-- [x] quest and settings overlays now use cockpit modal styling rather than legacy overlay frames
+- [x] priority and settings overlays now use workspace modal styling rather than legacy overlay frames
 - [x] dormant village/editor runtime code and legacy browser entry points are removed from the active product path rather than treated as fallback surfaces
 
 ## Working On Now
@@ -63,7 +63,7 @@
 
 - [x] the interface feels intentionally different from a generic chatbot shell
 - [x] tool use and agent activity are visible in the cockpit
-- [x] the primary workflow surface is now a guardian cockpit and the browser no longer boots into the village shell
+- [x] the primary workflow surface is now a guardian workspace and the browser no longer boots into the village shell
 - [x] the cockpit now has linked evidence, artifact, and approval density beyond the first shell
 - [x] cockpit artifacts can now round-trip back into the command bar for the next operator step
 - [x] cockpit artifacts can now also seed compatible follow-on workflow drafts directly from the inspector
@@ -76,7 +76,7 @@
 - [x] the cockpit now exposes first-class operator visibility for approval-thread recovery and cross-surface continue/open-thread actions
 - [x] the cockpit now exposes first-class operator visibility for bounded capability bootstrap, richer workflow step diagnostics, and routing-summary timeline rows
 - [x] the cockpit now exposes a first-class Activity Ledger window instead of leaving workflow, approval, notification, intervention, failure, and LLM-spend continuity split across separate panes
-- [x] settings and goals now present as cockpit-styled modal overlays instead of legacy shell overlays
+- [x] settings and priorities now present as workspace-styled modal overlays instead of legacy shell overlays
 - [x] the docs and active repo now treat the village/editor line as removed history rather than as a fallback product branch
 - [ ] the cockpit still needs richer install/recommend/repair guidance beyond the first "what can I do now?" capability surface, blocked-state explanation, starter-pack view, preflight/autorepair, and bounded bootstrap layer
 - [ ] the cockpit still needs broader workflow history, deeper branch/resume step control, and more flexible workspace ergonomics

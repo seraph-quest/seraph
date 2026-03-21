@@ -8,15 +8,15 @@ title: Season 4 - Embodied Life OS
 
 ## Theme
 
-Fully realize Seraph as a living, motivating, embodied life operating system.
+Archived embodiment branch superseded by the guardian workspace direction.
 
 ## Why this season matters
 
-This is where Seraph fully turns its strongest product differentiator into a hard moat. The system should feel like a companion world with meaningful ambient presence, not just a themed agent shell.
+Historically this season explored whether Seraph should become a companion-world product with heavy ambient embodiment. That bet is retired; the moat now centers on guardian visibility, memory, operator control, and presence.
 
 ## Win condition
 
-By the end of this season, the avatar, village, rituals, stats, and progress surfaces should all reflect real user state and real life momentum in a way no competitor matches.
+The surviving lesson is that Seraph should still feel distinct and stateful, but through guardian presence, runtime telemetry, and a dense workspace rather than an avatar, village, or ritual shell.
 
 ## Batches
 
@@ -33,5 +33,5 @@ By the end of this season, the avatar, village, rituals, stats, and progress sur
 ## Exit criteria
 
 - ambient embodiment is tied to real signals and outcomes
-- the life-OS metaphor is visible in daily use, not just in vision docs
-- Seraph feels uniquely alive, not just uniquely themed
+- the live guardian workspace stays more useful than ornamental
+- Seraph feels uniquely alive, not merely themed

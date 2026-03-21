@@ -4,30 +4,29 @@ title: Section 4 - Embodiment + Life OS
 
 # Section 4: Embodiment + Life OS
 
-> Archive note: this section describes the retired village-first embodiment branch. Keep it only as historical planning context; the live product direction is the guardian cockpit.
+> Archive note: this section describes the retired village-first embodiment branch. Keep it only as historical planning context; the live product direction is the guardian workspace.
 
-## Why this section matters competitively
+## Historical context
 
-OpenClaw, IronClaw, and Hermes all compete more naturally on capability than on presence, motivation, or long-term emotional stickiness. This section protects the part of Seraph that could become uniquely beloved rather than merely useful.
+This section captured an earlier bet that Seraph should differentiate through a village/avatar shell and heavier ambient motivation surfaces. That direction is retired. The live product now differentiates through a guardian workspace with stronger visibility, control, memory, and presence.
 
-## Current state in Seraph
+## Why it was retired
 
-- village, quest log, avatar, and ambient UX are already real
-- the RPG metaphor is compelling but under-leveraged
-- avatar state reflection and richer life surfaces remain mostly planned
-- the village is stronger as a shell than as a living long-term system
+- the village and avatar shell added novelty, but not enough operator clarity
+- the guardian workspace proved to be the stronger product contract
+- ambient motivation without strong execution and auditability risked becoming cosmetic
+- the live product now favors visible state, activity, approvals, and memory over game-like embodiment
 
-## Target end state
+## What survives from this section
 
-Seraph feels like a true life operating system with embodied ambient feedback, rich progress surfaces, and visible world-state changes tied to real growth.
+The useful remainder is not the village metaphor itself. It is the idea that Seraph should still feel distinct, alive, and stateful. That now shows up through guardian presence, live telemetry, activity history, and denser workspace surfaces instead of a companion-world shell.
 
-## Key capabilities
+## What replaced it
 
-- avatar reflection of user and agent state
-- ambient visual feedback loops
-- richer stats, rituals, dashboards, and review surfaces
-- dynamic panels and canvas outputs
-- village growth, decay, and meaningful progression systems
+- guardian presence and live workspace state instead of avatar expression
+- activity ledger, trace, approvals, and workflow history instead of ambient village progression
+- priorities, routines, and reviews instead of quest-log and ritual framing
+- native continuity and operator telemetry instead of a companion-world shell
 
 ## Dependencies and risks
 

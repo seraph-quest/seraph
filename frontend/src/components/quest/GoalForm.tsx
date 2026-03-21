@@ -62,19 +62,19 @@ export function GoalForm({ goal, onClose }: Props) {
         type="button"
         className="cockpit-modal-backdrop"
         onClick={onClose}
-        aria-label="Close goal editor"
+        aria-label="Close priority editor"
       />
       <section className="cockpit-modal-card cockpit-modal-card--goal-editor">
         <div className="cockpit-modal-header">
           <div>
-            <div className="cockpit-card-title">{isEdit ? "Edit Goal" : "New Goal"}</div>
-            <div className="cockpit-card-meta">guardian planning</div>
+            <div className="cockpit-card-title">{isEdit ? "Edit Priority" : "New Priority"}</div>
+            <div className="cockpit-card-meta">stored in the structured goal system</div>
           </div>
           <button
             type="button"
             className="cockpit-modal-close"
-            aria-label="Close goal editor"
-            title="Close goal editor"
+            aria-label="Close priority editor"
+            title="Close priority editor"
             onClick={onClose}
           >
             x
@@ -83,7 +83,7 @@ export function GoalForm({ goal, onClose }: Props) {
         <div className="cockpit-modal-body cockpit-modal-form cockpit-tone-scope cockpit-goals-scope">
           <input
             type="text"
-            placeholder="Goal title"
+            placeholder="Priority title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             className="w-full bg-transparent text-[11px] text-slate-100 border-b border-white/10 px-0.5 py-1 outline-none focus:border-cyan-300 placeholder:text-slate-500"

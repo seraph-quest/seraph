@@ -231,6 +231,7 @@ async def websocket_chat(websocket: WebSocket):
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
                         "timeout_seconds": settings.agent_chat_timeout,
+                        "request_id": llm_request_id,
                     },
                 )
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
@@ -280,6 +281,7 @@ async def websocket_chat(websocket: WebSocket):
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
                         "error": safe_error,
+                        "request_id": llm_request_id,
                     },
                 )
                 await websocket.send_text(
@@ -309,6 +311,7 @@ async def websocket_chat(websocket: WebSocket):
                         "response_length": len(final_result),
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
+                        "request_id": llm_request_id,
                     },
                 )
             await websocket.send_text(

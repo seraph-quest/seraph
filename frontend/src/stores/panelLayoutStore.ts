@@ -19,7 +19,7 @@ export const PANEL_MIN_SIZES: Record<string, { width: number; height: number }> 
   outputs_pane: { width: 224, height: 96 },
   presence_pane: { width: 304, height: 224 },
   approvals_pane: { width: 224, height: 112 },
-  operator_timeline_pane: { width: 240, height: 128 },
+  operator_timeline_pane: { width: 304, height: 176 },
   response_pane: { width: 224, height: 112 },
   guardian_state_pane: { width: 240, height: 144 },
   workflows_pane: { width: 224, height: 112 },
@@ -119,7 +119,8 @@ function distributeHeights(
   let remaining = usable - minTotal;
   const growthWeights = ids.map((id) => {
     if (id === "guardian_state_pane" || id === "inspector_pane" || id === "conversation_pane") return 2;
-    if (id === "operator_surface_pane" || id === "response_pane" || id === "operator_timeline_pane") return 1.5;
+    if (id === "operator_timeline_pane") return 2;
+    if (id === "operator_surface_pane" || id === "response_pane") return 1.5;
     if (id === "presence_pane") return 1.25;
     return 1;
   });

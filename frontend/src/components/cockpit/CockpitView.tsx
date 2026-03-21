@@ -165,7 +165,7 @@ interface ToolInfo {
 }
 
 interface OperatorEntity {
-  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "operator_timeline_item";
+  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "activity_item";
   name: string;
   meta: string;
   summary: string;
@@ -344,9 +344,33 @@ interface CapabilityOverview {
   runbooks: RunbookInfo[];
 }
 
-interface OperatorTimelineEntry {
+interface ActivityLedgerSummary {
+  window_hours: number;
+  started_at: string;
+  total_items: number;
+  visible_items?: number;
+  visible_groups?: number;
+  is_partial?: boolean;
+  partial_sources?: string[];
+  pending_approvals: number;
+  failure_count: number;
+  llm_call_count: number;
+  llm_cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  user_triggered_llm_calls: number;
+  autonomous_llm_calls: number;
+  categories: Record<string, number>;
+}
+
+type ActivityLedgerCategory = "llm" | "workflow" | "approval" | "guardian" | "agent" | "system";
+type ActivityLedgerFilter = "all" | ActivityLedgerCategory;
+
+interface ActivityLedgerEntry {
   id: string;
-  kind: "workflow_run" | "approval" | "notification" | "queued_insight" | "intervention" | "audit" | "routing";
+  kind: string;
+  category: ActivityLedgerCategory;
+  group_key?: string | null;
   title: string;
   summary: string;
   status: string;
@@ -360,7 +384,36 @@ interface OperatorTimelineEntry {
   replay_block_reason?: string | null;
   recommended_actions?: CapabilityAction[];
   source: string;
+  model?: string | null;
+  provider?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  cost_usd?: number | null;
+  duration_ms?: number | null;
   metadata?: Record<string, unknown>;
+}
+
+interface ActivityLedgerGroupChild {
+  key: string;
+  icon: string;
+  label: string;
+  summary: string;
+  meta: string;
+  status: string;
+  item?: ActivityLedgerEntry;
+}
+
+interface ActivityLedgerGroup {
+  key: string;
+  lead: ActivityLedgerEntry;
+  icon: string;
+  title: string;
+  summary: string;
+  detail?: string | null;
+  meta: string;
+  footer: string | null;
+  updatedAt: string;
+  children: ActivityLedgerGroupChild[];
 }
 
 type ToolPolicyMode = "safe" | "balanced" | "full";
@@ -831,8 +884,376 @@ function replayBlockCopy(reason: string | null | undefined): string {
   }
 }
 
-function timelineStatusLabel(value: OperatorTimelineEntry): string {
+function activityStatusLabel(value: ActivityLedgerEntry): string {
   return `${value.kind.replace(/_/g, " ")} · ${value.status.replace(/_/g, " ")}`;
+}
+
+function activityCategoryLabel(value: ActivityLedgerFilter): string {
+  return value === "all" ? "All" : value.replace(/_/g, " ");
+}
+
+function formatUsd(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return null;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function _modelLabelForRow(model: string): string {
+  return model.replace(/^openrouter\//, "").replace(/^anthropic\//, "").replace(/[_/-]+/g, " ");
+}
+
+function formatDuration(valueMs: number | null | undefined): string | null {
+  if (typeof valueMs !== "number" || Number.isNaN(valueMs) || valueMs <= 0) return null;
+  if (valueMs >= 60_000) return `${(valueMs / 60_000).toFixed(1)}m`;
+  if (valueMs >= 1000) return `${(valueMs / 1000).toFixed(1)}s`;
+  return `${Math.round(valueMs)}ms`;
+}
+
+function activityEmoji(value: ActivityLedgerEntry): string {
+  if (value.kind === "llm_call") return "🤖";
+  if (value.kind === "workflow_run") return "⚙️";
+  if (value.kind === "approval") return "⏳";
+  if (value.kind === "notification" || value.kind === "queued_insight" || value.kind === "intervention") return "📣";
+  if (value.kind === "routing") return "🧭";
+  if (value.kind === "tool_call" || value.kind === "tool_result" || value.kind === "tool_failed") return "🔧";
+  if (value.kind === "agent_run") return "✨";
+  if (value.kind === "scheduler_job") return "🗓️";
+  if (value.kind === "background_task") {
+    const title = value.title.toLowerCase();
+    if (title.includes("memory")) return "🧠";
+    if (title.includes("skill")) return "📚";
+    return "💤";
+  }
+  if (value.kind === "delivery") return "📨";
+  if (value.kind === "integration") return "🔌";
+  if (value.status === "failed" || value.status === "timed_out") return "⛔";
+  return "•";
+}
+
+function activityGroupKey(value: ActivityLedgerEntry): string {
+  if (value.group_key) return value.group_key;
+  const requestId = typeof value.metadata?.request_id === "string" ? value.metadata.request_id : null;
+  if (requestId) return `request:${requestId}`;
+  if (value.kind === "workflow_run") return `workflow:${value.id}`;
+  if (value.kind === "approval") return `approval:${value.id}`;
+  if (value.kind === "notification" || value.kind === "queued_insight" || value.kind === "intervention") {
+    return `guardian:${value.id}`;
+  }
+  return `${value.kind}:${value.thread_id ?? "ambient"}:${value.updated_at}`;
+}
+
+function activityLeadPriority(value: ActivityLedgerEntry): number {
+  switch (value.kind) {
+    case "approval":
+      return 0;
+    case "workflow_run":
+      return 1;
+    case "intervention":
+    case "notification":
+    case "queued_insight":
+      return 2;
+    case "agent_run":
+      return 3;
+    case "llm_call":
+      return 4;
+    case "routing":
+      return 5;
+    case "tool_call":
+    case "tool_result":
+    case "tool_failed":
+      return 6;
+    default:
+      return 7;
+  }
+}
+
+function chooseActivityLead(items: ActivityLedgerEntry[]): ActivityLedgerEntry {
+  return [...items].sort((left, right) => {
+    const priorityDelta = activityLeadPriority(left) - activityLeadPriority(right);
+    if (priorityDelta !== 0) return priorityDelta;
+    return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+  })[0];
+}
+
+function activityRowMeta(value: ActivityLedgerEntry): string {
+  const parts: string[] = [activityStatusLabel(value)];
+  if (value.thread_label) parts.push(value.thread_label);
+  if (value.model) parts.push(_modelLabelForRow(value.model));
+  if (value.provider) parts.push(value.provider);
+  const duration = formatDuration(value.duration_ms);
+  if (duration) parts.push(duration);
+  const usd = formatUsd(value.cost_usd);
+  if (usd) parts.push(usd);
+  if (typeof value.prompt_tokens === "number" && typeof value.completion_tokens === "number") {
+    const total = value.prompt_tokens + value.completion_tokens;
+    if (total > 0) parts.push(`${total} tok`);
+  }
+  return parts.join(" · ");
+}
+
+function activityRoutingSummary(value: ActivityLedgerEntry): string {
+  if (value.kind !== "routing") return value.summary;
+  return [
+    `model ${String(value.metadata?.selected_model ?? value.model ?? "unknown")}`,
+    typeof value.metadata?.selected_source === "string" ? String(value.metadata.selected_source) : null,
+    typeof value.metadata?.reroute_cause === "string" ? String(value.metadata.reroute_cause) : null,
+    value.metadata?.max_budget_class ? `budget ${String(value.metadata.max_budget_class)}` : null,
+    value.metadata?.required_task_class ? `task ${String(value.metadata.required_task_class)}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function activityLeadDetail(value: ActivityLedgerEntry): string | null {
+  if (value.kind === "routing") return activityRoutingSummary(value);
+  return null;
+}
+
+function activityChildMeta(value: ActivityLedgerEntry): string {
+  if (value.kind !== "routing") return activityRowMeta(value);
+  return [
+    Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
+      ? `intents ${value.metadata.required_policy_intents.join(", ")}`
+      : null,
+    value.metadata?.max_cost_tier ? `cost ${String(value.metadata.max_cost_tier)}` : null,
+    value.metadata?.max_latency_tier ? `latency ${String(value.metadata.max_latency_tier)}` : null,
+    typeof value.metadata?.rejected_target_count === "number"
+      && value.metadata.rejected_target_count > 0
+      ? `rejected ${String(value.metadata.rejected_target_count)}`
+      : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function activityLeadMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "routing") return activityChildMeta(value);
+  return activityRowMeta(value);
+}
+
+function activityInspectorEntity(value: ActivityLedgerEntry): OperatorEntity {
+  return {
+    entityType: "activity_item",
+    name: value.title,
+    meta: activityStatusLabel(value),
+    summary: value.summary,
+    details: {
+      category: value.category,
+      source: value.source,
+      thread: value.thread_label ?? value.thread_id ?? "ambient",
+      status: value.status,
+      continue_message: value.continue_message ?? "",
+      replay_allowed: value.replay_allowed ?? false,
+      replay_block_reason: value.replay_block_reason ?? "none",
+      model: value.model ?? "n/a",
+      provider: value.provider ?? "n/a",
+      prompt_tokens: value.prompt_tokens ?? 0,
+      completion_tokens: value.completion_tokens ?? 0,
+      cost_usd: value.cost_usd ?? 0,
+      duration_ms: value.duration_ms ?? 0,
+      metadata: value.metadata ?? {},
+      recommended_actions: value.recommended_actions ?? [],
+    },
+  };
+}
+
+function workflowStepChildren(value: ActivityLedgerEntry): ActivityLedgerGroupChild[] {
+  const stepRecords = Array.isArray(value.metadata?.step_records)
+    ? value.metadata.step_records as Array<Record<string, unknown>>
+    : [];
+  return stepRecords.flatMap((record, index) => {
+    const tool = typeof record.tool === "string" ? record.tool : "step";
+    const status = typeof record.status === "string" ? record.status : "recorded";
+    const duration = typeof record.duration_ms === "number" ? formatDuration(record.duration_ms) : null;
+    const summary = typeof record.summary === "string"
+      ? record.summary
+      : typeof record.result_summary === "string"
+        ? record.result_summary
+        : typeof record.error_summary === "string"
+          ? record.error_summary
+          : "No step summary recorded.";
+    return [{
+      key: `${value.id}:step:${typeof record.id === "string" ? record.id : index}`,
+      icon: "🔧",
+      label: tool.replace(/_/g, " "),
+      summary,
+      meta: [status.replace(/_/g, " "), duration].filter(Boolean).join(" · "),
+      status,
+    }];
+  });
+}
+
+function activityGroupFooter(items: ActivityLedgerEntry[], lead: ActivityLedgerEntry): string | null {
+  const toolCount = items.filter((item) => ["tool_call", "tool_result", "tool_failed"].includes(item.kind)).length;
+  const llmCount = items.filter((item) => item.kind === "llm_call").length;
+  const approvalCount = items.filter((item) => item.kind === "approval").length;
+  const failureCount = items.filter((item) => item.status === "failed" || item.status === "timed_out").length;
+  const workflowStepCount = Array.isArray(lead.metadata?.step_records) ? lead.metadata.step_records.length : 0;
+  const totalDurationMs = items.reduce((sum, item) => sum + (item.duration_ms ?? 0), 0)
+    + (Array.isArray(lead.metadata?.step_records)
+      ? (lead.metadata.step_records as Array<Record<string, unknown>>).reduce(
+        (sum, record) => sum + (typeof record.duration_ms === "number" ? record.duration_ms : 0),
+        0,
+      )
+      : 0);
+
+  const parts: string[] = [];
+  if (workflowStepCount > 0) {
+    parts.push(`${workflowStepCount} step${workflowStepCount === 1 ? "" : "s"} recorded`);
+  } else if (toolCount > 0) {
+    parts.push(`${toolCount} tool${toolCount === 1 ? "" : "s"}`);
+  }
+  if (llmCount > 0) parts.push(`${llmCount} model call${llmCount === 1 ? "" : "s"}`);
+  if (approvalCount > 0) parts.push(`${approvalCount} pending`);
+  if (parts.length === 0) return null;
+  const duration = formatDuration(totalDurationMs);
+  const prefix = failureCount > 0 ? "⛔" : "⚡";
+  return `${prefix} ${parts.join(" · ")}${duration ? ` in ${duration} total` : ""}`;
+}
+
+function buildActivityLedgerGroups(items: ActivityLedgerEntry[]): ActivityLedgerGroup[] {
+  const groups = new Map<string, ActivityLedgerEntry[]>();
+  items.forEach((item) => {
+    const key = activityGroupKey(item);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  });
+
+  return [...groups.entries()]
+    .map(([key, groupItems]) => {
+      const lead = chooseActivityLead(groupItems);
+      const groupChildren = groupItems
+        .filter((item) => item.id !== lead.id)
+        .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+        .map((item) => ({
+          key: item.id,
+          icon: activityEmoji(item),
+          label: item.title,
+          summary: activityRoutingSummary(item),
+          meta: activityChildMeta(item),
+          status: item.status,
+          item,
+        }));
+      const stepChildren = lead.kind === "workflow_run" ? workflowStepChildren(lead) : [];
+      const children = [...stepChildren, ...groupChildren];
+      return {
+        key,
+        lead,
+        icon: activityEmoji(lead),
+        title: lead.title,
+        summary: lead.summary,
+        detail: activityLeadDetail(lead),
+        meta: activityLeadMeta(lead),
+        footer: activityGroupFooter(groupItems, lead),
+        updatedAt: groupItems.reduce(
+          (latest, item) => (new Date(item.updated_at).getTime() > new Date(latest).getTime() ? item.updated_at : latest),
+          lead.updated_at,
+        ),
+        children,
+      };
+    })
+    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+}
+
+function activityEntryHasRowAction(value: ActivityLedgerEntry): boolean {
+  return Boolean(
+    value.continue_message
+      || (value.replay_draft && value.replay_allowed !== false)
+      || (value.recommended_actions && value.recommended_actions.length > 0),
+  );
+}
+
+function activityGroupActionTarget(group: ActivityLedgerGroup): ActivityLedgerEntry {
+  if (activityEntryHasRowAction(group.lead)) return group.lead;
+  for (const child of group.children) {
+    if (child.item && activityEntryHasRowAction(child.item)) return child.item;
+  }
+  return group.lead;
+}
+
+function canOpenLedgerThread(
+  threadId: string | null | undefined,
+  activeSessionId: string | null,
+  knownSessionIds: Set<string>,
+): boolean {
+  if (!threadId) return false;
+  if (activeSessionId === threadId) return false;
+  return knownSessionIds.has(threadId);
+}
+
+function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSummary {
+  const llmItems = items.filter((item) => item.kind === "llm_call");
+  return {
+    window_hours: 24,
+    started_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    total_items: items.length,
+    visible_items: items.length,
+    is_partial: false,
+    partial_sources: [],
+    pending_approvals: items.filter((item) => item.kind === "approval").length,
+    failure_count: items.filter((item) => ["failed", "timed_out"].includes(item.status)).length,
+    llm_call_count: llmItems.length,
+    llm_cost_usd: llmItems.reduce((sum, item) => sum + (item.cost_usd ?? 0), 0),
+    input_tokens: llmItems.reduce((sum, item) => sum + (item.prompt_tokens ?? 0), 0),
+    output_tokens: llmItems.reduce((sum, item) => sum + (item.completion_tokens ?? 0), 0),
+    user_triggered_llm_calls: llmItems.filter((item) => ["rest_chat", "websocket_chat"].includes(item.source)).length,
+    autonomous_llm_calls: llmItems.filter((item) => !["rest_chat", "websocket_chat"].includes(item.source)).length,
+    categories: {
+      llm: items.filter((item) => item.category === "llm").length,
+      workflow: items.filter((item) => item.category === "workflow").length,
+      approval: items.filter((item) => item.category === "approval").length,
+      guardian: items.filter((item) => item.category === "guardian").length,
+      agent: items.filter((item) => item.category === "agent").length,
+      system: items.filter((item) => item.category === "system").length,
+    },
+  };
+}
+
+function normalizeActivityLedgerEntry(raw: Record<string, unknown>): ActivityLedgerEntry {
+  const kind = typeof raw.kind === "string" ? raw.kind : "system";
+  const category = (typeof raw.category === "string" ? raw.category : (
+    kind === "llm_call" || kind === "routing"
+      ? "llm"
+      : kind === "workflow_run"
+        ? "workflow"
+        : kind === "approval"
+          ? "approval"
+          : ["notification", "queued_insight", "intervention"].includes(kind)
+            ? "guardian"
+            : ["agent_run", "tool_call", "tool_result", "tool_failed"].includes(kind)
+              ? "agent"
+              : "system"
+  )) as ActivityLedgerCategory;
+
+  return {
+    id: typeof raw.id === "string" ? raw.id : crypto.randomUUID(),
+    kind,
+    category,
+    group_key: typeof raw.group_key === "string" ? raw.group_key : null,
+    title: typeof raw.title === "string" ? raw.title : kind.replace(/_/g, " "),
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    status: typeof raw.status === "string" ? raw.status : "unknown",
+    created_at: typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString(),
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : (typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString()),
+    thread_id: typeof raw.thread_id === "string" ? raw.thread_id : null,
+    thread_label: typeof raw.thread_label === "string" ? raw.thread_label : null,
+    continue_message: typeof raw.continue_message === "string" ? raw.continue_message : null,
+    replay_draft: typeof raw.replay_draft === "string" ? raw.replay_draft : null,
+    replay_allowed: typeof raw.replay_allowed === "boolean" ? raw.replay_allowed : false,
+    replay_block_reason: typeof raw.replay_block_reason === "string" ? raw.replay_block_reason : null,
+    recommended_actions: readActionList(raw.recommended_actions),
+    source: typeof raw.source === "string" ? raw.source : "activity",
+    model: typeof raw.model === "string" ? raw.model : null,
+    provider: typeof raw.provider === "string" ? raw.provider : null,
+    prompt_tokens: typeof raw.prompt_tokens === "number" ? raw.prompt_tokens : null,
+    completion_tokens: typeof raw.completion_tokens === "number" ? raw.completion_tokens : null,
+    cost_usd: typeof raw.cost_usd === "number" ? raw.cost_usd : null,
+    duration_ms: typeof raw.duration_ms === "number" ? raw.duration_ms : null,
+    metadata: (raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata))
+      ? raw.metadata as Record<string, unknown>
+      : {},
+  };
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
@@ -852,7 +1273,7 @@ const COCKPIT_WINDOW_HINTS = {
   outputs: "Recent workspace artifacts produced in the current audit window.",
   approvals: "Pending approvals block workflow and tool execution until you inspect or approve them.",
   guardianState: "The live synthesis Seraph is using for timing, confidence, and next actions.",
-  operatorTimeline: "A thread-aware feed of approvals, interventions, notifications, and surfaced failures.",
+  operatorTimeline: "Browse what Seraph did, why it did it, and what spent budget across user, guardian, workflow, and system activity.",
   interventions: "Recent proactive nudges, delivery outcomes, and feedback signal.",
   workflowTimeline: "Inspect runs, branch from failures, and resume repaired steps.",
   audit: "Durable tool, memory, workflow, and integration events for the current window.",
@@ -863,6 +1284,16 @@ const COCKPIT_WINDOW_HINTS = {
   desktopShell: "Native continuity, queued notifications, and browser-closed follow-up state.",
   operatorTerminal: "Run packs, workflows, macros, and repair actions from one dense control surface.",
 } as const;
+
+const ACTIVITY_LEDGER_FILTERS: ActivityLedgerFilter[] = [
+  "all",
+  "llm",
+  "workflow",
+  "approval",
+  "guardian",
+  "agent",
+  "system",
+];
 
 function CockpitWorkspaceWindow({
   panelId,
@@ -934,7 +1365,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
-  const [operatorTimeline, setOperatorTimeline] = useState<OperatorTimelineEntry[]>([]);
+  const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
+  const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
+  const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -1037,7 +1470,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       approvalsResult,
       continuityResult,
       capabilitiesResult,
-      operatorTimelineResult,
+      activityLedgerResult,
       workflowRunsResult,
       toolModeResult,
       mcpModeResult,
@@ -1049,7 +1482,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
       fetchJson(`${API_URL}/api/observer/continuity`),
       fetchJson(`${API_URL}/api/capabilities/overview`),
-      fetchJson(`${API_URL}/api/operator/timeline?limit=12${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
       fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
@@ -1091,9 +1524,45 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
       setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
     }
-    if (operatorTimelineResult.ok && operatorTimelineResult.payload && typeof operatorTimelineResult.payload === "object") {
-      const items = (operatorTimelineResult.payload as { items?: unknown }).items;
-      setOperatorTimeline(Array.isArray(items) ? items : []);
+    if (
+      activityLedgerResult.ok
+      && activityLedgerResult.payload
+      && typeof activityLedgerResult.payload === "object"
+      && Array.isArray((activityLedgerResult.payload as { items?: unknown }).items)
+    ) {
+      const payload = activityLedgerResult.payload as { items?: unknown; summary?: unknown };
+      const items = Array.isArray(payload.items)
+        ? payload.items.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item)
+          ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+          : []))
+        : [];
+      const derivedSummary = deriveActivitySummary(items);
+      setActivityLedger(
+        items,
+      );
+      setActivitySummary(
+        payload.summary && typeof payload.summary === "object"
+          ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
+          : derivedSummary,
+      );
+    } else {
+      const fallbackTimelineResult = await fetchJson(
+        `${API_URL}/api/operator/timeline?limit=16${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      );
+      if (fallbackTimelineResult.ok && fallbackTimelineResult.payload && typeof fallbackTimelineResult.payload === "object") {
+        const items = Array.isArray((fallbackTimelineResult.payload as { items?: unknown }).items)
+          ? ((fallbackTimelineResult.payload as { items?: unknown }).items as unknown[]).flatMap((item) => (
+            item && typeof item === "object" && !Array.isArray(item)
+              ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+              : []
+          ))
+          : [];
+        setActivityLedger(items);
+        setActivitySummary(deriveActivitySummary(items));
+      } else {
+        setActivityLedger([]);
+        setActivitySummary(deriveActivitySummary([]));
+      }
     }
     if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
       const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
@@ -1256,6 +1725,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => Object.fromEntries(sessions.map((item) => [item.id, item.title])),
     [sessions],
   );
+  const knownSessionIds = useMemo(
+    () => new Set(sessions.map((item) => item.id)),
+    [sessions],
+  );
   const topGoals = collectGoalTitles(goalTree, 5);
   const readyStarterPacks = useMemo(
     () => starterPacks.filter((pack) => pack.availability === "ready"),
@@ -1277,9 +1750,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => runbooks,
     [runbooks],
   );
-  const recentOperatorTimeline = useMemo(
-    () => operatorTimeline.slice(0, 16),
-    [operatorTimeline],
+  const allActivityGroups = useMemo(
+    () => buildActivityLedgerGroups(activityLedger),
+    [activityLedger],
+  );
+  const visibleActivityGroups = useMemo(
+    () => (activityFilter === "all"
+      ? allActivityGroups
+      : allActivityGroups.filter(
+        (group) =>
+          group.lead.category === activityFilter
+          || group.children.some((child) => child.item?.category === activityFilter),
+      )),
+    [activityFilter, allActivityGroups],
   );
   const seraphPresenceSnapshot = useMemo(
     () => ({
@@ -3220,109 +3703,144 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         {activeLayout.sections.timeline && (
           <CockpitWorkspaceWindow
             panelId="operator_timeline_pane"
-            title="Operator timeline"
-            meta={`${recentOperatorTimeline.length} live`}
+            title="Activity ledger"
+            meta={`${visibleActivityGroups.length} groups · ${activitySummary?.llm_call_count ?? 0} llm`}
             hint={COCKPIT_WINDOW_HINTS.operatorTimeline}
             showHint={cockpitHintsEnabled}
             minWidth={360}
             minHeight={220}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
-              <div className="cockpit-list">
-                {recentOperatorTimeline.map((item) => (
-                  <div key={item.id} className="cockpit-row">
+              <div className="cockpit-ledger-toolbar">
+                <div className="cockpit-ledger-summary">
+                  <span className="cockpit-ledger-badge">
+                    spend {formatUsd(activitySummary?.llm_cost_usd ?? 0) ?? "$0.0000"}
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.user_triggered_llm_calls ?? 0} user llm
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.autonomous_llm_calls ?? 0} auto llm
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.failure_count ?? 0} failures
+                  </span>
+                  {activitySummary?.is_partial ? (
+                    <span className="cockpit-ledger-badge">
+                      partial {activitySummary.partial_sources?.join(", ") || "window"}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="cockpit-ledger-filter-row">
+                  {ACTIVITY_LEDGER_FILTERS.map((filter) => (
                     <button
-                      className="cockpit-row-button"
-                      onClick={() =>
-                        setSelectedInspector({
-                          kind: "operator",
-                          entity: {
-                            entityType: "operator_timeline_item",
-                            name: item.title,
-                            meta: timelineStatusLabel(item),
-                            summary: item.summary,
-                            details: {
-                              source: item.source,
-                              thread: item.thread_label ?? item.thread_id ?? "ambient",
-                              status: item.status,
-                              continue_message: item.continue_message ?? "",
-                              replay_allowed: item.replay_allowed ?? false,
-                              replay_block_reason: item.replay_block_reason ?? "none",
-                              metadata: item.metadata ?? {},
-                            },
-                          },
-                        })
-                      }
+                      key={filter}
+                      className={`cockpit-ledger-filter ${activityFilter === filter ? "active" : ""}`}
+                      onClick={() => setActivityFilter(filter)}
                     >
-                      <div className="cockpit-row-header">
-                        <span className="cockpit-role">{item.title}</span>
-                        <span className="cockpit-row-age">{formatAge(item.updated_at)}</span>
-                      </div>
-                      <div className="cockpit-row-body">{item.summary}</div>
-                      <div className="cockpit-row-meta">
-                        {timelineStatusLabel(item)}
-                        {item.thread_label ? ` · ${item.thread_label}` : ""}
-                      </div>
-                      {item.kind === "routing" && item.metadata && (
-                        <>
-                          <div className="cockpit-row-meta">
-                            model {String(item.metadata.selected_model ?? "unknown")}
-                            {item.metadata.selected_source ? ` · ${String(item.metadata.selected_source)}` : ""}
-                            {item.metadata.reroute_cause ? ` · ${String(item.metadata.reroute_cause)}` : ""}
-                            {item.metadata.max_budget_class ? ` · budget ${String(item.metadata.max_budget_class)}` : ""}
-                            {item.metadata.required_task_class ? ` · task ${String(item.metadata.required_task_class)}` : ""}
-                          </div>
-                          <div className="cockpit-row-meta">
-                            {Array.isArray(item.metadata.required_policy_intents) && item.metadata.required_policy_intents.length
-                              ? `intents ${item.metadata.required_policy_intents.join(", ")}`
-                              : "no required intents"}
-                            {item.metadata.max_cost_tier ? ` · cost ${String(item.metadata.max_cost_tier)}` : ""}
-                            {item.metadata.max_latency_tier ? ` · latency ${String(item.metadata.max_latency_tier)}` : ""}
-                            {typeof item.metadata.rejected_target_count === "number"
-                              ? ` · rejected ${String(item.metadata.rejected_target_count)}`
-                              : ""}
-                          </div>
-                        </>
-                      )}
+                      {activityCategoryLabel(filter)}
                     </button>
-                    <div className="cockpit-feedback-row">
-                      {item.continue_message && (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => void queueThreadDraft(item.continue_message ?? "", item.thread_id)}
-                        >
-                          Continue
-                        </button>
+                  ))}
+                </div>
+              </div>
+              <div className="cockpit-list">
+                {visibleActivityGroups.map((group) => {
+                  const actionTarget = activityGroupActionTarget(group);
+                  return (
+                    <div key={group.key} className="cockpit-row cockpit-ledger-group">
+                      <button
+                        className="cockpit-row-button cockpit-ledger-parent"
+                        onClick={() =>
+                          setSelectedInspector({
+                            kind: "operator",
+                            entity: activityInspectorEntity(group.lead),
+                          })
+                        }
+                      >
+                        <div className="cockpit-ledger-line cockpit-ledger-line--primary">
+                          <span className="cockpit-ledger-icon">{group.icon}</span>
+                          <span className="cockpit-role">{group.title}</span>
+                          <span className="cockpit-row-age">{formatAge(group.updatedAt)}</span>
+                        </div>
+                        <div className="cockpit-ledger-line cockpit-ledger-line--summary">{group.summary}</div>
+                        {group.detail ? (
+                          <div className="cockpit-ledger-line cockpit-ledger-line--summary">{group.detail}</div>
+                        ) : null}
+                        <div className="cockpit-row-meta">{group.meta}</div>
+                      </button>
+                      {group.children.length > 0 && (
+                        <div className="cockpit-ledger-children">
+                          {group.children.map((child) => {
+                            const childItem = child.item;
+                            return childItem ? (
+                              <button
+                                key={child.key}
+                                className="cockpit-ledger-child"
+                                onClick={() =>
+                                  setSelectedInspector({
+                                    kind: "operator",
+                                    entity: activityInspectorEntity(childItem),
+                                  })
+                                }
+                              >
+                                <span className="cockpit-ledger-icon">{child.icon}</span>
+                                <span className="cockpit-ledger-child-label">{child.label}</span>
+                                <span className="cockpit-ledger-child-summary">{child.summary}</span>
+                                <span className="cockpit-ledger-child-meta">{child.meta}</span>
+                              </button>
+                            ) : (
+                              <div key={child.key} className="cockpit-ledger-child cockpit-ledger-child--static">
+                                <span className="cockpit-ledger-icon">{child.icon}</span>
+                                <span className="cockpit-ledger-child-label">{child.label}</span>
+                                <span className="cockpit-ledger-child-summary">{child.summary}</span>
+                                <span className="cockpit-ledger-child-meta">{child.meta}</span>
+                              </div>
+                            );
+                          })}
+                          {group.footer ? (
+                            <div className="cockpit-ledger-footer">{group.footer}</div>
+                          ) : null}
+                        </div>
                       )}
-                      {item.thread_id && (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => void openThread(item.thread_id)}
-                        >
-                          Open Thread
-                        </button>
-                      )}
-                      {item.replay_draft && item.replay_allowed !== false && (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => queueComposerDraft(item.replay_draft ?? "")}
-                        >
-                          Replay
-                        </button>
-                      )}
-                      {item.recommended_actions?.length ? (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => void runCapabilityActions(item.recommended_actions ?? [], item.title)}
-                        >
-                          Repair
-                        </button>
-                      ) : null}
+                      <div className="cockpit-feedback-row">
+                        {actionTarget.continue_message && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void queueThreadDraft(actionTarget.continue_message ?? "", actionTarget.thread_id)}
+                          >
+                            Continue
+                          </button>
+                        )}
+                        {canOpenLedgerThread(actionTarget.thread_id, sessionId, knownSessionIds) && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(actionTarget.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
+                        {actionTarget.replay_draft && actionTarget.replay_allowed !== false && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueComposerDraft(actionTarget.replay_draft ?? "")}
+                          >
+                            Replay
+                          </button>
+                        )}
+                        {actionTarget.recommended_actions?.length ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void runCapabilityActions(actionTarget.recommended_actions ?? [], actionTarget.title)}
+                          >
+                            Repair
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                ))}
-                {recentOperatorTimeline.length === 0 && (
-                  <div className="cockpit-empty">No threaded operator timeline entries yet.</div>
+                  );
+                })}
+                {visibleActivityGroups.length === 0 && (
+                  <div className="cockpit-empty">No recent activity ledger entries for this filter.</div>
                 )}
               </div>
             </section>

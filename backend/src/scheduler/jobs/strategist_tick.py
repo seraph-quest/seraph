@@ -71,6 +71,7 @@ async def run_strategist_tick() -> None:
                 details={
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "reason": decision.reasoning,
+                    "request_id": llm_request_id,
                 },
             )
             logger.info("strategist_tick: no intervention needed — %s", decision.reasoning)
@@ -98,6 +99,7 @@ async def run_strategist_tick() -> None:
                 "urgency": decision.urgency,
                 "delivery": _delivery_value(result),
                 "policy_action": _policy_action_value(result),
+                "request_id": llm_request_id,
             },
         )
         logger.info(
@@ -117,6 +119,7 @@ async def run_strategist_tick() -> None:
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "timeout_seconds": settings.agent_strategist_timeout,
+                "request_id": llm_request_id,
             },
         )
         logger.warning("strategist_tick: agent timed out after %ds", settings.agent_strategist_timeout)
@@ -127,6 +130,7 @@ async def run_strategist_tick() -> None:
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "error": str(exc),
+                "request_id": llm_request_id,
             },
         )
         logger.exception("strategist_tick failed")

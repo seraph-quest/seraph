@@ -1171,6 +1171,11 @@ def reset_current_llm_request_id(token: contextvars.Token[str | None]) -> None:
     _runtime_request_id_var.reset(token)
 
 
+def get_current_llm_request_id() -> str | None:
+    """Return the active LLM runtime request id bound to the current context."""
+    return _runtime_request_id_var.get()
+
+
 def _current_llm_request_id() -> str | None:
     return _runtime_request_id_var.get()
 

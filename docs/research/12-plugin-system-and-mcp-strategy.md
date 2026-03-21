@@ -36,10 +36,10 @@ The strongest product decision is:
 ```text
                            SERAPH EXTENSION PLATFORM
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                               CORE RUNTIME                                  │
+│                               CORE RUNTIME                                   │
 │                                                                              │
-│  policy • approvals • audit • secrets • sessions/threads • routing          │
-│  workflow engine • preflight/repair • guardian state • activity ledger      │
+│  policy • approvals • audit • secrets • sessions/threads • routing           │
+│  workflow engine • preflight/repair • guardian state • activity ledger       │
 │                                                                              │
 │  Core owns trust boundaries. Extensions contribute capabilities inside them. │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -49,24 +49,24 @@ The strongest product decision is:
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                         EXTENSION MANIFEST / PACKAGE                         │
 │                                                                              │
-│  id • version • compatibility • publisher • permissions • contributes       │
+│  id • version • compatibility • publisher • permissions • contributes        │
 └──────────────────────────────────────────────────────────────────────────────┘
                   │
       ┌───────────┼───────────────────────┬───────────────────────┐
       │           │                       │                       │
       ▼           ▼                       ▼                       ▼
-┌───────────┐ ┌──────────────┐     ┌──────────────┐       ┌──────────────┐
+┌───────────┐ ┌───────────────┐     ┌──────────────┐       ┌──────────────┐
 │Declarative│ │MCP Connectors │     │Managed       │       │Trusted Code  │
 │Extensions │ │               │     │Connectors    │       │Plugins       │
-├───────────┤ ├──────────────┤     ├──────────────┤       ├──────────────┤
+├───────────┤ ├───────────────┤     ├──────────────┤       ├──────────────┤
 │skills     │ │MCP servers    │     │Slack         │       │native tools  │
-│workflows  │ │resources       │     │Jira          │       │deep runtime  │
-│runbooks   │ │prompts/tools   │     │GitHub        │       │extensions    │
-│starter    │ │stdio/http      │     │Google        │       │later only    │
-│packs      │ │long-tail       │     │first-party   │       │trusted only  │
-│presets    │ │integrations    │     │curated UX    │       │heavily gated │
-│routines   │ │                │     │              │       │              │
-└───────────┘ └──────────────┘     └──────────────┘       └──────────────┘
+│workflows  │ │resources      │     │Jira          │       │deep runtime  │
+│runbooks   │ │prompts/tools  │     │GitHub        │       │extensions    │
+│starter    │ │stdio/http     │     │Google        │       │later only    │
+│packs      │ │long-tail      │     │first-party   │       │trusted only  │
+│presets    │ │integrations   │     │curated UX    │       │heavily gated │
+│routines   │ │               │     │              │       │              │
+└───────────┘ └─────── ───────┘     └──────────────┘       └──────────────┘
 ```
 
 ## Current Seraph State

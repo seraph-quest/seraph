@@ -6,6 +6,89 @@ import pytest
 from src.observer.context import CurrentContext
 
 
+@pytest.fixture
+def _setup_manifest_pack_and_runbook_managers(tmp_path):
+    from src.runbooks.manager import runbook_manager
+    from src.starter_packs.manager import starter_pack_manager
+
+    legacy_starter_packs = tmp_path / "starter-packs.json"
+    legacy_starter_packs.write_text('{"packs": []}\n', encoding="utf-8")
+    runbooks_dir = tmp_path / "runbooks"
+    runbooks_dir.mkdir()
+
+    package_dir = tmp_path / "extensions" / "research-pack"
+    (package_dir / "starter-packs").mkdir(parents=True)
+    (package_dir / "runbooks").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.research-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Research Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  starter_packs:\n"
+        "    - starter-packs/research.json\n"
+        "  runbooks:\n"
+        "    - runbooks/research.yaml\n"
+        "permissions:\n"
+        "  tools: []\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (package_dir / "starter-packs" / "research.json").write_text(
+        "{\n"
+        '  "name": "research-briefing",\n'
+        '  "label": "Research Briefing",\n'
+        '  "description": "Manifest starter pack.",\n'
+        '  "skills": ["web-briefing"],\n'
+        '  "workflows": ["web-brief-to-file"],\n'
+        '  "install_items": ["http-request"],\n'
+        '  "sample_prompt": "Search the web and save a concise brief."\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (package_dir / "runbooks" / "research.yaml").write_text(
+        "id: runbook:research-briefing\n"
+        "title: Research Briefing\n"
+        "summary: Run the packaged research workflow.\n"
+        "workflow: web-brief-to-file\n",
+        encoding="utf-8",
+    )
+
+    starter_pack_manager.init(str(legacy_starter_packs), manifest_roots=[str(tmp_path / "extensions")])
+    runbook_manager.init(str(runbooks_dir), manifest_roots=[str(tmp_path / "extensions")])
+    yield
+    starter_pack_manager._packs = []
+    starter_pack_manager._load_errors = []
+    starter_pack_manager._shared_manifest_errors = []
+    starter_pack_manager._legacy_path = ""
+    starter_pack_manager._manifest_roots = []
+    starter_pack_manager._registry = None
+    runbook_manager._runbooks = []
+    runbook_manager._load_errors = []
+    runbook_manager._shared_manifest_errors = []
+    runbook_manager._runbooks_dir = ""
+    runbook_manager._manifest_roots = []
+    runbook_manager._registry = None
+
+
+def test_load_starter_packs_does_not_fallback_when_manager_is_initialized():
+    with (
+        patch("src.api.capabilities.starter_pack_manager.list_packs", return_value=[]),
+        patch("src.api.capabilities.starter_pack_manager.is_initialized", return_value=True),
+        patch("src.api.capabilities.load_legacy_starter_packs") as load_legacy,
+    ):
+        from src.api.capabilities import _load_starter_packs
+
+        assert _load_starter_packs() == []
+
+    load_legacy.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs(client):
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
@@ -146,6 +229,85 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
 
 
 @pytest.mark.asyncio
+async def test_capabilities_overview_includes_manifest_starter_pack_and_explicit_runbook(
+    client,
+    _setup_manifest_pack_and_runbook_managers,
+):
+    ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
+    with (
+        patch(
+            "src.api.capabilities.get_base_tools_and_active_skills",
+            return_value=(
+                [SimpleNamespace(name="web_search"), SimpleNamespace(name="write_file")],
+                ["web-briefing"],
+                "approval",
+            ),
+        ),
+        patch("src.api.capabilities.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.api.capabilities.skill_manager.list_skills",
+            return_value=[
+                {
+                    "name": "web-briefing",
+                    "description": "Web briefing",
+                    "requires_tools": ["web_search", "write_file"],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "file_path": "/tmp/web-briefing.md",
+                    "source": "manifest",
+                    "extension_id": "seraph.research-pack",
+                },
+            ],
+        ),
+        patch(
+            "src.api.capabilities.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "description": "Research and save",
+                    "requires_tools": ["web_search", "write_file"],
+                    "requires_skills": [],
+                    "user_invocable": True,
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                    "inputs": {
+                        "query": {"type": "string", "required": True},
+                        "file_path": {"type": "string", "required": True},
+                    },
+                    "risk_level": "medium",
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "source": "manifest",
+                    "extension_id": "seraph.research-pack",
+                },
+            ],
+        ),
+        patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
+        patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
+    ):
+        resp = await client.get("/api/capabilities/overview")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    pack = next(pack for pack in payload["starter_packs"] if pack["name"] == "research-briefing")
+    assert pack["source"] == "manifest"
+    assert pack["extension_id"] == "seraph.research-pack"
+    assert pack["file_path"].endswith("starter-packs/research.json")
+
+    runbooks = {item["id"]: item for item in payload["runbooks"]}
+    explicit = runbooks["runbook:research-briefing"]
+    assert explicit["source"] == "extension_runbook"
+    assert explicit["extension_id"] == "seraph.research-pack"
+    assert explicit["availability"] == "ready"
+    assert explicit["action"]["type"] == "draft_workflow"
+    assert explicit["command"].startswith('Run workflow "web-brief-to-file"')
+    assert "workflow:web-brief-to-file" not in runbooks
+
+
+@pytest.mark.asyncio
 async def test_activate_starter_pack_enables_seeded_assets(client):
     def install_side_effect(name: str):
         if name == "http-request":
@@ -183,6 +345,86 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
     assert payload["overview"]["summary"]["starter_packs_ready"] == 1
     assert payload["doctor_plan_before"]["install_actions"][0]["type"] == "install_catalog_item"
     assert payload["doctor_plan_after"]["ready"] is True
+    enable_skill.assert_called_with("web-briefing")
+    enable_workflow.assert_called_with("web-brief-to-file")
+
+
+@pytest.mark.asyncio
+async def test_activate_manifest_backed_starter_pack_works(client, _setup_manifest_pack_and_runbook_managers):
+    def install_side_effect(name: str):
+        if name == "http-request":
+            return {"ok": True, "status": "installed", "name": name, "type": "mcp_server", "bundled": False}
+        if name == "web-briefing":
+            return {"ok": True, "status": "installed", "name": name, "type": "skill", "bundled": False}
+        return {"ok": False, "status": "not_found", "name": name, "type": "unknown", "bundled": False}
+
+    with (
+        patch("src.api.capabilities.skill_manager.get_skill", return_value=None),
+        patch("src.api.capabilities.workflow_manager.get_workflow", return_value=SimpleNamespace(name="web-brief-to-file")),
+        patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect) as install_item,
+        patch("src.api.capabilities.skill_manager.enable", return_value=True) as enable_skill,
+        patch("src.api.capabilities.workflow_manager.enable", return_value=True) as enable_workflow,
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {
+                    "starter_packs": [
+                        {
+                            "name": "research-briefing",
+                            "label": "Research Briefing",
+                            "description": "Manifest starter pack.",
+                            "sample_prompt": "Search the web and save a concise brief.",
+                            "availability": "blocked",
+                            "recommended_actions": [{"type": "install_catalog_item", "name": "http-request"}],
+                            "install_items": ["http-request"],
+                        }
+                    ],
+                    "summary": {"starter_packs_ready": 0},
+                },
+                {
+                    "starter_packs": [
+                        {
+                            "name": "research-briefing",
+                            "label": "Research Briefing",
+                            "description": "Manifest starter pack.",
+                            "sample_prompt": "Search the web and save a concise brief.",
+                            "availability": "ready",
+                            "recommended_actions": [],
+                            "install_items": ["http-request"],
+                        }
+                    ],
+                    "summary": {"starter_packs_ready": 1},
+                },
+                {
+                    "starter_packs": [
+                        {
+                            "name": "research-briefing",
+                            "label": "Research Briefing",
+                            "description": "Manifest starter pack.",
+                            "sample_prompt": "Search the web and save a concise brief.",
+                            "availability": "ready",
+                            "recommended_actions": [],
+                            "install_items": ["http-request"],
+                        }
+                    ],
+                    "summary": {"starter_packs_ready": 1},
+                },
+            ],
+        ),
+    ):
+        resp = await client.post("/api/capabilities/starter-packs/research-briefing/activate")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "activated"
+    assert payload["name"] == "research-briefing"
+    assert payload["installed_catalog_items"] == [{"name": "http-request", "type": "mcp_server", "status": "installed"}]
+    assert payload["enabled_skills"] == ["web-briefing"]
+    assert payload["enabled_workflows"] == ["web-brief-to-file"]
+    assert payload["overview"]["summary"]["starter_packs_ready"] == 1
+    assert payload["doctor_plan_before"]["install_actions"][0]["type"] == "install_catalog_item"
+    assert payload["doctor_plan_after"]["ready"] is True
+    assert [call.args[0] for call in install_item.call_args_list] == ["http-request", "web-briefing"]
     enable_skill.assert_called_with("web-briefing")
     enable_workflow.assert_called_with("web-brief-to-file")
 

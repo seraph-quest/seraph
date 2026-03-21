@@ -49,6 +49,7 @@
 - [x] the authoring path now includes one canonical in-repo example package that is validated in tests and pinned to current scaffold output so contributors and docs share the same golden reference
 - [x] the runtime now loads manifest-backed skill contributions through the extension registry while still preserving legacy loose-skill compatibility during the coexistence window
 - [x] the runtime now also loads manifest-backed workflow contributions through the same registry seam, including packaged workflow diagnostics and manifest-preferred duplicate resolution during the coexistence window
+- [x] the runtime now also loads manifest-backed starter packs and explicit runbooks through the same registry seam, and the capabilities surface now publishes packaged starter-pack metadata plus extension-backed runbook entries instead of treating both surfaces as legacy-only inventory
 
 ## Still To Do On `develop`
 

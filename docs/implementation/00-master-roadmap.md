@@ -267,7 +267,7 @@ This is the authoritative PR list for the implementation side.
 For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#11 capability-packaging-runbooks-and-starter-packs-v1`
+- the current active item is `#12 bundled-capability-packs-v1`
 - this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
 1. [x] `extension-model-terminology-v1`:
@@ -290,8 +290,8 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    migrate skill loading into manifest-backed capability packs with backward compatibility during the transition so skills become first-class extension contributions
 10. [x] `capability-packaging-workflows-v1`:
    migrate workflow loading into manifest-backed capability packs with validated references and metadata so workflows stop living on a separate loading path
-11. [ ] `capability-packaging-runbooks-and-starter-packs-v1`:
-   move runbooks and starter packs into the same manifest-backed architecture so higher-level reusable capability bundles stop being special-case inventory
+11. [x] `capability-packaging-runbooks-and-starter-packs-v1`:
+   move runbooks and starter packs into the same manifest-backed architecture so higher-level reusable capability bundles stop being special-case inventory, with explicit runbook contributions and packaged starter packs now loaded through the extension registry during the coexistence window
 12. [ ] `bundled-capability-packs-v1`:
    convert Seraph’s shipped declarative defaults into real bundled capability packs so the product uses its own extension system instead of a parallel built-in path
 13. [ ] `extension-lifecycle-api-v1`:

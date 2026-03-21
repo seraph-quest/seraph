@@ -18,6 +18,8 @@ from src.skills.loader import scan_skills
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.loader import scan_workflows
 
+_MCP_RUNTIME_UNSET = object()
+
 
 def _slugify(value: str) -> str:
     sanitized = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
@@ -113,13 +115,13 @@ class ExtensionRegistry:
         manifest_roots: list[str] | None = None,
         skill_dirs: list[str] | None = None,
         workflow_dirs: list[str] | None = None,
-        mcp_runtime: Any | None = None,
+        mcp_runtime: Any = _MCP_RUNTIME_UNSET,
         seraph_version: str | None = None,
     ) -> None:
         self._manifest_roots = manifest_roots if manifest_roots is not None else _default_manifest_roots()
         self._skill_dirs = skill_dirs if skill_dirs is not None else _default_skill_dirs()
         self._workflow_dirs = workflow_dirs if workflow_dirs is not None else _default_workflow_dirs()
-        self._mcp_runtime = mcp_runtime if mcp_runtime is not None else mcp_manager
+        self._mcp_runtime = mcp_manager if mcp_runtime is _MCP_RUNTIME_UNSET else mcp_runtime
         self._seraph_version = seraph_version or _current_seraph_version()
 
     def snapshot(self) -> ExtensionRegistrySnapshot:

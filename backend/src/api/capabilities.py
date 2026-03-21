@@ -25,7 +25,10 @@ from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
+from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
+from src.starter_packs.loader import load_legacy_starter_packs
+from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import (
     MCP_POLICY_MODES,
@@ -74,13 +77,29 @@ class WorkflowDraftRequest(BaseModel):
 
 
 def _load_starter_packs() -> list[dict[str, Any]]:
-    path = os.path.normpath(_STARTER_PACKS_PATH)
-    if not os.path.isfile(path):
-        return []
-    with open(path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    packs = payload.get("packs", [])
-    return packs if isinstance(packs, list) else []
+    packs = starter_pack_manager.list_packs()
+    if packs or starter_pack_manager.is_initialized():
+        return packs
+    legacy_packs, _ = load_legacy_starter_packs(os.path.normpath(_STARTER_PACKS_PATH))
+    return [
+        {
+            "name": pack.name,
+            "label": pack.label,
+            "description": pack.description,
+            "skills": list(pack.skills),
+            "workflows": list(pack.workflows),
+            "install_items": list(pack.install_items),
+            "sample_prompt": pack.sample_prompt,
+            "file_path": pack.file_path,
+            "source": pack.source,
+            "extension_id": pack.extension_id,
+        }
+        for pack in legacy_packs
+    ]
+
+
+def _load_explicit_runbooks() -> list[dict[str, Any]]:
+    return runbook_manager.list_runbooks()
 
 
 async def _persist_runtime_mode(column: str, mode: str) -> None:
@@ -278,11 +297,112 @@ def _starter_pack_install_item_statuses(pack: dict[str, Any]) -> list[dict[str, 
     return statuses
 
 
+def _explicit_runbook_entries(
+    explicit_runbooks: list[dict[str, Any]],
+    *,
+    workflows_by_name: dict[str, dict[str, Any]],
+    starter_packs_by_name: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+    entries: list[dict[str, Any]] = []
+    referenced_workflows: set[str] = set()
+    referenced_starter_packs: set[str] = set()
+
+    for runbook in explicit_runbooks:
+        runbook_id = str(runbook.get("id") or "").strip()
+        title = str(runbook.get("title") or "").strip()
+        summary = str(runbook.get("summary") or "").strip()
+        if not runbook_id or not title or not summary:
+            continue
+
+        workflow_name = str(runbook.get("workflow") or "").strip() or None
+        starter_pack_name = str(runbook.get("starter_pack") or "").strip() or None
+        command = str(runbook.get("command") or "").strip() or None
+
+        availability = "ready"
+        blocking_reasons: list[str] = []
+        recommended_actions: list[dict[str, Any]] = []
+        parameter_schema: dict[str, Any] = {}
+        risk_level = "low"
+        execution_boundaries: list[str] = ["advisory"]
+        action: dict[str, Any] | None = None
+
+        if workflow_name is not None:
+            referenced_workflows.add(workflow_name)
+            workflow = workflows_by_name.get(workflow_name)
+            if workflow is None:
+                availability = "blocked"
+                blocking_reasons = [f"missing workflow: {workflow_name}"]
+            else:
+                availability = str(workflow.get("availability") or "unknown")
+                blocking_reasons = _workflow_blocking_reasons(workflow)
+                recommended_actions = [
+                    item for item in workflow.get("recommended_actions", []) or []
+                    if isinstance(item, dict)
+                ]
+                parameter_schema = workflow.get("inputs", {}) if isinstance(workflow.get("inputs"), dict) else {}
+                risk_level = str(workflow.get("risk_level") or "unknown")
+                execution_boundaries = [
+                    str(value)
+                    for value in workflow.get("execution_boundaries", []) or []
+                    if isinstance(value, str)
+                ]
+                action = {"type": "draft_workflow", "label": "Draft workflow", "name": workflow_name}
+                if command is None:
+                    command = _workflow_draft(workflow)
+        elif starter_pack_name is not None:
+            referenced_starter_packs.add(starter_pack_name)
+            pack = starter_packs_by_name.get(starter_pack_name)
+            if pack is None:
+                availability = "blocked"
+                blocking_reasons = [f"missing starter pack: {starter_pack_name}"]
+                risk_level = "medium"
+                execution_boundaries = ["capability_activation"]
+            else:
+                availability = str(pack.get("availability") or "unknown")
+                blocking_reasons = _starter_pack_blocking_reasons(pack)
+                recommended_actions = [
+                    item for item in pack.get("recommended_actions", []) or []
+                    if isinstance(item, dict)
+                ]
+                risk_level = "medium"
+                execution_boundaries = ["capability_activation"]
+                action = {"type": "activate_starter_pack", "label": "Activate pack", "name": starter_pack_name}
+                if command is None:
+                    command = str(pack.get("sample_prompt") or "").strip() or None
+        else:
+            action = (
+                {"type": "draft_message", "label": "Use runbook", "content": command}
+                if command is not None
+                else None
+            )
+
+        entries.append({
+            "id": runbook_id,
+            "name": runbook_id,
+            "label": title,
+            "description": summary,
+            "source": "extension_runbook",
+            "command": command,
+            "availability": availability,
+            "blocking_reasons": blocking_reasons,
+            "recommended_actions": recommended_actions,
+            "parameter_schema": parameter_schema,
+            "risk_level": risk_level,
+            "execution_boundaries": execution_boundaries,
+            "action": action,
+            "file_path": runbook.get("file_path"),
+            "extension_id": runbook.get("extension_id"),
+        })
+
+    return entries, referenced_workflows, referenced_starter_packs
+
+
 def _recommended_actions(
     *,
     skills_by_name: dict[str, dict[str, Any]],
     workflows_by_name: dict[str, dict[str, Any]],
     starter_packs: list[dict[str, Any]],
+    explicit_runbooks: list[dict[str, Any]],
     native_tools: list[dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
     tool_mode: str,
@@ -420,13 +540,19 @@ def _recommended_actions(
                     },
                 })
 
-    runbooks: list[dict[str, Any]] = []
     packs_by_name = {
         str(pack["name"]): pack
         for pack in starter_packs
         if isinstance(pack, dict) and isinstance(pack.get("name"), str)
     }
+    runbooks, explicit_workflow_refs, explicit_starter_pack_refs = _explicit_runbook_entries(
+        explicit_runbooks,
+        workflows_by_name=workflows_by_name,
+        starter_packs_by_name=packs_by_name,
+    )
     for pack_name, pack in packs_by_name.items():
+        if pack_name in explicit_starter_pack_refs:
+            continue
         sample_prompt = str(pack.get("sample_prompt") or "").strip()
         if not sample_prompt:
             continue
@@ -447,6 +573,8 @@ def _recommended_actions(
         })
 
     for workflow in workflows_by_name.values():
+        if str(workflow["name"]) in explicit_workflow_refs:
+            continue
         if not bool(workflow.get("user_invocable", False)):
             continue
         runbooks.append({
@@ -1091,6 +1219,9 @@ def _starter_pack_statuses(
             "label": pack.get("label", pack["name"]),
             "description": pack.get("description", ""),
             "sample_prompt": pack.get("sample_prompt", ""),
+            "file_path": pack.get("file_path"),
+            "source": pack.get("source", "legacy"),
+            "extension_id": pack.get("extension_id"),
             "skills": skill_names,
             "workflows": workflow_names,
             "install_items": install_items,
@@ -1136,6 +1267,7 @@ def _build_capability_overview() -> dict[str, Any]:
         native_tools=native_tools,
         tool_mode=tool_mode,
     )
+    explicit_runbooks = _load_explicit_runbooks()
     _attach_tool_actions(native_tools)
     _attach_skill_actions(skills, native_tools=native_tools, tool_mode=tool_mode)
     _attach_workflow_actions(
@@ -1149,6 +1281,7 @@ def _build_capability_overview() -> dict[str, Any]:
         skills_by_name=skills_by_name,
         workflows_by_name=workflows_by_name,
         starter_packs=starter_packs,
+        explicit_runbooks=explicit_runbooks,
         native_tools=native_tools,
         mcp_servers=mcp_servers,
         tool_mode=tool_mode,

@@ -12,8 +12,10 @@ from config.settings import settings
 from src.db import init_db, close_db
 from src.llm_logger import init_llm_logging
 from src.memory.soul import ensure_soul_exists
+from src.runbooks.manager import runbook_manager
 from src.scheduler.engine import init_scheduler, shutdown_scheduler
 from src.skills.manager import skill_manager
+from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
 
@@ -119,14 +121,23 @@ async def lifespan(app: FastAPI):
             os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
             shutil.copy2(default_proxy_config, stdio_proxy_config)
     mcp_manager.load_config(mcp_config)
+    extensions_dir = os.path.join(settings.workspace_dir, "extensions")
+    os.makedirs(extensions_dir, exist_ok=True)
     skills_dir = os.path.join(settings.workspace_dir, "skills")
     os.makedirs(skills_dir, exist_ok=True)
     _seed_default_skills(defaults_dir, skills_dir)
-    skill_manager.init(skills_dir)
+    skill_manager.init(skills_dir, manifest_roots=[extensions_dir])
+    runbooks_dir = os.path.join(settings.workspace_dir, "runbooks")
+    os.makedirs(runbooks_dir, exist_ok=True)
+    runbook_manager.init(runbooks_dir, manifest_roots=[extensions_dir])
     workflows_dir = os.path.join(settings.workspace_dir, "workflows")
     os.makedirs(workflows_dir, exist_ok=True)
     _seed_default_workflows(defaults_dir, workflows_dir)
-    workflow_manager.init(workflows_dir)
+    workflow_manager.init(workflows_dir, manifest_roots=[extensions_dir])
+    starter_pack_manager.init(
+        os.path.join(defaults_dir, "starter-packs.json"),
+        manifest_roots=[extensions_dir],
+    )
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()

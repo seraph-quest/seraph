@@ -28,7 +28,7 @@ export function DomainStats({ dashboard }: Props) {
   return (
     <div className="px-1">
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
-        Five Pillars
+        Priority Domains
       </div>
       <div className="cockpit-domain-stack">
         {DOMAIN_ORDER.map((domain) => {
@@ -48,7 +48,7 @@ export function DomainStats({ dashboard }: Props) {
         })}
       </div>
       <div className="mt-1 text-[10px] text-retro-text/40 text-center">
-        {dashboard.completed_count}/{dashboard.total_count} quests completed
+        {dashboard.completed_count}/{dashboard.total_count} priorities completed
       </div>
     </div>
   );

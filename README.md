@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a guardian cockpit browser shell, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is cockpit-only.
+  Seraph ships today with a guardian workspace browser interface, persistent identity, long-term memory, priorities tracked in a hierarchical goal system, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is workspace-first.
 </p>
 
 ---
@@ -73,11 +73,11 @@ open http://localhost:8004/docs
 
 ```
 frontend/src/
-  components/cockpit/ Guardian cockpit shell, state rails, intervention feed
-  components/        React overlays — chat, quest panel, settings
+  components/cockpit/ Guardian workspace operator surface, state rails, intervention feed
+  components/        React overlays — chat, priorities panel, settings
   hooks/             useWebSocket, keyboard and operator interaction hooks
-  stores/            Zustand stores — chat, quest
-  lib/               Tool parser and cockpit helpers
+  stores/            Zustand stores — chat, priorities
+  lib/               Tool parser and workspace helpers
   config/            Frontend constants
 
 backend/src/
@@ -85,7 +85,7 @@ backend/src/
   agent/             smolagents factory, onboarding, strategist, session manager
   tools/             @tool implementations + MCP manager
   workflows/         Reusable multi-step workflow loader, runtime, and gating
-  memory/            Soul file, LanceDB vector store, embedder, consolidator
+  memory/            Guardian record, LanceDB vector store, embedder, consolidator
   goals/             Hierarchical goal CRUD
   plugins/           Tool auto-discovery + registry
   scheduler/         APScheduler engine, connection manager, 9 background jobs
@@ -99,7 +99,7 @@ docs/                Docusaurus docs site
 
 ## Retired Surfaces
 
-The retired village/editor line has been removed from the active repo path. Seraph is being built as a cockpit-first guardian system, not a game-shell assistant.
+The retired village/editor line has been removed from the active repo path. Seraph is being built as a workspace-first guardian system, not a game-shell assistant.
 
 ---
 
@@ -170,7 +170,7 @@ Current truth:
 
 - [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
-- [x] the source-of-truth docs now target a power-user guardian cockpit and the browser app now defaults to that shell
+- [x] the source-of-truth docs now target a power-user guardian workspace and the browser app now defaults to that shell
 - [ ] no workstream is complete yet
 - [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
 

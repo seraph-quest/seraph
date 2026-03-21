@@ -1276,7 +1276,7 @@ const COCKPIT_GLOBAL_HINTS = [
 
 const COCKPIT_WINDOW_HINTS = {
   sessions: "Thread control, saved conversations, and continuity markers for the active thread.",
-  goals: "Keep current priorities visible here; open the full goals overlay for planning.",
+  goals: "Keep current priorities visible here; Seraph tracks them as structured goals for planning and review.",
   outputs: "Recent workspace artifacts produced in the current audit window.",
   approvals: "Pending approvals block workflow and tool execution until you inspect or approve them.",
   guardianState: "The live synthesis Seraph is using for timing, confidence, and next actions.",
@@ -3441,7 +3441,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               className="cockpit-action cockpit-action--ghost"
               onClick={() => setQuestPanelOpen(true)}
             >
-              Goals overlay
+              Priorities overlay
             </button>
             <button
               className="cockpit-action cockpit-action--ghost"
@@ -3623,7 +3623,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             {paneVisibility.goals_pane && (
               <CockpitWorkspaceWindow
                 panelId="goals_pane"
-                title="Goals"
+                title="Priorities"
                 meta={loadingGoals ? "refreshing" : `${dashboard?.active_count ?? 0} active`}
                 hint={COCKPIT_WINDOW_HINTS.goals}
                 showHint={cockpitHintsEnabled}
@@ -3648,7 +3648,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       ))}
                     </div>
                   ) : (
-                    <div className="cockpit-empty">Goal dashboard unavailable.</div>
+                    <div className="cockpit-empty">Priority board unavailable.</div>
                   )}
                   <div className="cockpit-sublist">
                     {topGoals.map((goal) => (
@@ -3656,7 +3656,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {goal}
                       </div>
                     ))}
-                    {topGoals.length === 0 && <div className="cockpit-empty">No active goals yet.</div>}
+                    {topGoals.length === 0 && <div className="cockpit-empty">No active priorities yet.</div>}
                   </div>
                 </section>
               </CockpitWorkspaceWindow>

@@ -8,12 +8,12 @@ logger = logging.getLogger(__name__)
 
 _soul_path = os.path.join(settings.workspace_dir, settings.soul_file)
 
-_DEFAULT_SOUL = """# Soul of the Traveler
+_DEFAULT_SOUL = """# Guardian Record
 
 ## Identity
-- Name: Traveler
-- Role: Unknown
-- Context: New arrival
+- Name:
+- Role:
+- Context: Baseline not yet established
 
 ## Values
 (Not yet discovered)
@@ -22,7 +22,7 @@ _DEFAULT_SOUL = """# Soul of the Traveler
 (Not yet defined)
 
 ## Personality Notes
-(Seraph is still learning about this human)
+(Seraph is still learning how this human works best)
 """
 
 

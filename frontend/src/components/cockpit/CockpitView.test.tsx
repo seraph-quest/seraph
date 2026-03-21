@@ -1361,7 +1361,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
-    expect(screen.getByText("spend $0.012")).toBeInTheDocument();
+    expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
     expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument();
     expect(screen.getByText("web_search")).toBeInTheDocument();
     expect(screen.getByText(/2 tools|1 tool/)).toBeInTheDocument();
@@ -1452,7 +1452,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
-    expect(screen.getByText("spend $0.012")).toBeInTheDocument();
+    expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
     expect(screen.getByText("1 user llm")).toBeInTheDocument();
   });
 
@@ -2037,9 +2037,9 @@ describe("CockpitView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Windows" }));
     const menu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
-    fireEvent.click(within(menu).getByText("Goals").closest("button") as HTMLButtonElement);
+    fireEvent.click(within(menu).getByText("Priorities").closest("button") as HTMLButtonElement);
 
-    await waitFor(() => expect(screen.queryByText("Goals", { selector: ".cockpit-window-title" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Priorities", { selector: ".cockpit-window-title" })).not.toBeInTheDocument());
     expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" });
   });
 

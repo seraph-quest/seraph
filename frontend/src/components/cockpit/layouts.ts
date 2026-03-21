@@ -37,7 +37,7 @@ export const COCKPIT_LAYOUT_IDS: CockpitLayoutId[] = ["default", "focus", "revie
 
 export const COCKPIT_PANES: CockpitPaneDefinition[] = [
   { id: "sessions_pane", label: "Sessions", group: "Core" },
-  { id: "goals_pane", label: "Goals", group: "Core" },
+  { id: "goals_pane", label: "Priorities", group: "Core" },
   { id: "outputs_pane", label: "Recent Outputs", group: "Core" },
   { id: "response_pane", label: "Latest Response", group: "Guardian" },
   { id: "guardian_state_pane", label: "Guardian State", group: "Guardian" },

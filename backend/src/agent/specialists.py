@@ -56,8 +56,8 @@ SPECIALIST_CONFIGS: dict[str, dict] = {
     "memory_keeper": {
         "domain": "memory",
         "description": (
-            "Manages the user's identity file (soul). Can view and update "
-            "the soul file sections (identity, values, goals, preferences)."
+            "Manages the user's identity record. Can view and update "
+            "the guardian record sections (identity, values, priorities, preferences)."
         ),
         "temperature": 0.5,
         "max_steps": 3,
@@ -65,8 +65,8 @@ SPECIALIST_CONFIGS: dict[str, dict] = {
     "goal_planner": {
         "domain": "goals",
         "description": (
-            "Manages the user's goal/quest system. Can create, update, list goals "
-            "and check goal progress across all domains."
+            "Manages the user's goals and priorities. Can create, update, list goals "
+            "and check progress across all domains."
         ),
         "temperature": 0.4,
         "max_steps": 5,

@@ -882,11 +882,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["session_consolidation_behavior"]["soul_update_count"] == 1
     assert details_by_name["session_consolidation_behavior"]["memory_categories"] == ["fact", "goal"]
     assert details_by_name["session_consolidation_behavior"]["stored_texts"] == [
-        "User is building a guardian cockpit",
+        "User is building a guardian workspace",
         "Ship behavioral guardian evals",
     ]
     assert details_by_name["session_consolidation_behavior"]["updated_soul_section"] == "Goals"
-    assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_cockpit"] is True
+    assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_workspace"] is True
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",

@@ -21,8 +21,10 @@ def soul_dir(tmp_path, monkeypatch):
 class TestReadSoul:
     def test_returns_default_when_missing(self, soul_dir, async_db):
         text = soul_mod.read_soul()
-        assert "# Soul of the Traveler" in text
+        assert "# Guardian Record" in text
         assert "## Identity" in text
+        assert "- Name: Unknown" not in text
+        assert "- Role: Unknown" not in text
 
         async def _fetch():
             events = await audit_repository.list_events(limit=5)
@@ -102,7 +104,8 @@ class TestEnsureSoulExists:
     def test_creates_default(self, soul_dir):
         soul_mod.ensure_soul_exists()
         text = soul_mod.read_soul()
-        assert "# Soul of the Traveler" in text
+        assert "# Guardian Record" in text
+        assert "- Name: Unknown" not in text
 
     def test_does_not_overwrite(self, soul_dir, async_db):
         soul_mod.write_soul("custom")

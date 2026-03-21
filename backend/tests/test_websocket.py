@@ -81,7 +81,9 @@ class TestWebSocket:
         try:
             with client.websocket_connect("/ws/chat") as ws:
                 # The server sends a proactive welcome on connect; drain it
-                _ = ws.receive_text()
+                welcome = json.loads(ws.receive_text())
+                assert welcome["type"] == "proactive"
+                assert "Seraph online" in welcome["content"]
                 ws.send_text(json.dumps({"type": "ping"}))
                 resp = json.loads(ws.receive_text())
                 assert resp["type"] == "pong"
@@ -114,6 +116,7 @@ class TestWebSocket:
                 resp = json.loads(ws.receive_text())
                 assert resp["type"] == "final"
                 assert "skipped" in resp["content"].lower()
+                assert "full workspace" in resp["content"].lower()
         finally:
             stack.close()
             for p in patches:

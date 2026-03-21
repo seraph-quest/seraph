@@ -267,7 +267,7 @@ This is the authoritative PR list for the implementation side.
 For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#10 capability-packaging-workflows-v1`
+- the current active item is `#11 capability-packaging-runbooks-and-starter-packs-v1`
 - this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
 1. [x] `extension-model-terminology-v1`:
@@ -288,7 +288,7 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    add one canonical schema-valid example package that includes at least a skill, workflow, and runbook so docs, tests, and future contributors all share one golden reference before the migrated loaders become the default runtime path
 9. [x] `capability-packaging-skills-v1`:
    migrate skill loading into manifest-backed capability packs with backward compatibility during the transition so skills become first-class extension contributions
-10. [ ] `capability-packaging-workflows-v1`:
+10. [x] `capability-packaging-workflows-v1`:
    migrate workflow loading into manifest-backed capability packs with validated references and metadata so workflows stop living on a separate loading path
 11. [ ] `capability-packaging-runbooks-and-starter-packs-v1`:
    move runbooks and starter packs into the same manifest-backed architecture so higher-level reusable capability bundles stop being special-case inventory

@@ -184,6 +184,7 @@ class ExtensionRegistry:
                             f"current runtime is {self._seraph_version}"
                         ),
                         phase="compatibility",
+                        details=[{"contributed_types": sorted(manifest.contributed_types())}],
                     )
                 )
                 continue
@@ -195,6 +196,7 @@ class ExtensionRegistry:
                         source=str(manifest_path),
                         message=str(exc),
                         phase="layout",
+                        details=[{"contributed_types": sorted(manifest.contributed_types())}],
                     )
                 )
         return extensions, errors

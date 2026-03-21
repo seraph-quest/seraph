@@ -12,9 +12,10 @@ from typing import Any
 
 from smolagents import Tool
 
+from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA
-from src.workflows.loader import Workflow, scan_workflows
+from src.workflows.loader import Workflow, scan_workflow_paths
 
 logger = logging.getLogger(__name__)
 
@@ -290,23 +291,157 @@ class WorkflowManager:
     def __init__(self) -> None:
         self._workflows: list[Workflow] = []
         self._load_errors: list[dict[str, str]] = []
+        self._shared_manifest_errors: list[dict[str, str]] = []
         self._workflows_dir: str = ""
+        self._manifest_roots: list[str] = []
         self._config_path: str = ""
         self._disabled: set[str] = set()
+        self._registry: ExtensionRegistry | None = None
 
-    def init(self, workflows_dir: str) -> None:
+    def init(self, workflows_dir: str, *, manifest_roots: list[str] | None = None) -> None:
         self._workflows_dir = workflows_dir
+        self._manifest_roots = list(manifest_roots or [os.path.join(os.path.dirname(workflows_dir), "extensions")])
         self._config_path = os.path.join(
             os.path.dirname(workflows_dir),
             "workflows-config.json",
         )
+        self._registry = ExtensionRegistry(
+            manifest_roots=self._manifest_roots,
+            skill_dirs=[],
+            workflow_dirs=[workflows_dir],
+            mcp_runtime=None,
+        )
         self._load_config()
-        self._workflows, self._load_errors = scan_workflows(workflows_dir)
+        self._reload_from_registry()
         self._apply_disabled()
         logger.info(
             "WorkflowManager initialized: %d workflows loaded",
             len(self._workflows),
         )
+
+    def _reload_from_registry(self) -> None:
+        snapshot = self._snapshot()
+        contribution_paths: list[str] = []
+        contribution_index: dict[str, tuple[str, str]] = {}
+        for contribution in snapshot.list_contributions("workflows"):
+            resolved_path = contribution.metadata.get("resolved_path")
+            path = str(resolved_path) if isinstance(resolved_path, str) and resolved_path else contribution.reference
+            normalized_path = os.path.abspath(path)
+            contribution_paths.append(path)
+            contribution_index[normalized_path] = (contribution.source, contribution.extension_id)
+
+        workflows, parse_errors = scan_workflow_paths(contribution_paths)
+        for workflow in workflows:
+            source, extension_id = contribution_index.get(
+                os.path.abspath(workflow.file_path),
+                ("legacy", None),
+            )
+            workflow.source = source
+            workflow.extension_id = extension_id
+
+        load_errors: list[dict[str, str]] = []
+        shared_manifest_errors: list[dict[str, str]] = []
+        for error in snapshot.load_errors:
+            payload = {
+                "file_path": error.source,
+                "message": error.message,
+                "phase": error.phase,
+            }
+            if self._error_affects_workflows(error.source, error.phase, error.details):
+                load_errors.append(payload)
+                continue
+            if error.phase in {"manifest", "compatibility", "layout"}:
+                shared_manifest_errors.append(payload)
+        for error in parse_errors:
+            path = str(error.get("file_path") or "")
+            source, _ = contribution_index.get(os.path.abspath(path), ("legacy", None))
+            load_errors.append(
+                {
+                    "file_path": path,
+                    "message": str(error.get("message") or "workflow parse error"),
+                    "phase": "manifest-workflows" if source == "manifest" else "legacy-workflows",
+                }
+            )
+
+        deduped_workflows: list[Workflow] = []
+        by_name: dict[str, Workflow] = {}
+        by_tool_name: dict[str, Workflow] = {}
+        for workflow in sorted(workflows, key=lambda item: (0 if item.source == "manifest" else 1, item.file_path)):
+            existing_name = by_name.get(workflow.name)
+            if existing_name is not None:
+                load_errors.append(
+                    {
+                        "file_path": workflow.file_path,
+                        "message": (
+                            f"Duplicate workflow name '{workflow.name}' from {workflow.file_path}; "
+                            f"keeping {existing_name.file_path}"
+                        ),
+                        "phase": "duplicate-workflow-name",
+                    }
+                )
+                continue
+            existing_tool = by_tool_name.get(workflow.tool_name)
+            if existing_tool is not None:
+                load_errors.append(
+                    {
+                        "file_path": workflow.file_path,
+                        "message": (
+                            f"Duplicate workflow tool '{workflow.tool_name}' from {workflow.file_path}; "
+                            f"keeping {existing_tool.file_path}"
+                        ),
+                        "phase": "duplicate-workflow-tool-name",
+                    }
+                )
+                continue
+            by_name[workflow.name] = workflow
+            by_tool_name[workflow.tool_name] = workflow
+            deduped_workflows.append(workflow)
+
+        self._workflows = deduped_workflows
+        self._load_errors = load_errors
+        self._shared_manifest_errors = shared_manifest_errors
+
+    def _snapshot(self) -> ExtensionRegistrySnapshot:
+        if self._registry is None:
+            self._registry = ExtensionRegistry(
+                manifest_roots=self._manifest_roots,
+                skill_dirs=[],
+                workflow_dirs=[self._workflows_dir] if self._workflows_dir else [],
+                mcp_runtime=None,
+            )
+        return self._registry.snapshot()
+
+    def _error_affects_workflows(
+        self,
+        source: str,
+        phase: str,
+        details: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        if phase == "legacy-workflows":
+            return True
+        if phase == "manifest":
+            if details:
+                for detail in details:
+                    loc = detail.get("loc")
+                    if (
+                        isinstance(loc, list)
+                        and len(loc) >= 2
+                        and str(loc[0]) == "contributes"
+                        and str(loc[1]) == "workflows"
+                    ):
+                        return True
+                return False
+        if phase in {"compatibility", "layout"}:
+            for detail in details or []:
+                contributed_types = detail.get("contributed_types")
+                if isinstance(contributed_types, list) and "workflows" in contributed_types:
+                    return True
+        if phase not in {"manifest", "compatibility", "layout"}:
+            return False
+        package_root = source
+        if os.path.basename(source) in {"manifest.yaml", "manifest.yml"}:
+            package_root = os.path.dirname(source)
+        return os.path.isdir(os.path.join(package_root, "workflows"))
 
     def _load_config(self) -> None:
         if os.path.isfile(self._config_path):
@@ -352,6 +487,8 @@ class WorkflowManager:
                 "enabled": workflow.enabled,
                 "step_count": len(workflow.steps),
                 "file_path": workflow.file_path,
+                "source": workflow.source,
+                "extension_id": workflow.extension_id,
                 "policy_modes": self._infer_policy_modes(workflow),
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
@@ -400,7 +537,7 @@ class WorkflowManager:
 
     def reload(self) -> list[dict[str, Any]]:
         if self._workflows_dir:
-            self._workflows, self._load_errors = scan_workflows(self._workflows_dir)
+            self._reload_from_registry()
             self._apply_disabled()
         return self.list_workflows()
 
@@ -408,8 +545,10 @@ class WorkflowManager:
         return {
             "workflows": self.list_workflows(),
             "load_errors": list(self._load_errors),
+            "shared_manifest_errors": list(self._shared_manifest_errors),
             "loaded_count": len(self._workflows),
             "error_count": len(self._load_errors),
+            "shared_error_count": len(self._shared_manifest_errors),
         }
 
     def get_active_workflows(

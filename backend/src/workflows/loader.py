@@ -57,6 +57,8 @@ class Workflow:
     file_path: str = ""
     body: str = ""
     result_template: str = ""
+    source: str = "legacy"
+    extension_id: str | None = None
 
     @property
     def tool_name(self) -> str:
@@ -216,24 +218,30 @@ def _parse_workflow_file(path: str, *, errors: list[dict[str, str]] | None = Non
     return parse_workflow_content(content, path=path, errors=errors)
 
 
+def scan_workflow_paths(workflow_paths: list[str]) -> tuple[list[Workflow], list[dict[str, str]]]:
+    """Parse an explicit set of workflow file paths with structured errors."""
+    workflows: list[Workflow] = []
+    errors: list[dict[str, str]] = []
+    for path in sorted(workflow_paths):
+        workflow = _parse_workflow_file(path, errors=errors)
+        if workflow is not None:
+            workflows.append(workflow)
+            logger.info("Loaded workflow: %s from %s", workflow.name, os.path.basename(path))
+    return workflows, errors
+
+
 def scan_workflows(workflows_dir: str) -> tuple[list[Workflow], list[dict[str, str]]]:
     """Scan directory for markdown workflows and parse them."""
     if not os.path.isdir(workflows_dir):
         logger.info("Workflows directory %s does not exist, skipping", workflows_dir)
         return [], []
 
-    workflows: list[Workflow] = []
-    errors: list[dict[str, str]] = []
-    for filename in sorted(os.listdir(workflows_dir)):
-        if not filename.endswith(".md"):
-            continue
-        path = os.path.join(workflows_dir, filename)
-        workflow = _parse_workflow_file(path, errors=errors)
-        if workflow is not None:
-            workflows.append(workflow)
-            logger.info("Loaded workflow: %s from %s", workflow.name, filename)
-
-    return workflows, errors
+    workflow_paths = [
+        os.path.join(workflows_dir, filename)
+        for filename in sorted(os.listdir(workflows_dir))
+        if filename.endswith(".md")
+    ]
+    return scan_workflow_paths(workflow_paths)
 
 
 def load_workflows(workflows_dir: str) -> list[Workflow]:

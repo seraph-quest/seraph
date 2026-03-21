@@ -48,6 +48,7 @@
 - [x] the authoring path now also includes first-class public docs for extension overview, package creation, manifest fields, contribution types, validation, and migration instead of leaving the new architecture trapped in research docs
 - [x] the authoring path now includes one canonical in-repo example package that is validated in tests and pinned to current scaffold output so contributors and docs share the same golden reference
 - [x] the runtime now loads manifest-backed skill contributions through the extension registry while still preserving legacy loose-skill compatibility during the coexistence window
+- [x] the runtime now also loads manifest-backed workflow contributions through the same registry seam, including packaged workflow diagnostics and manifest-preferred duplicate resolution during the coexistence window
 
 ## Still To Do On `develop`
 

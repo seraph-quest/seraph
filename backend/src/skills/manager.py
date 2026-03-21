@@ -4,7 +4,8 @@ import json
 import logging
 import os
 
-from src.skills.loader import Skill, load_skills, scan_skills
+from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
+from src.skills.loader import Skill, scan_skill_paths
 
 logger = logging.getLogger(__name__)
 
@@ -14,21 +15,112 @@ class SkillManager:
         self._skills: list[Skill] = []
         self._load_errors: list[dict[str, str]] = []
         self._skills_dir: str = ""
+        self._manifest_roots: list[str] = []
         self._config_path: str = ""
         self._disabled: set[str] = set()
+        self._registry: ExtensionRegistry | None = None
 
-    def init(self, skills_dir: str) -> None:
+    def init(self, skills_dir: str, *, manifest_roots: list[str] | None = None) -> None:
         """Load skills from disk and restore disabled state from config."""
         self._skills_dir = skills_dir
+        self._manifest_roots = list(manifest_roots or [os.path.join(os.path.dirname(skills_dir), "extensions")])
         self._config_path = os.path.join(
             os.path.dirname(skills_dir), "skills-config.json"
         )
+        self._registry = ExtensionRegistry(
+            manifest_roots=self._manifest_roots,
+            skill_dirs=[skills_dir],
+            workflow_dirs=[],
+            mcp_runtime=None,
+        )
         self._load_config()
-        self._skills, self._load_errors = scan_skills(skills_dir)
+        self._reload_from_registry()
         self._apply_disabled()
         logger.info(
             "SkillManager initialized: %d skills loaded", len(self._skills)
         )
+
+    def _reload_from_registry(self) -> None:
+        snapshot = self._snapshot()
+        contribution_paths: list[str] = []
+        contribution_index: dict[str, tuple[str, str]] = {}
+        for contribution in snapshot.list_contributions("skills"):
+            resolved_path = contribution.metadata.get("resolved_path")
+            path = str(resolved_path) if isinstance(resolved_path, str) and resolved_path else contribution.reference
+            normalized_path = os.path.abspath(path)
+            contribution_paths.append(path)
+            contribution_index[normalized_path] = (contribution.source, contribution.extension_id)
+
+        skills, parse_errors = scan_skill_paths(contribution_paths)
+        for skill in skills:
+            source, extension_id = contribution_index.get(
+                os.path.abspath(skill.file_path),
+                ("legacy", None),
+            )
+            skill.source = source
+            skill.extension_id = extension_id
+
+        load_errors = [
+            {
+                "file_path": error.source,
+                "message": error.message,
+                "phase": error.phase,
+            }
+            for error in snapshot.load_errors
+            if self._error_affects_skills(error.source, error.phase)
+        ]
+        for error in parse_errors:
+            path = str(error.get("file_path") or "")
+            source, _ = contribution_index.get(os.path.abspath(path), ("legacy", None))
+            load_errors.append(
+                {
+                    "file_path": path,
+                    "message": str(error.get("message") or "skill parse error"),
+                    "phase": "manifest-skills" if source == "manifest" else "legacy-skills",
+                }
+            )
+
+        deduped_skills: list[Skill] = []
+        by_name: dict[str, Skill] = {}
+        for skill in sorted(skills, key=lambda item: (0 if item.source == "manifest" else 1, item.file_path)):
+            existing = by_name.get(skill.name)
+            if existing is not None:
+                load_errors.append(
+                    {
+                        "file_path": skill.file_path,
+                        "message": (
+                            f"Duplicate skill name '{skill.name}' from {skill.file_path}; "
+                            f"keeping {existing.file_path}"
+                        ),
+                        "phase": "duplicate-skill-name",
+                    }
+                )
+                continue
+            by_name[skill.name] = skill
+            deduped_skills.append(skill)
+
+        self._skills = deduped_skills
+        self._load_errors = load_errors
+
+    def _snapshot(self) -> ExtensionRegistrySnapshot:
+        if self._registry is None:
+            self._registry = ExtensionRegistry(
+                manifest_roots=self._manifest_roots,
+                skill_dirs=[self._skills_dir] if self._skills_dir else [],
+                workflow_dirs=[],
+                mcp_runtime=None,
+            )
+        return self._registry.snapshot()
+
+    def _error_affects_skills(self, source: str, phase: str) -> bool:
+        if phase == "legacy-skills":
+            return True
+        if phase not in {"manifest", "compatibility", "layout"}:
+            return False
+        package_root = source
+        if os.path.basename(source) in {"manifest.yaml", "manifest.yml"}:
+            package_root = os.path.dirname(source)
+        return os.path.isdir(os.path.join(package_root, "skills"))
 
     def _load_config(self) -> None:
         """Load disabled skill names from config file."""
@@ -89,6 +181,8 @@ class SkillManager:
                 "user_invocable": s.user_invocable,
                 "enabled": s.enabled,
                 "file_path": s.file_path,
+                "source": s.source,
+                "extension_id": s.extension_id,
             }
             for s in self._skills
         ]
@@ -116,7 +210,7 @@ class SkillManager:
     def reload(self) -> list[dict]:
         """Re-scan skills directory and return updated list."""
         if self._skills_dir:
-            self._skills, self._load_errors = scan_skills(self._skills_dir)
+            self._reload_from_registry()
             self._apply_disabled()
         return self.list_skills()
 

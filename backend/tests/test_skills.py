@@ -242,6 +242,148 @@ class TestSkillManager:
         result = mgr.reload()
         assert len(result) == 3
 
+    def test_init_loads_manifest_backed_skills_alongside_legacy_skills(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        extensions_dir = tmp_path / "extensions" / "research-pack"
+        skills_dir.mkdir()
+        extensions_dir.mkdir(parents=True)
+
+        (skills_dir / "legacy.md").write_text(
+            "---\n"
+            "name: legacy-skill\n"
+            "description: Legacy skill\n"
+            "---\n\n"
+            "Legacy instructions.\n"
+        )
+        (extensions_dir / "manifest.yaml").write_text(
+            "id: seraph.research-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Research Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  skills:\n"
+            "    - skills/research-pack.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+        (extensions_dir / "skills").mkdir()
+        (extensions_dir / "skills" / "research-pack.md").write_text(
+            "---\n"
+            "name: packaged-skill\n"
+            "description: Packaged skill\n"
+            "requires:\n"
+            "  tools: []\n"
+            "user_invocable: true\n"
+            "---\n\n"
+            "Packaged instructions.\n",
+            encoding="utf-8",
+        )
+
+        mgr = SkillManager()
+        mgr.init(str(skills_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        listed = {skill["name"]: skill for skill in mgr.list_skills()}
+        assert set(listed) == {"legacy-skill", "packaged-skill"}
+        assert listed["legacy-skill"]["source"] == "legacy"
+        assert listed["legacy-skill"]["extension_id"].startswith("legacy.skills.")
+        assert listed["packaged-skill"]["source"] == "manifest"
+        assert listed["packaged-skill"]["extension_id"] == "seraph.research-pack"
+
+    def test_manifest_backed_skill_parse_errors_surface_in_diagnostics(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        extensions_dir = tmp_path / "extensions" / "broken-pack"
+        skills_dir.mkdir()
+        extensions_dir.mkdir(parents=True)
+
+        (extensions_dir / "manifest.yaml").write_text(
+            "id: seraph.broken-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Broken Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  skills:\n"
+            "    - skills/broken.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+        (extensions_dir / "skills").mkdir()
+        (extensions_dir / "skills" / "broken.md").write_text("not frontmatter", encoding="utf-8")
+
+        mgr = SkillManager()
+        mgr.init(str(skills_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        diagnostics = mgr.get_diagnostics()
+        assert diagnostics["loaded_count"] == 0
+        assert diagnostics["error_count"] == 1
+        assert diagnostics["load_errors"][0]["phase"] == "manifest-skills"
+        assert diagnostics["load_errors"][0]["file_path"].endswith("broken.md")
+
+    def test_manifest_backed_skill_names_win_duplicate_name_collisions(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        extensions_dir = tmp_path / "extensions" / "research-pack"
+        skills_dir.mkdir()
+        extensions_dir.mkdir(parents=True)
+
+        (skills_dir / "duplicate.md").write_text(
+            "---\n"
+            "name: shared-skill\n"
+            "description: Legacy skill\n"
+            "---\n\n"
+            "Legacy instructions.\n",
+            encoding="utf-8",
+        )
+        (extensions_dir / "manifest.yaml").write_text(
+            "id: seraph.research-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Research Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  skills:\n"
+            "    - skills/research-pack.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+        (extensions_dir / "skills").mkdir()
+        (extensions_dir / "skills" / "research-pack.md").write_text(
+            "---\n"
+            "name: shared-skill\n"
+            "description: Manifest skill\n"
+            "---\n\n"
+            "Manifest instructions.\n",
+            encoding="utf-8",
+        )
+
+        mgr = SkillManager()
+        mgr.init(str(skills_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        assert [skill["name"] for skill in mgr.list_skills()] == ["shared-skill"]
+        selected = mgr.get_skill("shared-skill")
+        assert selected is not None
+        assert selected.source == "manifest"
+        assert selected.description == "Manifest skill"
+        assert any(error["phase"] == "duplicate-skill-name" for error in mgr.get_diagnostics()["load_errors"])
+
     def test_list_skills_format(self, skills_dir):
         mgr = SkillManager()
         mgr.init(skills_dir)
@@ -251,6 +393,8 @@ class TestSkillManager:
         assert all("description" in s for s in lst)
         assert all("enabled" in s for s in lst)
         assert all("requires_tools" in s for s in lst)
+        assert all("source" in s for s in lst)
+        assert all("extension_id" in s for s in lst)
 
     def test_mcp_dependent_skill_inactive_without_tool(self, tmp_path):
         """A skill requiring http_request should be inactive when tool is unavailable."""
@@ -309,6 +453,60 @@ def _setup_skill_manager(skills_dir):
     skill_manager._disabled = set()
 
 
+@pytest.fixture
+def _setup_manifest_skill_manager(tmp_path):
+    from src.skills.manager import skill_manager
+
+    skills_dir = tmp_path / "skills"
+    extensions_dir = tmp_path / "extensions" / "research-pack"
+    skills_dir.mkdir()
+    extensions_dir.mkdir(parents=True)
+
+    (skills_dir / "legacy.md").write_text(
+        "---\n"
+        "name: legacy-skill\n"
+        "description: Legacy skill\n"
+        "---\n\n"
+        "Legacy instructions.\n",
+        encoding="utf-8",
+    )
+    (extensions_dir / "manifest.yaml").write_text(
+        "id: seraph.research-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Research Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  skills:\n"
+        "    - skills/research-pack.md\n"
+        "permissions:\n"
+        "  tools: []\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (extensions_dir / "skills").mkdir()
+    (extensions_dir / "skills" / "research-pack.md").write_text(
+        "---\n"
+        "name: packaged-skill\n"
+        "description: Packaged skill\n"
+        "requires:\n"
+        "  tools: []\n"
+        "user_invocable: true\n"
+        "---\n\n"
+        "Packaged instructions.\n",
+        encoding="utf-8",
+    )
+
+    skill_manager.init(str(skills_dir), manifest_roots=[str(tmp_path / "extensions")])
+    yield
+    skill_manager._skills = []
+    skill_manager._disabled = set()
+
+
 class TestSkillAPI:
     @pytest.mark.asyncio
     async def test_list_skills(self, client, _setup_skill_manager):
@@ -317,6 +515,28 @@ class TestSkillAPI:
         data = resp.json()
         assert "skills" in data
         assert len(data["skills"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_list_skills_includes_manifest_backed_entries(self, client, _setup_manifest_skill_manager):
+        resp = await client.get("/api/skills")
+
+        assert resp.status_code == 200
+        skills = {item["name"]: item for item in resp.json()["skills"]}
+        assert set(skills) == {"legacy-skill", "packaged-skill"}
+        assert skills["packaged-skill"]["source"] == "manifest"
+        assert skills["packaged-skill"]["extension_id"] == "seraph.research-pack"
+
+    @pytest.mark.asyncio
+    async def test_enable_disable_manifest_backed_skill(self, client, _setup_manifest_skill_manager):
+        resp = await client.put(
+            "/api/skills/packaged-skill",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 200
+
+        resp = await client.get("/api/skills")
+        skills = {item["name"]: item for item in resp.json()["skills"]}
+        assert skills["packaged-skill"]["enabled"] is False
 
     @pytest.mark.asyncio
     async def test_enable_disable_skill(self, client, _setup_skill_manager):

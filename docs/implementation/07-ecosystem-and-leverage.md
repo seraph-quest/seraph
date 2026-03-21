@@ -47,6 +47,7 @@
 - [x] the authoring path now includes first local scaffold and validation commands for capability-pack package creation instead of forcing hand-authored manifests
 - [x] the authoring path now also includes first-class public docs for extension overview, package creation, manifest fields, contribution types, validation, and migration instead of leaving the new architecture trapped in research docs
 - [x] the authoring path now includes one canonical in-repo example package that is validated in tests and pinned to current scaffold output so contributors and docs share the same golden reference
+- [x] the runtime now loads manifest-backed skill contributions through the extension registry while still preserving legacy loose-skill compatibility during the coexistence window
 
 ## Still To Do On `develop`
 

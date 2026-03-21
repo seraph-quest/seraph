@@ -18,6 +18,8 @@ class Skill:
     user_invocable: bool = False
     enabled: bool = True
     file_path: str = ""
+    source: str = "legacy"
+    extension_id: str | None = None
 
 
 def _record_skill_error(
@@ -106,6 +108,28 @@ def _parse_skill_file(path: str) -> Skill | None:
 _loaded_skills: list[Skill] = []
 
 
+def scan_skill_paths(skill_paths: list[str]) -> tuple[list[Skill], list[dict[str, str]]]:
+    """Parse an explicit set of skill file paths with structured errors."""
+    global _loaded_skills
+    skills: list[Skill] = []
+    errors: list[dict[str, str]] = []
+
+    for path in sorted(skill_paths):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except OSError as exc:
+            _record_skill_error(errors, path=path, message=f"Failed to read skill file {path}: {exc}")
+            continue
+        skill = parse_skill_content(content, path=path, errors=errors)
+        if skill:
+            skills.append(skill)
+            logger.info("Loaded skill: %s from %s", skill.name, os.path.basename(path))
+
+    _loaded_skills = skills
+    return skills, errors
+
+
 def load_skills(skills_dir: str) -> list[Skill]:
     """Scan directory for *.md files and parse them as skills."""
     skills, _ = scan_skills(skills_dir)
@@ -123,23 +147,12 @@ def scan_skills(skills_dir: str) -> tuple[list[Skill], list[dict[str, str]]]:
         _loaded_skills = []
         return [], []
 
-    for filename in sorted(os.listdir(skills_dir)):
-        if not filename.endswith(".md"):
-            continue
-        path = os.path.join(skills_dir, filename)
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                content = handle.read()
-        except OSError as exc:
-            _record_skill_error(errors, path=path, message=f"Failed to read skill file {path}: {exc}")
-            continue
-        skill = parse_skill_content(content, path=path, errors=errors)
-        if skill:
-            skills.append(skill)
-            logger.info("Loaded skill: %s from %s", skill.name, filename)
-
-    _loaded_skills = skills
-    return skills, errors
+    skill_paths = [
+        os.path.join(skills_dir, filename)
+        for filename in sorted(os.listdir(skills_dir))
+        if filename.endswith(".md")
+    ]
+    return scan_skill_paths(skill_paths)
 
 
 def reload_skills(skills_dir: str) -> list[Skill]:

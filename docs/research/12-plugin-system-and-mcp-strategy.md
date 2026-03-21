@@ -465,6 +465,10 @@ Extensions should contribute capabilities inside those systems, not replace them
 
 Seraph should introduce one extension manifest and one package/install lifecycle.
 
+For the current migration, the canonical manifest should cover `capability-pack`
+and `connector-pack` only. Trusted code remains deferred to the later RFC slice
+instead of being normalized into the first manifest contract.
+
 ### Manifest structure
 
 ```text
@@ -511,6 +515,9 @@ permissions:
     - write_file
   network: true
 ```
+
+Here `trust` is package provenance (`bundled`, `local`, or later `verified`),
+not a replacement for the trust-tier architecture above.
 
 This lets one package contribute multiple typed surfaces without inventing a universal runtime plugin contract.
 

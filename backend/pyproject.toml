@@ -10,6 +10,7 @@ dependencies = [
     "litellm>=1.50.0",
     "smolagents[litellm,mcp]>=1.24.0",
     "mcp>=1.7.0",
+    "packaging>=24.2",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
     "ddgs>=7.0.0",

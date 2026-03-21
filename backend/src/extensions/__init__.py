@@ -14,14 +14,28 @@ from .manifest import (
     load_extension_manifest,
     parse_extension_manifest,
 )
+from .registry import (
+    ExtensionContributionRecord,
+    ExtensionLoadErrorRecord,
+    ExtensionRecord,
+    ExtensionRegistry,
+    ExtensionRegistrySnapshot,
+    extension_registry,
+)
 
 __all__ = [
     "ExtensionCompatibility",
+    "ExtensionContributionRecord",
     "ExtensionContributionPaths",
+    "ExtensionLoadErrorRecord",
     "ExtensionManifest",
     "ExtensionManifestError",
     "ExtensionPermissions",
     "ExtensionPublisher",
+    "ExtensionRecord",
+    "ExtensionRegistry",
+    "ExtensionRegistrySnapshot",
+    "extension_registry",
     "load_extension_manifest",
     "parse_extension_manifest",
 ]

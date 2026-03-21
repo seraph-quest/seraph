@@ -1013,10 +1013,11 @@ function activityChildMeta(value: ActivityLedgerEntry): string {
   return [
     Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
       ? `intents ${value.metadata.required_policy_intents.join(", ")}`
-      : "no required intents",
+      : null,
     value.metadata?.max_cost_tier ? `cost ${String(value.metadata.max_cost_tier)}` : null,
     value.metadata?.max_latency_tier ? `latency ${String(value.metadata.max_latency_tier)}` : null,
     typeof value.metadata?.rejected_target_count === "number"
+      && value.metadata.rejected_target_count > 0
       ? `rejected ${String(value.metadata.rejected_target_count)}`
       : null,
   ].filter(Boolean).join(" · ");
@@ -1169,6 +1170,16 @@ function activityGroupActionTarget(group: ActivityLedgerGroup): ActivityLedgerEn
     if (child.item && activityEntryHasRowAction(child.item)) return child.item;
   }
   return group.lead;
+}
+
+function canOpenLedgerThread(
+  threadId: string | null | undefined,
+  activeSessionId: string | null,
+  knownSessionIds: Set<string>,
+): boolean {
+  if (!threadId) return false;
+  if (activeSessionId === threadId) return false;
+  return knownSessionIds.has(threadId);
 }
 
 function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSummary {
@@ -1712,6 +1723,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .reverse();
   const sessionTitleById = useMemo(
     () => Object.fromEntries(sessions.map((item) => [item.id, item.title])),
+    [sessions],
+  );
+  const knownSessionIds = useMemo(
+    () => new Set(sessions.map((item) => item.id)),
     [sessions],
   );
   const topGoals = collectGoalTitles(goalTree, 5);
@@ -3796,7 +3811,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             Continue
                           </button>
                         )}
-                        {actionTarget.thread_id && (
+                        {canOpenLedgerThread(actionTarget.thread_id, sessionId, knownSessionIds) && (
                           <button
                             className="cockpit-feedback-button"
                             onClick={() => void openThread(actionTarget.thread_id)}

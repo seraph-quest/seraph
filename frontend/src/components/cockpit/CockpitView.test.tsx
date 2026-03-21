@@ -1080,6 +1080,7 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Selected openai/gpt-4o-mini for chat_agent")).toBeInTheDocument());
     expect(screen.getByText(/model openai\/gpt-4o-mini · fallback_chain · policy_guardrails · budget standard · task interactive/)).toBeInTheDocument();
     expect(screen.getByText(/intents fast, cheap · cost medium · latency low · rejected 2/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Thread" })).not.toBeInTheDocument();
   });
 
   it("keeps repair actions reachable when the actionable event is a grouped child", async () => {

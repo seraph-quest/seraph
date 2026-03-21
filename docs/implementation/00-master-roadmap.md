@@ -268,7 +268,7 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
 
 - every entry below is a numbered PR-sized slice
 - the current active item is `#1 extension-model-terminology-v1`
-- the same queue is mirrored with more workstream-specific detail in [Workstream 07](./07-ecosystem-and-leverage.md)
+- this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
 1. [ ] `extension-model-terminology-v1`:
    rename the misleading internal `plugins/` concept into clearer terms such as `native_tools`, `connector`, and `capability_pack` so the codebase and docs stop implying that Seraph already has a general arbitrary-code plugin runtime
@@ -285,7 +285,7 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
 7. [ ] `extension-authoring-docs-v1`:
    publish first-class docs for creating capability packs, manifest fields, contribution types, validation, repair, and migration from the current loose-file model
 8. [ ] `example-capability-pack-v1`:
-   add one canonical example package that includes at least a skill, workflow, and runbook so docs, tests, and future contributors all share one golden reference
+   add one canonical schema-valid example package that includes at least a skill, workflow, and runbook so docs, tests, and future contributors all share one golden reference before the migrated loaders become the default runtime path
 9. [ ] `capability-packaging-skills-v1`:
    migrate skill loading into manifest-backed capability packs with backward compatibility during the transition so skills become first-class extension contributions
 10. [ ] `capability-packaging-workflows-v1`:
@@ -326,9 +326,12 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
 - keep the full active queue for architecture-transition programs visible here until the transition is complete
 - keep the most recent completed 10-PR batch visible above with checkmarks
 - do not delete the immediately previous completed batch until a later cleanup pass
-- rerank and rewrite the queue whenever the number of landed PRs from the published queue is divisible by 5
+- keep landed slices in the active queue marked `[x]` until a full 10-slice completed batch is ready to move into the completed-batches section
+- when 5 slices from the published queue have landed, rerank only the remaining open items while leaving the landed items in place
+- when 10 slices from the published queue have landed, move that completed set into the completed-batches history and renumber the remaining active queue
 - rerank earlier if new evidence from `docs/research/` materially changes the priority order
 - each internal slice must close with a subagent review pass against bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete or rolled into a final GitHub PR
+- the result of that subagent review must be recorded in the eventual GitHub PR `Validation` section before any slice is marked complete in these docs
 
 ## Delivery Order
 
@@ -342,14 +345,18 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
 
 Implementation docs `08` through `10` are supporting mirror layers for this roadmap, not additional workstreams.
 
-## Stable Interfaces
+## Stable Interfaces Outside This Transition
 
 - the browser and WebSocket chat surface
 - the observer daemon ingest path
-- `SKILL.md`-based skill loading
 - runtime-path-based LLM routing and fallback settings
 - runtime audit and eval harness contracts
-- MCP server configuration and server-management APIs
+
+## Transitional Interfaces Slated For Migration
+
+- `SKILL.md`-based skill loading
+- loose workflow loading from the current workspace file layout
+- MCP server configuration and server-management APIs as they exist before connector manifests and packaged install flows land
 
 ## Current Shipped Slice On `develop`
 

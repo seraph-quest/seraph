@@ -73,6 +73,7 @@ class ExtensionRecord:
     source: str
     root_path: str | None
     manifest_path: str | None
+    manifest: ExtensionManifest | None = None
     contributions: list[ExtensionContributionRecord] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -227,6 +228,7 @@ class ExtensionRegistry:
             source="manifest",
             root_path=root_path,
             manifest_path=str(manifest_path),
+            manifest=manifest,
             contributions=contributions,
             metadata={
                 "publisher": manifest.publisher.name,
@@ -296,6 +298,7 @@ class ExtensionRegistry:
                     source="legacy",
                     root_path=skills_dir,
                     manifest_path=None,
+                    manifest=None,
                     contributions=contributions,
                     metadata={"load_errors": errors},
                 )
@@ -354,6 +357,7 @@ class ExtensionRegistry:
                     source="legacy",
                     root_path=workflows_dir,
                     manifest_path=None,
+                    manifest=None,
                     contributions=contributions,
                     metadata={"load_errors": errors},
                 )
@@ -419,6 +423,7 @@ class ExtensionRegistry:
                 source="legacy",
                 root_path=str(config_path) if config_path else None,
                 manifest_path=None,
+                manifest=None,
                 contributions=contributions,
                 metadata={"server_count": len(contributions)},
             )

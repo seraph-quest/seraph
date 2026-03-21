@@ -267,16 +267,16 @@ This is the authoritative PR list for the implementation side.
 For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#1 extension-model-terminology-v1`
+- the current active item is `#5 extension-package-layout-v1`
 - this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
-1. [ ] `extension-model-terminology-v1`:
+1. [x] `extension-model-terminology-v1`:
    rename the misleading internal `plugins/` concept into clearer terms such as `native_tools`, `connector`, and `capability_pack` so the codebase and docs stop implying that Seraph already has a general arbitrary-code plugin runtime
-2. [ ] `extension-manifest-schema-v1`:
+2. [x] `extension-manifest-schema-v1`:
    add the first canonical extension manifest, schema validator, compatibility rules, and typed `contributes` contract so every later slice builds on one explicit package format instead of ad hoc files
-3. [ ] `extension-registry-and-loader-v1`:
+3. [x] `extension-registry-and-loader-v1`:
    introduce one extension registry and loader abstraction that can enumerate manifests and typed contributions while preserving current skill, workflow, and MCP behavior during migration
-4. [ ] `extension-validation-and-doctor-v1`:
+4. [x] `extension-validation-and-doctor-v1`:
    add structured extension validation and doctor outputs for schema errors, missing references, compatibility failures, and permission mismatches so broken packs become diagnosable before install or execution
 5. [ ] `extension-package-layout-v1`:
    standardize the on-disk package structure for capability packs and connectors so one package can contribute skills, workflows, runbooks, starter packs, presets, and later connector definitions coherently

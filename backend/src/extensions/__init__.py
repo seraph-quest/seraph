@@ -14,6 +14,13 @@ from .manifest import (
     load_extension_manifest,
     parse_extension_manifest,
 )
+from .doctor import (
+    ExtensionDoctorIssue,
+    ExtensionDoctorReport,
+    ExtensionDoctorResult,
+    doctor_extension,
+    doctor_snapshot,
+)
 from .registry import (
     ExtensionContributionRecord,
     ExtensionLoadErrorRecord,
@@ -27,6 +34,9 @@ __all__ = [
     "ExtensionCompatibility",
     "ExtensionContributionRecord",
     "ExtensionContributionPaths",
+    "ExtensionDoctorIssue",
+    "ExtensionDoctorReport",
+    "ExtensionDoctorResult",
     "ExtensionLoadErrorRecord",
     "ExtensionManifest",
     "ExtensionManifestError",
@@ -35,6 +45,8 @@ __all__ = [
     "ExtensionRecord",
     "ExtensionRegistry",
     "ExtensionRegistrySnapshot",
+    "doctor_extension",
+    "doctor_snapshot",
     "extension_registry",
     "load_extension_manifest",
     "parse_extension_manifest",

@@ -25,13 +25,13 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
 - Tool execution with visible feedback in the guardian workspace
-- **17 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
+- **17 auto-discovered native tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md skills
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
 - **Memory consolidation** — Background extraction of facts/preferences/decisions after each conversation
 - **Hierarchical priorities/goals system** — Vision → Annual → Quarterly → Monthly → Weekly → Daily, with a priorities UI
 - **Onboarding flow** — Specialized agent for first-time users, skip/restart controls, welcome message
-- **Plugin system** — Auto-discovery of tools from `src/tools/`, tool registry, and workspace-facing capability surfaces
+- **Extension surfaces** — Auto-discovery of bundled native tools from `src/tools/`, tool registry, SKILL.md skills, and workspace-facing capability surfaces
 - **Sandboxed execution** — snekbox Docker sidecar for shell commands, Playwright for browser
 - Guardian workspace with draggable panes, approvals, activity ledger, live trace, and operator surfaces
 - Multi-model support via OpenRouter/LiteLLM
@@ -96,7 +96,7 @@ These were gaps in the original analysis that have since been implemented:
 | **Sandboxed execution** | No sandboxing | snekbox Docker sidecar (Phase 2) |
 | **Browser automation** | DuckDuckGo text search only | Playwright with headless Chromium (Phase 2) |
 | **Shell command execution** | No shell tool | snekbox-based sandboxed execution (Phase 2) |
-| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (17 built-in tool capabilities) + MCP integrations + SKILL.md plugins |
+| **Extension surfaces** | 4 hardcoded tools | Auto-discovery from `src/tools/` (17 built-in native tool capabilities) + MCP integrations + SKILL.md skills |
 | **Proactive heartbeat** | No scheduler or reasoning engine | APScheduler with 9 jobs: strategist tick, daily briefing, evening review, memory consolidation, goal check, calendar scan, activity digest, weekly activity review, screen cleanup |
 | **Multi-agent / subagents** | Single agent (+ onboarding agent) | Recursive delegation with orchestrator + domain specialists behind feature flag (Phase 4) |
 | **Configuration UI** | No settings UI | Settings panel with interruption mode toggle, SKILL.md management, MCP server management (Phase 3.5) |
@@ -117,7 +117,7 @@ These were gaps in the original analysis that have since been implemented:
 5. ~~**Shell execution tool** — With sandboxing/allowlists~~
 6. ~~**Browser automation tool** — Playwright-based, huge capability unlock~~
 7. **Media support** — Image send/receive in chat
-8. ~~**Plugin/skill system** — User-installable tools without backend code changes~~
+8. ~~**Extension surfaces** — Built-in native tools plus installable MCP servers and SKILL.md skills~~
 
 ### Phase 3 — Operational Maturity
 

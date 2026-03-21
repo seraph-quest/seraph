@@ -1,4 +1,4 @@
-"""Tests for SKILL.md plugin system (loader, manager, API)."""
+"""Tests for the SKILL.md skill system (loader, manager, API)."""
 
 import json
 import os

@@ -7,7 +7,7 @@
 ## Paired Research
 
 - primary design doc: [08. Ecosystem And Delegation](/research/ecosystem-and-delegation)
-- detailed strategy: [12. Plugin System And MCP Strategy](/research/plugin-system-and-mcp-strategy)
+- detailed strategy: [12. Extension Platform And MCP Strategy](/research/plugin-system-and-mcp-strategy)
 
 ## Shipped On `develop`
 

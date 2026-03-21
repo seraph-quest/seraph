@@ -42,7 +42,7 @@ title: Development Status
 - [x] Shell execution foundation
 - [x] Browser automation foundation
 - [x] MCP integration and runtime-managed server configuration
-- [x] Auto-discovered built-in tools and plugin loading
+- [x] Auto-discovered built-in native tools and `SKILL.md` skill loading
 - [x] Visible tool-execution streaming in chat
 
 ### Runtime and observability

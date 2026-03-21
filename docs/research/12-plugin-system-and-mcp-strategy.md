@@ -1,4 +1,4 @@
-# 12. Plugin System And MCP Strategy
+# 12. Extension Platform And MCP Strategy
 
 ## Goal
 
@@ -6,7 +6,7 @@ Define a Seraph extension model that compounds capability without turning the pr
 
 This document answers:
 
-- whether Seraph should build a real plugin system
+- whether Seraph should build a real extension platform
 - what should become an extension versus stay core
 - how MCP should fit into the architecture
 - whether Seraph should build a non-MCP alternative
@@ -59,7 +59,7 @@ The strongest product decision is:
 │Declarative│ │MCP Connectors │     │Managed       │       │Trusted Code  │
 │Extensions │ │               │     │Connectors    │       │Plugins       │
 ├───────────┤ ├───────────────┤     ├──────────────┤       ├──────────────┤
-│skills     │ │MCP servers    │     │Slack         │       │native tools  │
+│skills     │ │MCP servers    │     │Slack         │       │signed tools  │
 │workflows  │ │resources      │     │Jira          │       │deep runtime  │
 │runbooks   │ │prompts/tools  │     │GitHub        │       │extensions    │
 │starter    │ │stdio/http     │     │Google        │       │later only    │
@@ -88,16 +88,16 @@ Seraph already has multiple extension seams, but they are not unified under one 
   - `backend/src/api/catalog.py`
   - `backend/src/api/capabilities.py`
 
-### Existing internal code plugin surface
+### Existing bundled native-tool discovery surface
 
 Seraph also has repo-local Python tool discovery:
 
-- `backend/src/plugins/loader.py`
-- `backend/src/plugins/registry.py`
+- `backend/src/native_tools/loader.py`
+- `backend/src/native_tools/registry.py`
 
 Important nuance:
 
-- this is not a general plugin system
+- this is not a general arbitrary-code plugin system
 - it only auto-discovers trusted, bundled Python tools in `backend/src/tools`
 - it does not install or sandbox third-party code
 
@@ -639,6 +639,10 @@ Rule of thumb:
 
 ## Recommended Execution Plan
 
+Canonical slice ownership lives in `docs/implementation/00-master-roadmap.md`.
+This section groups the same transition into phases so the architectural logic
+stays readable without duplicating a competing queue.
+
 ## Phase 1: Clarify today's architecture
 
 Goal:
@@ -651,10 +655,12 @@ Work:
 - document current extension types explicitly in API and docs
 - define the extension manifest schema
 
-PR slices:
+Queue slices:
 
 1. `extension-model-terminology-v1`
 2. `extension-manifest-schema-v1`
+3. `extension-registry-and-loader-v1`
+4. `extension-validation-and-doctor-v1`
 
 ## Phase 2: Package the declarative surfaces
 
@@ -668,11 +674,16 @@ Work:
 - make bundled defaults ship as real extension packages
 - support local install/update/remove for capability packs
 
-PR slices:
+Queue slices:
 
-3. `capability-packaging-v1`
-4. `bundled-capability-packs-v1`
-5. `extension-lifecycle-ui-v1`
+5. `extension-package-layout-v1`
+6. `extension-scaffold-tools-v1`
+7. `extension-authoring-docs-v1`
+8. `example-capability-pack-v1`
+9. `capability-packaging-skills-v1`
+10. `capability-packaging-workflows-v1`
+11. `capability-packaging-runbooks-and-starter-packs-v1`
+12. `bundled-capability-packs-v1`
 
 ## Phase 3: Normalize connector surfaces
 
@@ -687,11 +698,14 @@ Work:
 - add managed connector abstraction for first-party integrations
 - keep the same cockpit lifecycle for both
 
-PR slices:
+Queue slices:
 
-6. `connector-manifest-and-health-v1`
-7. `mcp-package-and-install-flow-v1`
-8. `managed-connectors-v1`
+13. `extension-lifecycle-api-v1`
+14. `extension-studio-manifest-awareness-v1`
+15. `extension-lifecycle-ui-v1`
+16. `connector-manifest-and-health-v1`
+17. `mcp-packaging-and-install-flow-v1`
+18. `managed-connectors-v1`
 
 ## Phase 4: Extend input/output reach cleanly
 
@@ -705,10 +719,14 @@ Work:
 - delivery/channel adapters
 - workspace/surface adapters
 
-PR slices:
+Queue slices:
 
-9. `observer-source-extensions-v1`
-10. `channel-adapter-extensions-v1`
+19. `observer-source-extensions-v1`
+20. `channel-adapter-extensions-v1`
+21. `extension-permissions-and-approvals-v1`
+22. `extension-audit-and-activity-v1`
+23. `extension-versioning-and-update-flow-v1`
+24. `legacy-loader-cleanup-v1`
 
 ## Phase 5: Reassess trusted code plugins
 
@@ -721,9 +739,9 @@ Work:
 - only after phases 1-4 prove insufficient
 - if needed, introduce signed or explicitly trusted code plugins with strong policy gates
 
-PR slice:
+Queue slice:
 
-11. `trusted-code-plugins-rfc-v1`
+25. `trusted-code-plugins-rfc-v1`
 
 ## Product recommendation
 

@@ -24,7 +24,7 @@ from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
 from src.observer.manager import context_manager
-from src.plugins.registry import TOOL_METADATA, get_tool_metadata
+from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
 from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import (

@@ -13,7 +13,7 @@ from typing import Any
 from smolagents import Tool
 
 from src.approval.repository import fingerprint_tool_call
-from src.plugins.registry import TOOL_METADATA
+from src.native_tools.registry import TOOL_METADATA
 from src.workflows.loader import Workflow, scan_workflows
 
 logger = logging.getLogger(__name__)

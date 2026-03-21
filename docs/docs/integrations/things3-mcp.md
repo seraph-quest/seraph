@@ -196,7 +196,7 @@ All 22 tools from things-mcp are exposed to the agent:
 | `src/tools/mcp_manager.py` | `MCPManager` — connects via `smolagents.MCPClient`, exposes `get_tools()` |
 | `src/app.py` | Connects MCP in FastAPI lifespan (startup/shutdown) |
 | `src/agent/factory.py` | Merges `discover_tools()` + `mcp_manager.get_tools()` |
-| `src/plugins/registry.py` | Village animation metadata for all 22 Things3 tools |
+| `src/native_tools/registry.py` | Native-tool metadata for the built-in Things3-adjacent tool surface |
 
 ### Frontend
 

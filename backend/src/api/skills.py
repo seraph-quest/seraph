@@ -1,4 +1,4 @@
-"""Skills API — list, toggle, reload, validate, and save SKILL.md plugins."""
+"""Skills API — list, toggle, reload, validate, and save SKILL.md skills."""
 
 import os
 import re

@@ -10,7 +10,7 @@ sidebar_position: 6
 
 **Inspiration**: [IronClaw](https://github.com/nearai/ironclaw) (NEAR AI's OpenClaw-in-Rust rewrite — 9-layer defense-in-depth with WASM sandboxing, capability manifests, credential injection, leak detection, prompt sanitization, and content policy).
 
-**Core principle**: Security and extensibility are the same problem. Without input validation, you can't load untrusted skill files. Without leak detection, you can't use untrusted MCP servers. Without capability permissions, you can't run community plugins. Each wave below adds security layers that unlock the next set of extensibility features.
+**Core principle**: Security and extensibility are the same problem. Without input validation, you can't load untrusted skill files. Without leak detection, you can't use untrusted MCP servers. Without capability permissions, you can't enable future third-party extensions or trusted-code plugins. Each wave below adds security layers that unlock the next set of extensibility features.
 
 ---
 

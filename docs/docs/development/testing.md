@@ -158,7 +158,7 @@ Frontend tests use [Vitest](https://vitest.dev/) with jsdom, configured in `vite
 | `test_screen_observation.py` | 14 | Screen observation repository — create, backfill, summaries, cleanup, and runtime audit logging |
 | `test_observer_time.py` | 14 | Time observer source — time-of-day, working hours, timezone, runtime audit logging |
 | `test_onboarding_edge_cases.py` | 2 | Onboarding edge cases — skip, restart |
-| `test_plugin_loader.py` | 5 | Tool auto-discovery — scan, expected tools, no duplicates, caching, reload |
+| `test_native_tools_loader.py` | 6 | Native tool auto-discovery + legacy alias compatibility — scan, expected tools, no duplicates, caching, reload, shared module state |
 | `test_profile.py` | 7 | User profile + onboarding — get/create, mark/reset complete, HTTP endpoints |
 | `test_scheduler.py` | 12 | Scheduler engine — job registration, start/stop, job execution |
 | `test_seed_config.py` | 7 | Seed config — default MCP servers, default skills, first-run seeding |

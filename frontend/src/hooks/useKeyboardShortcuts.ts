@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { getDefaultPaneVisibility } from "../components/cockpit/layouts";
 import { useChatStore } from "../stores/chatStore";
 import { useCockpitLayoutStore } from "../stores/cockpitLayoutStore";
 import { usePanelLayoutStore } from "../stores/panelLayoutStore";
@@ -18,18 +19,24 @@ export function handleGlobalKeyboardShortcut(event: KeyboardEvent) {
     return;
   }
   if (event.shiftKey && code === "Digit1") {
+    const nextVisibility =
+      cockpitLayout.savedPaneVisibility.default ?? getDefaultPaneVisibility("default");
     cockpitLayout.setLayout("default");
-    applyCockpitLayout("default", cockpitLayout.inspectorVisible);
+    applyCockpitLayout("default", nextVisibility);
     return;
   }
   if (event.shiftKey && code === "Digit2") {
+    const nextVisibility =
+      cockpitLayout.savedPaneVisibility.focus ?? getDefaultPaneVisibility("focus");
     cockpitLayout.setLayout("focus");
-    applyCockpitLayout("focus", cockpitLayout.inspectorVisible);
+    applyCockpitLayout("focus", nextVisibility);
     return;
   }
   if (event.shiftKey && code === "Digit3") {
+    const nextVisibility =
+      cockpitLayout.savedPaneVisibility.review ?? getDefaultPaneVisibility("review");
     cockpitLayout.setLayout("review");
-    applyCockpitLayout("review", cockpitLayout.inspectorVisible);
+    applyCockpitLayout("review", nextVisibility);
     return;
   }
   if (event.shiftKey && code === "KeyI") {

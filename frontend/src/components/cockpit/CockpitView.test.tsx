@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./CockpitView";
 import { useChatStore } from "../../stores/chatStore";
+import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
+import { usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import { useQuestStore } from "../../stores/questStore";
+import { getDefaultPaneVisibility } from "./layouts";
 
 function mockResponse(data: unknown, ok = true, status = ok ? 200 : 500) {
   return {
@@ -37,6 +40,19 @@ describe("CockpitView", () => {
       goalTree: [],
       dashboard: { domains: {}, active_count: 0, completed_count: 0, total_count: 0 },
       loading: false,
+    });
+    useCockpitLayoutStore.setState({
+      activeLayoutId: "default",
+      inspectorVisible: true,
+      paneVisibility: getDefaultPaneVisibility("default"),
+      savedPaneVisibility: {
+        default: getDefaultPaneVisibility("default"),
+      },
+    });
+    usePanelLayoutStore.setState({
+      panels: {
+        ...usePanelLayoutStore.getState().panels,
+      },
     });
   });
 
@@ -1912,6 +1928,154 @@ describe("CockpitView", () => {
     expect(screen.getByRole("button", { name: "Working" })).toBeDisabled();
     expect(screen.getAllByText(/fresh thread/i).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Start fresh" }).length).toBeGreaterThan(0);
+  });
+
+  it("lets operators hide and restore panes from the windows menu", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    const menu = screen.getByText("Show all").closest(".cockpit-windows-menu") as HTMLElement;
+    const activityToggle = within(menu).getByText("Activity Ledger").closest("button") as HTMLButtonElement;
+    fireEvent.click(activityToggle);
+
+    await waitFor(() =>
+      expect(screen.queryByText("Activity ledger", { selector: ".cockpit-window-title" })).not.toBeInTheDocument(),
+    );
+
+    const reopenedMenu = screen.getByText("Show all").closest(".cockpit-windows-menu") as HTMLElement;
+    const activityRow = within(reopenedMenu).getByText("Activity Ledger").closest(".cockpit-windows-menu-row") as HTMLElement;
+    fireEvent.click(within(activityRow).getByRole("button", { name: "Focus" }));
+
+    const activityTitle = await screen.findByText("Activity ledger", { selector: ".cockpit-window-title" });
+    expect(activityTitle).toBeInTheDocument();
+    expect(activityTitle.closest(".cockpit-window")).toHaveClass("cockpit-window--active");
+  });
+
+  it("hides a pane from its window close control", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByLabelText("Hide Activity ledger"));
+
+    await waitFor(() =>
+      expect(screen.queryByText("Activity ledger", { selector: ".cockpit-window-title" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("repacking the workspace keeps manually hidden panes hidden", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByLabelText("Hide Activity ledger"));
+    await waitFor(() =>
+      expect(screen.queryByText("Activity ledger", { selector: ".cockpit-window-title" })).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset view" }));
+
+    await waitFor(() =>
+      expect(screen.queryByText("Activity ledger", { selector: ".cockpit-window-title" })).not.toBeInTheDocument(),
+    );
   });
 
   it("opens the extension studio and loads workflow validation details", async () => {

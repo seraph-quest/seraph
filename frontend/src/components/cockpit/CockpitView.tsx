@@ -20,7 +20,14 @@ import {
   type WorkflowStepRecord,
   type WorkflowTimelineEntry,
 } from "./inspector";
-import { COCKPIT_LAYOUTS, getCockpitLayout } from "./layouts";
+import {
+  COCKPIT_PANES,
+  COCKPIT_LAYOUTS,
+  CORE_PANE_IDS,
+  getCockpitLayout,
+  getDefaultPaneVisibility,
+  type CockpitPaneId,
+} from "./layouts";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 
 interface CockpitViewProps {
@@ -1303,15 +1310,17 @@ function CockpitWorkspaceWindow({
   showHint,
   minWidth,
   minHeight,
+  onClose,
   children,
 }: {
-  panelId: string;
+  panelId: CockpitPaneId;
   title: string;
   meta: string;
   hint?: string | null;
   showHint?: boolean;
   minWidth: number;
   minHeight: number;
+  onClose?: () => void;
   children: ReactNode;
 }) {
   const { panelRef, dragHandleProps, resizeHandleProps, style, isFront, bringToFront } = useDragResize(panelId, {
@@ -1328,11 +1337,27 @@ function CockpitWorkspaceWindow({
     >
       <ResizeHandles resizeHandleProps={resizeHandleProps} />
       <div className="cockpit-window-header" {...dragHandleProps}>
-        <div>
+        <div className="cockpit-window-header-main">
           <div className="cockpit-window-title">{title}</div>
           <div className="cockpit-window-meta">{meta}</div>
         </div>
-        <div className="cockpit-window-grip">drag / resize</div>
+        <div className="cockpit-window-controls">
+          {onClose ? (
+            <button
+              type="button"
+              className="cockpit-window-control cockpit-window-control--close"
+              title={`Hide ${title}`}
+              aria-label={`Hide ${title}`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onClose();
+              }}
+            >
+              x
+            </button>
+          ) : null}
+        </div>
       </div>
       {showHint && hint ? <div className="cockpit-window-hint">{hint}</div> : null}
       <div className="cockpit-window-body">{children}</div>
@@ -1390,12 +1415,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const studioSaveRequestRef = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
+  const [windowsMenuOpen, setWindowsMenuOpen] = useState(false);
+  const windowsMenuRef = useRef<HTMLDivElement | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
-  const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
+  const paneVisibility = useCockpitLayoutStore((s) => s.paneVisibility);
+  const savedPaneVisibility = useCockpitLayoutStore((s) => s.savedPaneVisibility);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
+  const setPaneVisible = useCockpitLayoutStore((s) => s.setPaneVisible);
+  const togglePaneVisible = useCockpitLayoutStore((s) => s.togglePaneVisible);
+  const savePaneVisibility = useCockpitLayoutStore((s) => s.savePaneVisibility);
+  const showAllPanes = useCockpitLayoutStore((s) => s.showAllPanes);
+  const hideNonCorePanes = useCockpitLayoutStore((s) => s.hideNonCorePanes);
   const applyCockpitLayout = usePanelLayoutStore((s) => s.applyCockpitLayout);
   const saveCockpitLayout = usePanelLayoutStore((s) => s.saveCockpitLayout);
   const resetCockpitLayout = usePanelLayoutStore((s) => s.resetCockpitLayout);
+  const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
+  const syncCockpitPaneStack = usePanelLayoutStore((s) => s.syncCockpitPaneStack);
+  const previousLayoutRef = useRef(activeLayoutId);
+  const previousPaneVisibilityRef = useRef(paneVisibility);
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -1421,21 +1458,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const refreshGoals = useQuestStore((s) => s.refresh);
 
   const handleResetWorkspace = useCallback(() => {
-    resetCockpitLayout(activeLayoutId, inspectorVisible);
-  }, [activeLayoutId, inspectorVisible, resetCockpitLayout]);
+    resetCockpitLayout(activeLayoutId, paneVisibility);
+    setWindowsMenuOpen(false);
+  }, [activeLayoutId, paneVisibility, resetCockpitLayout]);
 
   const handleSaveWorkspace = useCallback(() => {
+    savePaneVisibility(activeLayoutId);
     saveCockpitLayout(activeLayoutId);
     setOperatorStatus(`Saved ${getCockpitLayout(activeLayoutId).label} workspace`);
-  }, [activeLayoutId, saveCockpitLayout]);
+    setWindowsMenuOpen(false);
+  }, [activeLayoutId, saveCockpitLayout, savePaneVisibility]);
 
   const handleSelectLayout = useCallback(
     (layoutId: (typeof COCKPIT_LAYOUTS)[keyof typeof COCKPIT_LAYOUTS]["id"]) => {
+      const nextVisibility = savedPaneVisibility[layoutId] ?? getDefaultPaneVisibility(layoutId);
       setLayout(layoutId);
-      applyCockpitLayout(layoutId, inspectorVisible);
+      applyCockpitLayout(layoutId, nextVisibility);
+      setWindowsMenuOpen(false);
     },
-    [applyCockpitLayout, inspectorVisible, setLayout],
+    [applyCockpitLayout, savedPaneVisibility, setLayout],
   );
+
+  const focusPane = useCallback(
+    (paneId: CockpitPaneId) => {
+      if (!paneVisibility[paneId]) {
+        setPaneVisible(paneId, true);
+        window.setTimeout(() => bringToFront(paneId), 0);
+      } else {
+        bringToFront(paneId);
+      }
+      setWindowsMenuOpen(false);
+    },
+    [bringToFront, paneVisibility, setPaneVisible],
+  );
+
+  const closeWindowPane = useCallback(
+    (paneId: CockpitPaneId) => {
+      setPaneVisible(paneId, false);
+    },
+    [setPaneVisible],
+  );
+
+  const panesByGroup = useMemo(() => {
+    const grouped = new Map<string, typeof COCKPIT_PANES>();
+    for (const pane of COCKPIT_PANES) {
+      const current = grouped.get(pane.group) ?? [];
+      current.push(pane);
+      grouped.set(pane.group, current);
+    }
+    return Array.from(grouped.entries());
+  }, []);
 
   useEffect(() => {
     void restoreLastSession();
@@ -1643,8 +1715,54 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return () => window.removeEventListener("keydown", handleEscape);
   }, [paletteOpen]);
 
+  useEffect(() => {
+    if (!windowsMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!windowsMenuRef.current?.contains(event.target as Node)) {
+        setWindowsMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [windowsMenuOpen]);
+
+  useEffect(() => {
+    syncCockpitPaneStack(paneVisibility);
+    const sameLayout = previousLayoutRef.current === activeLayoutId;
+    const visibilityChanged = COCKPIT_PANES.some(
+      (pane) => previousPaneVisibilityRef.current[pane.id] !== paneVisibility[pane.id],
+    );
+    if (sameLayout && visibilityChanged) {
+      resetCockpitLayout(activeLayoutId, paneVisibility);
+    }
+    previousLayoutRef.current = activeLayoutId;
+    previousPaneVisibilityRef.current = paneVisibility;
+  }, [activeLayoutId, paneVisibility, resetCockpitLayout, syncCockpitPaneStack]);
+
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
+  const visibleSections = useMemo(
+    () => ({
+      rail:
+        paneVisibility.sessions_pane
+        || paneVisibility.goals_pane
+        || paneVisibility.outputs_pane
+        || paneVisibility.approvals_pane,
+      guardianState: paneVisibility.guardian_state_pane,
+      timeline: paneVisibility.operator_timeline_pane,
+      workflows: paneVisibility.workflows_pane,
+      interventions: paneVisibility.interventions_pane,
+      audit: paneVisibility.audit_pane,
+      trace: paneVisibility.trace_pane,
+      inspector: paneVisibility.inspector_pane,
+      conversation:
+        paneVisibility.presence_pane
+        || paneVisibility.conversation_pane
+        || paneVisibility.desktop_shell_pane
+        || paneVisibility.operator_surface_pane,
+    }),
+    [paneVisibility],
+  );
   const recentConversation = messages.slice(-18);
   const latestResponse = useMemo(
     () =>
@@ -3352,6 +3470,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             >
               Settings
             </button>
+            <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
+              <button
+                className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
+                onClick={() => setWindowsMenuOpen((current) => !current)}
+                title="Show or hide workspace windows"
+              >
+                Windows
+              </button>
+              {windowsMenuOpen && (
+                <div className="cockpit-windows-menu">
+                  <div className="cockpit-windows-menu-toolbar">
+                    <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
+                      Show all
+                    </button>
+                    <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
+                      Hide non-core
+                    </button>
+                    <button className="cockpit-windows-menu-action" onClick={handleResetWorkspace}>
+                      Reset workspace
+                    </button>
+                  </div>
+                  {panesByGroup.map(([group, panes]) => (
+                    <div key={group} className="cockpit-windows-menu-group">
+                      <div className="cockpit-windows-menu-group-title">{group}</div>
+                      {panes.map((pane) => {
+                        const isCorePane = CORE_PANE_IDS.includes(pane.id);
+                        return (
+                          <div key={pane.id} className="cockpit-windows-menu-row">
+                            <button
+                              className={`cockpit-windows-menu-toggle ${paneVisibility[pane.id] ? "active" : ""}`}
+                              onClick={() => togglePaneVisible(pane.id)}
+                            >
+                              <span className="cockpit-windows-menu-check">{paneVisibility[pane.id] ? "■" : "□"}</span>
+                              <span>{pane.label}</span>
+                              {isCorePane ? <span className="cockpit-windows-menu-core">core</span> : null}
+                            </button>
+                            <button
+                              className="cockpit-windows-menu-focus"
+                              onClick={() => focusPane(pane.id)}
+                            >
+                              Focus
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="cockpit-layout-row">
@@ -3388,147 +3556,158 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       )}
 
       <div className="cockpit-workspace">
-        {activeLayout.sections.rail && (
+        {visibleSections.rail && (
           <>
-            <CockpitWorkspaceWindow
-              panelId="sessions_pane"
-              title="Sessions"
-              meta={activeSession ? activeSession.title : "fresh thread"}
-              hint={COCKPIT_WINDOW_HINTS.sessions}
-              showHint={cockpitHintsEnabled}
-              minWidth={260}
-              minHeight={180}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                <div className="cockpit-session-helper">
-                  <div className="cockpit-key">thread control</div>
-                  <div className="cockpit-session-helper-row">
-                    <div className="cockpit-session-helper-text">
-                      Start fresh opens a blank thread and keeps earlier sessions in the list. Seraph names it after the first completed reply.
+            {paneVisibility.sessions_pane && (
+              <CockpitWorkspaceWindow
+                panelId="sessions_pane"
+                title="Sessions"
+                meta={activeSession ? activeSession.title : "fresh thread"}
+                hint={COCKPIT_WINDOW_HINTS.sessions}
+                showHint={cockpitHintsEnabled}
+                minWidth={260}
+                minHeight={180}
+                onClose={() => closeWindowPane("sessions_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  <div className="cockpit-session-helper">
+                    <div className="cockpit-key">thread control</div>
+                    <div className="cockpit-session-helper-row">
+                      <div className="cockpit-session-helper-text">
+                        Start fresh opens a blank thread and keeps earlier sessions in the list. Seraph names it after the first completed reply.
+                      </div>
+                      <button
+                        type="button"
+                        className="cockpit-feedback-button"
+                        onClick={() => newSession()}
+                      >
+                        Start fresh
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      className="cockpit-feedback-button"
-                      onClick={() => newSession()}
-                    >
-                      Start fresh
-                    </button>
                   </div>
-                </div>
-                <div className="cockpit-list">
-                  {sessions.slice(0, 8).map((session) => (
-                    <button
-                      key={session.id}
-                      className={`cockpit-session ${session.id === sessionId ? "active" : ""}`}
-                      onClick={() => {
-                        clearSessionContinuity(session.id);
-                        switchSession(session.id, "live");
-                      }}
-                    >
-                      <span className="cockpit-session-title">
-                        {session.title}
-                        {sessionContinuity[session.id] && (
-                          <span className="cockpit-session-badge">
-                            {sessionContinuity[session.id] === "new_activity"
-                              ? "new activity"
-                              : sessionContinuity[session.id]}
-                          </span>
-                        )}
-                      </span>
-                      <span className="cockpit-session-meta">{formatAge(session.updated_at)}</span>
-                    </button>
-                  ))}
-                  {sessions.length === 0 && (
-                    <div className="cockpit-empty">No saved sessions yet.</div>
-                  )}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+                  <div className="cockpit-list">
+                    {sessions.slice(0, 8).map((session) => (
+                      <button
+                        key={session.id}
+                        className={`cockpit-session ${session.id === sessionId ? "active" : ""}`}
+                        onClick={() => {
+                          clearSessionContinuity(session.id);
+                          switchSession(session.id, "live");
+                        }}
+                      >
+                        <span className="cockpit-session-title">
+                          {session.title}
+                          {sessionContinuity[session.id] && (
+                            <span className="cockpit-session-badge">
+                              {sessionContinuity[session.id] === "new_activity"
+                                ? "new activity"
+                                : sessionContinuity[session.id]}
+                            </span>
+                          )}
+                        </span>
+                        <span className="cockpit-session-meta">{formatAge(session.updated_at)}</span>
+                      </button>
+                    ))}
+                    {sessions.length === 0 && (
+                      <div className="cockpit-empty">No saved sessions yet.</div>
+                    )}
+                  </div>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="goals_pane"
-              title="Goals"
-              meta={loadingGoals ? "refreshing" : `${dashboard?.active_count ?? 0} active`}
-              hint={COCKPIT_WINDOW_HINTS.goals}
-              showHint={cockpitHintsEnabled}
-              minWidth={280}
-              minHeight={220}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                {dashboard ? (
-                  <div className="cockpit-domain-stack">
-                    {Object.entries(dashboard.domains).map(([domain, stat]) => (
-                      <div key={domain} className="cockpit-domain-row">
-                        <div className="cockpit-domain-label">{domain.replace("_", " ")}</div>
-                        <div className="cockpit-domain-bar">
-                          <div
-                            className="cockpit-domain-fill"
-                            style={{ width: `${stat.progress}%` }}
-                          />
+            {paneVisibility.goals_pane && (
+              <CockpitWorkspaceWindow
+                panelId="goals_pane"
+                title="Goals"
+                meta={loadingGoals ? "refreshing" : `${dashboard?.active_count ?? 0} active`}
+                hint={COCKPIT_WINDOW_HINTS.goals}
+                showHint={cockpitHintsEnabled}
+                minWidth={280}
+                minHeight={220}
+                onClose={() => closeWindowPane("goals_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  {dashboard ? (
+                    <div className="cockpit-domain-stack">
+                      {Object.entries(dashboard.domains).map(([domain, stat]) => (
+                        <div key={domain} className="cockpit-domain-row">
+                          <div className="cockpit-domain-label">{domain.replace("_", " ")}</div>
+                          <div className="cockpit-domain-bar">
+                            <div
+                              className="cockpit-domain-fill"
+                              style={{ width: `${stat.progress}%` }}
+                            />
+                          </div>
+                          <div className="cockpit-domain-value">{stat.progress}%</div>
                         </div>
-                        <div className="cockpit-domain-value">{stat.progress}%</div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="cockpit-empty">Goal dashboard unavailable.</div>
+                  )}
+                  <div className="cockpit-sublist">
+                    {topGoals.map((goal) => (
+                      <div key={goal} className="cockpit-sublist-item">
+                        {goal}
                       </div>
                     ))}
+                    {topGoals.length === 0 && <div className="cockpit-empty">No active goals yet.</div>}
                   </div>
-                ) : (
-                  <div className="cockpit-empty">Goal dashboard unavailable.</div>
-                )}
-                <div className="cockpit-sublist">
-                  {topGoals.map((goal) => (
-                    <div key={goal} className="cockpit-sublist-item">
-                      {goal}
-                    </div>
-                  ))}
-                  {topGoals.length === 0 && <div className="cockpit-empty">No active goals yet.</div>}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="outputs_pane"
-              title="Recent outputs"
-              meta={`${artifacts.length} files`}
-              hint={COCKPIT_WINDOW_HINTS.outputs}
-              showHint={cockpitHintsEnabled}
-              minWidth={280}
-              minHeight={180}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                <div className="cockpit-sublist">
-                  {artifacts.map((artifact) => (
-                    <button
-                      key={artifact.id}
-                      className={`cockpit-sublist-button ${
-                        selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
-                          ? "active"
-                          : ""
-                      }`}
-                      onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
-                    >
-                      <span>{artifact.filePath}</span>
-                      <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
-                    </button>
-                  ))}
-                  {artifacts.length === 0 && (
-                    <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
-                  )}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+            {paneVisibility.outputs_pane && (
+              <CockpitWorkspaceWindow
+                panelId="outputs_pane"
+                title="Recent outputs"
+                meta={`${artifacts.length} files`}
+                hint={COCKPIT_WINDOW_HINTS.outputs}
+                showHint={cockpitHintsEnabled}
+                minWidth={280}
+                minHeight={180}
+                onClose={() => closeWindowPane("outputs_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  <div className="cockpit-sublist">
+                    {artifacts.map((artifact) => (
+                      <button
+                        key={artifact.id}
+                        className={`cockpit-sublist-button ${
+                          selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
+                            ? "active"
+                            : ""
+                        }`}
+                        onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                      >
+                        <span>{artifact.filePath}</span>
+                        <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
+                      </button>
+                    ))}
+                    {artifacts.length === 0 && (
+                      <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
+                    )}
+                  </div>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="approvals_pane"
-              title="Pending approvals"
-              meta={`${pendingApprovals.length} waiting`}
-              hint={COCKPIT_WINDOW_HINTS.approvals}
-              showHint={cockpitHintsEnabled}
-              minWidth={300}
-              minHeight={220}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                <div className="cockpit-list">
-                  {pendingApprovals.map((approval) => (
-                    <div key={approval.id} className="cockpit-row">
+            {paneVisibility.approvals_pane && (
+              <CockpitWorkspaceWindow
+                panelId="approvals_pane"
+                title="Pending approvals"
+                meta={`${pendingApprovals.length} waiting`}
+                hint={COCKPIT_WINDOW_HINTS.approvals}
+                showHint={cockpitHintsEnabled}
+                minWidth={300}
+                minHeight={220}
+                onClose={() => closeWindowPane("approvals_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  <div className="cockpit-list">
+                    {pendingApprovals.map((approval) => (
+                      <div key={approval.id} className="cockpit-row">
                       <button
                         className={`cockpit-row-button ${
                           selectedInspector?.kind === "approval" && selectedInspector.approval.id === approval.id
@@ -3589,18 +3768,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           {approvalState[approval.id] ?? "pending"}
                         </span>
                       </div>
-                    </div>
-                  ))}
-                  {pendingApprovals.length === 0 && (
-                    <div className="cockpit-empty">No pending approvals.</div>
-                  )}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+                      </div>
+                    ))}
+                    {pendingApprovals.length === 0 && (
+                      <div className="cockpit-empty">No pending approvals.</div>
+                    )}
+                  </div>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
           </>
         )}
 
-        {(latestResponse || isAgentBusy) && (
+        {paneVisibility.response_pane && (latestResponse || isAgentBusy) && (
           <CockpitWorkspaceWindow
             panelId="response_pane"
             title="Latest response"
@@ -3613,6 +3793,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={420}
             minHeight={160}
+            onClose={() => closeWindowPane("response_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded cockpit-panel--response">
               {isAgentBusy && (
@@ -3642,7 +3823,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.guardianState && (
+        {visibleSections.guardianState && (
           <CockpitWorkspaceWindow
             panelId="guardian_state_pane"
             title="Guardian state"
@@ -3651,6 +3832,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={420}
             minHeight={260}
+            onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-state-grid">
@@ -3700,7 +3882,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.timeline && (
+        {visibleSections.timeline && (
           <CockpitWorkspaceWindow
             panelId="operator_timeline_pane"
             title="Activity ledger"
@@ -3709,6 +3891,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={360}
             minHeight={220}
+            onClose={() => closeWindowPane("operator_timeline_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-ledger-toolbar">
@@ -3847,7 +4030,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.workflows && (
+        {visibleSections.workflows && (
           <CockpitWorkspaceWindow
             panelId="workflows_pane"
             title="Workflow timeline"
@@ -3856,6 +4039,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={380}
             minHeight={220}
+            onClose={() => closeWindowPane("workflows_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -3992,7 +4176,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.interventions && (
+        {visibleSections.interventions && (
           <CockpitWorkspaceWindow
             panelId="interventions_pane"
             title="Interventions"
@@ -4001,6 +4185,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={380}
             minHeight={220}
+            onClose={() => closeWindowPane("interventions_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -4065,7 +4250,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.audit && (
+        {visibleSections.audit && (
           <CockpitWorkspaceWindow
             panelId="audit_pane"
             title="Audit surface"
@@ -4074,6 +4259,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={340}
             minHeight={220}
+            onClose={() => closeWindowPane("audit_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -4105,7 +4291,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.trace && (
+        {visibleSections.trace && (
           <CockpitWorkspaceWindow
             panelId="trace_pane"
             title="Live trace"
@@ -4114,6 +4300,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={320}
             minHeight={180}
+            onClose={() => closeWindowPane("trace_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -4142,7 +4329,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.inspector && inspectorVisible && (
+        {visibleSections.inspector && (
           <CockpitWorkspaceWindow
             panelId="inspector_pane"
             title="Operations inspector"
@@ -4151,6 +4338,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             showHint={cockpitHintsEnabled}
             minWidth={480}
             minHeight={240}
+            onClose={() => closeWindowPane("inspector_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-feed">{renderInspector()}</div>
@@ -4158,29 +4346,34 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.conversation && (
+        {visibleSections.conversation && (
           <>
-            <CockpitWorkspaceWindow
-              panelId="presence_pane"
-              title="Seraph presence"
-              meta={connectionStatus === "connected" ? "runtime linked" : connectionLabel}
-              hint={COCKPIT_WINDOW_HINTS.presence}
-              showHint={false}
-              minWidth={368}
-              minHeight={256}
-            >
-              <SeraphPresencePane snapshot={seraphPresenceSnapshot} />
-            </CockpitWorkspaceWindow>
+            {paneVisibility.presence_pane && (
+              <CockpitWorkspaceWindow
+                panelId="presence_pane"
+                title="Seraph presence"
+                meta={connectionStatus === "connected" ? "runtime linked" : connectionLabel}
+                hint={COCKPIT_WINDOW_HINTS.presence}
+                showHint={false}
+                minWidth={368}
+                minHeight={256}
+                onClose={() => closeWindowPane("presence_pane")}
+              >
+                <SeraphPresencePane snapshot={seraphPresenceSnapshot} />
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="conversation_pane"
-              title="Conversation"
-              meta={activeSession?.title ?? "fresh thread · saved after first reply"}
-              hint={COCKPIT_WINDOW_HINTS.conversation}
-              showHint={cockpitHintsEnabled}
-              minWidth={360}
-              minHeight={260}
-            >
+            {paneVisibility.conversation_pane && (
+              <CockpitWorkspaceWindow
+                panelId="conversation_pane"
+                title="Conversation"
+                meta={activeSession?.title ?? "fresh thread · saved after first reply"}
+                hint={COCKPIT_WINDOW_HINTS.conversation}
+                showHint={cockpitHintsEnabled}
+                minWidth={360}
+                minHeight={260}
+                onClose={() => closeWindowPane("conversation_pane")}
+              >
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
@@ -4215,17 +4408,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
               </section>
-            </CockpitWorkspaceWindow>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="desktop_shell_pane"
-              title="Desktop shell"
-              meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
-              hint={COCKPIT_WINDOW_HINTS.desktopShell}
-              showHint={cockpitHintsEnabled}
-              minWidth={340}
-              minHeight={220}
-            >
+            {paneVisibility.desktop_shell_pane && (
+              <CockpitWorkspaceWindow
+                panelId="desktop_shell_pane"
+                title="Desktop shell"
+                meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
+                hint={COCKPIT_WINDOW_HINTS.desktopShell}
+                showHint={cockpitHintsEnabled}
+                minWidth={340}
+                minHeight={220}
+                onClose={() => closeWindowPane("desktop_shell_pane")}
+              >
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
                   <div className="cockpit-sublist-item">
@@ -4362,18 +4558,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
               </section>
-            </CockpitWorkspaceWindow>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="operator_surface_pane"
-              title="Operator terminal"
-              meta={`tool ${toolPolicyMode} · mcp ${mcpPolicyMode}`}
-              hint={COCKPIT_WINDOW_HINTS.operatorTerminal}
-              showHint={cockpitHintsEnabled}
-              minWidth={360}
-              minHeight={260}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
+            {paneVisibility.operator_surface_pane && (
+              <CockpitWorkspaceWindow
+                panelId="operator_surface_pane"
+                title="Operator terminal"
+                meta={`tool ${toolPolicyMode} · mcp ${mcpPolicyMode}`}
+                hint={COCKPIT_WINDOW_HINTS.operatorTerminal}
+                showHint={cockpitHintsEnabled}
+                minWidth={360}
+                minHeight={260}
+                onClose={() => closeWindowPane("operator_surface_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-state-grid">
                   <div>
                     <div className="cockpit-key">approval</div>
@@ -5155,7 +5354,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
               </section>
-            </CockpitWorkspaceWindow>
+              </CockpitWorkspaceWindow>
+            )}
           </>
         )}
       </div>

@@ -1,6 +1,11 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
-import type { CockpitLayoutId } from "../components/cockpit/layouts";
+import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
+import {
+  COCKPIT_PANE_IDS,
+  getDefaultPaneVisibility,
+  type CockpitLayoutId,
+  type CockpitPaneId,
+} from "../components/cockpit/layouts";
 import { useCockpitLayoutStore } from "./cockpitLayoutStore";
 
 export interface PanelRect {
@@ -38,24 +43,25 @@ const WORKSPACE_TOP = 124;
 const WORKSPACE_RIGHT = 16;
 const WORKSPACE_BOTTOM = 140;
 const PANEL_GRID_SIZE = 16;
-const COCKPIT_PANE_IDS = [
-  "sessions_pane",
-  "goals_pane",
-  "outputs_pane",
-  "presence_pane",
-  "approvals_pane",
-  "operator_timeline_pane",
-  "response_pane",
-  "guardian_state_pane",
-  "workflows_pane",
-  "interventions_pane",
-  "audit_pane",
-  "trace_pane",
-  "inspector_pane",
-  "conversation_pane",
-  "desktop_shell_pane",
-  "operator_surface_pane",
-] as const;
+
+const noopStorage: StateStorage = {
+  getItem: () => null,
+  setItem: () => {},
+  removeItem: () => {},
+};
+
+function getSafeBrowserStorage(): StateStorage {
+  const storage = globalThis.localStorage as Partial<StateStorage> | undefined;
+  if (
+    storage &&
+    typeof storage.getItem === "function" &&
+    typeof storage.setItem === "function" &&
+    typeof storage.removeItem === "function"
+  ) {
+    return storage as StateStorage;
+  }
+  return noopStorage;
+}
 
 interface LayoutColumn {
   weight: number;
@@ -139,13 +145,13 @@ function distributeHeights(
 
 export function getPackedCockpitPanels(
   layoutId: CockpitLayoutId,
-  inspectorVisible = true,
+  paneVisibility: Partial<Record<CockpitPaneId, boolean>> = getDefaultPaneVisibility(layoutId),
 ): Record<string, PanelRect> {
   const frame = getWorkspaceFrame();
   const columns = LAYOUT_COLUMNS[layoutId]
     .map((column) => ({
       weight: column.weight,
-      panes: column.panes.filter((id) => inspectorVisible || id !== "inspector_pane"),
+      panes: column.panes.filter((id) => paneVisibility[id as CockpitPaneId] !== false),
     }))
     .filter((column) => column.panes.length > 0);
   const columnCount = columns.length;
@@ -221,8 +227,14 @@ function defaultPanels(): Record<string, PanelRect> {
       width: 280,
       height: 340,
     },
-    ...getPackedCockpitPanels("default", true),
+    ...getPackedCockpitPanels("default", getDefaultPaneVisibility("default")),
   };
+}
+
+function visibleCockpitPaneIds(
+  paneVisibility: Partial<Record<CockpitPaneId, boolean>> = getDefaultPaneVisibility("default"),
+) {
+  return COCKPIT_PANE_IDS.filter((paneId) => paneVisibility[paneId] !== false);
 }
 
 function defaultZStack(): string[] {
@@ -257,9 +269,10 @@ interface PanelLayoutStore {
   setRect: (id: string, rect: Partial<PanelRect>) => void;
   bringToFront: (id: string) => void;
   resetPanel: (id: string) => void;
-  applyCockpitLayout: (layoutId: CockpitLayoutId, inspectorVisible?: boolean) => void;
+  applyCockpitLayout: (layoutId: CockpitLayoutId, paneVisibility?: Partial<Record<CockpitPaneId, boolean>>) => void;
   saveCockpitLayout: (layoutId: CockpitLayoutId) => void;
-  resetCockpitLayout: (layoutId: CockpitLayoutId, inspectorVisible?: boolean) => void;
+  resetCockpitLayout: (layoutId: CockpitLayoutId, paneVisibility?: Partial<Record<CockpitPaneId, boolean>>) => void;
+  syncCockpitPaneStack: (paneVisibility: Partial<Record<CockpitPaneId, boolean>>) => void;
   getZIndex: (id: string) => number;
 }
 
@@ -268,9 +281,9 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
     (set, get) => ({
       panels: defaultPanels(),
       cockpitLayouts: {
-        default: getPackedCockpitPanels("default", true),
-        focus: getPackedCockpitPanels("focus", true),
-        review: getPackedCockpitPanels("review", true),
+        default: getPackedCockpitPanels("default", getDefaultPaneVisibility("default")),
+        focus: getPackedCockpitPanels("focus", getDefaultPaneVisibility("focus")),
+        review: getPackedCockpitPanels("review", getDefaultPaneVisibility("review")),
       },
       zStack: defaultZStack(),
 
@@ -288,7 +301,10 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
             nextState.cockpitLayouts = {
               ...state.cockpitLayouts,
               [activeLayoutId]: {
-                ...(state.cockpitLayouts[activeLayoutId] ?? getPackedCockpitPanels(activeLayoutId, true)),
+                ...(state.cockpitLayouts[activeLayoutId] ?? getPackedCockpitPanels(
+                  activeLayoutId,
+                  useCockpitLayoutStore.getState().paneVisibility,
+                )),
                 [id]: nextPanel,
               },
             };
@@ -311,9 +327,9 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
           },
         })),
 
-      applyCockpitLayout: (layoutId, inspectorVisible = true) =>
+      applyCockpitLayout: (layoutId, paneVisibility = getDefaultPaneVisibility(layoutId)) =>
         set((state) => {
-          const packed = getPackedCockpitPanels(layoutId, inspectorVisible);
+          const packed = getPackedCockpitPanels(layoutId, paneVisibility);
           const saved = state.cockpitLayouts[layoutId] ?? {};
           const visiblePaneIds = Object.keys(packed);
           const resolvedPanels: Record<string, PanelRect> = { ...packed };
@@ -333,7 +349,7 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
             },
             zStack: [
               ...state.zStack.filter((id) => !COCKPIT_PANE_IDS.includes(id as (typeof COCKPIT_PANE_IDS)[number])),
-              ...COCKPIT_PANE_IDS,
+              ...visibleCockpitPaneIds(paneVisibility),
             ],
           };
         }),
@@ -354,9 +370,9 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
           };
         }),
 
-      resetCockpitLayout: (layoutId, inspectorVisible = true) =>
+      resetCockpitLayout: (layoutId, paneVisibility = getDefaultPaneVisibility(layoutId)) =>
         set((state) => {
-          const packed = getPackedCockpitPanels(layoutId, inspectorVisible);
+          const packed = getPackedCockpitPanels(layoutId, paneVisibility);
           return {
             panels: {
               ...state.panels,
@@ -369,6 +385,17 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
           };
         }),
 
+      syncCockpitPaneStack: (paneVisibility) =>
+        set((state) => {
+          const visiblePaneSet = new Set(visibleCockpitPaneIds(paneVisibility));
+          const nonCockpit = state.zStack.filter((id) => !COCKPIT_PANE_IDS.includes(id as (typeof COCKPIT_PANE_IDS)[number]));
+          const visibleExisting = state.zStack.filter((id) => visiblePaneSet.has(id as CockpitPaneId));
+          const missingVisible = visibleCockpitPaneIds(paneVisibility).filter((id) => !visibleExisting.includes(id));
+          return {
+            zStack: [...nonCockpit, ...visibleExisting, ...missingVisible],
+          };
+        }),
+
       getZIndex: (id) => {
         const idx = get().zStack.indexOf(id);
         return 50 + (idx === -1 ? 0 : idx);
@@ -376,6 +403,7 @@ export const usePanelLayoutStore = create<PanelLayoutStore>()(
     }),
     {
       name: "seraph_panel_layout",
+      storage: createJSONStorage(getSafeBrowserStorage),
       partialize: (state) => ({
         panels: state.panels,
         cockpitLayouts: state.cockpitLayouts,

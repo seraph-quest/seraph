@@ -22,6 +22,7 @@ vi.hoisted(() => {
 
 import { useChatStore } from "../stores/chatStore";
 import { useCockpitLayoutStore } from "../stores/cockpitLayoutStore";
+import { getDefaultPaneVisibility } from "../components/cockpit/layouts";
 import { handleGlobalKeyboardShortcut } from "./useKeyboardShortcuts";
 
 function resetStores() {
@@ -33,6 +34,10 @@ function resetStores() {
   useCockpitLayoutStore.setState({
     activeLayoutId: "default",
     inspectorVisible: true,
+    paneVisibility: getDefaultPaneVisibility("default"),
+    savedPaneVisibility: {
+      default: getDefaultPaneVisibility("default"),
+    },
   });
 }
 

@@ -11,36 +11,38 @@ describe("cockpit layouts", () => {
     const layout = getCockpitLayout("default");
 
     expect(layout.centerSingleColumn).toBe(false);
-    expect(layout.sections.rail).toBe(true);
-    expect(layout.sections.timeline).toBe(true);
-    expect(layout.sections.workflows).toBe(true);
-    expect(layout.sections.audit).toBe(true);
-    expect(layout.sections.trace).toBe(true);
-    expect(layout.sections.conversation).toBe(true);
+    expect(layout.paneVisibility.sessions_pane).toBe(true);
+    expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
+    expect(layout.paneVisibility.workflows_pane).toBe(true);
+    expect(layout.paneVisibility.audit_pane).toBe(true);
+    expect(layout.paneVisibility.trace_pane).toBe(true);
+    expect(layout.paneVisibility.conversation_pane).toBe(true);
   });
 
   it("uses a trimmed single-column operator surface for focus layout", () => {
     const layout = getCockpitLayout("focus");
 
     expect(layout.centerSingleColumn).toBe(true);
-    expect(layout.sections.rail).toBe(false);
-    expect(layout.sections.guardianState).toBe(true);
-    expect(layout.sections.timeline).toBe(true);
-    expect(layout.sections.workflows).toBe(true);
-    expect(layout.sections.audit).toBe(false);
-    expect(layout.sections.trace).toBe(false);
-    expect(layout.sections.inspector).toBe(true);
+    expect(layout.paneVisibility.sessions_pane).toBe(false);
+    expect(layout.paneVisibility.goals_pane).toBe(false);
+    expect(layout.paneVisibility.outputs_pane).toBe(false);
+    expect(layout.paneVisibility.guardian_state_pane).toBe(true);
+    expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
+    expect(layout.paneVisibility.workflows_pane).toBe(true);
+    expect(layout.paneVisibility.audit_pane).toBe(false);
+    expect(layout.paneVisibility.trace_pane).toBe(false);
+    expect(layout.paneVisibility.inspector_pane).toBe(true);
   });
 
   it("biases review layout toward evidence surfaces", () => {
     const layout = getCockpitLayout("review");
 
     expect(layout.centerSingleColumn).toBe(true);
-    expect(layout.sections.rail).toBe(true);
-    expect(layout.sections.guardianState).toBe(false);
-    expect(layout.sections.timeline).toBe(true);
-    expect(layout.sections.workflows).toBe(true);
-    expect(layout.sections.audit).toBe(true);
-    expect(layout.sections.trace).toBe(true);
+    expect(layout.paneVisibility.sessions_pane).toBe(true);
+    expect(layout.paneVisibility.guardian_state_pane).toBe(false);
+    expect(layout.paneVisibility.operator_timeline_pane).toBe(true);
+    expect(layout.paneVisibility.workflows_pane).toBe(true);
+    expect(layout.paneVisibility.audit_pane).toBe(true);
+    expect(layout.paneVisibility.trace_pane).toBe(true);
   });
 });

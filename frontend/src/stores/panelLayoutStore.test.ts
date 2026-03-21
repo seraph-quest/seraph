@@ -20,16 +20,24 @@ const { localStorageMock } = vi.hoisted(() => {
 
 import { getPackedCockpitPanels, usePanelLayoutStore } from "./panelLayoutStore";
 import { useCockpitLayoutStore } from "./cockpitLayoutStore";
+import { getDefaultPaneVisibility } from "../components/cockpit/layouts";
 
 describe("panelLayoutStore packed cockpit layouts", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     localStorageMock.clear();
-    useCockpitLayoutStore.setState({ activeLayoutId: "default", inspectorVisible: true });
+    useCockpitLayoutStore.setState({
+      activeLayoutId: "default",
+      inspectorVisible: true,
+      paneVisibility: getDefaultPaneVisibility("default"),
+      savedPaneVisibility: {
+        default: getDefaultPaneVisibility("default"),
+      },
+    });
     usePanelLayoutStore.setState({
       panels: {
         ...usePanelLayoutStore.getState().panels,
-        ...getPackedCockpitPanels("default", true),
+        ...getPackedCockpitPanels("default", getDefaultPaneVisibility("default")),
       },
     });
   });
@@ -37,7 +45,7 @@ describe("panelLayoutStore packed cockpit layouts", () => {
   it("packs the default layout across the workspace with no bottom gaps per column", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
 
-    const panels = getPackedCockpitPanels("default", true);
+    const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
     const columns = new Map<number, Array<{ y: number; height: number }>>();
 
     for (const panel of Object.values(panels)) {
@@ -63,7 +71,10 @@ describe("panelLayoutStore packed cockpit layouts", () => {
   it("focus layout keeps a denser three-column arrangement without the hidden inspector", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
 
-    const panels = getPackedCockpitPanels("focus", false);
+    const panels = getPackedCockpitPanels("focus", {
+      ...getDefaultPaneVisibility("focus"),
+      inspector_pane: false,
+    });
     const xs = new Set(Object.values(panels).map((panel) => panel.x));
 
     expect(xs.size).toBe(3);
@@ -76,7 +87,7 @@ describe("panelLayoutStore packed cockpit layouts", () => {
   it("gives the default layout more width to the main guardian surfaces than to inventory panes", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
 
-    const panels = getPackedCockpitPanels("default", true);
+    const panels = getPackedCockpitPanels("default", getDefaultPaneVisibility("default"));
 
     expect(panels.response_pane.width).toBeGreaterThan(panels.sessions_pane.width);
     expect(panels.guardian_state_pane.width).toBeGreaterThan(panels.goals_pane.width);
@@ -87,8 +98,8 @@ describe("panelLayoutStore packed cockpit layouts", () => {
   it("keeps focus and review layouts functionally distinct", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
 
-    const focusPanels = getPackedCockpitPanels("focus", true);
-    const reviewPanels = getPackedCockpitPanels("review", true);
+    const focusPanels = getPackedCockpitPanels("focus", getDefaultPaneVisibility("focus"));
+    const reviewPanels = getPackedCockpitPanels("review", getDefaultPaneVisibility("review"));
 
     expect(focusPanels.response_pane.width).toBeGreaterThan(focusPanels.workflows_pane.width);
     expect(reviewPanels.audit_pane.width).toBeGreaterThan(reviewPanels.sessions_pane.width);
@@ -97,12 +108,19 @@ describe("panelLayoutStore packed cockpit layouts", () => {
 
   it("persists manual pane edits inside the active layout snapshot", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
-    useCockpitLayoutStore.setState({ activeLayoutId: "focus", inspectorVisible: true });
-    usePanelLayoutStore.getState().applyCockpitLayout("focus", true);
+    useCockpitLayoutStore.setState({
+      activeLayoutId: "focus",
+      inspectorVisible: true,
+      paneVisibility: getDefaultPaneVisibility("focus"),
+      savedPaneVisibility: {
+        focus: getDefaultPaneVisibility("focus"),
+      },
+    });
+    usePanelLayoutStore.getState().applyCockpitLayout("focus", getDefaultPaneVisibility("focus"));
 
     usePanelLayoutStore.getState().setRect("response_pane", { x: 320, y: 160 });
-    usePanelLayoutStore.getState().applyCockpitLayout("default", true);
-    usePanelLayoutStore.getState().applyCockpitLayout("focus", true);
+    usePanelLayoutStore.getState().applyCockpitLayout("default", getDefaultPaneVisibility("default"));
+    usePanelLayoutStore.getState().applyCockpitLayout("focus", getDefaultPaneVisibility("focus"));
 
     expect(usePanelLayoutStore.getState().panels.response_pane.x).toBe(320);
     expect(usePanelLayoutStore.getState().panels.response_pane.y).toBe(160);
@@ -110,11 +128,11 @@ describe("panelLayoutStore packed cockpit layouts", () => {
 
   it("resetCockpitLayout restores the packed canonical layout for the active preset", () => {
     vi.stubGlobal("window", { innerWidth: 1600, innerHeight: 980 });
-    usePanelLayoutStore.getState().applyCockpitLayout("review", true);
-    const packed = getPackedCockpitPanels("review", true);
+    usePanelLayoutStore.getState().applyCockpitLayout("review", getDefaultPaneVisibility("review"));
+    const packed = getPackedCockpitPanels("review", getDefaultPaneVisibility("review"));
 
     usePanelLayoutStore.getState().setRect("audit_pane", { x: 64 });
-    usePanelLayoutStore.getState().resetCockpitLayout("review", true);
+    usePanelLayoutStore.getState().resetCockpitLayout("review", getDefaultPaneVisibility("review"));
 
     expect(usePanelLayoutStore.getState().panels.audit_pane.x).toBe(packed.audit_pane.x);
   });

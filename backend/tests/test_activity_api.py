@@ -1,6 +1,14 @@
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _iso_offset(*, hours: int = 0, minutes: int = 0, seconds: int = 0) -> str:
+    return (NOW + timedelta(hours=hours, minutes=minutes, seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
 @pytest.mark.asyncio
@@ -15,8 +23,8 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
                         "workflow_name": "web-brief-to-file",
                         "summary": "Workflow resumed after approval",
                         "status": "succeeded",
-                        "started_at": "2026-03-20T09:00:00Z",
-                        "updated_at": "2026-03-20T09:02:00Z",
+                        "started_at": _iso_offset(minutes=-8),
+                        "updated_at": _iso_offset(minutes=-6),
                         "thread_id": "session-1",
                         "thread_label": "Research thread",
                         "thread_continue_message": "Continue from this workflow run.",
@@ -50,7 +58,7 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
                         "id": "approval-1",
                         "tool_name": "write_file",
                         "summary": "Approve workspace write",
-                        "created_at": "2026-03-20T09:01:00Z",
+                        "created_at": _iso_offset(minutes=-7),
                         "session_id": "session-1",
                         "thread_id": "session-1",
                         "thread_label": "Research thread",
@@ -72,7 +80,7 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
                         "event_type": "agent_run_succeeded",
                         "tool_name": "chat_agent",
                         "summary": "Websocket chat agent run succeeded",
-                        "created_at": "2026-03-20T09:03:00Z",
+                        "created_at": _iso_offset(minutes=-5),
                         "session_id": "session-1",
                         "details": {"request_id": "agent-ws:session-1:123", "duration_ms": 820},
                     },
@@ -81,7 +89,7 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
                         "event_type": "llm_routing_decision",
                         "tool_name": "llm_runtime",
                         "summary": "Selected claude-sonnet-4 for websocket chat",
-                        "created_at": "2026-03-20T09:02:30Z",
+                        "created_at": _iso_offset(minutes=-5, seconds=-30),
                         "session_id": "session-1",
                         "details": {
                             "request_id": "agent-ws:session-1:123",
@@ -96,7 +104,7 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
             "src.api.activity.list_recent_llm_calls",
             return_value=[
                 {
-                    "timestamp": "2026-03-20T09:02:20+00:00",
+                    "timestamp": _iso_offset(minutes=-5, seconds=-40).replace("Z", "+00:00"),
                     "status": "success",
                     "model": "openrouter/anthropic/claude-sonnet-4",
                     "provider": "openrouter",
@@ -155,7 +163,7 @@ async def test_activity_ledger_respects_window_and_classifies_background_llm_cal
                         "event_type": "background_task_succeeded",
                         "tool_name": "session_title_generation",
                         "summary": "Background task session_title_generation succeeded",
-                        "created_at": "2026-03-20T10:00:00Z",
+                        "created_at": _iso_offset(hours=-2),
                         "session_id": None,
                         "details": {"duration_ms": 120},
                     }
@@ -166,7 +174,7 @@ async def test_activity_ledger_respects_window_and_classifies_background_llm_cal
             "src.api.activity.list_recent_llm_calls",
             return_value=[
                 {
-                    "timestamp": "2026-03-19T04:00:00+00:00",
+                    "timestamp": _iso_offset(hours=-30).replace("Z", "+00:00"),
                     "status": "success",
                     "model": "openrouter/anthropic/claude-sonnet-4",
                     "provider": "openrouter",
@@ -198,7 +206,7 @@ async def test_activity_ledger_respects_window_and_classifies_background_llm_cal
 async def test_activity_ledger_summary_counts_full_window_beyond_visible_limit(client):
     llm_entries = [
         {
-            "timestamp": f"2026-03-20T10:{index:02d}:00+00:00",
+            "timestamp": _iso_offset(minutes=-(index + 1)).replace("Z", "+00:00"),
             "status": "success",
             "model": "openrouter/anthropic/claude-sonnet-4",
             "provider": "openrouter",
@@ -250,7 +258,7 @@ async def test_activity_ledger_dedupes_live_pending_approvals_and_skips_foreign_
                         "id": "approval-1",
                         "tool_name": "write_file",
                         "summary": "Approve workspace write",
-                        "created_at": "2026-03-20T09:01:00Z",
+                        "created_at": _iso_offset(minutes=-9),
                         "session_id": "session-1",
                         "thread_id": "session-1",
                         "thread_label": "Research thread",
@@ -270,7 +278,7 @@ async def test_activity_ledger_dedupes_live_pending_approvals_and_skips_foreign_
                         (),
                         {
                             "id": "queued-1",
-                            "created_at": "2026-03-20T09:05:00Z",
+                            "created_at": _iso_offset(minutes=-5),
                             "session_id": None,
                             "intervention_id": "intervention-foreign",
                             "intervention_type": "advisory",
@@ -291,7 +299,7 @@ async def test_activity_ledger_dedupes_live_pending_approvals_and_skips_foreign_
                         (),
                         {
                             "id": "intervention-foreign",
-                            "updated_at": "2026-03-20T09:04:00Z",
+                            "updated_at": _iso_offset(minutes=-6),
                             "session_id": "session-2",
                             "intervention_type": "advisory",
                             "content_excerpt": "Foreign intervention",
@@ -314,7 +322,7 @@ async def test_activity_ledger_dedupes_live_pending_approvals_and_skips_foreign_
                         "event_type": "approval_requested",
                         "tool_name": "write_file",
                         "summary": "Approval requested for workspace write",
-                        "created_at": "2026-03-20T09:01:00Z",
+                        "created_at": _iso_offset(minutes=-9),
                         "session_id": "session-1",
                         "details": {"approval_id": "approval-1"},
                     }
@@ -360,7 +368,7 @@ async def test_activity_ledger_groups_request_scoped_tool_and_llm_events(client)
                         "event_type": "tool_call",
                         "tool_name": "web_search",
                         "summary": "Search for hinge specs",
-                        "created_at": "2026-03-20T09:02:00Z",
+                        "created_at": _iso_offset(minutes=-4),
                         "session_id": "session-1",
                         "details": {"request_id": "agent-ws:session-1:123", "arguments": {"query": "hinge specs"}},
                     },
@@ -369,7 +377,7 @@ async def test_activity_ledger_groups_request_scoped_tool_and_llm_events(client)
                         "event_type": "tool_result",
                         "tool_name": "web_search",
                         "summary": "Found hinge specs",
-                        "created_at": "2026-03-20T09:02:02Z",
+                        "created_at": _iso_offset(minutes=-4, seconds=2),
                         "session_id": "session-1",
                         "details": {"request_id": "agent-ws:session-1:123", "result_summary": "Found hinge specs"},
                     },
@@ -380,7 +388,7 @@ async def test_activity_ledger_groups_request_scoped_tool_and_llm_events(client)
             "src.api.activity.list_recent_llm_calls",
             return_value=[
                 {
-                    "timestamp": "2026-03-20T09:02:20+00:00",
+                    "timestamp": _iso_offset(minutes=-3, seconds=-40).replace("Z", "+00:00"),
                     "status": "success",
                     "model": "openrouter/anthropic/claude-sonnet-4",
                     "provider": "openrouter",
@@ -428,7 +436,7 @@ async def test_activity_ledger_limit_keeps_full_request_group_visible(client):
                         "event_type": "tool_call",
                         "tool_name": "web_search",
                         "summary": "Search hinge specs",
-                        "created_at": "2026-03-20T09:02:00Z",
+                        "created_at": _iso_offset(minutes=-4),
                         "session_id": "session-1",
                         "details": {"request_id": "agent-ws:session-1:123"},
                     },
@@ -437,7 +445,7 @@ async def test_activity_ledger_limit_keeps_full_request_group_visible(client):
                         "event_type": "tool_result",
                         "tool_name": "web_search",
                         "summary": "Found hinge specs",
-                        "created_at": "2026-03-20T09:02:02Z",
+                        "created_at": _iso_offset(minutes=-4, seconds=2),
                         "session_id": "session-1",
                         "details": {"request_id": "agent-ws:session-1:123"},
                     },
@@ -448,7 +456,7 @@ async def test_activity_ledger_limit_keeps_full_request_group_visible(client):
             "src.api.activity.list_recent_llm_calls",
             return_value=[
                 {
-                    "timestamp": "2026-03-20T09:02:20+00:00",
+                    "timestamp": _iso_offset(minutes=-3, seconds=-40).replace("Z", "+00:00"),
                     "status": "success",
                     "model": "openrouter/anthropic/claude-sonnet-4",
                     "provider": "openrouter",
@@ -461,7 +469,7 @@ async def test_activity_ledger_limit_keeps_full_request_group_visible(client):
                     "source": "websocket_chat",
                 },
                 {
-                    "timestamp": "2026-03-20T09:00:20+00:00",
+                    "timestamp": _iso_offset(minutes=-10).replace("Z", "+00:00"),
                     "status": "success",
                     "model": "openrouter/anthropic/claude-haiku-4",
                     "provider": "openrouter",

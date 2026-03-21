@@ -19,21 +19,38 @@
 
 ## Quick Start
 
+### Recommended: Local Direct Dev Stack
+
 ```bash
 # 1. Configure
 cp .env.dev.example .env.dev
 # Edit .env.dev and set OPENROUTER_API_KEY=your-key-here
 
 # 2. Launch
-./manage.sh -e dev up -d
+./manage.sh -e dev local up
 
 # 3. Open
-open http://localhost:3000        # Current shipped browser UI
+open http://localhost:3001        # Current shipped browser UI
 open http://localhost:8004/docs   # Swagger API docs
 
-# 4. (Optional) Screen awareness daemon
+# 4. Inspect / stop
+./manage.sh -e dev local status
+./manage.sh -e dev local logs backend
+./manage.sh -e dev local down
+
+# 5. (Optional) Screen awareness daemon
 ./daemon/run.sh                   # Window tracking
 ./daemon/run.sh --ocr             # + OCR via Apple Vision
+```
+
+`./manage.sh -e dev local up` is the canonical direct browser-development path. It explicitly loads the repo-root `.env.dev`, starts the backend on `8004`, starts the frontend on `3001`, and avoids the cwd-sensitive env drift that can otherwise change the active model/provider.
+
+### Docker Dev Stack
+
+```bash
+./manage.sh -e dev up -d
+open http://localhost:3000
+open http://localhost:8004/docs
 ```
 
 ---
@@ -113,6 +130,29 @@ Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
 ./manage.sh -e dev down         # Stop
 ./manage.sh -e dev logs -f      # Tail logs
 ./manage.sh -e dev build        # Rebuild
+```
+
+## Local Direct Runtime
+
+```bash
+./manage.sh -e dev local up
+./manage.sh -e dev local status
+./manage.sh -e dev local logs frontend
+./manage.sh -e dev local logs backend
+./manage.sh -e dev local down
+```
+
+Defaults for the local runtime:
+
+- frontend: `http://localhost:3001`
+- backend: `http://localhost:8004`
+- workspace dir: `/tmp/seraph-dev-data`
+- llm logs: `/tmp/seraph-dev-logs`
+
+Override ports or local paths with env vars before launch if needed:
+
+```bash
+LOCAL_FRONTEND_PORT=3100 LOCAL_BACKEND_PORT=8100 ./manage.sh -e dev local up
 ```
 
 ---

@@ -1,5 +1,7 @@
 import pytest
 
+from config.settings import settings
+
 
 @pytest.mark.asyncio
 async def test_cors_allows_loopback_dev_origin(client):
@@ -24,5 +26,5 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["version"] == "2026.3.19"
     assert payload["build_id"] == "SERAPH_PRIME_v2026.3.19"
     assert payload["provider"] == "openrouter"
-    assert payload["model"] == "openrouter/anthropic/claude-sonnet-4"
-    assert payload["model_label"] == "claude-sonnet-4"
+    assert payload["model"] == settings.default_model
+    assert payload["model_label"] == settings.default_model.split("/")[-1]

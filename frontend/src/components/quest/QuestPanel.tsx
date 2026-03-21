@@ -150,9 +150,11 @@ export function QuestPanel() {
             <button
               type="button"
               className="cockpit-modal-close"
+              aria-label="Close goals"
+              title="Close goals"
               onClick={() => setQuestPanelOpen(false)}
             >
-              Close
+              x
             </button>
           </div>
           <div className="cockpit-modal-body">{content}</div>

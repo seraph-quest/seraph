@@ -63,6 +63,7 @@ Legend for the checklist column:
 - [x] Workflow runs, pending approvals, notifications, queued interventions, recent interventions, surfaced failures, and routing events now share explicit thread labels, continue drafts, open-thread links, and one threaded operator timeline instead of living as separate operator silos.
 - [x] Seraph now also exposes a separate Activity Ledger window that answers what the agent did, why it did it, which thread it belonged to, and what spent LLM budget, instead of forcing the operator to reconstruct that from timeline, trace, and audit panes.
 - [x] the Activity Ledger now groups request-scoped work into compact parent rows with emoji/icon scanability, child tool or routing rows, and completion summaries, giving the operator a Hermes-style action ledger without collapsing into raw terminal spam.
+- [x] the workspace window system now uses flatter terminal-style chrome with close controls, visible resize grip, per-pane visibility state, and a top-level Windows menu instead of treating panes as fixed dashboard cards.
 - [x] Workflow runs now expose step records, timestamps, duration, error summaries, retry-from-step drafts, richer fingerprints, blocked-skill repair guidance, workflow diagnostics, and cockpit-native debug/authoring handoff instead of only run-level replay.
 - [x] The cockpit now includes a first extension authoring and validation studio for workflows, skills, and MCP config instead of forcing repo-level edits for every capability change.
 - [x] Guardian state now carries memory signals, continuity threads, collaborators, recurring obligations, project timelines, corroboration sources, and learned timing, suppression, blocked-state, plus thread guidance instead of only first-pass focus and delivery bias.
@@ -333,6 +334,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] recent negative feedback on the same intervention type can now reduce interruption eagerness for similar future advisory nudges
 - [x] aligned active-work signals now calibrate observer salience upward, and grounded high-salience nudges can cut through high interruption cost outside focus mode
 - [x] the cockpit now supports a pane workspace with drag/resize, grid snap, packed `default` / `focus` / `review` layout presets, inspector visibility persistence, layout switching from both the header and keyboard shortcuts, plus per-layout save and reset behavior
+- [x] the pane workspace now also supports per-pane hide/show controls, a dedicated Windows menu, and flatter Godel-style window framing instead of the earlier rounded-card shell
 - [x] 17 built-in tool capabilities exposed through the registry, with native and MCP-backed execution surfaces
 - [x] first-class reusable workflow definitions loaded from defaults and workspace files, exposed through a workflows API, workflow metadata registry, and a dedicated `workflow_runner` specialist
 - [x] starter packs now bundle default skills and workflows into obvious operator-invocable packages instead of leaving capability discovery entirely to disk inspection

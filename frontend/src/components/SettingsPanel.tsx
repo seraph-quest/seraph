@@ -553,9 +553,11 @@ export function SettingsPanel() {
           <button
             type="button"
             className="cockpit-modal-close"
+            aria-label="Close settings"
+            title="Close settings"
             onClick={() => setSettingsPanelOpen(false)}
           >
-            Close
+            x
           </button>
         </div>
         <div className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">

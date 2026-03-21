@@ -21,6 +21,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The target product shape is now a power-user guardian cockpit, not a village-first shell.
 - [x] The guardian cockpit is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
 - [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, retry-from-step recovery, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
+- [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -141,6 +142,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] cockpit-first browser guardian shell with session rail, guardian-state panel, workflow-run views, interventions feed, audit surface, trace view, pending approvals, recent outputs, operations inspector, artifact round-trip into the command bar, a fixed composer, and live send fallback
 - [x] cockpit workflow and artifact inspectors can now draft compatible follow-on workflows directly from existing artifact paths instead of only inserting generic file-context commands
 - [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching, per-layout save, and per-layout reset now define the main cockpit workspace
+- [x] the pane workspace now also supports per-pane close/hide controls, a dedicated Windows menu for visibility and focus, and flatter Godel-style window chrome
 - [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up, continue, and dismiss controls
 - [x] the cockpit now includes a first operator surface for tool/MCP policy state, workflow availability, tools, skills, starter packs, and MCP server visibility with direct reload and activation controls
 - [x] the cockpit now also includes a searchable capability palette plus a denser operator terminal for recommendations, repair actions, installable items, reusable runbooks, capability preflight, live operator-feed status, and saved runbook macros

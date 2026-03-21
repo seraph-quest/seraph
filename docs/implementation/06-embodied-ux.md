@@ -20,6 +20,7 @@
 - [x] cockpit-native bridge cues through live desktop status, pending native-notification state, deferred bundle visibility, recent intervention continuity, and browser-side native-presence controls in the operator surfaces
 - [x] cockpit-native operator surface for workflow availability, skills, MCP servers, and live policy state with direct reload controls
 - [x] separate Activity Ledger window that links workflow runs, approvals, notifications, queued interventions, recent guardian outputs, surfaced failures, tool steps, and attributed LLM calls back into one live browser control surface
+- [x] flatter terminal-style workspace windows with close controls, visible resize grip, and a dedicated Windows menu for per-pane visibility and focus
 - [x] cockpit capability preflight and autorepair flows for runbooks, starter packs, and workflows before the operator drafts or reruns them
 - [x] cockpit capability bootstrap now applies bounded safe install/repair actions for workflows, runbooks, and starter packs instead of leaving preflight as a separate manual operator step
 - [x] cockpit workflow views now expose richer step timestamps, duration, error summaries, recovery hints, and stored workflow diagnostics
@@ -69,6 +70,7 @@
 - [x] the cockpit now supports draggable/resizable panes with 16px grid snapping
 - [x] the cockpit now supports persisted packed `default`, `focus`, and `review` layouts plus keyboard switching for core navigation
 - [x] the cockpit now supports saving and resetting each core workspace layout rather than only switching between fixed presets
+- [x] the pane model now also supports per-pane hide/show state instead of forcing every preset-visible pane to stay permanently mounted
 - [x] the cockpit now exposes first-class operator visibility for workflows, skills, MCP servers, and live policy state
 - [x] the cockpit now exposes first-class operator visibility for tools, starter packs, blocked-state reasons, session continuity state, and preflight/autorepair outcomes
 - [x] the cockpit now exposes first-class operator visibility for approval-thread recovery and cross-surface continue/open-thread actions

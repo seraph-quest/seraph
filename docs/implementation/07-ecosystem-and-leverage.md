@@ -51,11 +51,12 @@
 - [x] the runtime now also loads manifest-backed workflow contributions through the same registry seam, including packaged workflow diagnostics and manifest-preferred duplicate resolution during the coexistence window
 - [x] the runtime now also loads manifest-backed starter packs and explicit runbooks through the same registry seam, and the capabilities surface now publishes packaged starter-pack metadata plus extension-backed runbook entries instead of treating both surfaces as legacy-only inventory
 - [x] startup/runtime loading now serves bundled default skills, workflows, starter packs, and explicit runbooks from a real `seraph.core-capabilities` package under `backend/src/defaults/extensions/`, with workspace extension packs taking precedence over bundled defaults while install/bootstrap/catalog flows and legacy loose-file coexistence are still being migrated
+- [x] the backend now ships one `/api/extensions` lifecycle surface for list, inspect, validate, install, enable, disable, configure, and remove so automation no longer has to talk directly to per-surface skill/workflow/package seams even though the workspace UI still needs to adopt that API and the current `configure` step is metadata-only until typed runtime config contracts land
 
 ## Still To Do On `develop`
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, installable catalog surfaces, bounded bootstrap flow, and first extension-studio save path
-- [ ] unified extension lifecycle APIs and workspace controls for install, validation, enablement, configuration, health, and removal beyond the current packaged capability loading path
+- [ ] workspace lifecycle controls, richer extension health/test surfaces, and connector-aware lifecycle handling beyond the new backend `/api/extensions` API
 - [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, branch/resume checkpoints, replay guardrails, parameterized reruns, approval-aware recovery, diagnostics endpoint, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, and first extension studio
 - [ ] better leverage of delegation without making the product harder to trust or reason about

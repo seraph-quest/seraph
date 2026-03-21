@@ -111,16 +111,33 @@ A clean package returns `ok: true`.
 
 If validation fails, fix the reported files and run the validator again.
 
-## 6. Install/use later
+## 6. Install/use through the lifecycle API
 
 This docs slice focuses on authoring and local validation.
 
-The later lifecycle slices add:
+The backend lifecycle API now supports:
 
+- list
+- inspect
+- validate
 - install
 - enable/disable
-- configure
-- health/test
-- update/remove
+- configure (metadata-only in this slice)
+- remove
+
+Current gap:
+
+- workspace UI adoption, runtime-consumed typed config, and richer health/test flows still land in later lifecycle slices
+
+Current backend endpoints:
+
+- `GET /api/extensions`
+- `GET /api/extensions/{extension_id}`
+- `POST /api/extensions/validate`
+- `POST /api/extensions/install`
+- `POST /api/extensions/{extension_id}/enable`
+- `POST /api/extensions/{extension_id}/disable`
+- `POST /api/extensions/{extension_id}/configure`
+- `DELETE /api/extensions/{extension_id}`
 
 For the manifest fields themselves, see [Manifest Reference](./manifest-reference.md).

@@ -31,6 +31,44 @@ The strongest product decision is:
 3. do not replace MCP with a second open-ended general plugin runtime
 4. do add a curated non-MCP connector path for cases where Seraph needs tighter auth, UX, rollout, telemetry, and enterprise control than raw MCP provides
 
+## Architecture At A Glance
+
+```text
+                           SERAPH EXTENSION PLATFORM
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                               CORE RUNTIME                                  │
+│                                                                              │
+│  policy • approvals • audit • secrets • sessions/threads • routing          │
+│  workflow engine • preflight/repair • guardian state • activity ledger      │
+│                                                                              │
+│  Core owns trust boundaries. Extensions contribute capabilities inside them. │
+└──────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  │ loads / validates / enables / audits
+                  ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         EXTENSION MANIFEST / PACKAGE                         │
+│                                                                              │
+│  id • version • compatibility • publisher • permissions • contributes       │
+└──────────────────────────────────────────────────────────────────────────────┘
+                  │
+      ┌───────────┼───────────────────────┬───────────────────────┐
+      │           │                       │                       │
+      ▼           ▼                       ▼                       ▼
+┌───────────┐ ┌──────────────┐     ┌──────────────┐       ┌──────────────┐
+│Declarative│ │MCP Connectors │     │Managed       │       │Trusted Code  │
+│Extensions │ │               │     │Connectors    │       │Plugins       │
+├───────────┤ ├──────────────┤     ├──────────────┤       ├──────────────┤
+│skills     │ │MCP servers    │     │Slack         │       │native tools  │
+│workflows  │ │resources       │     │Jira          │       │deep runtime  │
+│runbooks   │ │prompts/tools   │     │GitHub        │       │extensions    │
+│starter    │ │stdio/http      │     │Google        │       │later only    │
+│packs      │ │long-tail       │     │first-party   │       │trusted only  │
+│presets    │ │integrations    │     │curated UX    │       │heavily gated │
+│routines   │ │                │     │              │       │              │
+└───────────┘ └──────────────┘     └──────────────┘       └──────────────┘
+```
+
 ## Current Seraph State
 
 Seraph already has multiple extension seams, but they are not unified under one package/runtime model.
@@ -427,6 +465,25 @@ Extensions should contribute capabilities inside those systems, not replace them
 
 Seraph should introduce one extension manifest and one package/install lifecycle.
 
+### Manifest structure
+
+```text
+capability-pack
+├─ manifest.yaml
+├─ skills/
+│  └─ web-briefing.md
+├─ workflows/
+│  └─ web-brief-to-file.md
+├─ runbooks/
+│  └─ research-briefing.yaml
+├─ mcp/
+│  └─ http-request.json
+├─ observers/
+│  └─ calendar-source.yaml
+└─ presets/
+   └─ provider-routing.yaml
+```
+
 Example:
 
 ```yaml
@@ -456,6 +513,62 @@ permissions:
 ```
 
 This lets one package contribute multiple typed surfaces without inventing a universal runtime plugin contract.
+
+### Runtime flow from install to execution
+
+```text
+┌────────────────┐
+│ Extension file │
+│ or registry    │
+└───────┬────────┘
+        │ install
+        ▼
+┌────────────────┐
+│ Manifest parse │
+│ + compatibility│
+│ + signature    │
+└───────┬────────┘
+        │ validate
+        ▼
+┌────────────────┐
+│ Contribution   │
+│ scanners       │
+│ skills/workflows│
+│ MCP/connectors │
+└───────┬────────┘
+        │ permission review
+        ▼
+┌────────────────┐
+│ Core policy    │
+│ mapping        │
+│ approvals      │
+│ execution bnds │
+└───────┬────────┘
+        │ enable
+        ▼
+┌────────────────┐
+│ Capability     │
+│ registry       │
+│ tools/skills   │
+│ workflows/etc. │
+└───────┬────────┘
+        │ surface in cockpit
+        ▼
+┌────────────────┐
+│ Operator UI    │
+│ install/repair │
+│ runbooks/packs │
+│ activity trace │
+└───────┬────────┘
+        │ invoke
+        ▼
+┌────────────────┐
+│ Runtime exec   │
+│ routed through │
+│ audit/policy   │
+│ secret guards  │
+└────────────────┘
+```
 
 ## Recommended Lifecycle
 
@@ -498,6 +611,23 @@ Rule of thumb:
 
 - if the value is ecosystem breadth, use MCP
 - if the value is trust, enterprise operability, and polished first-party UX, use a managed connector
+
+### Connector choice matrix
+
+```text
+┌───────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┐
+│ Dimension             │ MCP connector        │ Managed connector    │ Trusted code plugin  │
+├───────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
+│ Main goal             │ ecosystem breadth    │ curated UX + trust   │ deep host extension  │
+│ Install UX            │ medium / often rough │ polished / owned     │ heavy / explicit     │
+│ Auth ownership        │ shared w/ server     │ Seraph-owned         │ plugin-owned/core    │
+│ Update path           │ per server           │ first-party managed  │ plugin lifecycle     │
+│ Context overhead      │ can be high          │ controllable         │ controllable         │
+│ Safety posture        │ transport-standard   │ tighter policy fit   │ highest risk         │
+│ Best for              │ long-tail tools      │ top enterprise apps  │ rare deep runtime    │
+│ Should be default?    │ yes, for breadth     │ yes, curated cases   │ no                   │
+└───────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┘
+```
 
 ## What Seraph should not do
 

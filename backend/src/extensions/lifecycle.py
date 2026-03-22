@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
+from src.extensions.channels import select_active_channel_adapters
 from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
 from src.extensions.doctor import doctor_snapshot
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
@@ -793,6 +794,14 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
     }
     mcp_servers = _mcp_runtime_index()
     observer_snapshot = _registry().snapshot()
+    channel_adapters = {
+        os.path.abspath(item.resolved_path): {
+            "name": item.name,
+            "transport": item.transport,
+        }
+        for item in select_active_channel_adapters(observer_snapshot.list_contributions("channel_adapters"))
+        if item.resolved_path
+    }
     observer_definitions = {
         os.path.abspath(item.resolved_path): {
             "name": item.name,
@@ -807,6 +816,7 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
         "runbooks": runbooks,
         "starter_packs": starter_packs,
         "mcp_servers": mcp_servers,
+        "channel_adapters": channel_adapters,
         "observer_definitions": observer_definitions,
     }
 
@@ -908,6 +918,40 @@ def _contribution_payload(
         if payload["loaded"]:
             payload["status"] = "active"
         elif not valid_definition:
+            payload["status"] = "invalid"
+        elif not default_enabled:
+            payload["status"] = "disabled"
+        else:
+            payload["status"] = "overridden"
+        return payload
+    if contribution.contribution_type == "channel_adapters":
+        active_adapter = (
+            indexes.get("channel_adapters", {}).get(normalized_path or "")
+            if normalized_path is not None
+            else None
+        )
+        default_enabled = bool(contribution.metadata.get("default_enabled", True))
+        valid_adapter = all(
+            isinstance(contribution.metadata.get(field_name), str) and str(contribution.metadata.get(field_name)).strip()
+            for field_name in ("name", "transport")
+        )
+        payload = {
+            "type": contribution.contribution_type,
+            "reference": contribution.reference,
+            "resolved_path": normalized_path,
+            "loaded": active_adapter is not None,
+        }
+        for field_name in ("name", "transport", "description"):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, str) and field_value:
+                payload[field_name] = field_value
+        if "default_enabled" in contribution.metadata:
+            payload["default_enabled"] = default_enabled
+        if "requires_daemon" in contribution.metadata:
+            payload["requires_daemon"] = bool(contribution.metadata.get("requires_daemon"))
+        if payload["loaded"]:
+            payload["status"] = "active"
+        elif not valid_adapter:
             payload["status"] = "invalid"
         elif not default_enabled:
             payload["status"] = "disabled"

@@ -226,6 +226,61 @@ def _write_invalid_observer_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_channel_adapter_extension(root: Path) -> Path:
+    package_dir = root / "channel-adapter-pack"
+    (package_dir / "channels").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.native-channel\n"
+        "version: 2026.3.21\n"
+        "display_name: Native Channel\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  channel_adapters:\n"
+        "    - channels/native.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "channels" / "native.yaml").write_text(
+        "name: workspace-native\n"
+        "transport: native_notification\n"
+        "description: Workspace native adapter\n"
+        "enabled: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_invalid_channel_adapter_extension(root: Path) -> Path:
+    package_dir = root / "invalid-channel-pack"
+    (package_dir / "channels").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.invalid-channel\n"
+        "version: 2026.3.21\n"
+        "display_name: Invalid Channel\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  channel_adapters:\n"
+        "    - channels/native.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "channels" / "native.yaml").write_text(
+        "name: invalid-native\n"
+        "description: Missing transport\n"
+        "enabled: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 @pytest.fixture
 def extension_runtime(tmp_path):
     original_workspace_dir = settings.workspace_dir
@@ -657,6 +712,63 @@ async def test_invalid_observer_definition_surfaces_invalid_status_in_extension_
     observer = next(item for item in invalid_extension["contributions"] if item["type"] == "observer_definitions")
     assert observer["loaded"] is False
     assert observer["status"] == "invalid"
+    assert invalid_extension["doctor_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_channel_adapter_overrides_bundled_transport(client, extension_runtime, tmp_path):
+    package_dir = _write_channel_adapter_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+
+    workspace_extension = extensions["seraph.native-channel"]
+    bundled_extension = extensions["seraph.core-channel-adapters"]
+
+    workspace_adapter = next(
+        item
+        for item in workspace_extension["contributions"]
+        if item["type"] == "channel_adapters" and item["transport"] == "native_notification"
+    )
+    bundled_adapter = next(
+        item
+        for item in bundled_extension["contributions"]
+        if item["type"] == "channel_adapters" and item["transport"] == "native_notification"
+    )
+
+    assert workspace_adapter["loaded"] is True
+    assert workspace_adapter["status"] == "active"
+    assert bundled_adapter["loaded"] is False
+    assert bundled_adapter["status"] == "overridden"
+
+
+@pytest.mark.asyncio
+async def test_invalid_channel_adapter_surfaces_invalid_status_in_extension_payload(client, extension_runtime):
+    _write_invalid_channel_adapter_extension(extension_runtime / "extensions")
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ):
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+
+    invalid_extension = extensions["seraph.invalid-channel"]
+    adapter = next(item for item in invalid_extension["contributions"] if item["type"] == "channel_adapters")
+    assert adapter["loaded"] is False
+    assert adapter["status"] == "invalid"
     assert invalid_extension["doctor_ok"] is False
 
 

@@ -552,6 +552,51 @@ enabled: true
     assert "network access" in result.issues[0].message
 
 
+def test_doctor_reports_invalid_channel_adapter(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "bad-channel-pack"
+    channel_dir = pack_dir / "channels"
+    channel_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.bad-channel-pack
+version: 2026.3.21
+display_name: Bad Channel Pack
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  channel_adapters:
+    - channels/websocket.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (channel_dir / "websocket.yaml").write_text(
+        """
+name: browser-websocket
+description: Missing transport
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.bad-channel-pack"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "invalid_channel_adapter"
+    assert "transport" in result.issues[0].message
+
+
 def test_doctor_snapshot_preserves_registry_load_errors(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "bad"
     pack_dir.mkdir(parents=True)

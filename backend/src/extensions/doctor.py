@@ -11,6 +11,7 @@ from src.extensions.connectors import (
     parse_managed_connector_definition,
     parse_mcp_server_definition,
 )
+from src.extensions.channels import parse_channel_adapter_definition
 from src.extensions.observers import parse_observer_definition
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
@@ -353,6 +354,29 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                         contribution_type=contribution.contribution_type,
                         reference=contribution.reference,
                         suggested_fix="set manifest.permissions.network to true for networked observer sources",
+                    )
+                )
+
+        if contribution.contribution_type == "channel_adapters":
+            payload, connector_issue = _load_connector_payload(
+                content,
+                contribution_type=contribution.contribution_type,
+                reference=contribution.reference,
+            )
+            if connector_issue is not None:
+                issues.append(connector_issue)
+                continue
+            try:
+                parse_channel_adapter_definition(payload, source=contribution.reference)
+            except ConnectorDefinitionError as exc:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="invalid_channel_adapter",
+                        severity="error",
+                        message=str(exc),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix="add a valid channel adapter name, transport, and optional enabled flag",
                     )
                 )
 

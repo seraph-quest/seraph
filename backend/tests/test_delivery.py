@@ -70,6 +70,59 @@ async def test_deliver_broadcasts():
 
 
 @pytest.mark.asyncio
+async def test_native_channel_adapter_can_deliver_without_websocket():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Native path", intervention_type="alert", urgency=4)
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.act
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Native path"
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocket():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_iq.peek_all = AsyncMock(
+        return_value=[
+            MagicMock(id="queued-1", content="Queued update", intervention_id="intervention-1"),
+        ]
+    )
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
+            delivered = await deliver_queued_bundle()
+
+        assert delivered == 1
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.delete_many.assert_called_once_with(["queued-1"])
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert "Queued update" in notification.body
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_deliver_logs_runtime_audit(async_db):
     ctx = _make_context()
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)

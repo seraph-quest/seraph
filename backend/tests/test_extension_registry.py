@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from src.extensions.channels import select_active_channel_adapters
 from src.extensions.observers import select_active_observer_definitions
 from src.extensions.registry import ExtensionRegistry
 
@@ -549,6 +550,135 @@ enabled: true
 
     assert len(active) == 1
     assert active[0].name == "workspace-calendar"
+    assert active[0].manifest_root_index == 0
+
+
+def test_registry_enriches_manifest_backed_channel_adapter_metadata(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "channel-pack"
+    channel_dir = pack_dir / "channels"
+    channel_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.core-channel-adapters
+version: 2026.3.21
+display_name: Core Channel Adapters
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  channel_adapters:
+    - channels/websocket.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (channel_dir / "websocket.yaml").write_text(
+        """
+name: browser-websocket
+transport: websocket
+description: Browser delivery adapter
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+
+    extension = snapshot.get_extension("seraph.core-channel-adapters")
+    assert extension is not None
+    contribution = extension.contributions[0]
+    assert contribution.contribution_type == "channel_adapters"
+    assert contribution.metadata["name"] == "browser-websocket"
+    assert contribution.metadata["transport"] == "websocket"
+    assert contribution.metadata["default_enabled"] is True
+    assert contribution.metadata["requires_daemon"] is False
+
+
+def test_active_channel_adapters_prefer_lower_manifest_root_index(tmp_path: Path):
+    workspace_root = tmp_path / "workspace-extensions"
+    bundled_root = tmp_path / "bundled-extensions"
+    workspace_pack = workspace_root / "native-override"
+    bundled_pack = bundled_root / "core-channel-adapters"
+    (workspace_pack / "channels").mkdir(parents=True)
+    (bundled_pack / "channels").mkdir(parents=True)
+
+    (workspace_pack / "manifest.yaml").write_text(
+        """
+id: seraph.workspace-channel
+version: 2026.3.21
+display_name: Workspace Channel
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  channel_adapters:
+    - channels/native.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (workspace_pack / "channels" / "native.yaml").write_text(
+        """
+name: workspace-native
+transport: native_notification
+description: Workspace native adapter
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    (bundled_pack / "manifest.yaml").write_text(
+        """
+id: seraph.core-channel-adapters
+version: 2026.3.21
+display_name: Core Channel Adapters
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+contributes:
+  channel_adapters:
+    - channels/native.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (bundled_pack / "channels" / "native.yaml").write_text(
+        """
+name: bundled-native
+transport: native_notification
+description: Bundled native adapter
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(workspace_root), str(bundled_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+    active = select_active_channel_adapters(snapshot.list_contributions("channel_adapters"))
+
+    assert len(active) == 1
+    assert active[0].name == "workspace-native"
     assert active[0].manifest_root_index == 0
 
 

@@ -71,6 +71,12 @@ interface PendingApproval {
   summary: string;
   created_at: string;
   resume_message?: string | null;
+  extension_id?: string | null;
+  extension_display_name?: string | null;
+  extension_action?: string | null;
+  package_path?: string | null;
+  lifecycle_boundaries?: string[] | null;
+  permissions?: Record<string, unknown> | null;
 }
 
 interface DaemonPresenceState {
@@ -398,6 +404,14 @@ interface ExtensionPathPreview {
   results: Array<{ issues?: unknown[] }>;
   load_errors?: Array<Record<string, unknown>>;
   lifecycle_plan?: ExtensionLifecyclePlan | null;
+}
+
+interface ExtensionLifecycleApprovalDetail {
+  type: "approval_required";
+  approval_id: string;
+  tool_name: string;
+  risk_level: string;
+  message: string;
 }
 
 type LoggedOperatorError = Error & { operatorLogged?: boolean };
@@ -796,6 +810,32 @@ function normalizeExtensionPackagesPayload(payload: unknown): ExtensionPackageIn
       ? [normalizeExtensionPackage(entry as Record<string, unknown>)].filter(Boolean) as ExtensionPackageInfo[]
       : []
   ));
+}
+
+function normalizeExtensionLifecycleApprovalDetail(payload: unknown): ExtensionLifecycleApprovalDetail | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const detail = (payload as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return null;
+  }
+  const detailRecord = detail as Record<string, unknown>;
+  const type = typeof detailRecord.type === "string" ? detailRecord.type : "";
+  if (type !== "approval_required") {
+    return null;
+  }
+  const approvalId = typeof detailRecord.approval_id === "string" ? detailRecord.approval_id : "";
+  const toolName = typeof detailRecord.tool_name === "string" ? detailRecord.tool_name : "extension_lifecycle";
+  const riskLevel = typeof detailRecord.risk_level === "string" ? detailRecord.risk_level : "high";
+  const message = typeof detailRecord.message === "string" ? detailRecord.message : "Approval required before retrying the extension action.";
+  return {
+    type: "approval_required",
+    approval_id: approvalId,
+    tool_name: toolName,
+    risk_level: riskLevel,
+    message,
+  };
 }
 
 function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
@@ -1779,6 +1819,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [studioExtensionPath, setStudioExtensionPath] = useState("");
   const [studioExtensionConfigDraft, setStudioExtensionConfigDraft] = useState("{}");
   const [studioExtensionConfigDirty, setStudioExtensionConfigDirty] = useState(false);
+  const [pendingLifecycleApprovalId, setPendingLifecycleApprovalId] = useState<string | null>(null);
   const studioExtensionConfigSelectionRef = useRef<string | null>(null);
   const studioSelectionRef = useRef<string | null>(null);
   const studioLoadRequestRef = useRef(0);
@@ -1891,6 +1932,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   useEffect(() => {
     writeRunbookMacros(savedRunbooks);
   }, [savedRunbooks]);
+
+  useEffect(() => {
+    if (!pendingLifecycleApprovalId) return;
+    const approval = pendingApprovals.find((item) => item.id === pendingLifecycleApprovalId);
+    if (!approval) return;
+    focusPane("approvals_pane");
+    setSelectedInspector({ kind: "approval", approval });
+    setPendingLifecycleApprovalId(null);
+  }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
     const fetchJson = async (url: string) => {
@@ -2803,6 +2853,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
 
+  async function handleExtensionLifecycleFailure(
+    payload: unknown,
+    fallbackMessage: string,
+    setStatus: (value: string) => void,
+  ) {
+    const approvalDetail = normalizeExtensionLifecycleApprovalDetail(payload);
+    if (approvalDetail) {
+      setPendingLifecycleApprovalId(approvalDetail.approval_id || null);
+      setStatus(`${approvalDetail.message} Review Pending approvals, then retry.`);
+      focusPane("approvals_pane");
+      await refreshCockpit();
+      appendOperatorFeed(
+        `${approvalDetail.tool_name} requires ${approvalDetail.risk_level} approval`,
+        "info",
+      );
+      return;
+    }
+
+    const detail = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { detail?: unknown }).detail
+      : null;
+    setStatus(typeof detail === "string" ? detail : fallbackMessage);
+  }
+
   function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
     const next: DoctorPlanRecord = {
       ...plan,
@@ -3196,11 +3270,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setStudioPackageStatus(
-          typeof payload?.detail === "string"
-            ? payload.detail
-            : `Failed to install ${path}`,
-        );
+        await handleExtensionLifecycleFailure(payload, `Failed to install ${path}`, setStudioPackageStatus);
         return;
       }
       await refreshCockpit();
@@ -3239,11 +3309,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setStudioPackageStatus(
-          typeof payload?.detail === "string"
-            ? payload.detail
-            : `Failed to update ${path}`,
-        );
+        await handleExtensionLifecycleFailure(payload, `Failed to update ${path}`, setStudioPackageStatus);
         return;
       }
       await refreshCockpit();
@@ -3278,10 +3344,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setStudioStatus(
-          typeof payload?.detail === "string"
-            ? payload.detail
-            : `Failed to ${enabled ? "enable" : "disable"} ${selectedExtensionPackage.display_name}`,
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to ${enabled ? "enable" : "disable"} ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
         );
         return;
       }
@@ -3325,10 +3391,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setStudioStatus(
-          typeof payload?.detail === "string"
-            ? payload.detail
-            : `Failed to save metadata for ${selectedExtensionPackage.display_name}`,
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to save metadata for ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
         );
         return;
       }
@@ -3354,10 +3420,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setStudioStatus(
-          typeof payload?.detail === "string"
-            ? payload.detail
-            : `Failed to remove ${selectedExtensionPackage.display_name}`,
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to remove ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
         );
         return;
       }
@@ -4001,6 +4067,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: approval.status,
         resolution: approvalState[approval.id] ?? "pending",
         resume_message: approval.resume_message ?? "n/a",
+        extension_id: approval.extension_id ?? "n/a",
+        extension_display_name: approval.extension_display_name ?? "n/a",
+        extension_action: approval.extension_action ?? "n/a",
+        package_path: approval.package_path ?? "n/a",
+        lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
+        permissions: approval.permissions ?? {},
       };
     } else if (selectedInspector.kind === "workflow") {
       const workflow = selectedInspector.workflow;

@@ -298,8 +298,8 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    add one lifecycle API for install, validate, enable, disable, configure, inspect, and remove so UI and automation flows stop talking to per-surface install logic, with the backend now shipping `/api/extensions` list/inspect/validate/install/enable/disable/configure/remove endpoints while workspace lifecycle UI still lands in the next slice and the first `configure` step remains metadata-only until typed runtime config contracts arrive
 14. [x] `extension-studio-manifest-awareness-v1`:
    make the extension studio package-aware so authors edit manifests and package-backed workflow/skill members together instead of forcing loose-file-only save paths, with `/api/extensions/{id}/source` now backing workspace package manifests and package-backed authoring while the studio sidebar groups manifests with their packaged members and still falls back to legacy loose-file paths where migration slices have not finished yet
-15. [ ] `extension-lifecycle-ui-v1`:
-   surface the unified extension lifecycle in the workspace so install, validation, health, enablement, configuration, and removal all happen through one operator path
+15. [x] `extension-lifecycle-ui-v1`:
+   surface the unified extension lifecycle in the workspace so install, validation, health, enablement, configuration, and removal all happen through one operator path, with the extension studio now handling approval-required install/update/enable flows honestly, focusing Pending approvals on lifecycle gates, and exposing extension lifecycle context inside the approvals inspector instead of collapsing structured approval responses into generic failures
 16. [ ] `connector-manifest-and-health-v1`:
    define the connector package shape with auth/config metadata and health/test hooks so connectors stop being an architectural exception
 17. [ ] `mcp-packaging-and-install-flow-v1`:

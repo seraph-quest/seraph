@@ -68,3 +68,37 @@ async def test_list_pending_approvals_includes_thread_labels(client):
     assert payload[0]["thread_id"] == "thread-1"
     assert payload[0]["thread_label"] == "Release repair"
     assert payload[0]["resume_message"] == "Continue with this shell command"
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_includes_extension_lifecycle_context(client):
+    request = await approval_repository.get_or_create_pending(
+        session_id=None,
+        tool_name="extension_install",
+        risk_level="high",
+        summary="Install extension 'Test Installable' with access to workspace_write",
+        fingerprint="extension-install",
+        details={
+            "extension_id": "seraph.test-installable",
+            "extension_display_name": "Test Installable",
+            "action": "install",
+            "package_path": "/tmp/extensions/test-installable",
+            "permissions": {"tool_names": ["write_file"]},
+            "approval_profile": {
+                "requires_lifecycle_approval": True,
+                "lifecycle_boundaries": ["workspace_write"],
+            },
+        },
+    )
+
+    resp = await client.get("/api/approvals/pending")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    approval = next(item for item in payload if item["id"] == request.id)
+    assert approval["extension_id"] == "seraph.test-installable"
+    assert approval["extension_display_name"] == "Test Installable"
+    assert approval["extension_action"] == "install"
+    assert approval["package_path"] == "/tmp/extensions/test-installable"
+    assert approval["lifecycle_boundaries"] == ["workspace_write"]
+    assert approval["permissions"] == {"tool_names": ["write_file"]}

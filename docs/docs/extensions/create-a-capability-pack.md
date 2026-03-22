@@ -153,7 +153,7 @@ Install/update rules:
 
 High-risk package note:
 
-- packages that declare or derive high-risk boundaries such as `workspace_write`, `sandbox_execution`, `secret_*`, or `external_mcp` now pause behind the normal approval system on install/enable
+- packages that declare or derive high-risk boundaries such as `workspace_write`, `sandbox_execution`, `secret_*`, or `external_mcp` now pause behind the normal approval system on install, update, and enable
 - that approval is tied to the validated package path and content digest, so changing the package after approval forces a new approval
 - low-risk declarative packages install and enable directly
 

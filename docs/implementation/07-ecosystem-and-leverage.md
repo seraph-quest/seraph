@@ -100,9 +100,9 @@
 
 ### Phase 4: Lifecycle And Studio
 
-- unified extension lifecycle API
-- manifest-aware extension studio with package manifest plus package-backed workflow/skill source editing
-- unified workspace lifecycle UI for install, validate, health, enablement, configuration, and removal
+- [x] unified extension lifecycle API
+- [x] manifest-aware extension studio with package manifest plus package-backed workflow/skill source editing
+- [x] unified workspace lifecycle UI for install, validate, health, enablement, configuration, and removal, including approval-aware lifecycle recovery through Pending approvals and the inspector
 
 ### Phase 5: Connector Unification
 

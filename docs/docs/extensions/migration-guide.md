@@ -6,7 +6,9 @@ Current reality:
 
 - skills, workflows, runbooks, starter packs, and MCP surfaces still have transitional legacy loading paths
 - the manifest, registry, doctor, layout, and scaffold seams now exist
-- built-in declarative defaults now ship as the bundled `seraph.core-capabilities` package, but install/bootstrap/catalog and lifecycle paths still have transitional legacy behavior
+- built-in declarative defaults now ship as the bundled `seraph.core-capabilities` package
+- new authored skills/workflows now land in the managed workspace package at `workspace/extensions/workspace-capabilities/`
+- bundled catalog skill installs now land as generated manifest-backed extension packages under `workspace/extensions/`
 
 ## What this means for contributors right now
 
@@ -30,7 +32,12 @@ Current registry behavior still synthesizes legacy entries for:
 - loose starter packs
 - runtime MCP state
 
-That is temporary. The migration slices later in the roadmap remove those parallel paths once packaged loading fully replaces them. Until then, some catalog flows still copy bundled skill files into the workspace as transitional compatibility shims, and some bootstrap flows still reinitialize managers against bundled manifest roots to make packaged workflows available. Under the normal manifest-backed startup path those compatibility shims are not the primary source of truth; they exist only to keep legacy install/bootstrap flows working until the lifecycle migration slices land.
+That is temporary. The migration slices later in the roadmap remove those parallel paths once packaged loading fully replaces them. The important line today is:
+
+- new content is package-backed
+- old loose content is still readable
+
+Until the last cleanup steps land, some runtime seams still read loose legacy content and the registry still surfaces those paths as transitional compatibility records. Under the normal manifest-backed startup and authoring path, those compatibility shims are no longer the primary source of truth.
 
 ## Recommended migration order for existing content
 

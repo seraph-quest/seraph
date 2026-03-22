@@ -91,6 +91,25 @@ Seraph now also ships one canonical in-repo example package:
 
 - `examples/extensions/research-pack/`
 
+## Managed workspace authoring
+
+New authored capability content now lands in a managed workspace package:
+
+- `workspace/extensions/workspace-capabilities/`
+
+That package is now the primary write target for:
+
+- saved skill drafts
+- saved workflow drafts
+- capability-draft workflow saves
+
+Bundled catalog skill installs now also land as manifest-backed extension
+packages under `workspace/extensions/`, but not inside the managed
+`workspace-capabilities` authoring package.
+
+The old loose workspace folders remain readable only as transitional
+compatibility inputs while existing content is migrated forward.
+
 ## Current local tools
 
 Create a new capability pack:

@@ -53,6 +53,7 @@
 - [x] startup/runtime loading now serves bundled default skills, workflows, starter packs, and explicit runbooks from a real `seraph.core-capabilities` package under `backend/src/defaults/extensions/`, with workspace extension packs taking precedence over bundled defaults while install/bootstrap/catalog flows and legacy loose-file coexistence are still being migrated
 - [x] the backend now ships one `/api/extensions` lifecycle surface for list, inspect, validate, install, enable, disable, configure, and remove so automation no longer has to talk directly to per-surface skill/workflow/package seams even though the workspace UI still needs to adopt that API and the current `configure` step is metadata-only until typed runtime config contracts land
 - [x] extension studio is now manifest-aware for installed packages, with package manifests and package-backed workflow/skill sources loaded and saved through `/api/extensions/{id}/source` instead of always collapsing edits back into loose managed-file save paths
+- [x] new authored skills/workflows now land in the managed `workspace/extensions/workspace-capabilities/` package, while bundled catalog skill installs now land as manifest-backed extension packages under `workspace/extensions/`; old loose loaders remain read-only compatibility during the final cleanup window
 
 ## Still To Do On `develop`
 
@@ -117,7 +118,7 @@
 - [x] extension permissions and approvals
 - [x] extension audit and activity visibility
 - [x] extension versioning and update flow
-- legacy loader cleanup
+- [x] legacy loader cleanup for primary authoring/install paths
 - trusted-code-plugins RFC only after the typed extension platform is complete enough to judge whether privileged code plugins are actually needed
 
 ## Required Authoring Docs And Tools

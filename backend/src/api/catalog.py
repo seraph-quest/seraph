@@ -6,17 +6,18 @@ import json
 import logging
 import os
 from pathlib import Path
-import shutil
 import tempfile
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+import yaml
 
 from config.settings import settings
 from src.extensions.lifecycle import install_extension_path
+from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root
 from src.extensions.scaffold import validate_extension_package
-from src.skills.loader import scan_skill_paths
+from src.skills.loader import parse_skill_content, scan_skill_paths
 from src.skills.manager import skill_manager
 from src.tools.mcp_manager import mcp_manager
 
@@ -46,9 +47,19 @@ def _load_catalog() -> dict[str, list[dict[str, Any]]]:
 
 
 def _skill_installed(name: str) -> bool:
-    """Check if a skill .md file exists in the workspace skills directory."""
-    skills_dir = os.path.join(settings.workspace_dir, "skills")
-    return _skill_loaded(name) or os.path.isfile(os.path.join(skills_dir, f"{name}.md"))
+    """Check if a skill exists in the current runtime or workspace package roots."""
+    if _skill_loaded(name):
+        return True
+    registry = ExtensionRegistry(
+        manifest_roots=[os.path.join(settings.workspace_dir, "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+    for contribution in registry.snapshot().list_contributions("skills"):
+        if str(contribution.metadata.get("name") or "") == name:
+            return True
+    return False
 
 
 def _skill_loaded(name: str) -> bool:
@@ -101,6 +112,45 @@ def _slugify(value: str) -> str:
 
 def _catalog_mcp_extension_id(name: str) -> str:
     return f"seraph.catalog-mcp-{_slugify(name)}"
+
+
+def _catalog_skill_extension_id(name: str) -> str:
+    return f"seraph.catalog-skill-{_slugify(name)}"
+
+
+def _write_catalog_skill_package(root: str, item: dict[str, Any], source_path: str) -> str:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise ValueError("catalog skill item is missing a name")
+    package_dir = Path(root) / _slugify(name)
+    skills_dir = package_dir / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    content = Path(source_path).read_text(encoding="utf-8")
+    skill = parse_skill_content(content, path=source_path, errors=[])
+    if skill is None:
+        raise ValueError(f"catalog skill '{name}' could not be parsed from its bundled source")
+    permission_profile = evaluate_tool_permissions(None, tool_names=list(skill.requires_tools))
+    manifest_path = package_dir / "manifest.yaml"
+    manifest_payload = {
+        "id": _catalog_skill_extension_id(name),
+        "version": "2026.3.21",
+        "display_name": name,
+        "kind": "capability-pack",
+        "compatibility": {"seraph": ">=2026.3.19"},
+        "publisher": {"name": "Seraph Catalog"},
+        "trust": "local",
+        "contributes": {
+            "skills": [f"skills/{_slugify(name)}.md"],
+        },
+        "permissions": {
+            "tools": list(permission_profile["required_tools"]),
+            "execution_boundaries": list(permission_profile["required_execution_boundaries"]),
+            "network": bool(permission_profile["requires_network"]),
+        },
+    }
+    manifest_path.write_text(yaml.safe_dump(manifest_payload, sort_keys=False), encoding="utf-8")
+    (skills_dir / f"{_slugify(name)}.md").write_text(content, encoding="utf-8")
+    return str(package_dir)
 
 
 def _write_catalog_mcp_package(root: str, item: dict[str, Any]) -> str:
@@ -213,11 +263,47 @@ def install_catalog_item_by_name(name: str) -> dict[str, Any]:
                 "type": "skill",
                 "bundled": True,
             }
-
-        dst_dir = os.path.join(settings.workspace_dir, "skills")
-        os.makedirs(dst_dir, exist_ok=True)
-        shutil.copy2(src, os.path.join(dst_dir, f"{name}.md"))
-        skill_manager.reload()
+        try:
+            with tempfile.TemporaryDirectory(prefix="seraph-catalog-skill-") as temp_dir:
+                package_path = _write_catalog_skill_package(temp_dir, catalog_skill, src)
+                report = validate_extension_package(package_path)
+                if not report.ok:
+                    return {
+                        "ok": False,
+                        "status": "validation_failed",
+                        "name": name,
+                        "type": "skill",
+                        "bundled": True,
+                        "detail": _validation_detail(report),
+                    }
+                install_extension_path(package_path)
+        except FileExistsError:
+            return {
+                "ok": False,
+                "status": "already_installed",
+                "name": name,
+                "type": "skill",
+                "bundled": True,
+            }
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": "validation_failed",
+                "name": name,
+                "type": "skill",
+                "bundled": True,
+                "detail": str(exc),
+            }
+        except OSError as exc:
+            logger.warning("Failed to install catalog skill '%s'", name, exc_info=True)
+            return {
+                "ok": False,
+                "status": "install_failed",
+                "name": name,
+                "type": "skill",
+                "bundled": True,
+                "detail": str(exc),
+            }
         if not _skill_loaded(name):
             return {
                 "ok": False,
@@ -231,6 +317,7 @@ def install_catalog_item_by_name(name: str) -> dict[str, Any]:
             "status": "installed",
             "name": name,
             "type": "skill",
+            "extension_id": _catalog_skill_extension_id(name),
             "bundled": True,
         }
 

@@ -23,6 +23,7 @@ from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
+from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
 from src.runbooks.manager import runbook_manager
@@ -63,6 +64,18 @@ _BOOTSTRAP_ACTION_PRIORITY = {
     "set_mcp_policy": 5,
     "set_tool_policy": 6,
 }
+
+
+def _ensure_workflow_manager_workspace_extensions_loaded() -> None:
+    workflows_dir = workflow_manager._workflows_dir or os.path.join(settings.workspace_dir, "workflows")
+    manifest_roots = list(workflow_manager._manifest_roots or [])
+    changed = not bool(workflow_manager._workflows_dir)
+    for root in default_manifest_roots_for_workspace(settings.workspace_dir):
+        if root not in manifest_roots:
+            manifest_roots.append(root)
+            changed = True
+    if changed:
+        workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
 
 
 class CapabilityBootstrapRequest(BaseModel):
@@ -721,11 +734,11 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
 
     for item_name in [str(item) for item in pack.get("install_items", [])]:
         install_result = install_catalog_item_by_name(item_name)
-        if install_result["ok"]:
+        if install_result["ok"] or install_result["status"] == "already_installed":
             installed_catalog_items.append({
                 "name": item_name,
                 "type": install_result["type"],
-                "status": install_result["status"],
+                "status": "installed",
             })
             continue
         if install_result["status"] != "already_installed":
@@ -1535,11 +1548,8 @@ async def save_workflow_draft(body: WorkflowDraftRequest):
         raise HTTPException(status_code=400, detail="Workflow draft is invalid")
     workflow_name = str(validation["workflow"]["name"])
     file_name = f"{sanitize_workflow_name(workflow_name)}.md"
-    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
-    os.makedirs(workflows_dir, exist_ok=True)
-    file_path = os.path.join(workflows_dir, file_name)
-    with open(file_path, "w", encoding="utf-8") as handle:
-        handle.write(body.content)
+    _ensure_workflow_manager_workspace_extensions_loaded()
+    file_path = str(save_workspace_contribution("workflows", file_name=file_name, content=body.content))
     workflow_manager.reload()
     await log_integration_event(
         integration_type="workflow_draft",

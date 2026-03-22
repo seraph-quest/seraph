@@ -165,4 +165,11 @@ Current Studio support:
   `/api/extensions/{extension_id}/source`
 - MCP config still uses its existing dedicated config path until the connector migration slices land
 
+Managed workspace authoring note:
+
+- when Seraph saves a new skill or workflow from the live workspace, it now writes
+  into the managed `workspace/extensions/workspace-capabilities/` package instead
+  of creating new loose files under `workspace/skills/` or `workspace/workflows/`
+- those loose folders are now transitional read-compatibility only
+
 For the manifest fields themselves, see [Manifest Reference](./manifest-reference.md).

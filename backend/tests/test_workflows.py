@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, _parse_workflow_file, load_workflows
 from src.workflows.manager import WorkflowManager
 from src.approval.exceptions import ApprovalRequired
@@ -1528,6 +1529,7 @@ class TestWorkflowApi:
         )
         with (
             patch("src.api.workflows.workflow_manager._workflows_dir", "/tmp/workflows"),
+            patch("src.extensions.workspace_package.settings.workspace_dir", "/tmp"),
             patch(
                 "src.api.workflows.get_base_tools_and_active_skills",
                 return_value=([SimpleNamespace(name="write_file")], [], "disabled"),
@@ -1539,7 +1541,48 @@ class TestWorkflowApi:
             )
 
         assert resp.status_code == 400
-        assert "managed workflows directory" in resp.json()["detail"]
+        assert "managed workspace package" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_save_workflow_draft_persists_to_managed_workspace_package(self, client, tmp_path):
+        content = (
+            "---\n"
+            "name: Retryable Save\n"
+            "description: Save a note\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/brief.md\n"
+            "      content: hello\n"
+            "---\n"
+        )
+        with (
+            patch("src.api.workflows.workflow_manager._workflows_dir", str(tmp_path / "workflows")),
+            patch("src.api.workflows.workflow_manager._manifest_roots", []),
+            patch("src.extensions.workspace_package.settings.workspace_dir", str(tmp_path)),
+            patch(
+                "src.api.workflows.get_base_tools_and_active_skills",
+                return_value=([SimpleNamespace(name="write_file")], [], "disabled"),
+            ),
+            patch("src.api.workflows.workflow_manager.init") as init_manager,
+            patch("src.api.workflows.workflow_manager.reload", return_value=[]),
+            patch("src.api.workflows.log_integration_event", AsyncMock()),
+        ):
+            resp = await client.post("/api/workflows/save", json={"content": content})
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["status"] == "saved"
+        init_manager.assert_called_once_with(
+            str(tmp_path / "workflows"),
+            manifest_roots=default_manifest_roots_for_workspace(str(tmp_path)),
+        )
+        assert payload["file_path"].endswith(
+            "extensions/workspace-capabilities/workflows/retryable-save.md"
+        )
 
 
 class TestWorkflowSurfaces:

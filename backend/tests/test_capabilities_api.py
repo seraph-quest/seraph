@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.observer.context import CurrentContext
-from src.extensions.registry import bundled_manifest_root
+from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
 
 
 @pytest.fixture
@@ -529,6 +529,7 @@ async def test_activate_bundled_core_capability_pack_uses_manifest_runtime(_setu
 @pytest.mark.asyncio
 async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_setup_bundled_core_capabilities_managers):
     from src.api.capabilities import _activate_starter_pack_by_name
+    from src.api.catalog import install_catalog_item_by_name as real_install_catalog_item_by_name
     from src.tools.mcp_manager import mcp_manager
 
     original_config = dict(mcp_manager._config)
@@ -537,10 +538,13 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
     mcp_manager._config = {}
     mcp_manager._status = {}
     mcp_manager._config_path = None
-    installed_server_names: list[str] = []
 
     try:
         with (
+            patch(
+                "src.api.capabilities.install_catalog_item_by_name",
+                side_effect=real_install_catalog_item_by_name,
+            ) as install_item,
             patch(
                 "src.api.capabilities.get_base_tools_and_active_skills",
                 return_value=(
@@ -560,7 +564,6 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
             patch("src.api.capabilities.log_integration_event", AsyncMock()),
         ):
             payload = await _activate_starter_pack_by_name("research-briefing")
-            installed_server_names = sorted(mcp_manager._config.keys())
     finally:
         mcp_manager._config = original_config
         mcp_manager._status = original_status
@@ -572,7 +575,7 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
     ]
     assert payload["enabled_skills"] == ["web-briefing"]
     assert payload["enabled_workflows"] == ["web-brief-to-file"]
-    assert "http-request" in installed_server_names
+    assert [call.args[0] for call in install_item.call_args_list] == ["http-request"]
 
 
 def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_path):
@@ -1147,6 +1150,9 @@ async def test_workflow_draft_validation_and_save(client, tmp_path):
     )
     with (
         patch("src.api.capabilities.settings.workspace_dir", str(tmp_path)),
+        patch("src.api.capabilities.workflow_manager._workflows_dir", str(tmp_path / "workflows")),
+        patch("src.api.capabilities.workflow_manager._manifest_roots", []),
+        patch("src.api.capabilities.workflow_manager.init") as init_manager,
         patch("src.api.capabilities.workflow_manager.reload", return_value=[]),
     ):
         validate_resp = await client.post(
@@ -1168,4 +1174,10 @@ async def test_workflow_draft_validation_and_save(client, tmp_path):
     save_payload = save_resp.json()
     assert save_payload["status"] == "saved"
     assert save_payload["name"] == "Web Brief To File"
-    assert save_payload["file_path"].endswith("web_brief_to_file.md")
+    init_manager.assert_called_once_with(
+        str(tmp_path / "workflows"),
+        manifest_roots=default_manifest_roots_for_workspace(str(tmp_path)),
+    )
+    assert save_payload["file_path"].endswith(
+        "extensions/workspace-capabilities/workflows/web_brief_to_file.md"
+    )

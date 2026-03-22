@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from src.extensions.connectors import ConnectorDefinitionError, parse_mcp_server_definition
+from src.extensions.connectors import (
+    ConnectorDefinitionError,
+    parse_managed_connector_definition,
+    parse_mcp_server_definition,
+)
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
@@ -276,6 +280,21 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                             contribution_type=contribution.contribution_type,
                             reference=contribution.reference,
                             suggested_fix="add a valid MCP server name, url, and optional auth metadata",
+                        )
+                    )
+                    continue
+            if payload is not None and contribution.contribution_type == "managed_connectors":
+                try:
+                    parse_managed_connector_definition(payload, source=contribution.reference)
+                except ConnectorDefinitionError as exc:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="invalid_connector",
+                            severity="error",
+                            message=str(exc),
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="add a valid managed connector name, provider, auth metadata, and config fields",
                         )
                     )
                     continue

@@ -124,6 +124,49 @@ def _write_mcp_connector_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_managed_connector_extension(root: Path) -> Path:
+    package_dir = root / "managed-connector-pack"
+    (package_dir / "connectors" / "managed").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.managed-github\n"
+        "version: 2026.3.21\n"
+        "display_name: Managed GitHub\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  managed_connectors:\n"
+        "    - connectors/managed/github.yaml\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "managed" / "github.yaml").write_text(
+        "name: github-managed\n"
+        "provider: github\n"
+        "description: Curated GitHub connector\n"
+        "auth_kind: oauth\n"
+        "capabilities:\n"
+        "  - pull_requests.read\n"
+        "  - issues.write\n"
+        "setup_steps:\n"
+        "  - Authorize GitHub access\n"
+        "config_fields:\n"
+        "  - key: installation_id\n"
+        "    label: Installation ID\n"
+        "    required: true\n"
+        "  - key: api_base_url\n"
+        "    label: API Base URL\n"
+        "    required: false\n"
+        "    input: url\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 @pytest.fixture
 def extension_runtime(tmp_path):
     original_workspace_dir = settings.workspace_dir
@@ -375,6 +418,106 @@ async def test_install_toggle_and_remove_workspace_connector_extension(client, e
         assert remove_response.status_code == 200
         assert "github-packaged" not in mcp_manager._config
         assert not (extension_runtime / "extensions" / "seraph-test-connector").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_and_configure_workspace_managed_connector_extension(client, extension_runtime, tmp_path):
+    package_dir = _write_managed_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+        assert installed["id"] == "seraph.managed-github"
+        assert installed["enabled"] is None
+        assert installed["toggleable_contribution_types"] == []
+        assert installed["passive_contribution_types"] == ["managed_connectors"]
+        assert installed["configurable"] is True
+        assert installed["config_scope"] == "metadata_and_managed_connectors"
+        connector = next(item for item in installed["contributions"] if item["type"] == "managed_connectors")
+        assert connector["name"] == "github-managed"
+        assert connector["provider"] == "github"
+        assert connector["loaded"] is False
+        assert connector["status"] == "not_configured"
+        assert "enabled" not in connector
+
+        configure_response = await client.post(
+            "/api/extensions/seraph.managed-github/configure",
+            json={
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "12345",
+                            "api_base_url": "https://api.github.com",
+                        }
+                    }
+                }
+            },
+        )
+        assert configure_response.status_code == 200
+        configured = configure_response.json()["extension"]
+        connector = next(item for item in configured["contributions"] if item["type"] == "managed_connectors")
+        assert configured["enabled"] is None
+        assert connector["configured"] is True
+        assert connector["config_keys"] == ["api_base_url", "installation_id"]
+        assert connector["status"] == "configured"
+        assert "enabled" not in connector
+
+        invalid_config_response = await client.post(
+            "/api/extensions/seraph.managed-github/configure",
+            json={
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "api_base_url": "https://api.github.com",
+                        }
+                    }
+                }
+            },
+        )
+        assert invalid_config_response.status_code == 422
+        assert "installation_id" in invalid_config_response.json()["detail"]
+
+        invalid_url_response = await client.post(
+            "/api/extensions/seraph.managed-github/configure",
+            json={
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "12345",
+                            "api_base_url": "not-a-url",
+                        }
+                    }
+                }
+            },
+        )
+        assert invalid_url_response.status_code == 422
+        assert "valid http or https URL" in invalid_url_response.json()["detail"]
+
+        unknown_connector_response = await client.post(
+            "/api/extensions/seraph.managed-github/configure",
+            json={
+                "config": {
+                    "managed_connectors": {
+                        "github-shadow": {
+                            "installation_id": "12345",
+                        }
+                    }
+                }
+            },
+        )
+        assert unknown_connector_response.status_code == 422
+        assert "github-shadow" in unknown_connector_response.json()["detail"]
+
+        remove_response = await client.delete("/api/extensions/seraph.managed-github")
+        assert remove_response.status_code == 200
+        assert not (extension_runtime / "extensions" / "seraph-managed-github").exists()
 
 
 @pytest.mark.asyncio

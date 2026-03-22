@@ -151,6 +151,8 @@ async def configure_extension_package(extension_id: str, req: ExtensionConfigReq
         extension = configure_extension(extension_id, req.config)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     await log_integration_event(
         integration_type="extension",
         name=extension_id,

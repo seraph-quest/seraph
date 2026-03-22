@@ -351,6 +351,71 @@ permissions:
     assert not any(item.id.startswith("legacy.mcp-runtime.") for item in snapshot.extensions)
 
 
+def test_registry_enriches_manifest_backed_managed_connector_metadata(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "managed-connector-pack"
+    connector_dir = pack_dir / "connectors" / "managed"
+    connector_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.managed-github
+version: 2026.3.21
+display_name: Managed GitHub
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  managed_connectors:
+    - connectors/managed/github.yaml
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (connector_dir / "github.yaml").write_text(
+        """
+name: github-managed
+provider: github
+description: Curated GitHub connector
+auth_kind: oauth
+capabilities:
+  - pull_requests.read
+  - issues.write
+config_fields:
+  - key: installation_id
+    label: Installation ID
+    required: true
+  - key: api_base_url
+    label: API Base URL
+    required: false
+    input: url
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+
+    extension = snapshot.get_extension("seraph.managed-github")
+    assert extension is not None
+    contribution = extension.contributions[0]
+    assert contribution.contribution_type == "managed_connectors"
+    assert contribution.metadata["name"] == "github-managed"
+    assert contribution.metadata["provider"] == "github"
+    assert contribution.metadata["auth_kind"] == "oauth"
+    assert contribution.metadata["capabilities"] == ["pull_requests.read", "issues.write"]
+    assert contribution.metadata["config_fields"][1]["input"] == "url"
+
+
 def test_registry_reports_layout_error_for_symlink_escape(tmp_path: Path):
     package_dir = tmp_path / "extensions" / "escape-pack"
     skills_dir = package_dir / "skills"

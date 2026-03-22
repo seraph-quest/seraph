@@ -359,6 +359,106 @@ permissions:
     assert "streamable-http" in result.issues[0].message
 
 
+def test_doctor_reports_invalid_managed_connector_definition(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "bad-managed-connector"
+    connector_dir = pack_dir / "connectors" / "managed"
+    connector_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.bad-managed-connector
+version: 2026.3.21
+display_name: Bad Managed Connector
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  managed_connectors:
+    - connectors/managed/github.yaml
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (connector_dir / "github.yaml").write_text(
+        """
+name: github-managed
+auth_kind: oauth
+config_fields:
+  - key: access_token
+    input: password
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.bad-managed-connector"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "invalid_connector"
+    assert "provider" in result.issues[0].message or "label" in result.issues[0].message
+
+
+def test_doctor_rejects_secret_managed_connector_fields_until_vault_backing_exists(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "secret-managed-connector"
+    connector_dir = pack_dir / "connectors" / "managed"
+    connector_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.secret-managed-connector
+version: 2026.3.21
+display_name: Secret Managed Connector
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  managed_connectors:
+    - connectors/managed/github.yaml
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (connector_dir / "github.yaml").write_text(
+        """
+name: github-managed
+provider: github
+config_fields:
+  - key: access_token
+    label: Access Token
+    secret: true
+    input: password
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.secret-managed-connector"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "invalid_connector"
+    assert "vault-backed" in result.issues[0].message
+
+
 def test_doctor_snapshot_preserves_registry_load_errors(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "bad"
     pack_dir.mkdir(parents=True)

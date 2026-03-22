@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 from typing import Any
+from urllib.parse import urlparse
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
@@ -139,6 +140,69 @@ def _mcp_definitions_for_extension(extension: ExtensionRecord) -> dict[str, MCPS
         if definition is not None:
             definitions[definition.name] = definition
     return definitions
+
+
+def _managed_connector_config(
+    state_entry: dict[str, Any] | None,
+    connector_name: str,
+) -> dict[str, Any]:
+    if not isinstance(state_entry, dict) or not connector_name:
+        return {}
+
+    config_payload = state_entry.get("config")
+    if not isinstance(config_payload, dict):
+        config_payload = {}
+    managed_config = config_payload.get("managed_connectors")
+    if not isinstance(managed_config, dict):
+        managed_config = {}
+    config_entry = managed_config.get(connector_name)
+    if not isinstance(config_entry, dict):
+        return {}
+    return config_entry
+
+
+def _managed_connector_config_errors(
+    metadata: dict[str, Any],
+    config_entry: dict[str, Any],
+) -> list[str]:
+    config_fields = metadata.get("config_fields")
+    if not isinstance(config_fields, list):
+        return []
+    errors: list[str] = []
+    allowed_keys: set[str] = set()
+    for field in config_fields:
+        if not isinstance(field, dict):
+            continue
+        key = field.get("key")
+        if not isinstance(key, str) or not key:
+            continue
+        allowed_keys.add(key)
+        required = bool(field.get("required", True))
+        value = config_entry.get(key)
+        if required and (
+            key not in config_entry
+            or value is None
+            or (isinstance(value, str) and not value.strip())
+        ):
+            errors.append(f"missing required config field '{key}'")
+            continue
+        if key not in config_entry or value is None:
+            continue
+        input_kind = field.get("input")
+        if input_kind in {"text", "password", "select", "url"} and not isinstance(value, str):
+            errors.append(f"config field '{key}' must be a string")
+            continue
+        if input_kind in {"text", "password", "select"} and isinstance(value, str) and not value.strip():
+            errors.append(f"config field '{key}' must not be empty")
+            continue
+        if input_kind == "url" and isinstance(value, str):
+            parsed = urlparse(value.strip())
+            if not value.strip() or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                errors.append(f"config field '{key}' must be a valid http or https URL")
+    unknown_keys = sorted(key for key in config_entry.keys() if key not in allowed_keys)
+    for key in unknown_keys:
+        errors.append(f"unknown config field '{key}'")
+    return errors
 
 
 def _install_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
@@ -740,6 +804,7 @@ def _contribution_payload(
     contribution: ExtensionContributionRecord,
     *,
     indexes: dict[str, dict[str, dict[str, Any]]],
+    state_entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_path = contribution.metadata.get("resolved_path")
     normalized_path = os.path.abspath(str(resolved_path)) if isinstance(resolved_path, str) and resolved_path else None
@@ -771,6 +836,38 @@ def _contribution_payload(
             for field_name in ("name", "enabled", "status", "status_message", "connected", "tool_count", "auth_hint", "description", "url", "has_headers"):
                 if field_name in runtime_entry:
                     payload[field_name] = runtime_entry[field_name]
+        return payload
+    if contribution.contribution_type == "managed_connectors":
+        payload = {
+            "type": contribution.contribution_type,
+            "reference": contribution.reference,
+            "resolved_path": normalized_path,
+            "loaded": False,
+        }
+        for field_name in ("name", "provider", "description", "auth_kind"):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, str) and field_value:
+                payload[field_name] = field_value
+        for field_name in ("capabilities", "setup_steps", "config_fields"):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, list) and field_value:
+                payload[field_name] = field_value
+        connector_name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+        config_entry = _managed_connector_config(state_entry, connector_name)
+        config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
+        if config_entry:
+            payload["config_keys"] = sorted(config_entry.keys())
+        if config_errors:
+            payload["config_errors"] = config_errors
+        if not config_entry:
+            payload["configured"] = False
+            payload["status"] = "not_configured"
+        elif config_errors:
+            payload["configured"] = False
+            payload["status"] = "invalid_config"
+        else:
+            payload["configured"] = True
+            payload["status"] = "configured"
         return payload
     item = (
         indexes.get(contribution.contribution_type, {}).get(normalized_path or "")
@@ -857,7 +954,7 @@ def _extension_payload(
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
     location = _location_for_extension(extension)
     contributions = [
-        _contribution_payload(contribution, indexes=indexes)
+        _contribution_payload(contribution, indexes=indexes, state_entry=state_entry)
         for contribution in extension.contributions
     ]
     enabled_values = [
@@ -870,6 +967,10 @@ def _extension_payload(
         enabled = all(enabled_values)
     toggleable_types = _toggleable_contribution_types(extension)
     passive_types = _passive_contribution_types(extension)
+    managed_connector_present = any(
+        contribution.contribution_type == "managed_connectors"
+        for contribution in extension.contributions
+    )
     return {
         "id": extension.id,
         "display_name": extension.display_name,
@@ -907,9 +1008,9 @@ def _extension_payload(
         "disable_supported": bool(toggles),
         "removable": location == "workspace",
         "enabled_scope": "toggleable_contributions" if toggles else "none",
-        "configurable": False,
+        "configurable": managed_connector_present,
         "metadata_supported": True,
-        "config_scope": "metadata_only",
+        "config_scope": "metadata_and_managed_connectors" if managed_connector_present else "metadata_only",
         "enabled": enabled,
         "config": state_entry.get("config", {}),
         "contributions": contributions,
@@ -1139,6 +1240,37 @@ def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, 
     extension = snapshot.get_extension(extension_id)
     if extension is None:
         raise KeyError(extension_id)
+    managed_connector_configs = config.get("managed_connectors") if isinstance(config, dict) else None
+    if managed_connector_configs is not None and not isinstance(managed_connector_configs, dict):
+        raise ValueError("managed_connectors config must be an object keyed by connector name")
+    managed_connector_names: set[str] = set()
+    for contribution in extension.contributions:
+        if contribution.contribution_type != "managed_connectors":
+            continue
+        connector_name = contribution.metadata.get("name")
+        if not isinstance(connector_name, str) or not connector_name:
+            continue
+        managed_connector_names.add(connector_name)
+        connector_config = (
+            managed_connector_configs.get(connector_name)
+            if isinstance(managed_connector_configs, dict)
+            else None
+        )
+        if connector_config is None:
+            continue
+        if not isinstance(connector_config, dict):
+            raise ValueError(f"managed connector '{connector_name}' config must be an object")
+        config_errors = _managed_connector_config_errors(contribution.metadata, connector_config)
+        if config_errors:
+            raise ValueError("; ".join(config_errors))
+    if isinstance(managed_connector_configs, dict):
+        unknown_connectors = sorted(
+            connector_name for connector_name in managed_connector_configs.keys() if connector_name not in managed_connector_names
+        )
+        if unknown_connectors:
+            raise ValueError(
+                "unknown managed connector config entries: " + ", ".join(unknown_connectors)
+            )
     payload = _state_payload()
     extensions = payload.setdefault("extensions", {})
     entry = extensions.setdefault(extension_id, {})

@@ -15,6 +15,7 @@ from config.settings import settings
 from src.extensions.connectors import load_managed_connector_definition, load_mcp_server_definition
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import ExtensionManifest, ExtensionManifestError, load_extension_manifest
+from src.extensions.observers import load_observer_definition
 from src.skills.loader import scan_skills
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.loader import scan_workflows
@@ -253,6 +254,11 @@ class ExtensionRegistry:
                 if contribution_type == "managed_connectors":
                     try:
                         metadata.update(load_managed_connector_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "observer_definitions":
+                    try:
+                        metadata.update(load_observer_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
                 contributions.append(

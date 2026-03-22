@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from src.extensions.observers import select_active_observer_definitions
 from src.extensions.registry import ExtensionRegistry
 
 
@@ -414,6 +415,141 @@ config_fields:
     assert contribution.metadata["auth_kind"] == "oauth"
     assert contribution.metadata["capabilities"] == ["pull_requests.read", "issues.write"]
     assert contribution.metadata["config_fields"][1]["input"] == "url"
+
+
+def test_registry_enriches_manifest_backed_observer_definition_metadata(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "observer-pack"
+    observer_dir = pack_dir / "observers" / "definitions"
+    observer_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.core-observer-sources
+version: 2026.3.21
+display_name: Core Observer Sources
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  observer_definitions:
+    - observers/definitions/calendar.yaml
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (observer_dir / "calendar.yaml").write_text(
+        """
+name: calendar
+source_type: calendar
+description: Curated calendar observer
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+
+    extension = snapshot.get_extension("seraph.core-observer-sources")
+    assert extension is not None
+    contribution = extension.contributions[0]
+    assert contribution.contribution_type == "observer_definitions"
+    assert contribution.metadata["name"] == "calendar"
+    assert contribution.metadata["source_type"] == "calendar"
+    assert contribution.metadata["default_enabled"] is True
+    assert contribution.metadata["requires_network"] is True
+
+
+def test_active_observer_definitions_prefer_lower_manifest_root_index(tmp_path: Path):
+    workspace_root = tmp_path / "workspace-extensions"
+    bundled_root = tmp_path / "bundled-extensions"
+    workspace_pack = workspace_root / "calendar-override"
+    bundled_pack = bundled_root / "core-observer-sources"
+    (workspace_pack / "observers" / "definitions").mkdir(parents=True)
+    (bundled_pack / "observers" / "definitions").mkdir(parents=True)
+
+    (workspace_pack / "manifest.yaml").write_text(
+        """
+id: seraph.workspace-calendar
+version: 2026.3.21
+display_name: Workspace Calendar
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+permissions:
+  network: true
+contributes:
+  observer_definitions:
+    - observers/definitions/calendar.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (workspace_pack / "observers" / "definitions" / "calendar.yaml").write_text(
+        """
+name: workspace-calendar
+source_type: calendar
+description: Workspace calendar override
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    (bundled_pack / "manifest.yaml").write_text(
+        """
+id: seraph.core-observer-sources
+version: 2026.3.21
+display_name: Core Observer Sources
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+permissions:
+  network: true
+contributes:
+  observer_definitions:
+    - observers/definitions/calendar.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (bundled_pack / "observers" / "definitions" / "calendar.yaml").write_text(
+        """
+name: bundled-calendar
+source_type: calendar
+description: Bundled calendar observer
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(workspace_root), str(bundled_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+    active = select_active_observer_definitions(snapshot.list_contributions("observer_definitions"))
+
+    assert len(active) == 1
+    assert active[0].name == "workspace-calendar"
+    assert active[0].manifest_root_index == 0
 
 
 def test_registry_reports_layout_error_for_symlink_escape(tmp_path: Path):

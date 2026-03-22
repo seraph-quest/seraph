@@ -11,6 +11,7 @@ from src.extensions.connectors import (
     parse_managed_connector_definition,
     parse_mcp_server_definition,
 )
+from src.extensions.observers import parse_observer_definition
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
@@ -314,6 +315,44 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                         contribution_type=contribution.contribution_type,
                         reference=contribution.reference,
                         suggested_fix="set manifest.permissions.network to true for networked connectors",
+                    )
+                )
+
+        if contribution.contribution_type == "observer_definitions":
+            payload, connector_issue = _load_connector_payload(
+                content,
+                contribution_type=contribution.contribution_type,
+                reference=contribution.reference,
+            )
+            if connector_issue is not None:
+                issues.append(connector_issue)
+                continue
+            try:
+                definition = parse_observer_definition(payload, source=contribution.reference)
+            except ConnectorDefinitionError as exc:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="invalid_observer_definition",
+                        severity="error",
+                        message=str(exc),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix="add a valid observer name, source_type, and optional enabled flag",
+                    )
+                )
+                continue
+            if definition.requires_network and not extension.manifest.permissions.network:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            "Observer definition requires network access but "
+                            "manifest.permissions.network is false"
+                        ),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix="set manifest.permissions.network to true for networked observer sources",
                     )
                 )
 

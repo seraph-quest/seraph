@@ -167,6 +167,65 @@ def _write_managed_connector_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_observer_extension(root: Path) -> Path:
+    package_dir = root / "observer-pack"
+    (package_dir / "observers" / "definitions").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.calendar-observer\n"
+        "version: 2026.3.21\n"
+        "display_name: Calendar Observer\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "permissions:\n"
+        "  network: true\n"
+        "contributes:\n"
+        "  observer_definitions:\n"
+        "    - observers/definitions/calendar.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "observers" / "definitions" / "calendar.yaml").write_text(
+        "name: calendar\n"
+        "source_type: calendar\n"
+        "description: Curated calendar observer\n"
+        "enabled: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_invalid_observer_extension(root: Path) -> Path:
+    package_dir = root / "invalid-observer-pack"
+    (package_dir / "observers" / "definitions").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.invalid-observer\n"
+        "version: 2026.3.21\n"
+        "display_name: Invalid Observer\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "permissions:\n"
+        "  network: true\n"
+        "contributes:\n"
+        "  observer_definitions:\n"
+        "    - observers/definitions/calendar.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "observers" / "definitions" / "calendar.yaml").write_text(
+        "name: invalid-calendar\n"
+        "description: Missing source type\n"
+        "enabled: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 @pytest.fixture
 def extension_runtime(tmp_path):
     original_workspace_dir = settings.workspace_dir
@@ -518,6 +577,87 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
         remove_response = await client.delete("/api/extensions/seraph.managed-github")
         assert remove_response.status_code == 200
         assert not (extension_runtime / "extensions" / "seraph-managed-github").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_workspace_observer_extension_exposes_typed_observer_metadata(client, extension_runtime, tmp_path):
+    package_dir = _write_observer_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+        assert installed["passive_contribution_types"] == ["observer_definitions"]
+        observer = next(item for item in installed["contributions"] if item["type"] == "observer_definitions")
+        assert observer["name"] == "calendar"
+        assert observer["source_type"] == "calendar"
+        assert observer["default_enabled"] is True
+        assert observer["requires_network"] is True
+        assert observer["loaded"] is True
+        assert observer["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_workspace_observer_extension_overrides_bundled_source_of_same_type(client, extension_runtime, tmp_path):
+    package_dir = _write_observer_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+
+        workspace_extension = extensions["seraph.calendar-observer"]
+        bundled_extension = extensions["seraph.core-observer-sources"]
+
+        workspace_observer = next(
+            item
+            for item in workspace_extension["contributions"]
+            if item["type"] == "observer_definitions" and item["source_type"] == "calendar"
+        )
+        bundled_observer = next(
+            item
+            for item in bundled_extension["contributions"]
+            if item["type"] == "observer_definitions" and item["source_type"] == "calendar"
+        )
+
+        assert workspace_observer["loaded"] is True
+        assert workspace_observer["status"] == "active"
+        assert bundled_observer["loaded"] is False
+        assert bundled_observer["status"] == "overridden"
+
+
+@pytest.mark.asyncio
+async def test_invalid_observer_definition_surfaces_invalid_status_in_extension_payload(client, extension_runtime):
+    package_dir = _write_invalid_observer_extension(extension_runtime / "extensions")
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ):
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+
+    invalid_extension = extensions["seraph.invalid-observer"]
+    observer = next(item for item in invalid_extension["contributions"] if item["type"] == "observer_definitions")
+    assert observer["loaded"] is False
+    assert observer["status"] == "invalid"
+    assert invalid_extension["doctor_ok"] is False
 
 
 @pytest.mark.asyncio

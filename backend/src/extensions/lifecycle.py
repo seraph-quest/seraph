@@ -23,6 +23,7 @@ from src.extensions.manifest import (
     load_extension_manifest,
     parse_extension_manifest,
 )
+from src.extensions.observers import select_active_observer_definitions
 from src.extensions.registry import (
     ExtensionContributionRecord,
     ExtensionLoadErrorRecord,
@@ -791,12 +792,22 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
         if isinstance(item.get("file_path"), str)
     }
     mcp_servers = _mcp_runtime_index()
+    observer_snapshot = _registry().snapshot()
+    observer_definitions = {
+        os.path.abspath(item.resolved_path): {
+            "name": item.name,
+            "source_type": item.source_type,
+        }
+        for item in select_active_observer_definitions(observer_snapshot.list_contributions("observer_definitions"))
+        if item.resolved_path
+    }
     return {
         "skills": skills,
         "workflows": workflows,
         "runbooks": runbooks,
         "starter_packs": starter_packs,
         "mcp_servers": mcp_servers,
+        "observer_definitions": observer_definitions,
     }
 
 
@@ -868,6 +879,40 @@ def _contribution_payload(
         else:
             payload["configured"] = True
             payload["status"] = "configured"
+        return payload
+    if contribution.contribution_type == "observer_definitions":
+        active_definition = (
+            indexes.get("observer_definitions", {}).get(normalized_path or "")
+            if normalized_path is not None
+            else None
+        )
+        default_enabled = bool(contribution.metadata.get("default_enabled", True))
+        valid_definition = all(
+            isinstance(contribution.metadata.get(field_name), str) and str(contribution.metadata.get(field_name)).strip()
+            for field_name in ("name", "source_type")
+        )
+        payload = {
+            "type": contribution.contribution_type,
+            "reference": contribution.reference,
+            "resolved_path": normalized_path,
+            "loaded": active_definition is not None,
+        }
+        for field_name in ("name", "source_type", "description"):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, str) and field_value:
+                payload[field_name] = field_value
+        if "default_enabled" in contribution.metadata:
+            payload["default_enabled"] = default_enabled
+        if "requires_network" in contribution.metadata:
+            payload["requires_network"] = bool(contribution.metadata.get("requires_network"))
+        if payload["loaded"]:
+            payload["status"] = "active"
+        elif not valid_definition:
+            payload["status"] = "invalid"
+        elif not default_enabled:
+            payload["status"] = "disabled"
+        else:
+            payload["status"] = "overridden"
         return payload
     item = (
         indexes.get(contribution.contribution_type, {}).get(normalized_path or "")

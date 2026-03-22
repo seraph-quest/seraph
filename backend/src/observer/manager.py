@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 from src.audit.runtime import log_background_task_event
 from src.observer.context import CurrentContext
@@ -15,6 +16,61 @@ logger = logging.getLogger(__name__)
 # States considered "blocked" for transition detection
 _BLOCKED_STATES = {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}
 _UNBLOCKED_STATES = {UserState.available.value, UserState.transitioning.value}
+
+
+async def _gather_time_source() -> dict:
+    from src.observer.sources.time_source import gather_time
+
+    return gather_time()
+
+
+async def _gather_calendar_source() -> dict:
+    from src.observer.sources.calendar_source import gather_calendar
+
+    return await gather_calendar()
+
+
+async def _gather_git_source() -> dict:
+    from src.observer.sources.git_source import gather_git
+
+    result = gather_git()
+    return result or {}
+
+
+async def _gather_goal_source() -> dict:
+    from src.observer.sources.goal_source import gather_goals
+
+    return await gather_goals()
+
+
+_OBSERVER_SOURCE_RUNNERS: dict[str, Callable[[], Awaitable[dict]]] = {
+    "time": _gather_time_source,
+    "calendar": _gather_calendar_source,
+    "git": _gather_git_source,
+    "goals": _gather_goal_source,
+}
+
+
+def _active_observer_definitions() -> list[tuple[str, str]]:
+    from config.settings import settings
+    from src.extensions.observers import select_active_observer_definitions
+    from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    active_definitions = select_active_observer_definitions(snapshot.list_contributions("observer_definitions"))
+    if active_definitions:
+        return [(item.source_type, item.name) for item in active_definitions]
+    return [
+        ("time", "time"),
+        ("calendar", "calendar"),
+        ("git", "git"),
+        ("goals", "goals"),
+    ]
 
 
 class ContextManager:
@@ -45,47 +101,27 @@ class ContextManager:
             async with self._lock:
                 old = self._context
 
-                # Track source success for data quality
+                active_sources = _active_observer_definitions()
+                source_results: dict[str, dict] = {}
                 sources_ok = 0
-                sources_total = 4
+                sources_total = len(active_sources)
 
-                # Time source (sync, pure computation)
-                time_data: dict = {}
-                try:
-                    from src.observer.sources.time_source import gather_time
-                    time_data = gather_time()
-                    sources_ok += 1
-                except Exception:
-                    logger.exception("Time source failed")
+                for source_type, source_name in active_sources:
+                    runner = _OBSERVER_SOURCE_RUNNERS.get(source_type)
+                    if runner is None:
+                        logger.warning("Observer source '%s' has no runtime runner", source_type)
+                        continue
+                    try:
+                        source_results[source_type] = await runner()
+                        sources_ok += 1
+                    except Exception:
+                        logger.exception("Observer source '%s' (%s) failed during refresh", source_type, source_name)
+                        source_results[source_type] = {}
 
-                # Calendar source (async, I/O)
-                calendar_data: dict = {}
-                try:
-                    from src.observer.sources.calendar_source import gather_calendar
-                    calendar_data = await gather_calendar()
-                    sources_ok += 1
-                except Exception:
-                    logger.exception("Calendar source failed during refresh")
-
-                # Git source (sync, filesystem)
-                git_data: dict = {}
-                try:
-                    from src.observer.sources.git_source import gather_git
-                    result = gather_git()
-                    if result:
-                        git_data = result
-                    sources_ok += 1
-                except Exception:
-                    logger.exception("Git source failed")
-
-                # Goal source (async, DB)
-                goal_data: dict = {}
-                try:
-                    from src.observer.sources.goal_source import gather_goals
-                    goal_data = await gather_goals()
-                    sources_ok += 1
-                except Exception:
-                    logger.exception("Goal source failed")
+                time_data = source_results.get("time", {})
+                calendar_data = source_results.get("calendar", {})
+                git_data = source_results.get("git", {})
+                goal_data = source_results.get("goals", {})
 
                 # Derive data quality
                 if sources_ok == sources_total:
@@ -177,6 +213,7 @@ class ContextManager:
                     details={
                         "sources_ok": sources_ok,
                         "sources_total": sources_total,
+                        "active_source_types": [source_type for source_type, _ in active_sources],
                         "data_quality": data_quality,
                         "observer_confidence": assessment.observer_confidence,
                         "salience_level": assessment.salience_level,

@@ -459,6 +459,99 @@ config_fields:
     assert "vault-backed" in result.issues[0].message
 
 
+def test_doctor_reports_invalid_observer_definition(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "bad-observer-pack"
+    observer_dir = pack_dir / "observers" / "definitions"
+    observer_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.bad-observer-pack
+version: 2026.3.21
+display_name: Bad Observer Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  observer_definitions:
+    - observers/definitions/calendar.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (observer_dir / "calendar.yaml").write_text(
+        """
+name: calendar
+description: Missing source type
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.bad-observer-pack"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "invalid_observer_definition"
+    assert "source_type" in result.issues[0].message
+
+
+def test_doctor_reports_network_permission_mismatch_for_calendar_observer(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "calendar-observer-pack"
+    observer_dir = pack_dir / "observers" / "definitions"
+    observer_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.calendar-observer-pack
+version: 2026.3.21
+display_name: Calendar Observer Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+permissions:
+  network: false
+contributes:
+  observer_definitions:
+    - observers/definitions/calendar.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (observer_dir / "calendar.yaml").write_text(
+        """
+name: calendar
+source_type: calendar
+description: Calendar observer
+enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.calendar-observer-pack"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "permission_mismatch"
+    assert "network access" in result.issues[0].message
+
+
 def test_doctor_snapshot_preserves_registry_load_errors(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "bad"
     pack_dir.mkdir(parents=True)

@@ -23,6 +23,7 @@ from src.extensions.lifecycle import (
     list_extensions,
     remove_extension,
     save_extension_source,
+    set_extension_connector_enabled,
     update_extension_path,
     validate_extension_path,
 )
@@ -46,6 +47,11 @@ class ExtensionSourceSaveRequest(BaseModel):
 
 class ExtensionConnectorTestRequest(BaseModel):
     reference: str
+
+
+class ExtensionConnectorToggleRequest(BaseModel):
+    reference: str
+    enabled: bool
 
 
 def _extension_issue_count(preview: dict[str, Any] | None) -> int:
@@ -348,6 +354,60 @@ async def test_extension_package_connector(extension_id: str, req: ExtensionConn
         "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
         "message": str(health.get("summary") if isinstance(health, dict) else connector.get("status") or "Connector status"),
         "health": health,
+    }
+
+
+@router.post("/extensions/{extension_id}/connectors/enabled")
+async def set_extension_package_connector_enabled(extension_id: str, req: ExtensionConnectorToggleRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        if req.enabled:
+            if preview.get("status") != "ready":
+                raise ValueError(
+                    f"extension '{extension_id}' is degraded and cannot enable packaged connectors until validation issues are fixed"
+                )
+            await _require_extension_lifecycle_approval("enable", preview)
+        result = set_extension_connector_enabled(extension_id, req.reference, enabled=req.enabled)
+    except KeyError as exc:
+        detail = (
+            f"Extension '{extension_id}' not found"
+            if str(exc) == f"'{extension_id}'"
+            else f"Connector reference '{req.reference}' is not part of extension '{extension_id}'"
+        )
+        await _log_extension_lifecycle_event(
+            action="enable" if req.enabled else "disable",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=detail,
+            extra_details={"reference": req.reference},
+        )
+        raise HTTPException(status_code=404, detail=detail) from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="enable" if req.enabled else "disable",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+            extra_details={"reference": req.reference},
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await _log_extension_lifecycle_event(
+        action="enable" if req.enabled else "disable",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={
+            "reference": req.reference,
+            "changed": result.get("changed"),
+        },
+    )
+    return {
+        "status": "enabled" if req.enabled else "disabled",
+        **result,
     }
 
 

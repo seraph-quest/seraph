@@ -142,6 +142,8 @@ Current connector-runtime visibility:
 
 - `GET /api/extensions/{id}/connectors` lists packaged connector contributions with a normalized health contract
 - `POST /api/extensions/{id}/connectors/test` now routes packaged MCP connectors through a live runtime test path and returns normalized readiness for the other shipped connector surfaces
+- `POST /api/extensions/{id}/connectors/enabled` now owns packaged MCP enable and disable changes, while raw `/api/mcp` update/remove/test/token flows reject extension-managed servers so package-owned connectors stay inside the extension lifecycle
+- the standalone MCP config editor is now a manual-server path only; packaged MCP definitions stay read-only in Extension Studio until package-backed MCP source editing lands
 - the first shipped health contract covers packaged MCP connectors, managed connectors, observer definitions, and channel adapters, while deeper runtime behavior for managed connectors and the reach surfaces continues to land in later slices
 
 For the concrete author workflow, continue with [Create A Capability Pack](./create-a-capability-pack.md).

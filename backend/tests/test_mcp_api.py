@@ -99,6 +99,81 @@ async def test_set_token_unknown_server(client):
 
 
 @pytest.mark.asyncio
+async def test_set_token_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.post(
+            "/api/mcp/servers/github-packaged/token",
+            json={"token": "secret"},
+        )
+
+    assert resp.status_code == 409
+    assert "token updates" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_server_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.put("/api/mcp/servers/github-packaged", json={"enabled": False})
+
+    assert resp.status_code == 409
+    assert "managed by Test Connector" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_remove_server_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.delete("/api/mcp/servers/github-packaged")
+
+    assert resp.status_code == 409
+    assert "extension connector lifecycle" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_test_server_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.post("/api/mcp/servers/github-packaged/test")
+
+    assert resp.status_code == 409
+    assert "raw MCP tests" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_test_server_auth_required_for_missing_vars(client):
     """POST /api/mcp/servers/{name}/test should return auth_required for unresolved env vars."""
     with patch("src.api.mcp.mcp_manager") as mock_mgr:

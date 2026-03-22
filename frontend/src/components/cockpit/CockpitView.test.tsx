@@ -2492,6 +2492,215 @@ describe("CockpitView", () => {
     await waitFor(() => expect(within(studio).getByText(/github config is ready to test/i)).toBeInTheDocument());
   }, 15000);
 
+  it("routes packaged MCP test and toggle actions through extension connector endpoints", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 1,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [{
+            name: "github-packaged",
+            enabled: false,
+            url: "https://example.test/mcp",
+            description: "Packaged GitHub MCP",
+            status: "disconnected",
+            status_message: null,
+            tool_count: 0,
+            has_headers: true,
+            auth_hint: "Set GITHUB_TOKEN before enabling the connector",
+            source: "extension",
+            extension_id: "seraph.test-connector",
+            extension_reference: "mcp/github.json",
+            extension_display_name: "Test Connector",
+            availability: "disabled",
+            blocked_reason: "server_disabled",
+            recommended_actions: [],
+          }],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({ extensions: [] }));
+      }
+      if (url.includes("/api/extensions/seraph.test-connector/connectors/test")) {
+        return Promise.resolve(mockResponse({ status: "ok", tool_count: 2, tools: ["fetch_repo", "list_issues"] }));
+      }
+      if (url.includes("/api/extensions/seraph.test-connector/connectors/enabled")) {
+        return Promise.resolve(mockResponse({
+          status: "enabled",
+          connector: { name: "github-packaged", enabled: true },
+          extension: { id: "seraph.test-connector" },
+          changed: { type: "mcp_server", name: "github-packaged", reference: "mcp/github.json", enabled: true, ok: true },
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const packagedLabel = await screen.findByText("github-packaged");
+    const packagedRow = packagedLabel.closest(".cockpit-operator-row");
+    expect(packagedRow).not.toBeNull();
+
+    fireEvent.click(within(packagedRow as HTMLElement).getByRole("button", { name: "Test github-packaged" }));
+    fireEvent.click(within(packagedRow as HTMLElement).getByRole("button", { name: "Turn on github-packaged" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.test-connector/connectors/test"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"reference":"mcp/github.json"'),
+        }),
+      ),
+    );
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.test-connector/connectors/enabled"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"enabled":true'),
+        }),
+      ),
+    );
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/mcp/servers/github-packaged"))).toBe(false);
+  }, 15000);
+
+  it("shows packaged MCP definitions as read-only in extension studio", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 1,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [{
+            name: "github-packaged",
+            enabled: false,
+            url: "https://example.test/mcp",
+            description: "Packaged GitHub MCP",
+            status: "disconnected",
+            status_message: null,
+            tool_count: 0,
+            has_headers: true,
+            auth_hint: "Set GITHUB_TOKEN before enabling the connector",
+            source: "extension",
+            extension_id: "seraph.test-connector",
+            extension_reference: "mcp/github.json",
+            extension_display_name: "Test Connector",
+            availability: "disabled",
+            blocked_reason: "server_disabled",
+            recommended_actions: [],
+          }],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({ extensions: [] }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const packagedLabel = await screen.findByText("github-packaged");
+    const packagedRow = packagedLabel.closest(".cockpit-operator-row");
+    expect(packagedRow).not.toBeNull();
+
+    fireEvent.click(within(packagedRow as HTMLElement).getByRole("button", { name: "studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    expect(within(studio).getByRole("button", { name: "Save config" })).toBeDisabled();
+    expect(within(studio).getByRole("button", { name: "Validate config" })).toBeDisabled();
+    expect(within(studio).getByLabelText("mcp url")).toBeDisabled();
+    expect(within(studio).getByLabelText("description")).toBeDisabled();
+    expect(within(studio).getByText(/Packaged MCP definitions are read-only here/i)).toBeInTheDocument();
+  }, 15000);
+
   it("preserves the existing workflow file when saving studio drafts", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

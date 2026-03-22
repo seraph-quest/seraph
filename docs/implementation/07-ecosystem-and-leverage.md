@@ -107,7 +107,7 @@
 ### Phase 5: Connector Unification
 
 - [x] connector manifests and health hooks, including one normalized connector-health contract plus extension-native connector list/test endpoints
-- MCP packaging and install flow inside the extension platform
+- [x] MCP packaging and install flow inside the extension platform, including package-owned MCP runtime metadata, extension-native connector enable/disable control, cockpit routing for packaged MCP test/toggle actions, raw `/api/mcp` mutation paths now blocked for extension-owned servers, and package-owned MCP definitions now read-only in Extension Studio until package-backed MCP source editing lands
 - managed connectors for curated high-trust integrations
 
 ### Phase 6: Reach Surface Migration

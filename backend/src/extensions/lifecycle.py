@@ -253,6 +253,17 @@ def _mcp_definitions_for_extension(extension: ExtensionRecord) -> dict[str, MCPS
     return definitions
 
 
+def _mcp_definition_items_for_extension(
+    extension: ExtensionRecord,
+) -> list[tuple[ExtensionContributionRecord, MCPServerDefinition]]:
+    items: list[tuple[ExtensionContributionRecord, MCPServerDefinition]] = []
+    for contribution in extension.contributions:
+        definition = _mcp_definition_for_contribution(contribution)
+        if definition is not None:
+            items.append((contribution, definition))
+    return items
+
+
 def _managed_connector_config(
     state_entry: dict[str, Any] | None,
     connector_name: str,
@@ -317,15 +328,15 @@ def _managed_connector_config_errors(
 
 
 def _install_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
-    definitions = _mcp_definitions_for_extension(extension)
-    for definition in definitions.values():
+    definition_items = _mcp_definition_items_for_extension(extension)
+    for _, definition in definition_items:
         if definition.name in mcp_manager._config:
             raise FileExistsError(
                 f"MCP server '{definition.name}' from extension '{extension.id}' already exists"
             )
     added: list[str] = []
     try:
-        for definition in definitions.values():
+        for contribution, definition in definition_items:
             # Connector packages register safely at install time; operators enable them explicitly later.
             mcp_manager.add_server(
                 name=definition.name,
@@ -334,6 +345,10 @@ def _install_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
                 enabled=False,
                 headers=definition.headers,
                 auth_hint=definition.auth_hint,
+                extension_id=extension.id,
+                extension_reference=contribution.reference,
+                extension_display_name=extension.display_name,
+                source="extension",
             )
             added.append(definition.name)
     except Exception:
@@ -353,7 +368,9 @@ def _sync_mcp_servers_for_updated_extension(
     updated_extension: ExtensionRecord,
 ) -> None:
     previous_definitions = _mcp_definitions_for_extension(previous_extension)
-    updated_definitions = _mcp_definitions_for_extension(updated_extension)
+    updated_definition_items = _mcp_definition_items_for_extension(updated_extension)
+    updated_definitions = {definition.name: definition for _, definition in updated_definition_items}
+    updated_references = {definition.name: contribution.reference for contribution, definition in updated_definition_items}
 
     for removed_name in sorted(set(previous_definitions) - set(updated_definitions)):
         if removed_name in mcp_manager._config:
@@ -380,6 +397,10 @@ def _sync_mcp_servers_for_updated_extension(
                 headers=headers,
                 enabled=enabled,
                 auth_hint=auth_hint,
+                extension_id=updated_extension.id,
+                extension_reference=updated_references.get(name),
+                extension_display_name=updated_extension.display_name,
+                source="extension",
             )
         else:
             mcp_manager.add_server(
@@ -389,6 +410,10 @@ def _sync_mcp_servers_for_updated_extension(
                 enabled=enabled,
                 headers=headers,
                 auth_hint=auth_hint,
+                extension_id=updated_extension.id,
+                extension_reference=updated_references.get(name),
+                extension_display_name=updated_extension.display_name,
+                source="extension",
             )
 
 
@@ -1527,6 +1552,72 @@ def get_extension_connector(extension_id: str, reference: str) -> dict[str, Any]
     raise KeyError(reference)
 
 
+def set_extension_connector_enabled(
+    extension_id: str,
+    reference: str,
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+
+    contribution = next((item for item in extension.contributions if item.reference == reference), None)
+    if contribution is None:
+        raise KeyError(reference)
+    if contribution.contribution_type != "mcp_servers":
+        raise ValueError(
+            f"connector '{reference}' in extension '{extension_id}' does not support enable or disable yet"
+        )
+
+    definition = _mcp_definition_for_contribution(contribution)
+    if definition is None:
+        raise ValueError(
+            f"connector '{reference}' in extension '{extension_id}' is not a valid MCP server definition"
+        )
+
+    existing_config = mcp_manager._config.get(definition.name)
+    if existing_config is None:
+        mcp_manager.add_server(
+            name=definition.name,
+            url=definition.url,
+            description=definition.description,
+            enabled=enabled,
+            headers=definition.headers,
+            auth_hint=definition.auth_hint,
+            extension_id=extension.id,
+            extension_reference=contribution.reference,
+            extension_display_name=extension.display_name,
+            source="extension",
+        )
+    else:
+        updated = mcp_manager.update_server(
+            definition.name,
+            enabled=enabled,
+            extension_id=extension.id,
+            extension_reference=contribution.reference,
+            extension_display_name=extension.display_name,
+            source="extension",
+        )
+        if not updated:
+            raise ValueError(
+                f"connector '{reference}' in extension '{extension_id}' could not be updated in the MCP runtime"
+            )
+
+    return {
+        "extension": get_extension(extension_id),
+        "connector": get_extension_connector(extension_id, reference),
+        "changed": {
+            "type": "mcp_server",
+            "name": definition.name,
+            "reference": contribution.reference,
+            "enabled": enabled,
+            "ok": True,
+        },
+    }
+
+
 def validate_extension_path(path: str) -> dict[str, Any]:
     package_root, manifest = _load_manifest_from_path(path)
     snapshot = ExtensionRegistry(
@@ -1772,6 +1863,10 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                 f"extension '{extension_id}' is degraded and cannot be enabled until validation issues are fixed"
             )
     mcp_definitions = _mcp_definitions_for_extension(extension)
+    mcp_references_by_name = {
+        definition.name: contribution.reference
+        for contribution, definition in _mcp_definition_items_for_extension(extension)
+    }
     changed: list[dict[str, Any]] = []
     for target in _toggle_targets(extension):
         target_name = target["name"]
@@ -1781,9 +1876,17 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         elif target["type"] == "workflow":
             ok = workflow_manager.enable(target_name) if enabled else workflow_manager.disable(target_name)
         elif target["type"] == "mcp_server":
-            ok = mcp_manager.update_server(target_name, enabled=enabled)
+            definition = mcp_definitions.get(target_name)
+            extension_reference = mcp_references_by_name.get(target_name)
+            ok = mcp_manager.update_server(
+                target_name,
+                enabled=enabled,
+                extension_id=extension.id,
+                extension_reference=extension_reference,
+                extension_display_name=extension.display_name,
+                source="extension",
+            )
             if not ok and enabled:
-                definition = mcp_definitions.get(target_name)
                 if definition is not None:
                     mcp_manager.add_server(
                         name=definition.name,
@@ -1792,6 +1895,10 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                         enabled=True,
                         headers=definition.headers,
                         auth_hint=definition.auth_hint,
+                        extension_id=extension.id,
+                        extension_reference=extension_reference,
+                        extension_display_name=extension.display_name,
+                        source="extension",
                     )
                     ok = True
         changed.append({

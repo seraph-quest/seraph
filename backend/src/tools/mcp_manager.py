@@ -225,6 +225,10 @@ class MCPManager:
                 "status_message": status_info.get("error"),
                 "has_headers": "headers" in server,
                 "auth_hint": server.get("auth_hint", ""),
+                "extension_id": server.get("extension_id"),
+                "extension_reference": server.get("extension_reference"),
+                "extension_display_name": server.get("extension_display_name"),
+                "source": server.get("source", "manual"),
             }
             result.append(entry)
         return result
@@ -250,7 +254,11 @@ class MCPManager:
     def add_server(self, name: str, url: str,
                    description: str = "", enabled: bool = True,
                    headers: dict[str, str] | None = None,
-                   auth_hint: str = "") -> None:
+                   auth_hint: str = "",
+                   extension_id: str | None = None,
+                   extension_reference: str | None = None,
+                   extension_display_name: str | None = None,
+                   source: str | None = None) -> None:
         """Add a new server to config and optionally connect it."""
         self._config[name] = {
             "url": url,
@@ -261,6 +269,14 @@ class MCPManager:
             self._config[name]["headers"] = headers
         if auth_hint:
             self._config[name]["auth_hint"] = auth_hint
+        if extension_id:
+            self._config[name]["extension_id"] = extension_id
+        if extension_reference:
+            self._config[name]["extension_reference"] = extension_reference
+        if extension_display_name:
+            self._config[name]["extension_display_name"] = extension_display_name
+        if source:
+            self._config[name]["source"] = source
         if enabled:
             self.connect(name, url, headers=headers)
         self._save_config()
@@ -298,6 +314,26 @@ class MCPManager:
                 server["auth_hint"] = kwargs["auth_hint"]
             else:
                 server.pop("auth_hint", None)
+        if "extension_id" in kwargs:
+            if kwargs["extension_id"]:
+                server["extension_id"] = kwargs["extension_id"]
+            else:
+                server.pop("extension_id", None)
+        if "extension_reference" in kwargs:
+            if kwargs["extension_reference"]:
+                server["extension_reference"] = kwargs["extension_reference"]
+            else:
+                server.pop("extension_reference", None)
+        if "extension_display_name" in kwargs:
+            if kwargs["extension_display_name"]:
+                server["extension_display_name"] = kwargs["extension_display_name"]
+            else:
+                server.pop("extension_display_name", None)
+        if "source" in kwargs:
+            if kwargs["source"]:
+                server["source"] = kwargs["source"]
+            else:
+                server.pop("source", None)
 
         current_headers = dict(server.get("headers", {})) if isinstance(server.get("headers"), dict) else None
         reconnect_required = (

@@ -1195,6 +1195,104 @@ async def test_extension_connector_test_endpoint_uses_packaged_mcp_runtime(clien
 
 
 @pytest.mark.asyncio
+async def test_extension_connector_enable_endpoint_controls_packaged_mcp_runtime(client, extension_runtime, tmp_path):
+    package_dir = _write_mcp_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ), patch.object(
+        mcp_manager,
+        "connect",
+    ) as connect_mock, patch.object(
+        mcp_manager,
+        "disconnect",
+    ) as disconnect_mock:
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        approval_id = install_response.json()["detail"]["approval_id"]
+        approve_response = await client.post(f"/api/approvals/{approval_id}/approve")
+        assert approve_response.status_code == 200
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        enable_response = await client.post(
+            "/api/extensions/seraph.test-connector/connectors/enabled",
+            json={"reference": "mcp/github.json", "enabled": True},
+        )
+        assert enable_response.status_code == 409
+        enable_approval_id = enable_response.json()["detail"]["approval_id"]
+        approve_enable = await client.post(f"/api/approvals/{enable_approval_id}/approve")
+        assert approve_enable.status_code == 200
+
+        enable_response = await client.post(
+            "/api/extensions/seraph.test-connector/connectors/enabled",
+            json={"reference": "mcp/github.json", "enabled": True},
+        )
+        assert enable_response.status_code == 200
+        payload = enable_response.json()
+        assert payload["status"] == "enabled"
+        assert payload["connector"]["name"] == "github-packaged"
+        assert payload["connector"]["enabled"] is True
+        assert payload["changed"]["reference"] == "mcp/github.json"
+        assert mcp_manager._config["github-packaged"]["enabled"] is True
+        assert mcp_manager._config["github-packaged"]["source"] == "extension"
+        assert connect_mock.call_count == 1
+
+        disable_response = await client.post(
+            "/api/extensions/seraph.test-connector/connectors/enabled",
+            json={"reference": "mcp/github.json", "enabled": False},
+        )
+        assert disable_response.status_code == 200
+        assert disable_response.json()["status"] == "disabled"
+        assert mcp_manager._config["github-packaged"]["enabled"] is False
+        assert disconnect_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_whole_extension_enable_repairs_packaged_mcp_ownership_metadata(client, extension_runtime, tmp_path):
+    package_dir = _write_mcp_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ), patch.object(
+        mcp_manager,
+        "connect",
+    ) as connect_mock:
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        approval_id = install_response.json()["detail"]["approval_id"]
+        approve_response = await client.post(f"/api/approvals/{approval_id}/approve")
+        assert approve_response.status_code == 200
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        for key in ("source", "extension_id", "extension_reference", "extension_display_name"):
+            mcp_manager._config["github-packaged"].pop(key, None)
+
+        enable_response = await client.post("/api/extensions/seraph.test-connector/enable")
+        assert enable_response.status_code == 409
+        enable_approval_id = enable_response.json()["detail"]["approval_id"]
+        approve_enable = await client.post(f"/api/approvals/{enable_approval_id}/approve")
+        assert approve_enable.status_code == 200
+
+        enable_response = await client.post("/api/extensions/seraph.test-connector/enable")
+        assert enable_response.status_code == 200
+        assert mcp_manager._config["github-packaged"]["source"] == "extension"
+        assert mcp_manager._config["github-packaged"]["extension_id"] == "seraph.test-connector"
+        assert mcp_manager._config["github-packaged"]["extension_reference"] == "mcp/github.json"
+        assert mcp_manager._config["github-packaged"]["extension_display_name"] == "Test Connector"
+        assert connect_mock.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_extension_connector_test_endpoint_returns_managed_connector_health(client, extension_runtime, tmp_path):
     package_dir = _write_managed_connector_extension(tmp_path)
 

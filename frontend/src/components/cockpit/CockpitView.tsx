@@ -163,6 +163,10 @@ interface McpServerInfo {
   status_message?: string | null;
   has_headers?: boolean;
   auth_hint?: string;
+  source?: string;
+  extension_id?: string | null;
+  extension_reference?: string | null;
+  extension_display_name?: string | null;
   availability?: "ready" | "blocked" | "disabled";
   blocked_reason?: string | null;
   recommended_actions?: CapabilityAction[];
@@ -901,6 +905,10 @@ function buildMcpEntity(server: McpServerInfo): OperatorEntity {
       auth_hint: server.auth_hint ?? "",
       status_message: server.status_message ?? "",
       enabled: server.enabled,
+      source: server.source ?? "manual",
+      extension_id: server.extension_id ?? null,
+      extension_reference: server.extension_reference ?? null,
+      extension_display_name: server.extension_display_name ?? null,
       has_headers: server.has_headers ?? false,
       recommended_actions: server.recommended_actions ?? [],
     },
@@ -2352,7 +2360,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const matchPackageFile = useCallback(
     (
       extensionId: string | null | undefined,
-      displayType: "skill" | "workflow",
+      displayType: "skill" | "workflow" | "mcp_server",
       name: string,
       filePath: string | null | undefined,
     ): ExtensionStudioFileInfo | null => {
@@ -2419,6 +2427,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         })(),
       })),
       ...mcpServers.map((server) => ({
+        ...(() => {
+          const extensionPackage = server.extension_id ? extensionPackagesById.get(server.extension_id) ?? null : null;
+          const packagedServer = server.source === "extension" && !!server.extension_id;
+          return {
+            extensionId: server.extension_id ?? null,
+            packageReference: server.extension_reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? server.extension_display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: null,
+            saveSupported: packagedServer ? false : true,
+            validationSupported: packagedServer ? false : true,
+          };
+        })(),
         id: `mcp:${server.name}`,
         entityType: "mcp" as const,
         name: server.name,
@@ -2426,8 +2449,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         availability: server.availability ?? server.status ?? "unknown",
         meta: `${server.status ?? "unknown"} · ${server.tool_count ?? 0} tools`,
         entity: buildMcpEntity(server),
-        saveSupported: true,
-        validationSupported: true,
       })),
       ...extensionPackages.map((extensionPackage) => {
         const manifestFile = extensionPackage.studio_files.find((entry) => entry.role === "manifest") ?? null;
@@ -2465,6 +2486,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ),
     [extensionPackagesById, selectedStudioEntry?.extensionId],
   );
+  const studioMcpReadOnly = selectedStudioEntry?.entityType === "mcp" && !!selectedStudioEntry.extensionId;
   const selectedExtensionToggleAction = useMemo(() => {
     if (!selectedExtensionPackage) return null;
     const currentlyEnabled = selectedExtensionPackage.enabled !== false;
@@ -2616,6 +2638,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ? selectedStudioEntry.entity.details.description
         : "",
     );
+    if (selectedStudioEntry.entityType === "mcp" && selectedStudioEntry.extensionId) {
+      setStudioStatus("Packaged MCP definitions are read-only here; use connector test/toggle controls or update the package itself.");
+    }
     const loadStudioSource = async () => {
       try {
         if (selectedStudioEntry.extensionId && selectedStudioEntry.packageReference && selectedStudioEntry.entityType !== "mcp") {
@@ -2857,7 +2882,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     payload: unknown,
     fallbackMessage: string,
     setStatus: (value: string) => void,
-  ) {
+  ): Promise<boolean> {
     const approvalDetail = normalizeExtensionLifecycleApprovalDetail(payload);
     if (approvalDetail) {
       setPendingLifecycleApprovalId(approvalDetail.approval_id || null);
@@ -2868,13 +2893,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         `${approvalDetail.tool_name} requires ${approvalDetail.risk_level} approval`,
         "info",
       );
-      return;
+      return true;
     }
 
     const detail = payload && typeof payload === "object" && !Array.isArray(payload)
       ? (payload as { detail?: unknown }).detail
       : null;
     setStatus(typeof detail === "string" ? detail : fallbackMessage);
+    return false;
   }
 
   function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
@@ -3998,14 +4024,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function toggleMcpServer(server: McpServerInfo) {
     setOperatorStatus(`${server.enabled ? "Disabling" : "Enabling"} ${server.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: !server.enabled }),
-      });
+      const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
+      const response = await fetch(
+        packagedServer
+          ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/enabled`
+          : `${API_URL}/api/mcp/servers/${server.name}`,
+        packagedServer
+          ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: server.extension_reference, enabled: !server.enabled }),
+          }
+          : {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: !server.enabled }),
+          },
+      );
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setOperatorStatus(`Failed to update ${server.name}`);
-        appendOperatorFeed(`Failed to update MCP ${server.name}`, "failed");
+        const approvalHandled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to update ${server.name}`,
+          setOperatorStatus,
+        );
+        if (!approvalHandled) {
+          appendOperatorFeed(`Failed to update MCP ${server.name}`, "failed");
+        }
         return;
       }
       await refreshCockpit();
@@ -4020,7 +4065,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function testMcpServer(server: McpServerInfo) {
     setOperatorStatus(`Testing ${server.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
+      const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
+      const response = await fetch(
+        packagedServer
+          ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/test`
+          : `${API_URL}/api/mcp/servers/${server.name}/test`,
+        packagedServer
+          ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: server.extension_reference }),
+          }
+          : { method: "POST" },
+      );
       const payload = await response.json();
       if (!response.ok) {
         setOperatorStatus(payload.detail || `${server.name} test failed`);
@@ -6744,6 +6801,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         value={studioMcpUrl}
                         onChange={(event) => setStudioMcpUrl(event.target.value)}
                         placeholder="http://host.docker.internal:9001/mcp"
+                        disabled={studioMcpReadOnly}
                       />
                       <label className="cockpit-key" htmlFor="studio-mcp-description">description</label>
                       <input
@@ -6752,6 +6810,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         value={studioMcpDescription}
                         onChange={(event) => setStudioMcpDescription(event.target.value)}
                         placeholder="What this MCP server provides"
+                        disabled={studioMcpReadOnly}
                       />
                     </div>
                   ) : (

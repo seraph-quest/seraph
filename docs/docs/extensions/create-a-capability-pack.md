@@ -163,7 +163,10 @@ Current Studio support:
   and package-backed workflow/skill members grouped together
 - manifest, packaged workflow, and packaged skill edits save back through
   `/api/extensions/{extension_id}/source`
-- MCP config still uses its existing dedicated config path until the connector migration slices land
+- packaged MCP connectors now test and toggle through `/api/extensions/{extension_id}/connectors/*`
+  instead of raw `/api/mcp`
+- the standalone MCP config editor remains for manual servers only; packaged MCP definitions are
+  read-only in Extension Studio until package-backed MCP source editing lands
 
 Managed workspace authoring note:
 

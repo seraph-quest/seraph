@@ -174,6 +174,9 @@ Current Studio support:
 - packaged observer definitions now also use `/api/extensions/{extension_id}/connectors/*`
   for health/test and enable/disable, and their lifecycle state feeds the live
   observer runtime selector
+- packaged channel adapters now also use `/api/extensions/{extension_id}/connectors/*`
+  for health/test and enable/disable, and their lifecycle state feeds the live
+  delivery transport selector
 - the standalone MCP config editor remains for manual servers only; packaged MCP definitions are
   read-only in Extension Studio until package-backed MCP source editing lands
 

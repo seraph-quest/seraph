@@ -96,3 +96,9 @@ Observer definition note:
 - `observer_definitions` now participate in the shared extension lifecycle
 - connector-level and package-level enable/disable both write lifecycle state overrides keyed by extension id and contribution reference
 - the observer runtime selector now honors those overrides directly, so disabling a higher-priority observer source yields to another enabled packaged definition of the same `source_type`, and disabling every packaged definition for that `source_type` removes it from active refresh entirely
+
+Channel adapter note:
+
+- `channel_adapters` now participate in the shared extension lifecycle
+- connector-level and package-level enable/disable both write lifecycle state overrides keyed by extension id and contribution reference
+- the delivery transport selector now honors those overrides directly, so disabling a higher-priority adapter yields to another enabled packaged adapter for the same transport, and disabling every packaged adapter for that transport removes it from active delivery entirely

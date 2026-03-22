@@ -29,6 +29,7 @@ def _active_channel_adapters() -> set[str]:
     from config.settings import settings
     from src.extensions.channels import select_active_channel_adapters
     from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
+    from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
 
     snapshot = ExtensionRegistry(
         manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
@@ -36,9 +37,17 @@ def _active_channel_adapters() -> set[str]:
         workflow_dirs=[],
         mcp_runtime=None,
     ).snapshot()
-    active_adapters = select_active_channel_adapters(snapshot.list_contributions("channel_adapters"))
+    contributions = snapshot.list_contributions("channel_adapters")
+    state_payload = load_extension_state_payload()
+    state_by_id = state_payload.get("extensions")
+    active_adapters = select_active_channel_adapters(
+        contributions,
+        enabled_overrides=connector_enabled_overrides(state_by_id),
+    )
     if active_adapters:
         return {item.transport for item in active_adapters}
+    if contributions:
+        return set()
     return {"websocket", "native_notification"}
 
 

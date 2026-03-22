@@ -113,7 +113,7 @@
 ### Phase 6: Reach Surface Migration
 
 - [x] observer-source extensions, including lifecycle-backed enable/disable for `observer_definitions`, runtime selector overrides wired into observer refresh, and connector health that now distinguishes active, disabled, invalid, and overridden packaged observer sources
-- channel-adapter extensions
+- [x] channel-adapter extensions, including lifecycle-backed enable/disable for `channel_adapters`, delivery transport selector overrides wired into proactive delivery, connector health that now distinguishes active, degraded, disabled, invalid, and overridden packaged channel transports, and an explicit boundary that the concrete websocket/native delivery implementations remain core-owned even though packaged adapters now drive selector state
 
 ### Phase 7: Hardening And Completion
 

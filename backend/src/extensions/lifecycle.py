@@ -17,6 +17,7 @@ from packaging.version import Version
 from src.agent.factory import get_base_tools_and_active_skills
 from src.extensions.channels import select_active_channel_adapters
 from src.extensions.connector_health import (
+    ConnectorHealthSnapshot,
     managed_connector_health,
     mcp_server_health,
     planned_connector_health,
@@ -344,6 +345,21 @@ def _connector_enabled(
     enabled_override = connector_enabled_override(state_entry, contribution.reference)
     if enabled_override is not None:
         return enabled_override
+    return _connector_default_enabled(contribution)
+
+
+def _managed_connector_package_enable_target(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+) -> bool:
+    if contribution.contribution_type != "managed_connectors":
+        return True
+    has_non_managed_toggleables = any(
+        item.contribution_type in {"skills", "workflows", "mcp_servers", "observer_definitions", "channel_adapters"}
+        for item in extension.contributions
+    )
+    if not has_non_managed_toggleables:
+        return True
     return _connector_default_enabled(contribution)
 
 
@@ -1206,6 +1222,8 @@ def _contribution_payload(
             else None
         )
         default_enabled = bool(contribution.metadata.get("default_enabled", True))
+        enabled = _connector_enabled(contribution, state_entry)
+        requires_daemon = bool(contribution.metadata.get("requires_daemon"))
         valid_adapter = all(
             isinstance(contribution.metadata.get(field_name), str) and str(contribution.metadata.get(field_name)).strip()
             for field_name in ("name", "transport")
@@ -1215,6 +1233,7 @@ def _contribution_payload(
             "reference": contribution.reference,
             "resolved_path": normalized_path,
             "loaded": active_adapter is not None,
+            "enabled": enabled,
         }
         payload["permission_profile"] = evaluate_contribution_permissions(
             extension,
@@ -1228,25 +1247,49 @@ def _contribution_payload(
         if "default_enabled" in contribution.metadata:
             payload["default_enabled"] = default_enabled
         if "requires_daemon" in contribution.metadata:
-            payload["requires_daemon"] = bool(contribution.metadata.get("requires_daemon"))
+            payload["requires_daemon"] = requires_daemon
         if payload["loaded"]:
             payload["status"] = "active"
         elif not valid_adapter:
             payload["status"] = "invalid"
-        elif not default_enabled:
+        elif not enabled:
             payload["status"] = "disabled"
         else:
             payload["status"] = "overridden"
-        payload["health"] = static_connector_health(
+        daemon_connected: bool | None = None
+        if requires_daemon:
+            from src.observer.manager import context_manager
+
+            daemon_connected = context_manager.is_daemon_connected()
+        health = static_connector_health(
             active=payload["loaded"],
             valid=valid_adapter,
-            default_enabled=default_enabled,
+            default_enabled=enabled,
             active_summary="Channel adapter is active in the delivery runtime.",
             invalid_summary="Channel adapter is invalid and cannot load.",
-            disabled_summary="Channel adapter is disabled by default.",
+            disabled_summary="Channel adapter is disabled in extension lifecycle state.",
             overridden_summary="Another extension currently owns this channel transport.",
+            supports_enable=True,
+            supports_disable=True,
             supports_test=True,
-        ).as_payload()
+        )
+        if payload["loaded"] and requires_daemon and daemon_connected is False:
+            payload["status"] = "degraded"
+            payload["health"] = ConnectorHealthSnapshot(
+                state="degraded",
+                summary="Channel adapter owns the transport, but the native daemon is offline.",
+                ready=False,
+                enabled=enabled,
+                configured=True,
+                connected=False,
+                supports_test=True,
+                supports_enable=True,
+                supports_disable=True,
+            ).as_payload()
+        else:
+            payload["health"] = health.as_payload()
+            if daemon_connected is not None:
+                payload["health"]["connected"] = daemon_connected
         return payload
     if contribution.contribution_type in {"observer_connectors", "workspace_adapters"}:
         payload = {
@@ -1344,13 +1387,15 @@ def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
             targets.append({"type": "managed_connector", "name": target_name, "reference": contribution.reference})
         elif contribution.contribution_type == "observer_definitions":
             targets.append({"type": "observer_definition", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "channel_adapters":
+            targets.append({"type": "channel_adapter", "name": target_name, "reference": contribution.reference})
     return targets
 
 
 def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
     types: list[str] = []
     for contribution in extension.contributions:
-        if contribution.contribution_type in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions"} and contribution.contribution_type not in types:
+        if contribution.contribution_type in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions", "channel_adapters"} and contribution.contribution_type not in types:
             types.append(contribution.contribution_type)
     return types
 
@@ -1358,7 +1403,7 @@ def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
 def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
     types: list[str] = []
     for contribution in extension.contributions:
-        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions"} and contribution.contribution_type not in types:
+        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions", "channel_adapters"} and contribution.contribution_type not in types:
             types.append(contribution.contribution_type)
     return types
 
@@ -1697,6 +1742,13 @@ def set_extension_connector_enabled(
             enabled=enabled,
             changed_type="observer_definition",
         )
+    if contribution.contribution_type == "channel_adapters":
+        return _set_runtime_selector_contribution_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="channel_adapter",
+        )
     if contribution.contribution_type != "mcp_servers":
         raise ValueError(
             f"connector '{reference}' in extension '{extension_id}' does not support enable or disable yet"
@@ -2026,6 +2078,9 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                 raise ValueError(
                     f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid managed connector definition"
                 )
+            target_enabled = _managed_connector_package_enable_target(extension, contribution)
+            if not target_enabled:
+                continue
             config_entry = _managed_connector_config(state_entry, connector_name)
             config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
             if not config_entry or config_errors:
@@ -2093,26 +2148,32 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                     if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
                     else {}
                 )
+                target_enabled = enabled
+                if enabled:
+                    target_enabled = _managed_connector_package_enable_target(extension, contribution)
                 config_entry = _managed_connector_config(state_entry, connector_name)
                 config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
-                if enabled and (not config_entry or config_errors):
+                if target_enabled and (not config_entry or config_errors):
                     raise ValueError(
                         f"managed connector '{connector_name}' requires valid configuration before enable"
-                )
+                    )
                 set_connector_enabled_override(
                     state_payload,
                     extension.id,
                     contribution.reference,
-                    enabled=enabled,
+                    enabled=target_enabled,
                 )
                 ok = True
-        elif target["type"] == "observer_definition":
+        elif target["type"] in {"observer_definition", "channel_adapter"}:
             contribution = next(
                 (
                     item
                     for item in extension.contributions
                     if item.reference == target.get("reference")
-                    and item.contribution_type == "observer_definitions"
+                    and (
+                        (target["type"] == "observer_definition" and item.contribution_type == "observer_definitions")
+                        or (target["type"] == "channel_adapter" and item.contribution_type == "channel_adapters")
+                    )
                 ),
                 None,
             )
@@ -2131,7 +2192,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         changed.append({
             "type": target["type"],
             "name": target_name,
-            "enabled": enabled,
+            "enabled": target_enabled if target["type"] == "managed_connector" and ok else enabled,
             "ok": ok,
         })
     if state_payload is not None:

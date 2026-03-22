@@ -141,12 +141,13 @@ Current validation depth:
 Current connector-runtime visibility:
 
 - `GET /api/extensions/{id}/connectors` lists packaged connector contributions with a normalized health contract
-- `POST /api/extensions/{id}/connectors/test` now routes packaged MCP connectors through a live runtime test path and returns normalized readiness for the other shipped connector surfaces
+- `POST /api/extensions/{id}/connectors/test` now routes packaged MCP connectors through a live runtime test path and returns normalized connector status for the other shipped connector surfaces
 - `POST /api/extensions/{id}/connectors/enabled` now owns packaged MCP enable and disable changes, while raw `/api/mcp` update/remove/test/token flows reject extension-managed servers so package-owned connectors stay inside the extension lifecycle
 - the standalone MCP config editor is now a manual-server path only; packaged MCP definitions stay read-only in Extension Studio until package-backed MCP source editing lands
 - packaged managed connectors now use the same lifecycle state model: they ship disabled until configured, keep operator-supplied config in extension runtime state, support connector-level enable/disable through `POST /api/extensions/{id}/connectors/enabled`, and participate in package-level enable/disable through the normal extension lifecycle endpoints
 - packaged observer definitions now also use shared lifecycle state: connector-level and package-level enable/disable both feed the observer runtime selector, disabling a higher-priority observer lets the next enabled packaged definition of the same `source_type` take over, disabling every packaged definition for that `source_type` leaves the selector empty instead of silently reviving hardcoded fallbacks, and observer health now distinguishes `active`, `disabled`, `invalid`, and `overridden`
-- the first shipped health contract covers packaged MCP connectors, managed connectors, observer definitions, and channel adapters; managed connectors now distinguish `requires_config`, `disabled`, and `ready`, while channel-adapter runtime behavior still lands in the next slice
+- packaged channel adapters now use the same lifecycle state path: connector-level and package-level enable/disable both feed the delivery transport selector, disabling a higher-priority transport lets the next enabled packaged adapter take over, disabling every packaged adapter for that transport leaves delivery with no active adapter instead of reviving hardcoded fallbacks, and channel health now distinguishes `active`, `degraded`, `disabled`, `invalid`, and `overridden`
+- the first shipped health contract now covers packaged MCP connectors, managed connectors, observer definitions, and channel adapters, with connector-level enable/disable available across every runtime-backed connector surface
 
 For the concrete author workflow, continue with [Create A Capability Pack](./create-a-capability-pack.md).
 

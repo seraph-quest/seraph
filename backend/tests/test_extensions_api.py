@@ -268,6 +268,7 @@ def _write_mixed_managed_connector_extension(root: Path) -> Path:
         "name: github-managed\n"
         "provider: github\n"
         "description: Curated GitHub connector\n"
+        "enabled: false\n"
         "auth_kind: oauth\n"
         "config_fields:\n"
         "  - key: installation_id\n"
@@ -1174,7 +1175,7 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
 
 
 @pytest.mark.asyncio
-async def test_enable_extension_with_invalid_managed_connector_does_not_partially_toggle_other_targets(client, extension_runtime, tmp_path):
+async def test_enable_extension_with_default_disabled_managed_connector_keeps_other_targets_active(client, extension_runtime, tmp_path):
     package_dir = _write_mixed_managed_connector_extension(tmp_path)
 
     with patch(
@@ -1193,10 +1194,15 @@ async def test_enable_extension_with_invalid_managed_connector_does_not_partiall
         assert workflow_manager.get_workflow("local-workflow").enabled is False
 
         enable_response = await client.post("/api/extensions/seraph.mixed-managed/enable")
-        assert enable_response.status_code == 422
-        assert "requires valid configuration before enable" in enable_response.json()["detail"]
+        assert enable_response.status_code == 200
+        enabled_extension = enable_response.json()["extension"]
         assert workflow_manager.get_workflow("local-workflow") is not None
-        assert workflow_manager.get_workflow("local-workflow").enabled is False
+        assert workflow_manager.get_workflow("local-workflow").enabled is True
+        workflow = next(item for item in enabled_extension["contributions"] if item["type"] == "workflows")
+        connector = next(item for item in enabled_extension["contributions"] if item["type"] == "managed_connectors")
+        assert enabled_extension["enabled"] is True
+        assert workflow["enabled"] is True
+        assert connector["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -1690,9 +1696,132 @@ async def test_workspace_channel_adapter_overrides_bundled_transport(client, ext
     )
 
     assert workspace_adapter["loaded"] is True
-    assert workspace_adapter["status"] == "active"
+    assert workspace_adapter["status"] == "degraded"
     assert bundled_adapter["loaded"] is False
     assert bundled_adapter["status"] == "overridden"
+
+
+@pytest.mark.asyncio
+async def test_channel_adapter_toggle_updates_extension_and_runtime_selection(client, extension_runtime, tmp_path):
+    package_dir = _write_channel_adapter_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        disable_response = await client.post(
+            "/api/extensions/seraph.native-channel/connectors/enabled",
+            json={"reference": "channels/native.yaml", "enabled": False},
+        )
+        assert disable_response.status_code == 200
+        disabled_extension = disable_response.json()["extension"]
+        disabled_connector = disable_response.json()["connector"]
+        assert disabled_extension["enabled"] is False
+        assert disabled_connector["enabled"] is False
+        assert disabled_connector["status"] == "disabled"
+
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+        workspace_extension = extensions["seraph.native-channel"]
+        bundled_extension = extensions["seraph.core-channel-adapters"]
+
+        workspace_adapter = next(
+            item
+            for item in workspace_extension["contributions"]
+            if item["type"] == "channel_adapters" and item["transport"] == "native_notification"
+        )
+        bundled_adapter = next(
+            item
+            for item in bundled_extension["contributions"]
+            if item["type"] == "channel_adapters" and item["transport"] == "native_notification"
+        )
+        assert workspace_adapter["enabled"] is False
+        assert workspace_adapter["loaded"] is False
+        assert workspace_adapter["status"] == "disabled"
+        assert bundled_adapter["loaded"] is True
+        assert bundled_adapter["status"] == "degraded"
+
+        channel_test = await client.post(
+            "/api/extensions/seraph.native-channel/connectors/test",
+            json={"reference": "channels/native.yaml"},
+        )
+        assert channel_test.status_code == 200
+        assert channel_test.json()["status"] == "disabled"
+        assert channel_test.json()["message"] == "Channel adapter is disabled in extension lifecycle state."
+
+        enable_response = await client.post(
+            "/api/extensions/seraph.native-channel/connectors/enabled",
+            json={"reference": "channels/native.yaml", "enabled": True},
+        )
+        assert enable_response.status_code == 200
+        enabled_extension = enable_response.json()["extension"]
+        enabled_connector = enable_response.json()["connector"]
+        assert enabled_extension["enabled"] is True
+        assert enabled_connector["enabled"] is True
+        assert enabled_connector["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_channel_adapter_package_toggle_updates_runtime_selection(client, extension_runtime, tmp_path):
+    package_dir = _write_channel_adapter_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        disable_response = await client.post("/api/extensions/seraph.native-channel/disable")
+        assert disable_response.status_code == 200
+        disabled_extension = disable_response.json()["extension"]
+        disabled_adapter = next(
+            item for item in disabled_extension["contributions"] if item["type"] == "channel_adapters"
+        )
+        assert disabled_extension["enabled"] is False
+        assert disabled_adapter["enabled"] is False
+        assert disabled_adapter["status"] == "disabled"
+
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+        workspace_extension = extensions["seraph.native-channel"]
+        bundled_extension = extensions["seraph.core-channel-adapters"]
+
+        workspace_adapter = next(
+            item
+            for item in workspace_extension["contributions"]
+            if item["type"] == "channel_adapters" and item["transport"] == "native_notification"
+        )
+        bundled_adapter = next(
+            item
+            for item in bundled_extension["contributions"]
+            if item["type"] == "channel_adapters" and item["transport"] == "native_notification"
+        )
+        assert workspace_adapter["loaded"] is False
+        assert workspace_adapter["status"] == "disabled"
+        assert bundled_adapter["loaded"] is True
+        assert bundled_adapter["status"] == "degraded"
+
+        enable_response = await client.post("/api/extensions/seraph.native-channel/enable")
+        assert enable_response.status_code == 200
+        enabled_extension = enable_response.json()["extension"]
+        enabled_adapter = next(
+            item for item in enabled_extension["contributions"] if item["type"] == "channel_adapters"
+        )
+        assert enabled_extension["enabled"] is True
+        assert enabled_adapter["enabled"] is True
+        assert enabled_adapter["status"] == "degraded"
 
 
 @pytest.mark.asyncio
@@ -1745,9 +1874,11 @@ async def test_extension_connector_test_endpoint_returns_observer_and_channel_he
             json={"reference": "channels/native.yaml"},
         )
         assert channel_test.status_code == 200
-        assert channel_test.json()["status"] == "ready"
-        assert channel_test.json()["message"] == "Channel adapter is active in the delivery runtime."
+        assert channel_test.json()["status"] == "degraded"
+        assert channel_test.json()["message"] == "Channel adapter owns the transport, but the native daemon is offline."
         assert channel_test.json()["health"]["supports_test"] is True
+        assert channel_test.json()["health"]["supports_enable"] is True
+        assert channel_test.json()["health"]["connected"] is False
 
 
 @pytest.mark.asyncio

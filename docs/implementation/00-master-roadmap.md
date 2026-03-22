@@ -267,7 +267,7 @@ This is the authoritative PR list for the implementation side.
 For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#15 extension-lifecycle-ui-v1`
+- the current active item is `#24 legacy-loader-cleanup-v1`
 - this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
 1. [x] `extension-model-terminology-v1`:
@@ -314,8 +314,8 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    map extension-declared permissions cleanly into policy, approval, and execution behavior so packages cannot bypass Seraph’s trust boundaries
 22. [x] `extension-audit-and-activity-v1`:
    make extension install, update, enable, disable, health, and execution visible in Activity Ledger and audit so operators can explain what changed and why
-23. [ ] `extension-versioning-and-update-flow-v1`:
-   add version-aware updates, compatibility checks, and bundled-vs-user-installed semantics so packages can evolve without hidden drift
+23. [x] `extension-versioning-and-update-flow-v1`:
+   add version-aware updates, compatibility checks, and bundled-vs-user-installed semantics so packages can evolve without hidden drift, with validation now returning lifecycle plans for install vs update vs workspace override, the lifecycle API shipping a dedicated update path, and packaged MCP connectors refreshing their runtime config cleanly during workspace package upgrades
 24. [ ] `legacy-loader-cleanup-v1`:
    retire or demote the old parallel loaders and loose-file paths so the new extension platform becomes the only supported primary path
 25. [ ] `trusted-code-plugins-rfc-v1`:

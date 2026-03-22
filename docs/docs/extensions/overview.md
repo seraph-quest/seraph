@@ -128,6 +128,7 @@ That includes:
 
 - validation attempts
 - installs
+- updates
 - enable/disable actions
 - configuration changes
 - source saves
@@ -135,3 +136,20 @@ That includes:
 
 High-risk lifecycle actions still pause behind approvals when required, and failed
 extension actions now show up with the same lifecycle context in the Activity Ledger.
+
+## Versioning and update semantics
+
+Manifest-backed packages now expose a lifecycle plan during validation.
+
+That plan tells Seraph whether a package path represents:
+
+- a new install
+- a workspace-package update
+- an up-to-date package
+- a bundled-package override that should install into workspace scope
+
+Current behavior:
+
+- workspace-installed packages validate as `update` when the candidate package changes
+- bundled packages validate as `install` when the candidate should become a workspace override
+- package updates preserve existing runtime-enabled state for packaged MCP connectors while refreshing package-defined metadata such as URL, description, and auth hints

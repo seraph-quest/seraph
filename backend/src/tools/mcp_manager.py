@@ -270,6 +270,10 @@ class MCPManager:
         if name not in self._config:
             return False
         server = self._config[name]
+        was_enabled = bool(server.get("enabled", True))
+        previous_url = server.get("url")
+        previous_headers = dict(server.get("headers", {})) if isinstance(server.get("headers"), dict) else None
+        reconnected_from_toggle = False
 
         if "headers" in kwargs:
             if kwargs["headers"]:
@@ -278,10 +282,10 @@ class MCPManager:
                 server.pop("headers", None)
 
         if "enabled" in kwargs:
-            was_enabled = server.get("enabled", True)
             server["enabled"] = kwargs["enabled"]
             if kwargs["enabled"] and not was_enabled:
                 self.connect(name, server["url"], headers=server.get("headers"))
+                reconnected_from_toggle = True
             elif not kwargs["enabled"] and was_enabled:
                 self.disconnect(name)
 
@@ -289,6 +293,24 @@ class MCPManager:
             server["url"] = kwargs["url"]
         if "description" in kwargs:
             server["description"] = kwargs["description"]
+        if "auth_hint" in kwargs:
+            if kwargs["auth_hint"]:
+                server["auth_hint"] = kwargs["auth_hint"]
+            else:
+                server.pop("auth_hint", None)
+
+        current_headers = dict(server.get("headers", {})) if isinstance(server.get("headers"), dict) else None
+        reconnect_required = (
+            bool(server.get("enabled", True))
+            and not reconnected_from_toggle
+            and (
+                ("url" in kwargs and server.get("url") != previous_url)
+                or ("headers" in kwargs and current_headers != previous_headers)
+            )
+        )
+        if reconnect_required:
+            self.disconnect(name)
+            self.connect(name, server["url"], headers=server.get("headers"))
 
         self._save_config()
         return True

@@ -112,7 +112,10 @@ class ExtensionRegistrySnapshot:
     load_errors: list[ExtensionLoadErrorRecord]
 
     def get_extension(self, extension_id: str) -> ExtensionRecord | None:
-        return next((item for item in self.extensions if item.id == extension_id), None)
+        matches = [item for item in self.extensions if item.id == extension_id]
+        if not matches:
+            return None
+        return min(matches, key=_extension_priority)
 
     def list_contributions(self, contribution_type: str | None = None) -> list[ExtensionContributionRecord]:
         contributions = [
@@ -535,3 +538,16 @@ class ExtensionRegistry:
 
 
 extension_registry = ExtensionRegistry()
+
+
+def _extension_priority(extension: ExtensionRecord) -> tuple[int, int, str]:
+    workspace_root = Path(settings.workspace_dir).resolve() / "extensions"
+    bundled_root = Path(bundled_manifest_root()).resolve()
+    root_path = Path(extension.root_path).resolve() if extension.root_path else None
+    if root_path is not None and (root_path == workspace_root or workspace_root in root_path.parents):
+        return (0, 0, extension.display_name.lower())
+    if root_path is not None and (root_path == bundled_root or bundled_root in root_path.parents):
+        return (1, 0, extension.display_name.lower())
+    if extension.source == "manifest":
+        return (2, 0, extension.display_name.lower())
+    return (3, 0, extension.display_name.lower())

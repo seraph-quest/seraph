@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from config.settings import settings
+from packaging.version import Version
 from src.agent.factory import get_base_tools_and_active_skills
 from src.extensions.channels import select_active_channel_adapters
 from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
@@ -94,6 +95,70 @@ def _extension_package_digest(root_path: str | None) -> str | None:
     if not root.exists() or not root.is_dir():
         return None
     return _hash_extension_directory(root)
+
+
+def _version_relation(candidate_version: str, current_version: str | None) -> str:
+    if not current_version:
+        return "new"
+    candidate = Version(candidate_version)
+    current = Version(current_version)
+    if candidate > current:
+        return "upgrade"
+    if candidate < current:
+        return "downgrade"
+    return "same"
+
+
+def _extension_lifecycle_plan(
+    manifest: ExtensionManifest,
+    existing: ExtensionRecord | None,
+    *,
+    candidate_digest: str,
+) -> dict[str, Any]:
+    if existing is None:
+        return {
+            "mode": "new_install",
+            "recommended_action": "install",
+            "install_allowed": True,
+            "update_supported": False,
+            "current_location": None,
+            "current_version": None,
+            "current_source": None,
+            "candidate_version": manifest.version,
+            "version_relation": "new",
+            "package_changed": True,
+        }
+
+    current_location = _location_for_extension(existing)
+    current_version = existing.manifest.version if existing.manifest is not None else None
+    current_digest = _extension_package_digest(existing.root_path)
+    package_changed = candidate_digest != current_digest
+    version_relation = _version_relation(manifest.version, current_version)
+    if current_location == "workspace":
+        return {
+            "mode": "update_workspace" if package_changed else "up_to_date",
+            "recommended_action": "update" if package_changed else "none",
+            "install_allowed": False,
+            "update_supported": package_changed,
+            "current_location": current_location,
+            "current_version": current_version,
+            "current_source": existing.source,
+            "candidate_version": manifest.version,
+            "version_relation": version_relation,
+            "package_changed": package_changed,
+        }
+    return {
+        "mode": "workspace_override",
+        "recommended_action": "install",
+        "install_allowed": True,
+        "update_supported": False,
+        "current_location": current_location,
+        "current_version": current_version,
+        "current_source": existing.source,
+        "candidate_version": manifest.version,
+        "version_relation": version_relation,
+        "package_changed": package_changed,
+    }
 
 
 def _workspace_root() -> str:
@@ -267,6 +332,50 @@ def _remove_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
     for definition in _mcp_definitions_for_extension(extension).values():
         if definition.name in mcp_manager._config:
             mcp_manager.remove_server(definition.name)
+
+
+def _sync_mcp_servers_for_updated_extension(
+    previous_extension: ExtensionRecord,
+    updated_extension: ExtensionRecord,
+) -> None:
+    previous_definitions = _mcp_definitions_for_extension(previous_extension)
+    updated_definitions = _mcp_definitions_for_extension(updated_extension)
+
+    for removed_name in sorted(set(previous_definitions) - set(updated_definitions)):
+        if removed_name in mcp_manager._config:
+            mcp_manager.remove_server(removed_name)
+
+    for name, definition in updated_definitions.items():
+        previous_state = mcp_manager._config.get(name, {})
+        enabled = bool(previous_state.get("enabled", False))
+        headers = previous_state.get("headers") if isinstance(previous_state.get("headers"), dict) else definition.headers
+        auth_hint = (
+            definition.auth_hint
+            if definition.auth_hint
+            else (
+                str(previous_state.get("auth_hint"))
+                if isinstance(previous_state.get("auth_hint"), str) and previous_state.get("auth_hint")
+                else ""
+            )
+        )
+        if name in mcp_manager._config:
+            mcp_manager.update_server(
+                name,
+                url=definition.url,
+                description=definition.description,
+                headers=headers,
+                enabled=enabled,
+                auth_hint=auth_hint,
+            )
+        else:
+            mcp_manager.add_server(
+                name=definition.name,
+                url=definition.url,
+                description=definition.description,
+                enabled=enabled,
+                headers=headers,
+                auth_hint=auth_hint,
+            )
 
 
 def _registry() -> ExtensionRegistry:
@@ -645,6 +754,172 @@ def _validation_for_extension_source(
     return {"valid": True}
 
 
+def _validate_extension_candidate_root(extension: ExtensionRecord, candidate_root: Path) -> ExtensionManifest:
+    if extension.root_path is None or extension.manifest_path is None:
+        raise ValueError(f"extension '{extension.id}' does not expose a package root")
+    report = validate_extension_package(candidate_root)
+    if not report.ok:
+        raise ValueError("extension update would make the package invalid")
+    if not any(result.extension_id == extension.id for result in report.results):
+        raise ValueError("extension update would make the package unloadable")
+
+    candidate_manifest_path = candidate_root / Path(extension.manifest_path).name
+    manifest = load_extension_manifest(candidate_manifest_path)
+    if manifest.id != extension.id:
+        raise ValueError(f"extension update must keep manifest id '{extension.id}'")
+    skill_paths = [
+        str(resolve_package_reference(candidate_root, reference_path))
+        for reference_path in manifest.contributes.skills
+    ]
+    workflow_paths = [
+        str(resolve_package_reference(candidate_root, reference_path))
+        for reference_path in manifest.contributes.workflows
+    ]
+    runbook_paths = [
+        str(resolve_package_reference(candidate_root, reference_path))
+        for reference_path in manifest.contributes.runbooks
+    ]
+    starter_pack_paths = [
+        str(resolve_package_reference(candidate_root, reference_path))
+        for reference_path in manifest.contributes.starter_packs
+    ]
+
+    skills, skill_errors = scan_skill_paths(skill_paths)
+    workflows, workflow_errors = scan_workflow_paths(workflow_paths)
+    runbooks, runbook_errors = scan_runbook_paths(runbook_paths)
+    starter_packs, starter_pack_errors = scan_starter_pack_paths(starter_pack_paths)
+    all_errors = [*skill_errors, *workflow_errors, *runbook_errors, *starter_pack_errors]
+    if all_errors:
+        raise ValueError(all_errors[0]["message"])
+
+    skill_names = {skill.name for skill in skills}
+    workflow_names = {workflow.name for workflow in workflows}
+    starter_pack_names = {pack.name for pack in starter_packs}
+    external_skill_names = {
+        str(item.get("name"))
+        for item in skill_manager.list_skills()
+        if isinstance(item.get("name"), str) and item.get("extension_id") != extension.id
+    }
+    external_workflow_names = {
+        str(item.get("name"))
+        for item in workflow_manager.list_workflows()
+        if isinstance(item.get("name"), str) and item.get("extension_id") != extension.id
+    }
+    external_starter_pack_names = {
+        str(item.get("name"))
+        for item in starter_pack_manager.list_packs()
+        if isinstance(item.get("name"), str) and item.get("extension_id") != extension.id
+    }
+    current_skill_names = {
+        str(item.get("name"))
+        for item in skill_manager.list_skills()
+        if isinstance(item.get("name"), str) and item.get("extension_id") == extension.id
+    }
+    current_workflow_names = {
+        str(item.get("name"))
+        for item in workflow_manager.list_workflows()
+        if isinstance(item.get("name"), str) and item.get("extension_id") == extension.id
+    }
+    current_starter_pack_names = {
+        str(item.get("name"))
+        for item in starter_pack_manager.list_packs()
+        if isinstance(item.get("name"), str) and item.get("extension_id") == extension.id
+    }
+    allowed_skill_names = skill_names | external_skill_names
+    allowed_workflow_names = workflow_names | external_workflow_names
+    allowed_starter_pack_names = starter_pack_names | external_starter_pack_names
+    removed_skill_names = current_skill_names - skill_names
+    removed_workflow_names = current_workflow_names - workflow_names
+    removed_starter_pack_names = current_starter_pack_names - starter_pack_names
+
+    for workflow in workflows:
+        missing_required_skills = [name for name in workflow.requires_skills if name not in allowed_skill_names]
+        if missing_required_skills:
+            raise ValueError(
+                f"workflow '{workflow.name}' references unknown skills: {', '.join(missing_required_skills)}"
+            )
+
+    for runbook in runbooks:
+        if runbook.workflow and runbook.workflow not in allowed_workflow_names:
+            raise ValueError(
+                f"runbook '{runbook.id}' references unknown workflow '{runbook.workflow}'"
+            )
+        if runbook.starter_pack and runbook.starter_pack not in allowed_starter_pack_names:
+            raise ValueError(
+                f"runbook '{runbook.id}' references unknown starter pack '{runbook.starter_pack}'"
+            )
+
+    for starter_pack in starter_packs:
+        missing_skills = [name for name in starter_pack.skills if name not in allowed_skill_names]
+        if missing_skills:
+            raise ValueError(
+                f"starter pack '{starter_pack.name}' references unknown skills: {', '.join(missing_skills)}"
+            )
+        missing_workflows = [name for name in starter_pack.workflows if name not in allowed_workflow_names]
+        if missing_workflows:
+            raise ValueError(
+                f"starter pack '{starter_pack.name}' references unknown workflows: {', '.join(missing_workflows)}"
+            )
+
+    for workflow in workflow_manager.list_workflows():
+        if workflow.get("extension_id") == extension.id:
+            continue
+        missing_required_skills = [
+            name
+            for name in workflow.get("requires_skills") or []
+            if isinstance(name, str) and name in removed_skill_names
+        ]
+        if missing_required_skills:
+            workflow_name = str(workflow.get("name") or "unknown-workflow")
+            raise ValueError(
+                f"workflow '{workflow_name}' depends on skills removed from extension '{extension.id}': "
+                f"{', '.join(missing_required_skills)}"
+            )
+
+    for runbook in runbook_manager.list_runbooks():
+        if runbook.get("extension_id") == extension.id:
+            continue
+        if isinstance(runbook.get("workflow"), str) and runbook["workflow"] in removed_workflow_names:
+            runbook_id = str(runbook.get("id") or "unknown-runbook")
+            raise ValueError(
+                f"runbook '{runbook_id}' depends on workflows removed from extension '{extension.id}': "
+                f"{runbook['workflow']}"
+            )
+        if isinstance(runbook.get("starter_pack"), str) and runbook["starter_pack"] in removed_starter_pack_names:
+            runbook_id = str(runbook.get("id") or "unknown-runbook")
+            raise ValueError(
+                f"runbook '{runbook_id}' depends on starter packs removed from extension '{extension.id}': "
+                f"{runbook['starter_pack']}"
+            )
+
+    for starter_pack in starter_pack_manager.list_packs():
+        if starter_pack.get("extension_id") == extension.id:
+            continue
+        blocking_skills = [
+            name
+            for name in starter_pack.get("skills") or []
+            if isinstance(name, str) and name in removed_skill_names
+        ]
+        if blocking_skills:
+            starter_pack_name = str(starter_pack.get("name") or "unknown-starter-pack")
+            raise ValueError(
+                f"starter pack '{starter_pack_name}' depends on skills removed from extension '{extension.id}': "
+                f"{', '.join(blocking_skills)}"
+            )
+        blocking_workflows = [
+            name
+            for name in starter_pack.get("workflows") or []
+            if isinstance(name, str) and name in removed_workflow_names
+        ]
+        if blocking_workflows:
+            starter_pack_name = str(starter_pack.get("name") or "unknown-starter-pack")
+            raise ValueError(
+                f"starter pack '{starter_pack_name}' depends on workflows removed from extension '{extension.id}': "
+                f"{', '.join(blocking_workflows)}"
+            )
+    return manifest
+
+
 def _validate_extension_candidate_package(
     extension: ExtensionRecord,
     *,
@@ -652,7 +927,7 @@ def _validate_extension_candidate_package(
     resolved_path: Path,
     content: str,
 ) -> None:
-    if extension.root_path is None or extension.manifest_path is None:
+    if extension.root_path is None:
         raise ValueError(f"extension '{extension.id}' does not expose a package root")
     root_path = Path(extension.root_path)
     resolved_reference = str(resolved_path.relative_to(root_path))
@@ -662,164 +937,7 @@ def _validate_extension_candidate_package(
         candidate_target = candidate_root / Path(resolved_reference)
         candidate_target.parent.mkdir(parents=True, exist_ok=True)
         candidate_target.write_text(content, encoding="utf-8")
-        report = validate_extension_package(candidate_root)
-        if not report.ok:
-            raise ValueError("extension update would make the package invalid")
-        if not any(result.extension_id == extension.id for result in report.results):
-            raise ValueError("extension update would make the package unloadable")
-
-        candidate_manifest_path = candidate_root / Path(extension.manifest_path).name
-        manifest = load_extension_manifest(candidate_manifest_path)
-        skill_paths = [
-            str(resolve_package_reference(candidate_root, reference_path))
-            for reference_path in manifest.contributes.skills
-        ]
-        workflow_paths = [
-            str(resolve_package_reference(candidate_root, reference_path))
-            for reference_path in manifest.contributes.workflows
-        ]
-        runbook_paths = [
-            str(resolve_package_reference(candidate_root, reference_path))
-            for reference_path in manifest.contributes.runbooks
-        ]
-        starter_pack_paths = [
-            str(resolve_package_reference(candidate_root, reference_path))
-            for reference_path in manifest.contributes.starter_packs
-        ]
-
-        skills, skill_errors = scan_skill_paths(skill_paths)
-        workflows, workflow_errors = scan_workflow_paths(workflow_paths)
-        runbooks, runbook_errors = scan_runbook_paths(runbook_paths)
-        starter_packs, starter_pack_errors = scan_starter_pack_paths(starter_pack_paths)
-        all_errors = [*skill_errors, *workflow_errors, *runbook_errors, *starter_pack_errors]
-        if all_errors:
-            raise ValueError(all_errors[0]["message"])
-
-        skill_names = {skill.name for skill in skills}
-        workflow_names = {workflow.name for workflow in workflows}
-        starter_pack_names = {pack.name for pack in starter_packs}
-        external_skill_names = {
-            str(item.get("name"))
-            for item in skill_manager.list_skills()
-            if isinstance(item.get("name"), str) and item.get("extension_id") != extension.id
-        }
-        external_workflow_names = {
-            str(item.get("name"))
-            for item in workflow_manager.list_workflows()
-            if isinstance(item.get("name"), str) and item.get("extension_id") != extension.id
-        }
-        external_starter_pack_names = {
-            str(item.get("name"))
-            for item in starter_pack_manager.list_packs()
-            if isinstance(item.get("name"), str) and item.get("extension_id") != extension.id
-        }
-        current_skill_names = {
-            str(item.get("name"))
-            for item in skill_manager.list_skills()
-            if isinstance(item.get("name"), str) and item.get("extension_id") == extension.id
-        }
-        current_workflow_names = {
-            str(item.get("name"))
-            for item in workflow_manager.list_workflows()
-            if isinstance(item.get("name"), str) and item.get("extension_id") == extension.id
-        }
-        current_starter_pack_names = {
-            str(item.get("name"))
-            for item in starter_pack_manager.list_packs()
-            if isinstance(item.get("name"), str) and item.get("extension_id") == extension.id
-        }
-        allowed_skill_names = skill_names | external_skill_names
-        allowed_workflow_names = workflow_names | external_workflow_names
-        allowed_starter_pack_names = starter_pack_names | external_starter_pack_names
-        removed_skill_names = current_skill_names - skill_names
-        removed_workflow_names = current_workflow_names - workflow_names
-        removed_starter_pack_names = current_starter_pack_names - starter_pack_names
-
-        for workflow in workflows:
-            missing_required_skills = [name for name in workflow.requires_skills if name not in allowed_skill_names]
-            if missing_required_skills:
-                raise ValueError(
-                    f"workflow '{workflow.name}' references unknown skills: {', '.join(missing_required_skills)}"
-                )
-
-        for runbook in runbooks:
-            if runbook.workflow and runbook.workflow not in allowed_workflow_names:
-                raise ValueError(
-                    f"runbook '{runbook.id}' references unknown workflow '{runbook.workflow}'"
-                )
-            if runbook.starter_pack and runbook.starter_pack not in allowed_starter_pack_names:
-                raise ValueError(
-                    f"runbook '{runbook.id}' references unknown starter pack '{runbook.starter_pack}'"
-                )
-
-        for starter_pack in starter_packs:
-            missing_skills = [name for name in starter_pack.skills if name not in allowed_skill_names]
-            if missing_skills:
-                raise ValueError(
-                    f"starter pack '{starter_pack.name}' references unknown skills: {', '.join(missing_skills)}"
-                )
-            missing_workflows = [name for name in starter_pack.workflows if name not in allowed_workflow_names]
-            if missing_workflows:
-                raise ValueError(
-                    f"starter pack '{starter_pack.name}' references unknown workflows: {', '.join(missing_workflows)}"
-                )
-
-        for workflow in workflow_manager.list_workflows():
-            if workflow.get("extension_id") == extension.id:
-                continue
-            missing_required_skills = [
-                name
-                for name in workflow.get("requires_skills") or []
-                if isinstance(name, str) and name in removed_skill_names
-            ]
-            if missing_required_skills:
-                workflow_name = str(workflow.get("name") or "unknown-workflow")
-                raise ValueError(
-                    f"workflow '{workflow_name}' depends on skills removed from extension '{extension.id}': "
-                    f"{', '.join(missing_required_skills)}"
-                )
-
-        for runbook in runbook_manager.list_runbooks():
-            if runbook.get("extension_id") == extension.id:
-                continue
-            if isinstance(runbook.get("workflow"), str) and runbook["workflow"] in removed_workflow_names:
-                runbook_id = str(runbook.get("id") or "unknown-runbook")
-                raise ValueError(
-                    f"runbook '{runbook_id}' depends on workflows removed from extension '{extension.id}': "
-                    f"{runbook['workflow']}"
-                )
-            if isinstance(runbook.get("starter_pack"), str) and runbook["starter_pack"] in removed_starter_pack_names:
-                runbook_id = str(runbook.get("id") or "unknown-runbook")
-                raise ValueError(
-                    f"runbook '{runbook_id}' depends on starter packs removed from extension '{extension.id}': "
-                    f"{runbook['starter_pack']}"
-                )
-
-        for starter_pack in starter_pack_manager.list_packs():
-            if starter_pack.get("extension_id") == extension.id:
-                continue
-            blocking_skills = [
-                name
-                for name in starter_pack.get("skills") or []
-                if isinstance(name, str) and name in removed_skill_names
-            ]
-            if blocking_skills:
-                starter_pack_name = str(starter_pack.get("name") or "unknown-starter-pack")
-                raise ValueError(
-                    f"starter pack '{starter_pack_name}' depends on skills removed from extension '{extension.id}': "
-                    f"{', '.join(blocking_skills)}"
-                )
-            blocking_workflows = [
-                name
-                for name in starter_pack.get("workflows") or []
-                if isinstance(name, str) and name in removed_workflow_names
-            ]
-            if blocking_workflows:
-                starter_pack_name = str(starter_pack.get("name") or "unknown-starter-pack")
-                raise ValueError(
-                    f"starter pack '{starter_pack_name}' depends on workflows removed from extension '{extension.id}': "
-                    f"{', '.join(blocking_workflows)}"
-                )
+        _validate_extension_candidate_root(extension, candidate_root)
 
 
 def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
@@ -1251,7 +1369,7 @@ def list_extensions() -> dict[str, Any]:
     doctor = doctor_snapshot(snapshot)
     doctor_by_id = {result.extension_id: result for result in doctor.results}
     state_by_id = _state_payload()["extensions"]
-    extensions = [
+    raw_extensions = [
         _extension_payload(
             extension,
             load_errors=snapshot.load_errors,
@@ -1260,6 +1378,15 @@ def list_extensions() -> dict[str, Any]:
         )
         for extension in snapshot.extensions
     ]
+    deduped_by_id: dict[str, dict[str, Any]] = {}
+    for extension in raw_extensions:
+        existing = deduped_by_id.get(extension["id"])
+        if existing is None or _extension_payload_priority(extension) < _extension_payload_priority(existing):
+            deduped_by_id[extension["id"]] = extension
+    extensions = sorted(
+        deduped_by_id.values(),
+        key=lambda item: (item["display_name"].lower(), item["id"]),
+    )
     return {
         "extensions": extensions,
         "load_errors": [_serialize_load_error(error) for error in snapshot.load_errors],
@@ -1273,12 +1400,21 @@ def list_extensions() -> dict[str, Any]:
     }
 
 
+def _extension_payload_priority(payload: dict[str, Any]) -> tuple[int, str]:
+    location = str(payload.get("location") or "")
+    if location == "workspace":
+        return (0, str(payload.get("display_name") or "").lower())
+    if location == "bundled":
+        return (1, str(payload.get("display_name") or "").lower())
+    return (2, str(payload.get("display_name") or "").lower())
+
+
 def get_extension(extension_id: str) -> dict[str, Any]:
     payload = list_extensions()
-    extension = next((item for item in payload["extensions"] if item["id"] == extension_id), None)
-    if extension is None:
+    matches = [item for item in payload["extensions"] if item["id"] == extension_id]
+    if not matches:
         raise KeyError(extension_id)
-    return extension
+    return min(matches, key=_extension_payload_priority)
 
 
 def validate_extension_path(path: str) -> dict[str, Any]:
@@ -1290,7 +1426,9 @@ def validate_extension_path(path: str) -> dict[str, Any]:
         mcp_runtime=None,
     ).snapshot()
     extension = snapshot.get_extension(manifest.id)
+    existing = _registry().snapshot().get_extension(manifest.id)
     report = validate_extension_package(package_root)
+    package_digest = _hash_extension_directory(package_root)
     permission_summary = summarize_extension_permissions(
         extension,
         contribution_profiles=[
@@ -1318,10 +1456,16 @@ def validate_extension_path(path: str) -> dict[str, Any]:
     }
     return {
         "path": str(package_root),
-        "package_digest": _hash_extension_directory(package_root),
+        "package_digest": package_digest,
         "manifest_path": str(package_root / "manifest.yaml"),
         "extension_id": manifest.id,
         "display_name": manifest.display_name,
+        "version": manifest.version,
+        "lifecycle_plan": _extension_lifecycle_plan(
+            manifest,
+            existing,
+            candidate_digest=package_digest,
+        ),
         "permissions": permission_summary["declared"],
         "permission_summary": {
             "status": permission_summary["status"],
@@ -1437,7 +1581,6 @@ def install_extension_path(path: str) -> dict[str, Any]:
     if existing is not None:
         if _location_for_extension(existing) == "workspace":
             raise FileExistsError(f"extension '{manifest.id}' is already installed")
-        raise ValueError(f"extension id '{manifest.id}' conflicts with existing {existing.source} package")
 
     target_root = Path(_workspace_extensions_root()) / _slugify(manifest.id)
     if target_root.exists():
@@ -1454,6 +1597,50 @@ def install_extension_path(path: str) -> dict[str, Any]:
         shutil.rmtree(target_root, ignore_errors=True)
         _refresh_runtime()
         raise
+    return get_extension(manifest.id)
+
+
+def update_extension_path(path: str) -> dict[str, Any]:
+    package_root, manifest = _load_manifest_from_path(path)
+    report = validate_extension_package(package_root)
+    if not report.ok:
+        raise ValueError("extension package failed validation")
+
+    snapshot = _registry().snapshot()
+    existing = snapshot.get_extension(manifest.id)
+    if existing is None:
+        raise KeyError(manifest.id)
+    if _location_for_extension(existing) != "workspace" or not existing.root_path:
+        raise ValueError(
+            f"extension '{manifest.id}' is bundled; install the package to create a workspace override"
+        )
+
+    current_digest = _extension_package_digest(existing.root_path)
+    candidate_digest = _hash_extension_directory(package_root)
+    if current_digest == candidate_digest:
+        raise ValueError(f"extension '{manifest.id}' is already up to date")
+
+    _validate_extension_candidate_root(existing, package_root)
+
+    target_root = Path(existing.root_path)
+    with tempfile.TemporaryDirectory(prefix="seraph-extension-update-") as temp_root:
+        staging_root = Path(temp_root) / "package"
+        backup_root = Path(temp_root) / "backup"
+        shutil.copytree(package_root, staging_root)
+        shutil.move(target_root, backup_root)
+        shutil.move(staging_root, target_root)
+        try:
+            _refresh_runtime()
+            updated_extension = _registry().snapshot().get_extension(manifest.id)
+            if updated_extension is None:
+                raise ValueError(f"extension '{manifest.id}' did not load after update")
+            _sync_mcp_servers_for_updated_extension(existing, updated_extension)
+        except Exception:
+            if target_root.exists():
+                shutil.rmtree(target_root, ignore_errors=True)
+            shutil.move(backup_root, target_root)
+            _refresh_runtime()
+            raise
     return get_extension(manifest.id)
 
 

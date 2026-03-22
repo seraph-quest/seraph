@@ -143,6 +143,8 @@ def _summary_for_extension_event(event: dict[str, Any]) -> str:
         "validated": "Validated extension package",
         "install_failed": "Extension install failed",
         "installed": "Installed extension package",
+        "update_failed": "Extension update failed",
+        "updated": "Updated extension package",
         "enable_failed": "Extension enable failed",
         "enabled": "Enabled extension package",
         "disable_failed": "Extension disable failed",

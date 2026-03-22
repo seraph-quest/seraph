@@ -121,6 +121,7 @@ The backend lifecycle API now supports:
 - inspect
 - validate
 - install
+- update
 - enable/disable
 - configure (metadata-only in this slice)
 - remove
@@ -137,10 +138,18 @@ Current backend endpoints:
 - `POST /api/extensions/{extension_id}/source`
 - `POST /api/extensions/validate`
 - `POST /api/extensions/install`
+- `POST /api/extensions/update`
 - `POST /api/extensions/{extension_id}/enable`
 - `POST /api/extensions/{extension_id}/disable`
 - `POST /api/extensions/{extension_id}/configure`
 - `DELETE /api/extensions/{extension_id}`
+
+Install/update rules:
+
+- validate a package path first
+- if validation reports `recommended_action: install`, use `POST /api/extensions/install`
+- if validation reports `recommended_action: update`, use `POST /api/extensions/update`
+- if validation reports a bundled `workspace_override`, install the package; Seraph will keep the bundled package intact and place the override under the workspace extension root
 
 High-risk package note:
 

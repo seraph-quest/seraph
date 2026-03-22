@@ -20,6 +20,7 @@ from src.extensions.lifecycle import (
     list_extensions,
     remove_extension,
     save_extension_source,
+    update_extension_path,
     validate_extension_path,
 )
 
@@ -86,6 +87,7 @@ async def _log_extension_lifecycle_event(
             "validated" if action == "validate"
             else "source_saved" if action == "save_source"
             else "installed" if action == "install"
+            else "updated" if action == "update"
             else "enabled" if action == "enable"
             else "disabled" if action == "disable"
             else "configured" if action == "configure"
@@ -264,6 +266,12 @@ async def install_extension_package(req: ExtensionPathRequest):
         preview = validate_extension_path(req.path)
         if not preview.get("ok", False):
             raise ValueError("extension package failed validation")
+        lifecycle_plan = preview.get("lifecycle_plan")
+        if isinstance(lifecycle_plan, dict) and lifecycle_plan.get("recommended_action") == "update":
+            extension_id = preview.get("extension_id") or preview.get("id") or "extension"
+            raise ValueError(
+                f"extension '{extension_id}' is already installed; use update to replace the workspace package"
+            )
         await _require_extension_lifecycle_approval("install", preview)
         extension = install_extension_path(req.path)
     except FileExistsError as exc:
@@ -294,6 +302,52 @@ async def install_extension_package(req: ExtensionPathRequest):
         },
     )
     return {"status": "installed", "extension": extension}
+
+
+@router.post("/extensions/update")
+async def update_extension_package(req: ExtensionPathRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = validate_extension_path(req.path)
+        if not preview.get("ok", False):
+            raise ValueError("extension package failed validation")
+        lifecycle_plan = preview.get("lifecycle_plan")
+        if not isinstance(lifecycle_plan, dict) or lifecycle_plan.get("recommended_action") != "update":
+            extension_id = preview.get("extension_id") or preview.get("id") or "extension"
+            raise ValueError(
+                f"extension '{extension_id}' is not updateable from this package path"
+            )
+        await _require_extension_lifecycle_approval("update", preview)
+        extension = update_extension_path(req.path)
+    except KeyError as exc:
+        extension_id = preview.get("extension_id") if isinstance(preview, dict) else req.path
+        await _log_extension_lifecycle_event(
+            action="update",
+            outcome="failed",
+            preview=preview,
+            path=req.path,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="update",
+            outcome="failed",
+            preview=preview,
+            path=req.path,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="update",
+        outcome="succeeded",
+        preview=extension,
+        path=req.path,
+        extra_details={
+            "location": extension.get("location"),
+        },
+    )
+    return {"status": "updated", "extension": extension}
 
 
 @router.post("/extensions/{extension_id}/enable")

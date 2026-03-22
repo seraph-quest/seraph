@@ -376,6 +376,30 @@ interface ExtensionPackageInfo {
   studio_files: ExtensionStudioFileInfo[];
 }
 
+interface ExtensionLifecyclePlan {
+  mode: string;
+  recommended_action: "install" | "update" | "none";
+  install_allowed: boolean;
+  update_supported: boolean;
+  current_location?: string | null;
+  current_version?: string | null;
+  current_source?: string | null;
+  candidate_version?: string | null;
+  version_relation?: string | null;
+  package_changed: boolean;
+}
+
+interface ExtensionPathPreview {
+  path: string;
+  extension_id: string;
+  display_name: string;
+  version?: string | null;
+  ok: boolean;
+  results: Array<{ issues?: unknown[] }>;
+  load_errors?: Array<Record<string, unknown>>;
+  lifecycle_plan?: ExtensionLifecyclePlan | null;
+}
+
 type LoggedOperatorError = Error & { operatorLogged?: boolean };
 
 interface CatalogItemInfo {
@@ -1744,6 +1768,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [studioDraft, setStudioDraft] = useState("");
   const [studioStatus, setStudioStatus] = useState<string | null>(null);
   const [studioPackageStatus, setStudioPackageStatus] = useState<string | null>(null);
+  const [studioPackagePreview, setStudioPackagePreview] = useState<ExtensionPathPreview | null>(null);
   const [studioBusy, setStudioBusy] = useState<string | null>(null);
   const [studioPreflight, setStudioPreflight] = useState<CapabilityPreflightResponse | null>(null);
   const [studioWorkflowDiagnostics, setStudioWorkflowDiagnostics] = useState<WorkflowDiagnosticsPayload | null>(null);
@@ -2433,6 +2458,46 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => readActionList(selectedStudioEntry?.entity.details.recommended_actions),
     [selectedStudioEntry],
   );
+  const studioPackagePreviewIssueCount = useMemo(() => {
+    if (!studioPackagePreview || !Array.isArray(studioPackagePreview.results)) return 0;
+    return studioPackagePreview.results.reduce((count, result) => {
+      const issues = Array.isArray(result?.issues) ? result.issues.length : 0;
+      return count + issues;
+    }, 0);
+  }, [studioPackagePreview]);
+  const studioPackagePreviewHasLoadErrors = useMemo(
+    () => Array.isArray(studioPackagePreview?.load_errors) && studioPackagePreview.load_errors.length > 0,
+    [studioPackagePreview],
+  );
+  const studioPackagePreviewActionable = useMemo(
+    () => Boolean(studioPackagePreview?.ok)
+      && !studioPackagePreviewHasLoadErrors
+      && studioPackagePreviewIssueCount === 0,
+    [studioPackagePreview, studioPackagePreviewHasLoadErrors, studioPackagePreviewIssueCount],
+  );
+  const studioPackageAction = useMemo(() => {
+    const lifecyclePlan = studioPackagePreview?.lifecycle_plan;
+    const recommendedAction = lifecyclePlan?.recommended_action ?? "install";
+    if (recommendedAction === "update") {
+      return {
+        key: "update",
+        label: "Update package",
+        disabled: !studioPackagePreviewActionable,
+      };
+    }
+    if (recommendedAction === "none") {
+      return {
+        key: "none",
+        label: "Up to date",
+        disabled: true,
+      };
+    }
+    return {
+      key: "install",
+      label: "Install package",
+      disabled: !studioPackagePreviewActionable,
+    };
+  }, [studioPackagePreview, studioPackagePreviewActionable]);
   const studioSidebarSections = useMemo(() => {
     const grouped = new Map<string, ExtensionStudioEntry[]>();
     extensionPackages.forEach((extensionPackage) => {
@@ -3058,6 +3123,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     setStudioBusy("extension-validate");
+    setStudioPackagePreview(null);
     setStudioPackageStatus(`Validating ${path}...`);
     try {
       const response = await fetch(`${API_URL}/api/extensions/validate`, {
@@ -3074,6 +3140,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         );
         return;
       }
+      const preview = payload as ExtensionPathPreview;
+      setStudioPackagePreview(preview);
       const issueCount = Array.isArray(payload?.results)
         ? payload.results.reduce((count: number, result: unknown) => {
           if (!result || typeof result !== "object" || Array.isArray(result)) return count;
@@ -3083,12 +3151,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           return count + issues;
         }, 0)
         : 0;
+      const loadErrorCount = Array.isArray(payload?.load_errors) ? payload.load_errors.length : 0;
+      const lifecyclePlan = preview.lifecycle_plan;
+      const packageLabel = payload?.display_name ?? payload?.extension_id ?? path;
+      const currentVersion = lifecyclePlan?.current_version;
+      const candidateVersion = lifecyclePlan?.candidate_version ?? payload?.version;
+      const location = lifecyclePlan?.current_location;
+      const validationFailureSummary = [
+        issueCount > 0 ? `${issueCount} doctor issue${issueCount === 1 ? "" : "s"}` : null,
+        loadErrorCount > 0 ? `${loadErrorCount} load error${loadErrorCount === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(" and ");
       setStudioPackageStatus(
-        issueCount > 0
-          ? `${payload?.display_name ?? payload?.extension_id ?? path} validated with ${issueCount} doctor issue${issueCount === 1 ? "" : "s"}`
-          : `${payload?.display_name ?? payload?.extension_id ?? path} is valid and installable`,
+        issueCount > 0 || loadErrorCount > 0 || payload?.ok === false
+          ? `${packageLabel} failed validation${validationFailureSummary ? ` with ${validationFailureSummary}` : ""}`
+          : lifecyclePlan?.recommended_action === "update"
+            ? `${packageLabel} can update ${currentVersion ?? "installed package"} -> ${candidateVersion ?? "candidate"}`
+            : lifecyclePlan?.mode === "workspace_override"
+              ? `${packageLabel} will install as a workspace override for the ${location ?? "bundled"} package`
+              : lifecyclePlan?.recommended_action === "none"
+                ? `${packageLabel} is already up to date`
+                : `${packageLabel} is valid and installable`,
       );
     } catch {
+      setStudioPackagePreview(null);
       setStudioPackageStatus(`Failed to validate ${path}`);
     } finally {
       setStudioBusy(null);
@@ -3119,6 +3204,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         return;
       }
       await refreshCockpit();
+      setStudioPackagePreview(null);
       const extensionId = typeof payload?.extension?.id === "string" ? payload.extension.id : null;
       if (extensionId) {
         setStudioSelectedId(`extension:${extensionId}`);
@@ -3132,6 +3218,49 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       );
     } catch {
       setStudioPackageStatus(`Failed to install ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function updateStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-update");
+    setStudioPackageStatus(`Updating ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setStudioPackageStatus(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : `Failed to update ${path}`,
+        );
+        return;
+      }
+      await refreshCockpit();
+      setStudioPackagePreview(null);
+      const extensionId = typeof payload?.extension?.id === "string" ? payload.extension.id : null;
+      if (extensionId) {
+        setStudioSelectedId(`extension:${extensionId}`);
+      }
+      setStudioPackageStatus(
+        `${payload?.extension?.display_name ?? extensionId ?? path} updated`,
+      );
+      appendOperatorFeed(
+        `Updated extension package: ${payload?.extension?.display_name ?? extensionId ?? path}`,
+        "success",
+      );
+    } catch {
+      setStudioPackageStatus(`Failed to update ${path}`);
     } finally {
       setStudioBusy(null);
     }
@@ -6206,23 +6335,40 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     className="cockpit-input"
                     aria-label="Extension package path"
                     value={studioExtensionPath}
-                    onChange={(event) => setStudioExtensionPath(event.target.value)}
+                    onChange={(event) => {
+                      setStudioExtensionPath(event.target.value);
+                      setStudioPackagePreview(null);
+                      setStudioPackageStatus(null);
+                    }}
                     placeholder="/path/to/extension-pack"
                   />
                   <div className="cockpit-feedback-row">
                     <button
                       className="cockpit-feedback-button"
                       onClick={() => void validateStudioExtensionPath()}
-                      disabled={studioBusy === "extension-validate" || studioBusy === "extension-install"}
+                      disabled={
+                        studioBusy === "extension-validate"
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-update"
+                      }
                     >
                       Validate path
                     </button>
                     <button
                       className="cockpit-feedback-button"
-                      onClick={() => void installStudioExtensionPath()}
-                      disabled={studioBusy === "extension-install" || studioBusy === "extension-validate"}
+                      onClick={() => void (
+                        studioPackageAction.key === "update"
+                          ? updateStudioExtensionPath()
+                          : installStudioExtensionPath()
+                      )}
+                      disabled={
+                        studioPackageAction.disabled
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-validate"
+                        || studioBusy === "extension-update"
+                      }
                     >
-                      Install package
+                      {studioPackageAction.label}
                     </button>
                   </div>
                   {studioPackageStatus ? (

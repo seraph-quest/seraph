@@ -13,16 +13,26 @@ from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
 
 
-def _write_installable_extension(root: Path) -> Path:
-    package_dir = root / "installable-pack"
+def _write_installable_extension(
+    root: Path,
+    *,
+    extension_id: str = "seraph.test-installable",
+    version: str = "2026.3.21",
+    display_name: str = "Test Installable",
+    package_name: str = "installable-pack",
+    skill_description: str = "Local installable skill",
+    workflow_description: str = "Local installable workflow",
+    workflow_content: str = "Use the local workflow.\n",
+) -> Path:
+    package_dir = root / package_name
     (package_dir / "skills").mkdir(parents=True)
     (package_dir / "workflows").mkdir()
     (package_dir / "runbooks").mkdir()
     (package_dir / "starter-packs").mkdir()
     (package_dir / "manifest.yaml").write_text(
-        "id: seraph.test-installable\n"
-        "version: 2026.3.21\n"
-        "display_name: Test Installable\n"
+        f"id: {extension_id}\n"
+        f"version: {version}\n"
+        f"display_name: {display_name}\n"
         "kind: capability-pack\n"
         "compatibility:\n"
         "  seraph: \">=2026.3.19\"\n"
@@ -46,7 +56,7 @@ def _write_installable_extension(root: Path) -> Path:
     (package_dir / "skills" / "local-skill.md").write_text(
         "---\n"
         "name: local-skill\n"
-        "description: Local installable skill\n"
+        f"description: {skill_description}\n"
         "requires:\n"
         "  tools: []\n"
         "user_invocable: true\n"
@@ -57,7 +67,7 @@ def _write_installable_extension(root: Path) -> Path:
     (package_dir / "workflows" / "local-workflow.md").write_text(
         "---\n"
         "name: local-workflow\n"
-        "description: Local installable workflow\n"
+        f"description: {workflow_description}\n"
         "requires:\n"
         "  tools: [read_file]\n"
         "steps:\n"
@@ -66,7 +76,7 @@ def _write_installable_extension(root: Path) -> Path:
         "    arguments:\n"
         "      file_path: notes/test.md\n"
         "---\n\n"
-        "Use the local workflow.\n",
+        f"{workflow_content}",
         encoding="utf-8",
     )
     (package_dir / "runbooks" / "local-runbook.yaml").write_text(
@@ -130,12 +140,20 @@ def _write_high_risk_extension(root: Path) -> Path:
     return package_dir
 
 
-def _write_mcp_connector_extension(root: Path) -> Path:
-    package_dir = root / "connector-pack"
+def _write_mcp_connector_extension(
+    root: Path,
+    *,
+    version: str = "2026.3.21",
+    url: str = "https://example.test/mcp",
+    description: str = "Packaged GitHub MCP",
+    auth_hint: str = "Set GITHUB_TOKEN before enabling the connector",
+    package_name: str = "connector-pack",
+) -> Path:
+    package_dir = root / package_name
     (package_dir / "mcp").mkdir(parents=True)
     (package_dir / "manifest.yaml").write_text(
         "id: seraph.test-connector\n"
-        "version: 2026.3.21\n"
+        f"version: {version}\n"
         "display_name: Test Connector\n"
         "kind: connector-pack\n"
         "compatibility:\n"
@@ -153,10 +171,10 @@ def _write_mcp_connector_extension(root: Path) -> Path:
     (package_dir / "mcp" / "github.json").write_text(
         "{\n"
         '  "name": "github-packaged",\n'
-        '  "url": "https://example.test/mcp",\n'
-        '  "description": "Packaged GitHub MCP",\n'
+        f'  "url": "{url}",\n'
+        f'  "description": "{description}",\n'
         '  "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},\n'
-        '  "auth_hint": "Set GITHUB_TOKEN before enabling the connector",\n'
+        f'  "auth_hint": "{auth_hint}",\n'
         '  "transport": "streamable-http"\n'
         "}\n",
         encoding="utf-8",
@@ -642,6 +660,121 @@ async def test_install_configure_toggle_and_remove_workspace_extension(client, e
 
 
 @pytest.mark.asyncio
+async def test_validate_extension_path_reports_workspace_update_plan(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+    updated_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-update",
+        version="2026.4.01",
+        workflow_description="Updated local installable workflow",
+        workflow_content="Use the updated local workflow.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        validate_response = await client.post("/api/extensions/validate", json={"path": str(updated_package_dir)})
+        assert validate_response.status_code == 200
+        payload = validate_response.json()
+        assert payload["display_name"] == "Test Installable"
+        assert payload["version"] == "2026.4.01"
+        assert payload["lifecycle_plan"]["mode"] == "update_workspace"
+        assert payload["lifecycle_plan"]["recommended_action"] == "update"
+        assert payload["lifecycle_plan"]["current_location"] == "workspace"
+        assert payload["lifecycle_plan"]["current_version"] == "2026.3.21"
+        assert payload["lifecycle_plan"]["candidate_version"] == "2026.4.01"
+        assert payload["lifecycle_plan"]["version_relation"] == "upgrade"
+        assert payload["lifecycle_plan"]["package_changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_install_rejects_workspace_replacement_and_update_replaces_package(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+    updated_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-update",
+        version="2026.4.01",
+        workflow_description="Updated local installable workflow",
+        workflow_content="Use the updated local workflow.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        reinstall_response = await client.post("/api/extensions/install", json={"path": str(updated_package_dir)})
+        assert reinstall_response.status_code == 422
+        assert "use update to replace the workspace package" in reinstall_response.json()["detail"]
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+        updated = update_response.json()["extension"]
+        assert updated["version"] == "2026.4.01"
+
+        source_response = await client.get(
+            "/api/extensions/seraph.test-installable/source",
+            params={"reference": "workflows/local-workflow.md"},
+        )
+        assert source_response.status_code == 200
+        assert "Updated local installable workflow" in source_response.json()["content"]
+
+
+@pytest.mark.asyncio
+async def test_validate_and_install_allow_workspace_override_for_bundled_extension(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="bundled-override-pack",
+        extension_id="seraph.core-capabilities",
+        version="2026.4.01",
+        display_name="Core Capabilities Override",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        validate_response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
+        assert validate_response.status_code == 200
+        preview = validate_response.json()
+        assert preview["lifecycle_plan"]["mode"] == "workspace_override"
+        assert preview["lifecycle_plan"]["recommended_action"] == "install"
+        assert preview["lifecycle_plan"]["current_location"] == "bundled"
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+        assert installed["id"] == "seraph.core-capabilities"
+        assert installed["location"] == "workspace"
+        assert installed["version"] == "2026.4.01"
+
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        matching = [
+            item
+            for item in list_response.json()["extensions"]
+            if item["id"] == "seraph.core-capabilities"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["location"] == "workspace"
+
+
+@pytest.mark.asyncio
 async def test_enable_rejects_degraded_extension_with_permission_mismatch(client, extension_runtime, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
 
@@ -792,6 +925,75 @@ async def test_install_toggle_and_remove_workspace_connector_extension(client, e
         assert remove_response.status_code == 200
         assert "github-packaged" not in mcp_manager._config
         assert not (extension_runtime / "extensions" / "seraph-test-connector").exists()
+
+
+@pytest.mark.asyncio
+async def test_update_workspace_connector_refreshes_packaged_mcp_server(client, extension_runtime, tmp_path):
+    package_dir = _write_mcp_connector_extension(tmp_path)
+    updated_package_dir = _write_mcp_connector_extension(
+        tmp_path,
+        package_name="connector-pack-update",
+        version="2026.4.01",
+        url="https://example.test/mcp/v2",
+        description="Updated packaged GitHub MCP",
+        auth_hint="Use GITHUB_TOKEN with repo scope before enabling the connector",
+    )
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ), patch.object(
+        mcp_manager,
+        "connect",
+    ) as connect_mock, patch.object(
+        mcp_manager,
+        "disconnect",
+    ) as disconnect_mock:
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        assert mcp_manager._config["github-packaged"]["url"] == "https://example.test/mcp"
+
+        enable_response = await client.post("/api/extensions/seraph.test-connector/enable")
+        assert enable_response.status_code == 409
+        enable_approval_id = enable_response.json()["detail"]["approval_id"]
+
+        approve_enable = await client.post(f"/api/approvals/{enable_approval_id}/approve")
+        assert approve_enable.status_code == 200
+
+        enable_response = await client.post("/api/extensions/seraph.test-connector/enable")
+        assert enable_response.status_code == 200
+        assert mcp_manager._config["github-packaged"]["enabled"] is True
+        assert connect_mock.call_count == 1
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 409
+        update_approval_id = update_response.json()["detail"]["approval_id"]
+
+        approve_update = await client.post(f"/api/approvals/{update_approval_id}/approve")
+        assert approve_update.status_code == 200
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+        updated = update_response.json()["extension"]
+        assert updated["version"] == "2026.4.01"
+        assert mcp_manager._config["github-packaged"]["url"] == "https://example.test/mcp/v2"
+        assert mcp_manager._config["github-packaged"]["description"] == "Updated packaged GitHub MCP"
+        assert mcp_manager._config["github-packaged"]["auth_hint"] == (
+            "Use GITHUB_TOKEN with repo scope before enabling the connector"
+        )
+        assert mcp_manager._config["github-packaged"]["enabled"] is True
+        assert connect_mock.call_count == 2
+        assert disconnect_mock.call_count == 1
 
 
 @pytest.mark.asyncio

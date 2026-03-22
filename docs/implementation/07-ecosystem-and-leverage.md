@@ -116,7 +116,7 @@
 
 - [x] extension permissions and approvals
 - [x] extension audit and activity visibility
-- extension versioning and update flow
+- [x] extension versioning and update flow
 - legacy loader cleanup
 - trusted-code-plugins RFC only after the typed extension platform is complete enough to judge whether privileged code plugins are actually needed
 

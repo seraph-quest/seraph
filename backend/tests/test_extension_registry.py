@@ -290,6 +290,67 @@ contributes:
     assert not any(item.id.startswith("legacy.skills.") for item in snapshot.extensions)
 
 
+def test_registry_prefers_manifest_backed_mcp_entries_over_matching_legacy_runtime(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "connector-pack"
+    mcp_dir = pack_dir / "mcp"
+    mcp_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.connector-pack
+version: 2026.3.21
+display_name: Connector Pack
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  mcp_servers:
+    - mcp/github.json
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (mcp_dir / "github.json").write_text(
+        '{"name":"github","url":"https://example.test/mcp","description":"Packaged GitHub MCP"}',
+        encoding="utf-8",
+    )
+
+    class StubMCPRuntime:
+        _config_path = "/tmp/runtime-mcp.json"
+
+        @staticmethod
+        def get_config():
+            return [
+                {
+                    "name": "github",
+                    "url": "https://legacy.example.test/mcp",
+                    "enabled": True,
+                    "connected": True,
+                    "status": "connected",
+                    "tool_count": 2,
+                }
+            ]
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=StubMCPRuntime(),
+        seraph_version="2026.3.19",
+    )
+
+    snapshot = registry.snapshot()
+
+    extension = snapshot.get_extension("seraph.connector-pack")
+    assert extension is not None
+    assert extension.contributions[0].metadata["name"] == "github"
+    assert extension.contributions[0].metadata["url"] == "https://example.test/mcp"
+    assert not any(item.id.startswith("legacy.mcp-runtime.") for item in snapshot.extensions)
+
+
 def test_registry_reports_layout_error_for_symlink_escape(tmp_path: Path):
     package_dir = tmp_path / "extensions" / "escape-pack"
     skills_dir = package_dir / "skills"

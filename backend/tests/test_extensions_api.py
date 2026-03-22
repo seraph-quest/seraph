@@ -9,6 +9,7 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
+from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
 
 
@@ -89,6 +90,40 @@ def _write_installable_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_mcp_connector_extension(root: Path) -> Path:
+    package_dir = root / "connector-pack"
+    (package_dir / "mcp").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.test-connector\n"
+        "version: 2026.3.21\n"
+        "display_name: Test Connector\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  mcp_servers:\n"
+        "    - mcp/github.json\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "mcp" / "github.json").write_text(
+        "{\n"
+        '  "name": "github-packaged",\n'
+        '  "url": "https://example.test/mcp",\n'
+        '  "description": "Packaged GitHub MCP",\n'
+        '  "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},\n'
+        '  "auth_hint": "Set GITHUB_TOKEN before enabling the connector",\n'
+        '  "transport": "streamable-http"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 @pytest.fixture
 def extension_runtime(tmp_path):
     original_workspace_dir = settings.workspace_dir
@@ -127,6 +162,13 @@ def extension_runtime(tmp_path):
         list(starter_pack_manager._manifest_roots),
         starter_pack_manager._registry,
     )
+    original_mcp_manager = (
+        dict(mcp_manager._config),
+        dict(mcp_manager._status),
+        dict(mcp_manager._clients),
+        dict(mcp_manager._tools),
+        mcp_manager._config_path,
+    )
 
     workspace_dir = tmp_path / "workspace"
     skills_dir = workspace_dir / "skills"
@@ -143,6 +185,11 @@ def extension_runtime(tmp_path):
     workflow_manager.init(str(workflows_dir), manifest_roots=manifest_roots)
     runbook_manager.init(str(runbooks_dir), manifest_roots=manifest_roots)
     starter_pack_manager.init(str(starter_packs_path), manifest_roots=manifest_roots)
+    mcp_manager.disconnect_all()
+    mcp_manager._config = {}
+    mcp_manager._status = {}
+    mcp_manager._tools = {}
+    mcp_manager._config_path = str(workspace_dir / "mcp-servers.json")
 
     yield workspace_dir
 
@@ -183,6 +230,14 @@ def extension_runtime(tmp_path):
         starter_pack_manager._manifest_roots,
         starter_pack_manager._registry,
     ) = original_starter_pack_manager
+    mcp_manager.disconnect_all()
+    (
+        mcp_manager._config,
+        mcp_manager._status,
+        mcp_manager._clients,
+        mcp_manager._tools,
+        mcp_manager._config_path,
+    ) = original_mcp_manager
 
 
 @pytest.mark.asyncio
@@ -273,6 +328,53 @@ async def test_install_configure_toggle_and_remove_workspace_extension(client, e
         assert skill_manager.get_skill("local-skill").enabled is True
         assert workflow_manager.get_workflow("local-workflow") is not None
         assert workflow_manager.get_workflow("local-workflow").enabled is True
+
+
+@pytest.mark.asyncio
+async def test_install_toggle_and_remove_workspace_connector_extension(client, extension_runtime, tmp_path):
+    package_dir = _write_mcp_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ), patch.object(
+        mcp_manager,
+        "connect",
+    ) as connect_mock, patch.object(
+        mcp_manager,
+        "disconnect",
+    ) as disconnect_mock:
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+        assert installed["id"] == "seraph.test-connector"
+        assert installed["enabled"] is False
+        assert installed["toggleable_contribution_types"] == ["mcp_servers"]
+        assert installed["studio_files"][1]["reference"] == "mcp/github.json"
+        assert installed["studio_files"][1]["loaded"] is True
+        assert mcp_manager._config["github-packaged"]["enabled"] is False
+        assert mcp_manager._config["github-packaged"]["auth_hint"] == "Set GITHUB_TOKEN before enabling the connector"
+        connect_mock.assert_not_called()
+
+        enable_response = await client.post("/api/extensions/seraph.test-connector/enable")
+        assert enable_response.status_code == 200
+        assert enable_response.json()["extension"]["enabled"] is True
+        assert mcp_manager._config["github-packaged"]["enabled"] is True
+        connect_mock.assert_called_once()
+
+        disable_response = await client.post("/api/extensions/seraph.test-connector/disable")
+        assert disable_response.status_code == 200
+        assert disable_response.json()["extension"]["enabled"] is False
+        assert mcp_manager._config["github-packaged"]["enabled"] is False
+        disconnect_mock.assert_called_once()
+
+        remove_response = await client.delete("/api/extensions/seraph.test-connector")
+        assert remove_response.status_code == 200
+        assert "github-packaged" not in mcp_manager._config
+        assert not (extension_runtime / "extensions" / "seraph-test-connector").exists()
 
 
 @pytest.mark.asyncio

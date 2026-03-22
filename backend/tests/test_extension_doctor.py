@@ -273,6 +273,92 @@ permissions:
     assert result.issues[0].code == "invalid_connector"
 
 
+def test_doctor_reports_mcp_connector_missing_required_fields(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "missing-mcp-fields"
+    mcp_dir = pack_dir / "mcp"
+    mcp_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.missing-mcp-fields
+version: 2026.3.21
+display_name: Missing MCP Fields
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  mcp_servers:
+    - mcp/github.json
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (mcp_dir / "github.json").write_text(
+        '{"url":"https://example.test/mcp"}',
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.missing-mcp-fields"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "invalid_connector"
+    assert "non-empty name" in result.issues[0].message
+
+
+def test_doctor_reports_unsupported_mcp_transport(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "unsupported-mcp-transport"
+    mcp_dir = pack_dir / "mcp"
+    mcp_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.unsupported-mcp-transport
+version: 2026.3.21
+display_name: Unsupported MCP Transport
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  mcp_servers:
+    - mcp/github.json
+permissions:
+  network: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (mcp_dir / "github.json").write_text(
+        '{"name":"github","url":"https://example.test/mcp","transport":"sse"}',
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.unsupported-mcp-transport"))
+
+    assert result.ok is False
+    assert result.issues[0].code == "invalid_connector"
+    assert "streamable-http" in result.issues[0].message
+
+
 def test_doctor_snapshot_preserves_registry_load_errors(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "bad"
     pack_dir.mkdir(parents=True)

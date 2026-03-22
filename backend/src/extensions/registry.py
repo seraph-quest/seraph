@@ -12,6 +12,7 @@ import tomllib
 from typing import Any
 
 from config.settings import settings
+from src.extensions.connectors import load_mcp_server_definition
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import ExtensionManifest, ExtensionManifestError, load_extension_manifest
 from src.skills.loader import scan_skills
@@ -239,17 +240,23 @@ class ExtensionRegistry:
         for contribution_type in sorted(manifest.contributed_types()):
             for reference in getattr(manifest.contributes, contribution_type):
                 resolved_path = resolve_package_reference(manifest_path.parent, reference)
+                metadata: dict[str, Any] = {
+                    "resolved_path": str(resolved_path),
+                    "manifest_root_index": manifest_root_index,
+                    "trust": manifest.trust.value,
+                }
+                if contribution_type == "mcp_servers":
+                    try:
+                        metadata.update(load_mcp_server_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
                 contributions.append(
                     ExtensionContributionRecord(
                         extension_id=manifest.id,
                         contribution_type=contribution_type,
                         reference=reference,
                         source="manifest",
-                        metadata={
-                            "resolved_path": str(resolved_path),
-                            "manifest_root_index": manifest_root_index,
-                            "trust": manifest.trust.value,
-                        },
+                        metadata=metadata,
                     )
                 )
         return ExtensionRecord(
@@ -277,6 +284,10 @@ class ExtensionRegistry:
                 resolved_path = contribution.metadata.get("resolved_path")
                 if isinstance(resolved_path, str) and resolved_path:
                     claim_bucket.add(os.path.abspath(resolved_path))
+                if contribution.contribution_type == "mcp_servers":
+                    connector_name = contribution.metadata.get("name")
+                    if isinstance(connector_name, str) and connector_name:
+                        claims.setdefault("mcp_server_names", set()).add(connector_name)
         return claims
 
     def _scan_legacy_skill_extensions(
@@ -423,11 +434,12 @@ class ExtensionRegistry:
         config_path = getattr(runtime, "_config_path", None)
         extension_id = _legacy_extension_id("mcp-runtime", config_path or "runtime")
         claimed_servers = manifest_claims.get("mcp_servers", set())
+        claimed_server_names = manifest_claims.get("mcp_server_names", set())
         contributions = []
         for entry in config_entries:
             if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
                 continue
-            if entry["name"] in claimed_servers:
+            if entry["name"] in claimed_server_names or entry["name"] in claimed_servers:
                 continue
             contributions.append(
                 ExtensionContributionRecord(

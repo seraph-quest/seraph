@@ -13,6 +13,7 @@ from typing import Any
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
+from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
 from src.extensions.doctor import doctor_snapshot
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import (
@@ -109,6 +110,67 @@ def _refresh_runtime() -> None:
     workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
     runbook_manager.init(runbooks_dir, manifest_roots=manifest_roots)
     starter_pack_manager.init(starter_packs_path, manifest_roots=manifest_roots)
+
+
+def _mcp_runtime_index() -> dict[str, dict[str, Any]]:
+    return {
+        str(item["name"]): item
+        for item in mcp_manager.get_config()
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+
+
+def _mcp_definition_for_contribution(contribution: ExtensionContributionRecord) -> MCPServerDefinition | None:
+    if contribution.contribution_type != "mcp_servers":
+        return None
+    resolved_path = contribution.metadata.get("resolved_path")
+    if isinstance(resolved_path, str) and resolved_path:
+        try:
+            return load_mcp_server_definition(Path(resolved_path))
+        except ConnectorDefinitionError:
+            return None
+    return None
+
+
+def _mcp_definitions_for_extension(extension: ExtensionRecord) -> dict[str, MCPServerDefinition]:
+    definitions: dict[str, MCPServerDefinition] = {}
+    for contribution in extension.contributions:
+        definition = _mcp_definition_for_contribution(contribution)
+        if definition is not None:
+            definitions[definition.name] = definition
+    return definitions
+
+
+def _install_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
+    definitions = _mcp_definitions_for_extension(extension)
+    for definition in definitions.values():
+        if definition.name in mcp_manager._config:
+            raise FileExistsError(
+                f"MCP server '{definition.name}' from extension '{extension.id}' already exists"
+            )
+    added: list[str] = []
+    try:
+        for definition in definitions.values():
+            # Connector packages register safely at install time; operators enable them explicitly later.
+            mcp_manager.add_server(
+                name=definition.name,
+                url=definition.url,
+                description=definition.description,
+                enabled=False,
+                headers=definition.headers,
+                auth_hint=definition.auth_hint,
+            )
+            added.append(definition.name)
+    except Exception:
+        for name in added:
+            mcp_manager.remove_server(name)
+        raise
+
+
+def _remove_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
+    for definition in _mcp_definitions_for_extension(extension).values():
+        if definition.name in mcp_manager._config:
+            mcp_manager.remove_server(definition.name)
 
 
 def _registry() -> ExtensionRegistry:
@@ -664,11 +726,13 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
         for item in starter_pack_manager.list_packs()
         if isinstance(item.get("file_path"), str)
     }
+    mcp_servers = _mcp_runtime_index()
     return {
         "skills": skills,
         "workflows": workflows,
         "runbooks": runbooks,
         "starter_packs": starter_packs,
+        "mcp_servers": mcp_servers,
     }
 
 
@@ -679,6 +743,35 @@ def _contribution_payload(
 ) -> dict[str, Any]:
     resolved_path = contribution.metadata.get("resolved_path")
     normalized_path = os.path.abspath(str(resolved_path)) if isinstance(resolved_path, str) and resolved_path else None
+    if contribution.contribution_type == "mcp_servers":
+        contribution_name = contribution.metadata.get("name")
+        runtime_entry = (
+            indexes.get("mcp_servers", {}).get(contribution_name)
+            if isinstance(contribution_name, str) and contribution_name
+            else None
+        )
+        payload: dict[str, Any] = {
+            "type": contribution.contribution_type,
+            "reference": contribution.reference,
+            "resolved_path": normalized_path,
+            "loaded": runtime_entry is not None,
+        }
+        if isinstance(contribution_name, str) and contribution_name:
+            payload["name"] = contribution_name
+        for field_name in ("url", "description", "auth_hint", "transport"):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, str) and field_value:
+                payload[field_name] = field_value
+        if "default_enabled" in contribution.metadata:
+            payload["default_enabled"] = bool(contribution.metadata.get("default_enabled"))
+        if isinstance(contribution.metadata.get("headers"), dict):
+            payload["has_headers"] = bool(contribution.metadata.get("headers"))
+        if isinstance(runtime_entry, dict):
+            payload["loaded"] = True
+            for field_name in ("name", "enabled", "status", "status_message", "connected", "tool_count", "auth_hint", "description", "url", "has_headers"):
+                if field_name in runtime_entry:
+                    payload[field_name] = runtime_entry[field_name]
+        return payload
     item = (
         indexes.get(contribution.contribution_type, {}).get(normalized_path or "")
         if normalized_path is not None
@@ -980,7 +1073,16 @@ def install_extension_path(path: str) -> dict[str, Any]:
         raise FileExistsError(f"extension install target already exists: {target_root}")
     target_root.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(package_root, target_root)
-    _refresh_runtime()
+    try:
+        _refresh_runtime()
+        installed_extension = _registry().snapshot().get_extension(manifest.id)
+        if installed_extension is None:
+            raise ValueError(f"extension '{manifest.id}' did not load after install")
+        _install_mcp_servers_for_extension(installed_extension)
+    except Exception:
+        shutil.rmtree(target_root, ignore_errors=True)
+        _refresh_runtime()
+        raise
     return get_extension(manifest.id)
 
 
@@ -989,6 +1091,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     extension = snapshot.get_extension(extension_id)
     if extension is None:
         raise KeyError(extension_id)
+    mcp_definitions = _mcp_definitions_for_extension(extension)
     changed: list[dict[str, Any]] = []
     for target in _toggle_targets(extension):
         target_name = target["name"]
@@ -999,6 +1102,18 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
             ok = workflow_manager.enable(target_name) if enabled else workflow_manager.disable(target_name)
         elif target["type"] == "mcp_server":
             ok = mcp_manager.update_server(target_name, enabled=enabled)
+            if not ok and enabled:
+                definition = mcp_definitions.get(target_name)
+                if definition is not None:
+                    mcp_manager.add_server(
+                        name=definition.name,
+                        url=definition.url,
+                        description=definition.description,
+                        enabled=True,
+                        headers=definition.headers,
+                        auth_hint=definition.auth_hint,
+                    )
+                    ok = True
         changed.append({
             "type": target["type"],
             "name": target_name,
@@ -1052,6 +1167,7 @@ def remove_extension(extension_id: str) -> None:
         skill_manager._save_config()
     if workflow_config_changed:
         workflow_manager._save_config()
+    _remove_mcp_servers_for_extension(extension)
     shutil.rmtree(extension.root_path)
     payload = _state_payload()
     payload.get("extensions", {}).pop(extension_id, None)

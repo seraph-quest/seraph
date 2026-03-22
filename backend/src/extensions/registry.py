@@ -17,6 +17,8 @@ from src.extensions.connectors import load_managed_connector_definition, load_mc
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import ExtensionManifest, ExtensionManifestError, load_extension_manifest
 from src.extensions.observers import load_observer_definition
+from src.skills.loader import parse_skill_content
+from src.workflows.loader import parse_workflow_content
 from src.skills.loader import scan_skills
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.loader import scan_workflows
@@ -250,6 +252,47 @@ class ExtensionRegistry:
                 if contribution_type == "mcp_servers":
                     try:
                         metadata.update(load_mcp_server_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "skills":
+                    try:
+                        skill = parse_skill_content(
+                            resolved_path.read_text(encoding="utf-8"),
+                            path=str(resolved_path),
+                            errors=[],
+                        )
+                        if skill is not None:
+                            metadata.update(
+                                {
+                                    "name": skill.name,
+                                    "description": skill.description,
+                                    "requires_tools": list(skill.requires_tools),
+                                    "user_invocable": skill.user_invocable,
+                                    "default_enabled": skill.enabled,
+                                }
+                            )
+                    except Exception:
+                        pass
+                if contribution_type == "workflows":
+                    try:
+                        workflow = parse_workflow_content(
+                            resolved_path.read_text(encoding="utf-8"),
+                            path=str(resolved_path),
+                            errors=[],
+                        )
+                        if workflow is not None:
+                            metadata.update(
+                                {
+                                    "name": workflow.name,
+                                    "description": workflow.description,
+                                    "requires_tools": list(workflow.requires_tools),
+                                    "requires_skills": list(workflow.requires_skills),
+                                    "step_tools": list(workflow.step_tools),
+                                    "user_invocable": workflow.user_invocable,
+                                    "default_enabled": workflow.enabled,
+                                    "tool_name": workflow.tool_name,
+                                }
+                            )
                     except Exception:
                         pass
                 if contribution_type == "managed_connectors":

@@ -142,6 +142,12 @@ Current backend endpoints:
 - `POST /api/extensions/{extension_id}/configure`
 - `DELETE /api/extensions/{extension_id}`
 
+High-risk package note:
+
+- packages that declare or derive high-risk boundaries such as `workspace_write`, `sandbox_execution`, `secret_*`, or `external_mcp` now pause behind the normal approval system on install/enable
+- that approval is tied to the validated package path and content digest, so changing the package after approval forces a new approval
+- low-risk declarative packages install and enable directly
+
 Current Studio support:
 
 - workspace-installed packages can now be opened in Extension Studio with their `manifest.yaml`

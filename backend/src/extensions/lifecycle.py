@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,11 @@ from src.extensions.manifest import (
     ExtensionManifestError,
     load_extension_manifest,
     parse_extension_manifest,
+)
+from src.extensions.permissions import (
+    evaluate_contribution_permissions,
+    evaluate_tool_permissions,
+    summarize_extension_permissions,
 )
 from src.extensions.observers import select_active_observer_definitions
 from src.extensions.registry import (
@@ -64,6 +70,30 @@ _STUDIO_TYPE_ORDER = {
 
 def _slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "extension"
+
+
+def _hash_extension_directory(root: Path) -> str:
+    hasher = hashlib.sha256()
+    for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
+        relative_path = file_path.relative_to(root).as_posix()
+        hasher.update(relative_path.encode("utf-8"))
+        hasher.update(b"\0")
+        with file_path.open("rb") as handle:
+            while True:
+                chunk = handle.read(8192)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _extension_package_digest(root_path: str | None) -> str | None:
+    if not root_path:
+        return None
+    root = Path(root_path)
+    if not root.exists() or not root.is_dir():
+        return None
+    return _hash_extension_directory(root)
 
 
 def _workspace_root() -> str:
@@ -403,7 +433,7 @@ def _studio_file_payload(
             "name": extension.display_name,
         }
 
-    payload = _contribution_payload(contribution, indexes=indexes)
+    payload = _contribution_payload(extension, contribution, indexes=indexes)
     editable = (
         _location_for_extension(extension) == "workspace"
         and contribution.contribution_type in _EDITABLE_STUDIO_TYPES
@@ -475,7 +505,12 @@ def _resolve_extension_reference(
     raise ValueError(f"reference '{reference}' is not part of extension '{extension.id}'")
 
 
-def _validate_skill_draft(content: str, *, path: str) -> dict[str, Any]:
+def _validate_skill_draft(
+    content: str,
+    *,
+    path: str,
+    extension: ExtensionRecord | None = None,
+) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     skill = parse_skill_content(content, path=path, errors=errors)
     if skill is None:
@@ -488,11 +523,20 @@ def _validate_skill_draft(content: str, *, path: str) -> dict[str, Any]:
     base_tools, _, _ = get_base_tools_and_active_skills()
     available_tool_names = {tool.name for tool in base_tools}
     missing_tools = [tool_name for tool_name in skill.requires_tools if tool_name not in available_tool_names]
+    permission_profile = evaluate_tool_permissions(extension, tool_names=skill.requires_tools)
     return {
         "valid": True,
         "errors": [],
-        "runtime_ready": not missing_tools and skill.enabled,
+        "runtime_ready": not missing_tools and skill.enabled and permission_profile["ok"],
         "missing_tools": missing_tools,
+        "permission_status": permission_profile["status"],
+        "missing_manifest_tools": list(permission_profile["missing_tools"]),
+        "missing_manifest_execution_boundaries": list(permission_profile["missing_execution_boundaries"]),
+        "requires_network": bool(permission_profile["requires_network"]),
+        "missing_manifest_network": bool(permission_profile["missing_network"]),
+        "risk_level": permission_profile["risk_level"],
+        "approval_behavior": permission_profile["approval_behavior"],
+        "requires_approval": bool(permission_profile["requires_approval"]),
         "skill": {
             "name": skill.name,
             "description": skill.description,
@@ -504,7 +548,12 @@ def _validate_skill_draft(content: str, *, path: str) -> dict[str, Any]:
     }
 
 
-def _validate_workflow_draft(content: str, *, path: str) -> dict[str, Any]:
+def _validate_workflow_draft(
+    content: str,
+    *,
+    path: str,
+    extension: ExtensionRecord | None = None,
+) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     workflow = parse_workflow_content(content, path=path, errors=errors)
     if workflow is None:
@@ -521,14 +570,21 @@ def _validate_workflow_draft(content: str, *, path: str) -> dict[str, Any]:
     missing_skills = [skill_name for skill_name in workflow.requires_skills if skill_name not in set(active_skill_names)]
     execution_boundaries = workflow_manager._infer_execution_boundaries(workflow)
     risk_level = workflow_manager._infer_risk_level(workflow)
+    permission_profile = evaluate_tool_permissions(extension, tool_names=workflow.step_tools)
     requires_approval = risk_level == "high" or ("external_mcp" in execution_boundaries and mcp_mode == "approval")
     return {
         "valid": True,
         "errors": [],
-        "runtime_ready": not missing_tools and not missing_skills and workflow.enabled,
+        "runtime_ready": not missing_tools and not missing_skills and workflow.enabled and permission_profile["ok"],
         "missing_tools": missing_tools,
         "missing_skills": missing_skills,
         "requires_approval": requires_approval,
+        "permission_status": permission_profile["status"],
+        "missing_manifest_tools": list(permission_profile["missing_tools"]),
+        "missing_manifest_execution_boundaries": list(permission_profile["missing_execution_boundaries"]),
+        "requires_network": bool(permission_profile["requires_network"]),
+        "missing_manifest_network": bool(permission_profile["missing_network"]),
+        "approval_behavior": permission_profile["approval_behavior"],
         "workflow": {
             "name": workflow.name,
             "tool_name": workflow.tool_name,
@@ -583,9 +639,9 @@ def _validation_for_extension_source(
             },
         }
     if contribution_type == "skills":
-        return _validate_skill_draft(content, path=reference)
+        return _validate_skill_draft(content, path=reference, extension=extension)
     if contribution_type == "workflows":
-        return _validate_workflow_draft(content, path=reference)
+        return _validate_workflow_draft(content, path=reference, extension=extension)
     return {"valid": True}
 
 
@@ -822,6 +878,7 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
 
 
 def _contribution_payload(
+    extension: ExtensionRecord,
     contribution: ExtensionContributionRecord,
     *,
     indexes: dict[str, dict[str, dict[str, Any]]],
@@ -842,6 +899,11 @@ def _contribution_payload(
             "resolved_path": normalized_path,
             "loaded": runtime_entry is not None,
         }
+        payload["permission_profile"] = evaluate_contribution_permissions(
+            extension,
+            contribution_type=contribution.contribution_type,
+            metadata=contribution.metadata,
+        )
         if isinstance(contribution_name, str) and contribution_name:
             payload["name"] = contribution_name
         for field_name in ("url", "description", "auth_hint", "transport"):
@@ -865,6 +927,11 @@ def _contribution_payload(
             "resolved_path": normalized_path,
             "loaded": False,
         }
+        payload["permission_profile"] = evaluate_contribution_permissions(
+            extension,
+            contribution_type=contribution.contribution_type,
+            metadata=contribution.metadata,
+        )
         for field_name in ("name", "provider", "description", "auth_kind"):
             field_value = contribution.metadata.get(field_name)
             if isinstance(field_value, str) and field_value:
@@ -907,6 +974,11 @@ def _contribution_payload(
             "resolved_path": normalized_path,
             "loaded": active_definition is not None,
         }
+        payload["permission_profile"] = evaluate_contribution_permissions(
+            extension,
+            contribution_type=contribution.contribution_type,
+            metadata=contribution.metadata,
+        )
         for field_name in ("name", "source_type", "description"):
             field_value = contribution.metadata.get(field_name)
             if isinstance(field_value, str) and field_value:
@@ -941,6 +1013,11 @@ def _contribution_payload(
             "resolved_path": normalized_path,
             "loaded": active_adapter is not None,
         }
+        payload["permission_profile"] = evaluate_contribution_permissions(
+            extension,
+            contribution_type=contribution.contribution_type,
+            metadata=contribution.metadata,
+        )
         for field_name in ("name", "transport", "description"):
             field_value = contribution.metadata.get(field_name)
             if isinstance(field_value, str) and field_value:
@@ -968,6 +1045,11 @@ def _contribution_payload(
         "reference": contribution.reference,
         "resolved_path": normalized_path,
         "loaded": item is not None,
+        "permission_profile": evaluate_contribution_permissions(
+            extension,
+            contribution_type=contribution.contribution_type,
+            metadata=contribution.metadata,
+        ),
     }
     if isinstance(item, dict):
         payload["name"] = item.get("name") or item.get("id") or item.get("label")
@@ -979,6 +1061,38 @@ def _contribution_payload(
             payload["source"] = item.get("source")
         if "extension_id" in item:
             payload["extension_id"] = item.get("extension_id")
+        for field_name in (
+            "requires_tools",
+            "requires_skills",
+            "policy_modes",
+            "execution_boundaries",
+            "risk_level",
+            "accepts_secret_refs",
+            "permission_status",
+            "missing_manifest_tools",
+            "missing_manifest_execution_boundaries",
+            "requires_network",
+            "missing_manifest_network",
+            "approval_behavior",
+            "requires_approval",
+        ):
+            if field_name in item:
+                payload[field_name] = item[field_name]
+    if contribution.contribution_type in {"skills", "workflows"}:
+        for field_name in ("name", "description", "requires_tools", "requires_skills", "step_tools", "tool_name", "user_invocable", "default_enabled"):
+            field_value = contribution.metadata.get(field_name)
+            if field_value not in (None, "", [], {}):
+                payload.setdefault(field_name, field_value)
+    payload.setdefault("permission_status", payload["permission_profile"]["status"])
+    payload.setdefault("missing_manifest_tools", list(payload["permission_profile"]["missing_tools"]))
+    payload.setdefault(
+        "missing_manifest_execution_boundaries",
+        list(payload["permission_profile"]["missing_execution_boundaries"]),
+    )
+    payload.setdefault("requires_network", bool(payload["permission_profile"]["requires_network"]))
+    payload.setdefault("missing_manifest_network", bool(payload["permission_profile"]["missing_network"]))
+    payload.setdefault("approval_behavior", payload["permission_profile"]["approval_behavior"])
+    payload.setdefault("requires_approval", bool(payload["permission_profile"]["requires_approval"]))
     return payload
 
 
@@ -986,7 +1100,7 @@ def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
     indexes = _contribution_indexes()
     targets: list[dict[str, str]] = []
     for contribution in extension.contributions:
-        payload = _contribution_payload(contribution, indexes=indexes)
+        payload = _contribution_payload(extension, contribution, indexes=indexes)
         target_name = payload.get("name")
         if not isinstance(target_name, str) or not target_name:
             continue
@@ -1015,6 +1129,24 @@ def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
     return types
 
 
+def _extension_load_errors_for_extension(
+    extension: ExtensionRecord,
+    load_errors: list[ExtensionLoadErrorRecord],
+) -> list[dict[str, Any]]:
+    return [
+        _serialize_load_error(error)
+        for error in load_errors
+        if extension.root_path
+        and (
+            error.source == extension.manifest_path
+            or (
+                os.path.commonpath([os.path.abspath(error.source), os.path.abspath(extension.root_path)])
+                == os.path.abspath(extension.root_path)
+            )
+        )
+    ]
+
+
 def _extension_payload(
     extension: ExtensionRecord,
     *,
@@ -1027,25 +1159,22 @@ def _extension_payload(
     issues = []
     if doctor_result is not None:
         issues = [asdict(issue) for issue in doctor_result.issues]
-    extension_load_errors = [
-        _serialize_load_error(error)
-        for error in load_errors
-        if extension.root_path
-        and (
-            error.source == extension.manifest_path
-            or (
-                os.path.commonpath([os.path.abspath(error.source), os.path.abspath(extension.root_path)])
-                == os.path.abspath(extension.root_path)
-            )
-        )
-    ]
+    extension_load_errors = _extension_load_errors_for_extension(extension, load_errors)
     toggles = _toggle_targets(extension)
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
     location = _location_for_extension(extension)
     contributions = [
-        _contribution_payload(contribution, indexes=indexes, state_entry=state_entry)
+        _contribution_payload(extension, contribution, indexes=indexes, state_entry=state_entry)
         for contribution in extension.contributions
     ]
+    permission_summary = summarize_extension_permissions(
+        extension,
+        contribution_profiles=[
+            contribution.get("permission_profile", {})
+            for contribution in contributions
+            if isinstance(contribution.get("permission_profile"), dict)
+        ],
+    )
     enabled_values = [
         bool(item["enabled"])
         for item in contributions
@@ -1069,6 +1198,7 @@ def _extension_payload(
         "source": extension.source,
         "location": location,
         "root_path": extension.root_path,
+        "package_digest": _extension_package_digest(extension.root_path),
         "manifest_path": extension.manifest_path,
         "summary": extension.manifest.summary if extension.manifest is not None else None,
         "description": extension.manifest.description if extension.manifest is not None else None,
@@ -1086,6 +1216,15 @@ def _extension_payload(
             if extension.manifest is not None
             else None
         ),
+        "permissions": permission_summary["declared"],
+        "permission_summary": {
+            "status": permission_summary["status"],
+            "ok": permission_summary["ok"],
+            "required": permission_summary["required"],
+            "missing": permission_summary["missing"],
+            "risk_level": permission_summary["risk_level"],
+        },
+        "approval_profile": permission_summary["approval_profile"],
         "doctor_ok": bool(getattr(doctor_result, "ok", True)),
         "issues": issues,
         "load_errors": extension_load_errors,
@@ -1144,12 +1283,54 @@ def get_extension(extension_id: str) -> dict[str, Any]:
 
 def validate_extension_path(path: str) -> dict[str, Any]:
     package_root, manifest = _load_manifest_from_path(path)
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(package_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    extension = snapshot.get_extension(manifest.id)
     report = validate_extension_package(package_root)
+    permission_summary = summarize_extension_permissions(
+        extension,
+        contribution_profiles=[
+            evaluate_contribution_permissions(
+                extension,
+                contribution_type=contribution.contribution_type,
+                metadata=contribution.metadata,
+            )
+            for contribution in (extension.contributions if extension is not None else [])
+        ],
+    ) if extension is not None else {
+        "declared": None,
+        "status": "unknown",
+        "ok": True,
+        "required": {},
+        "missing": {},
+        "risk_level": "low",
+        "approval_profile": {
+            "requires_runtime_approval": False,
+            "runtime_behavior": "never",
+            "requires_lifecycle_approval": False,
+            "lifecycle_boundaries": [],
+            "risk_level": "low",
+        },
+    }
     return {
         "path": str(package_root),
+        "package_digest": _hash_extension_directory(package_root),
         "manifest_path": str(package_root / "manifest.yaml"),
         "extension_id": manifest.id,
         "display_name": manifest.display_name,
+        "permissions": permission_summary["declared"],
+        "permission_summary": {
+            "status": permission_summary["status"],
+            "ok": permission_summary["ok"],
+            "required": permission_summary["required"],
+            "missing": permission_summary["missing"],
+            "risk_level": permission_summary["risk_level"],
+        },
+        "approval_profile": permission_summary["approval_profile"],
         "ok": report.ok,
         "load_errors": [_serialize_load_error(error) for error in report.load_errors],
         "results": [
@@ -1281,6 +1462,18 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     extension = snapshot.get_extension(extension_id)
     if extension is None:
         raise KeyError(extension_id)
+    if enabled:
+        doctor_report = doctor_snapshot(snapshot)
+        doctor_result = next(
+            (result for result in doctor_report.results if result.extension_id == extension_id),
+            None,
+        )
+        extension_load_errors = _extension_load_errors_for_extension(extension, snapshot.load_errors)
+        doctor_issues = list(doctor_result.issues if doctor_result is not None else [])
+        if doctor_issues or extension_load_errors:
+            raise ValueError(
+                f"extension '{extension_id}' is degraded and cannot be enabled until validation issues are fixed"
+            )
     mcp_definitions = _mcp_definitions_for_extension(extension)
     changed: list[dict[str, Any]] = []
     for target in _toggle_targets(extension):

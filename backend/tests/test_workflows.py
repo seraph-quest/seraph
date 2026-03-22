@@ -240,6 +240,31 @@ class TestWorkflowManager:
         assert mgr2.enable("web-brief-to-file") is True
         assert mgr2.get_workflow("web-brief-to-file").enabled is True
 
+    def test_manifest_backed_workflow_with_missing_manifest_permissions_is_not_active(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        _write_manifest_workflow_package(
+            tmp_path,
+            workflow_name="packaged-workflow",
+            description="Packaged workflow",
+            step_tool="write_file",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        listed = {
+            workflow["name"]: workflow
+            for workflow in mgr.list_workflows(
+                available_tool_names=["write_file"],
+                active_skill_names=[],
+            )
+        }
+        assert listed["packaged-workflow"]["permission_status"] == "insufficient"
+        assert listed["packaged-workflow"]["missing_manifest_tools"] == ["write_file"]
+        assert listed["packaged-workflow"]["is_available"] is False
+        assert mgr.get_active_workflows(["write_file"], []) == []
+
     def test_init_loads_manifest_backed_workflows_alongside_legacy_workflows(self, tmp_path):
         workflows_dir = tmp_path / "workflows"
         workflows_dir.mkdir()

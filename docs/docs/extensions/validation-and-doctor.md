@@ -30,6 +30,8 @@ backend/.venv/bin/python scripts/extensions/validate_pack.py ./tmp/research-pack
 - invalid skill files
 - invalid workflow files
 - tool-permission mismatches
+- workflow/skill network-permission mismatches for packages that use networked tools
+- explicit execution-boundary mismatches when a manifest declares `permissions.execution_boundaries`
 - connector payload parse failures
 - connector network-permission mismatches when the payload actually implies a network transport
 
@@ -85,6 +87,13 @@ The workflow markdown/frontmatter/steps are not parseable.
 ### `permission_mismatch`
 
 The manifest’s declared permissions do not match what the contribution requires.
+
+This now has runtime impact:
+
+- fresh installs that fail validation are rejected before the package is copied into the workspace
+- installed packages that later drift into permission mismatches or other validation failures remain visible for repair, but their packaged skills/workflows are kept out of the active runtime surface
+- degraded packages cannot be re-enabled until validation issues are fixed
+- high-risk packages also require approval on install/enable before Seraph will activate them
 
 ## Wrong path behavior
 

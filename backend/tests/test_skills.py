@@ -242,6 +242,50 @@ class TestSkillManager:
         result = mgr.reload()
         assert len(result) == 3
 
+    def test_manifest_backed_skill_with_missing_manifest_permissions_is_not_active(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        extensions_dir = tmp_path / "extensions" / "skill-pack"
+        skills_dir.mkdir()
+        extensions_dir.mkdir(parents=True)
+
+        (extensions_dir / "manifest.yaml").write_text(
+            "id: seraph.skill-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Skill Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  skills:\n"
+            "    - skills/web-briefing.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+        (extensions_dir / "skills").mkdir()
+        (extensions_dir / "skills" / "web-briefing.md").write_text(
+            "---\n"
+            "name: web-briefing\n"
+            "description: Research helper\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "---\n\n"
+            "Use web_search.\n",
+            encoding="utf-8",
+        )
+
+        mgr = SkillManager()
+        mgr.init(str(skills_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        listed = {skill["name"]: skill for skill in mgr.list_skills()}
+        assert listed["web-briefing"]["permission_status"] == "insufficient"
+        assert listed["web-briefing"]["missing_manifest_tools"] == ["web_search"]
+        assert mgr.get_active_skills(["web_search"]) == []
+
     def test_init_loads_manifest_backed_skills_alongside_legacy_skills(self, tmp_path):
         skills_dir = tmp_path / "skills"
         extensions_dir = tmp_path / "extensions" / "research-pack"

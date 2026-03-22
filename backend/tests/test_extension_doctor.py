@@ -191,6 +191,62 @@ permissions:
     assert "write_file" in result.issues[0].message
 
 
+def test_doctor_reports_workflow_network_permission_mismatch(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "networked-workflow-pack"
+    workflow_dir = pack_dir / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.networked-workflow-pack
+version: 2026.3.21
+display_name: Networked Workflow Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflows:
+    - workflows/web-brief.md
+permissions:
+  tools:
+    - web_search
+  network: false
+""".strip(),
+        encoding="utf-8",
+    )
+    (workflow_dir / "web-brief.md").write_text(
+        "---\n"
+        "name: Web Brief\n"
+        "description: Fetch a brief from the web\n"
+        "requires:\n"
+        "  tools: [web_search]\n"
+        "steps:\n"
+        "  - tool: web_search\n"
+        "    arguments:\n"
+        "      query: test\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.networked-workflow-pack"))
+
+    assert result.ok is False
+    assert any(
+        issue.code == "permission_mismatch" and "network access" in issue.message
+        for issue in result.issues
+    )
+
+
 def test_doctor_reports_connector_network_permission_mismatch(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "connector-pack"
     mcp_dir = pack_dir / "mcp"

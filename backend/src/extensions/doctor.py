@@ -13,6 +13,7 @@ from src.extensions.connectors import (
 )
 from src.extensions.channels import parse_channel_adapter_definition
 from src.extensions.observers import parse_observer_definition
+from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
@@ -56,17 +57,6 @@ class ExtensionDoctorReport:
     @property
     def ok(self) -> bool:
         return not self.load_errors and all(result.ok for result in self.results)
-
-
-def _permission_tool_set(extension: ExtensionRecord) -> set[str]:
-    manifest = extension.manifest
-    if manifest is None:
-        return set()
-    return set(manifest.permissions.tools)
-
-
-def _missing_tool_permissions(required_tools: list[str], allowed_tools: set[str]) -> list[str]:
-    return [tool_name for tool_name in required_tools if tool_name not in allowed_tools]
 
 
 def _read_contribution_text(
@@ -171,8 +161,6 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
 
     if extension.source != "manifest" or extension.manifest is None:
         return ExtensionDoctorResult(extension_id=extension.id, ok=True, issues=[])
-
-    allowed_tools = _permission_tool_set(extension)
     for contribution in extension.contributions:
         resolved_path = contribution.metadata.get("resolved_path")
         resolved = Path(resolved_path) if isinstance(resolved_path, str) else None
@@ -214,18 +202,47 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                     )
                 )
                 continue
-            missing_permissions = _missing_tool_permissions(skill.requires_tools, allowed_tools)
-            if missing_permissions:
+            permission_profile = evaluate_tool_permissions(extension, tool_names=skill.requires_tools)
+            if permission_profile["missing_tools"]:
                 issues.append(
                     ExtensionDoctorIssue(
                         code="permission_mismatch",
                         severity="error",
                         message=(
-                            f"Manifest permissions are missing required skill tools: {', '.join(missing_permissions)}"
+                            "Manifest permissions are missing required skill tools: "
+                            f"{', '.join(permission_profile['missing_tools'])}"
                         ),
                         contribution_type="skills",
                         reference=contribution.reference,
                         suggested_fix="add the missing tools to manifest.permissions.tools",
+                    )
+                )
+            if permission_profile["missing_execution_boundaries"]:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            "Manifest permissions are missing required skill execution boundaries: "
+                            f"{', '.join(permission_profile['missing_execution_boundaries'])}"
+                        ),
+                        contribution_type="skills",
+                        reference=contribution.reference,
+                        suggested_fix="add the missing boundaries to manifest.permissions.execution_boundaries",
+                    )
+                )
+            if permission_profile["missing_network"]:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            "Skill requires network access but "
+                            "manifest.permissions.network is false"
+                        ),
+                        contribution_type="skills",
+                        reference=contribution.reference,
+                        suggested_fix="set manifest.permissions.network to true for networked skills",
                     )
                 )
             continue
@@ -245,18 +262,47 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                     )
                 )
                 continue
-            missing_permissions = _missing_tool_permissions(workflow.requires_tools, allowed_tools)
-            if missing_permissions:
+            permission_profile = evaluate_tool_permissions(extension, tool_names=workflow.step_tools)
+            if permission_profile["missing_tools"]:
                 issues.append(
                     ExtensionDoctorIssue(
                         code="permission_mismatch",
                         severity="error",
                         message=(
-                            f"Manifest permissions are missing required workflow tools: {', '.join(missing_permissions)}"
+                            "Manifest permissions are missing required workflow tools: "
+                            f"{', '.join(permission_profile['missing_tools'])}"
                         ),
                         contribution_type="workflows",
                         reference=contribution.reference,
                         suggested_fix="add the missing tools to manifest.permissions.tools",
+                    )
+                )
+            if permission_profile["missing_execution_boundaries"]:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            "Manifest permissions are missing required workflow execution boundaries: "
+                            f"{', '.join(permission_profile['missing_execution_boundaries'])}"
+                        ),
+                        contribution_type="workflows",
+                        reference=contribution.reference,
+                        suggested_fix="add the missing boundaries to manifest.permissions.execution_boundaries",
+                    )
+                )
+            if permission_profile["missing_network"]:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            "Workflow requires network access but "
+                            "manifest.permissions.network is false"
+                        ),
+                        contribution_type="workflows",
+                        reference=contribution.reference,
+                        suggested_fix="set manifest.permissions.network to true for networked workflows",
                     )
                 )
             continue

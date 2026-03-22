@@ -4,6 +4,7 @@ import json
 import logging
 import os
 
+from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.skills.loader import Skill, scan_skill_paths
 
@@ -169,9 +170,17 @@ class SkillManager:
     def get_active_skills(self, available_tools: list[str]) -> list[Skill]:
         """Return enabled skills whose tool requirements are met."""
         tool_set = set(available_tools)
+        snapshot = self._snapshot()
+        extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
         result = []
         for skill in self._skills:
             if not skill.enabled:
+                continue
+            permission_profile = evaluate_tool_permissions(
+                extensions_by_id.get(skill.extension_id) if skill.extension_id else None,
+                tool_names=skill.requires_tools,
+            )
+            if not permission_profile["ok"]:
                 continue
             if skill.requires_tools and not all(
                 t in tool_set for t in skill.requires_tools
@@ -189,19 +198,37 @@ class SkillManager:
 
     def list_skills(self) -> list[dict]:
         """Return all skills as dicts (for API responses)."""
-        return [
-            {
-                "name": s.name,
-                "description": s.description,
-                "requires_tools": s.requires_tools,
-                "user_invocable": s.user_invocable,
-                "enabled": s.enabled,
-                "file_path": s.file_path,
-                "source": s.source,
-                "extension_id": s.extension_id,
-            }
-            for s in self._skills
-        ]
+        snapshot = self._snapshot()
+        extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
+        items: list[dict] = []
+        for skill in self._skills:
+            permission_profile = evaluate_tool_permissions(
+                extensions_by_id.get(skill.extension_id) if skill.extension_id else None,
+                tool_names=skill.requires_tools,
+            )
+            items.append(
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "requires_tools": skill.requires_tools,
+                    "user_invocable": skill.user_invocable,
+                    "enabled": skill.enabled,
+                    "file_path": skill.file_path,
+                    "source": skill.source,
+                    "extension_id": skill.extension_id,
+                    "permission_status": permission_profile["status"],
+                    "missing_manifest_tools": list(permission_profile["missing_tools"]),
+                    "required_execution_boundaries": list(permission_profile["required_execution_boundaries"]),
+                    "missing_manifest_execution_boundaries": list(permission_profile["missing_execution_boundaries"]),
+                    "requires_network": bool(permission_profile["requires_network"]),
+                    "missing_manifest_network": bool(permission_profile["missing_network"]),
+                    "risk_level": permission_profile["risk_level"],
+                    "approval_behavior": permission_profile["approval_behavior"],
+                    "requires_approval": bool(permission_profile["requires_approval"]),
+                    "accepts_secret_refs": bool(permission_profile["accepts_secret_refs"]),
+                }
+            )
+        return items
 
     def enable(self, name: str) -> bool:
         """Enable a skill by name. Returns False if not found."""

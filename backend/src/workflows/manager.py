@@ -12,6 +12,7 @@ from typing import Any
 
 from smolagents import Tool
 
+from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA
@@ -490,8 +491,14 @@ class WorkflowManager:
         available_tool_names: list[str] | None = None,
         active_skill_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        snapshot = self._snapshot()
+        extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
         workflows: list[dict[str, Any]] = []
         for workflow in self._workflows:
+            permission_profile = evaluate_tool_permissions(
+                extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
+                tool_names=workflow.step_tools,
+            )
             item = {
                 "name": workflow.name,
                 "tool_name": workflow.tool_name,
@@ -509,6 +516,13 @@ class WorkflowManager:
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
                 "accepts_secret_refs": self._accepts_secret_refs(workflow),
+                "permission_status": permission_profile["status"],
+                "missing_manifest_tools": list(permission_profile["missing_tools"]),
+                "missing_manifest_execution_boundaries": list(permission_profile["missing_execution_boundaries"]),
+                "requires_network": bool(permission_profile["requires_network"]),
+                "missing_manifest_network": bool(permission_profile["missing_network"]),
+                "approval_behavior": permission_profile["approval_behavior"],
+                "requires_approval": bool(permission_profile["requires_approval"]),
             }
             if available_tool_names is not None and active_skill_names is not None:
                 item.update(
@@ -516,6 +530,7 @@ class WorkflowManager:
                         workflow,
                         available_tool_names,
                         active_skill_names,
+                        permission_profile=permission_profile,
                     )
                 )
             workflows.append(item)
@@ -574,9 +589,17 @@ class WorkflowManager:
     ) -> list[Workflow]:
         tool_set = set(available_tool_names)
         skill_set = set(active_skill_names)
+        snapshot = self._snapshot()
+        extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
         result: list[Workflow] = []
         for workflow in self._workflows:
             if not workflow.enabled:
+                continue
+            permission_profile = evaluate_tool_permissions(
+                extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
+                tool_names=workflow.step_tools,
+            )
+            if not permission_profile["ok"]:
                 continue
             if workflow.step_tools and not all(
                 tool_name in tool_set for tool_name in workflow.step_tools
@@ -626,6 +649,8 @@ class WorkflowManager:
         workflow: Workflow,
         available_tool_names: list[str],
         active_skill_names: list[str],
+        *,
+        permission_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tool_set = set(available_tool_names)
         skill_set = set(active_skill_names)
@@ -637,10 +662,24 @@ class WorkflowManager:
             skill_name for skill_name in workflow.requires_skills
             if skill_name not in skill_set
         ]
+        missing_manifest_tools = list((permission_profile or {}).get("missing_tools", []))
+        missing_manifest_execution_boundaries = list(
+            (permission_profile or {}).get("missing_execution_boundaries", [])
+        )
+        missing_manifest_network = bool((permission_profile or {}).get("missing_network", False))
         return {
-            "is_available": not missing_tools and not missing_skills,
+            "is_available": (
+                not missing_tools
+                and not missing_skills
+                and not missing_manifest_tools
+                and not missing_manifest_execution_boundaries
+                and not missing_manifest_network
+            ),
             "missing_tools": missing_tools,
             "missing_skills": missing_skills,
+            "missing_manifest_tools": missing_manifest_tools,
+            "missing_manifest_execution_boundaries": missing_manifest_execution_boundaries,
+            "missing_manifest_network": missing_manifest_network,
         }
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:

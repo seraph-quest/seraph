@@ -17,6 +17,12 @@ from config.settings import settings
 from packaging.version import Version
 from src.agent.factory import get_base_tools_and_active_skills
 from src.extensions.channels import select_active_channel_adapters
+from src.extensions.connector_health import (
+    managed_connector_health,
+    mcp_server_health,
+    planned_connector_health,
+    static_connector_health,
+)
 from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
 from src.extensions.doctor import doctor_snapshot
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
@@ -66,6 +72,14 @@ _STUDIO_TYPE_ORDER = {
     "observer_connectors": 8,
     "channel_adapters": 9,
     "workspace_adapters": 10,
+}
+_CONNECTOR_CONTRIBUTION_TYPES = {
+    "mcp_servers",
+    "managed_connectors",
+    "observer_definitions",
+    "observer_connectors",
+    "channel_adapters",
+    "workspace_adapters",
 }
 
 
@@ -1037,6 +1051,9 @@ def _contribution_payload(
             for field_name in ("name", "enabled", "status", "status_message", "connected", "tool_count", "auth_hint", "description", "url", "has_headers"):
                 if field_name in runtime_entry:
                     payload[field_name] = runtime_entry[field_name]
+        health = mcp_server_health(contribution.metadata, runtime_entry)
+        payload["health"] = health.as_payload()
+        payload.setdefault("status", health.state)
         return payload
     if contribution.contribution_type == "managed_connectors":
         payload = {
@@ -1074,6 +1091,11 @@ def _contribution_payload(
         else:
             payload["configured"] = True
             payload["status"] = "configured"
+        payload["health"] = managed_connector_health(
+            contribution.metadata,
+            config_entry,
+            config_errors,
+        ).as_payload()
         return payload
     if contribution.contribution_type == "observer_definitions":
         active_definition = (
@@ -1113,6 +1135,16 @@ def _contribution_payload(
             payload["status"] = "disabled"
         else:
             payload["status"] = "overridden"
+        payload["health"] = static_connector_health(
+            active=payload["loaded"],
+            valid=valid_definition,
+            default_enabled=default_enabled,
+            active_summary="Observer source is active in the runtime selection.",
+            invalid_summary="Observer definition is invalid and cannot load.",
+            disabled_summary="Observer source is disabled by default.",
+            overridden_summary="Another extension currently owns this observer source.",
+            supports_test=True,
+        ).as_payload()
         return payload
     if contribution.contribution_type == "channel_adapters":
         active_adapter = (
@@ -1152,6 +1184,33 @@ def _contribution_payload(
             payload["status"] = "disabled"
         else:
             payload["status"] = "overridden"
+        payload["health"] = static_connector_health(
+            active=payload["loaded"],
+            valid=valid_adapter,
+            default_enabled=default_enabled,
+            active_summary="Channel adapter is active in the delivery runtime.",
+            invalid_summary="Channel adapter is invalid and cannot load.",
+            disabled_summary="Channel adapter is disabled by default.",
+            overridden_summary="Another extension currently owns this channel transport.",
+            supports_test=True,
+        ).as_payload()
+        return payload
+    if contribution.contribution_type in {"observer_connectors", "workspace_adapters"}:
+        payload = {
+            "type": contribution.contribution_type,
+            "reference": contribution.reference,
+            "resolved_path": normalized_path,
+            "loaded": False,
+            "permission_profile": evaluate_contribution_permissions(
+                extension,
+                contribution_type=contribution.contribution_type,
+                metadata=contribution.metadata,
+            ),
+            "status": "planned",
+            "health": planned_connector_health(
+                "Runtime support for this connector surface is not wired yet.",
+            ).as_payload(),
+        }
         return payload
     item = (
         indexes.get(contribution.contribution_type, {}).get(normalized_path or "")
@@ -1247,6 +1306,28 @@ def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
     return types
 
 
+def _connector_summary(contributions: list[dict[str, Any]]) -> dict[str, Any]:
+    connector_items = [
+        contribution
+        for contribution in contributions
+        if str(contribution.get("type") or "") in _CONNECTOR_CONTRIBUTION_TYPES
+    ]
+    state_counts: dict[str, int] = {}
+    for contribution in connector_items:
+        health = contribution.get("health")
+        state = str(health.get("state") if isinstance(health, dict) else contribution.get("status") or "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
+    return {
+        "total": len(connector_items),
+        "ready": sum(
+            1
+            for contribution in connector_items
+            if isinstance(contribution.get("health"), dict) and bool(contribution["health"].get("ready"))
+        ),
+        "states": state_counts,
+    }
+
+
 def _extension_load_errors_for_extension(
     extension: ExtensionRecord,
     load_errors: list[ExtensionLoadErrorRecord],
@@ -1307,6 +1388,7 @@ def _extension_payload(
         contribution.contribution_type == "managed_connectors"
         for contribution in extension.contributions
     )
+    connector_summary = _connector_summary(contributions)
     return {
         "id": extension.id,
         "display_name": extension.display_name,
@@ -1359,6 +1441,7 @@ def _extension_payload(
         "config_scope": "metadata_and_managed_connectors" if managed_connector_present else "metadata_only",
         "enabled": enabled,
         "config": state_entry.get("config", {}),
+        "connector_summary": connector_summary,
         "contributions": contributions,
         "studio_files": _studio_files(extension, indexes=indexes),
     }
@@ -1415,6 +1498,33 @@ def get_extension(extension_id: str) -> dict[str, Any]:
     if not matches:
         raise KeyError(extension_id)
     return min(matches, key=_extension_payload_priority)
+
+
+def list_extension_connectors(extension_id: str) -> dict[str, Any]:
+    extension = get_extension(extension_id)
+    connectors = [
+        contribution
+        for contribution in extension["contributions"]
+        if str(contribution.get("type") or "") in _CONNECTOR_CONTRIBUTION_TYPES
+    ]
+    return {
+        "extension_id": extension["id"],
+        "display_name": extension["display_name"],
+        "connectors": connectors,
+        "summary": extension.get("connector_summary") or _connector_summary(connectors),
+    }
+
+
+def get_extension_connector(extension_id: str, reference: str) -> dict[str, Any]:
+    connectors_payload = list_extension_connectors(extension_id)
+    for connector in connectors_payload["connectors"]:
+        if connector.get("reference") == reference:
+            return {
+                **connector,
+                "extension_id": connectors_payload["extension_id"],
+                "display_name": connectors_payload["display_name"],
+            }
+    raise KeyError(reference)
 
 
 def validate_extension_path(path: str) -> dict[str, Any]:

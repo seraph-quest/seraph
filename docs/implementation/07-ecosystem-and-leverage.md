@@ -106,7 +106,7 @@
 
 ### Phase 5: Connector Unification
 
-- connector manifests and health hooks
+- [x] connector manifests and health hooks, including one normalized connector-health contract plus extension-native connector list/test endpoints
 - MCP packaging and install flow inside the extension platform
 - managed connectors for curated high-trust integrations
 

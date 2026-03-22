@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from smolagents import MCPClient
 
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.audit.runtime import log_integration_event
@@ -15,14 +16,17 @@ from src.extensions.lifecycle import (
     disable_extension,
     enable_extension,
     get_extension,
+    get_extension_connector,
     get_extension_source,
     install_extension_path,
+    list_extension_connectors,
     list_extensions,
     remove_extension,
     save_extension_source,
     update_extension_path,
     validate_extension_path,
 )
+from src.tools.mcp_manager import mcp_manager
 
 router = APIRouter()
 
@@ -38,6 +42,10 @@ class ExtensionConfigRequest(BaseModel):
 class ExtensionSourceSaveRequest(BaseModel):
     reference: str
     content: str
+
+
+class ExtensionConnectorTestRequest(BaseModel):
+    reference: str
 
 
 def _extension_issue_count(preview: dict[str, Any] | None) -> int:
@@ -183,6 +191,110 @@ async def _require_extension_lifecycle_approval(action: str, preview: dict[str, 
     )
 
 
+async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, Any]:
+    name = str(connector.get("name") or "")
+    config = mcp_manager._config.get(name)
+    if not config:
+        health = connector.get("health")
+        return {
+            "status": "inactive",
+            "message": "Connector is not registered in the MCP runtime.",
+            "health": health,
+        }
+
+    if not bool(config.get("enabled", False)):
+        await log_integration_event(
+            integration_type="extension_connector_test",
+            name=name,
+            outcome="skipped",
+            details={
+                "status": "disabled",
+                "extension_id": connector.get("extension_id"),
+                "reference": connector.get("reference"),
+                "url": config.get("url"),
+            },
+        )
+        return {
+            "status": "disabled",
+            "message": "Enable the connector before running a live test.",
+            "health": connector.get("health"),
+        }
+
+    url = config["url"]
+    raw_headers = config.get("headers")
+    missing_vars = mcp_manager._check_unresolved_vars(raw_headers)
+    if missing_vars:
+        await log_integration_event(
+            integration_type="extension_connector_test",
+            name=name,
+            outcome="auth_required",
+            details={
+                "status": "auth_required",
+                "extension_id": connector.get("extension_id"),
+                "reference": connector.get("reference"),
+                "missing_env_vars": missing_vars,
+                "url": url,
+            },
+        )
+        return {
+            "status": "auth_required",
+            "message": f"Missing environment variables: {', '.join(missing_vars)}",
+            "missing_env_vars": missing_vars,
+            "health": connector.get("health"),
+        }
+
+    try:
+        params: dict[str, Any] = {"url": url, "transport": "streamable-http"}
+        if raw_headers:
+            params["headers"] = {
+                key: mcp_manager._resolve_env_vars(value)
+                for key, value in raw_headers.items()
+            }
+        client = MCPClient(params, structured_output=False)
+        tools = client.get_tools()
+        tool_names = [tool.name for tool in tools]
+        client.disconnect()
+        await log_integration_event(
+            integration_type="extension_connector_test",
+            name=name,
+            outcome="succeeded",
+            details={
+                "status": "ok",
+                "extension_id": connector.get("extension_id"),
+                "reference": connector.get("reference"),
+                "tool_count": len(tools),
+                "tool_names": tool_names,
+                "url": url,
+            },
+        )
+        return {
+            "status": "ok",
+            "tool_count": len(tools),
+            "tools": tool_names,
+            "health": connector.get("health"),
+        }
+    except Exception as exc:
+        exc_str = str(exc).lower()
+        status = "auth_failed" if any(token in exc_str for token in ("401", "403", "unauthorized", "forbidden")) else "connection_failed"
+        await log_integration_event(
+            integration_type="extension_connector_test",
+            name=name,
+            outcome="failed",
+            details={
+                "status": status,
+                "extension_id": connector.get("extension_id"),
+                "reference": connector.get("reference"),
+                "url": url,
+                "error": str(exc),
+            },
+        )
+        return {
+            "status": status,
+            "message": str(exc),
+            "health": connector.get("health"),
+        }
+
+
 @router.get("/extensions")
 async def list_extension_packages():
     return list_extensions()
@@ -194,6 +306,49 @@ async def get_extension_package(extension_id: str):
         return {"extension": get_extension(extension_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+
+
+@router.get("/extensions/{extension_id}/connectors")
+async def list_extension_package_connectors(extension_id: str):
+    try:
+        return list_extension_connectors(extension_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+
+
+@router.post("/extensions/{extension_id}/connectors/test")
+async def test_extension_package_connector(extension_id: str, req: ExtensionConnectorTestRequest):
+    try:
+        connector = get_extension_connector(extension_id, req.reference)
+    except KeyError as exc:
+        detail = (
+            f"Extension '{extension_id}' not found"
+            if str(exc) == f"'{extension_id}'"
+            else f"Connector reference '{req.reference}' is not part of extension '{extension_id}'"
+        )
+        raise HTTPException(status_code=404, detail=detail) from exc
+
+    connector_type = str(connector.get("type") or "")
+    health = connector.get("health") if isinstance(connector.get("health"), dict) else None
+    if connector_type == "mcp_servers":
+        return await _test_extension_mcp_connector(connector)
+
+    await log_integration_event(
+        integration_type="extension_connector_test",
+        name=str(connector.get("name") or req.reference),
+        outcome="succeeded" if isinstance(health, dict) and bool(health.get("ready")) else "skipped",
+        details={
+            "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
+            "extension_id": extension_id,
+            "reference": req.reference,
+            "connector_type": connector_type,
+        },
+    )
+    return {
+        "status": str(health.get("state") if isinstance(health, dict) else connector.get("status") or "unknown"),
+        "message": str(health.get("summary") if isinstance(health, dict) else connector.get("status") or "Connector status"),
+        "health": health,
+    }
 
 
 @router.get("/extensions/{extension_id}/source")

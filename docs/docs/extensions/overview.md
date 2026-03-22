@@ -138,6 +138,12 @@ Current validation depth:
 - the remaining canonical contribution types currently get manifest/layout/file
   validation first, with deeper semantic validators landing in later slices
 
+Current connector-runtime visibility:
+
+- `GET /api/extensions/{id}/connectors` lists packaged connector contributions with a normalized health contract
+- `POST /api/extensions/{id}/connectors/test` now routes packaged MCP connectors through a live runtime test path and returns normalized readiness for the other shipped connector surfaces
+- the first shipped health contract covers packaged MCP connectors, managed connectors, observer definitions, and channel adapters, while deeper runtime behavior for managed connectors and the reach surfaces continues to land in later slices
+
 For the concrete author workflow, continue with [Create A Capability Pack](./create-a-capability-pack.md).
 
 ## Lifecycle visibility

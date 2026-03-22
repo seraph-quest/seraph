@@ -300,8 +300,8 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    make the extension studio package-aware so authors edit manifests and package-backed workflow/skill members together instead of forcing loose-file-only save paths, with `/api/extensions/{id}/source` now backing workspace package manifests and package-backed authoring while the studio sidebar groups manifests with their packaged members and still falls back to legacy loose-file paths where migration slices have not finished yet
 15. [x] `extension-lifecycle-ui-v1`:
    surface the unified extension lifecycle in the workspace so install, validation, health, enablement, configuration, and removal all happen through one operator path, with the extension studio now handling approval-required install/update/enable flows honestly, focusing Pending approvals on lifecycle gates, and exposing extension lifecycle context inside the approvals inspector instead of collapsing structured approval responses into generic failures
-16. [ ] `connector-manifest-and-health-v1`:
-   define the connector package shape with auth/config metadata and health/test hooks so connectors stop being an architectural exception
+16. [x] `connector-manifest-and-health-v1`:
+   define the connector package shape with auth/config metadata and health/test hooks so connectors stop being an architectural exception, with extension payloads now exposing one normalized connector health contract, extension-native `/api/extensions/{id}/connectors` listing, and `/api/extensions/{id}/connectors/test` dispatch so MCP, managed connectors, observer sources, and channel adapters stop relying on completely different inspection paths; MCP now gets a live packaged test path through that endpoint while the other connector surfaces return normalized readiness until their later runtime slices deepen the actual checks
 17. [ ] `mcp-packaging-and-install-flow-v1`:
    move MCP server definitions into the extension package model and lifecycle so MCP becomes one connector type inside the platform instead of a separate world
 18. [ ] `managed-connectors-v1`:

@@ -85,6 +85,14 @@ def _status_for_audit_event(event_type: str) -> str:
 def _title_for_audit_event(event: dict[str, Any]) -> str:
     event_type = str(event.get("event_type") or "")
     tool_name = str(event.get("tool_name") or "")
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    if event_type.startswith("integration_") and details.get("integration_type") == "extension":
+        return str(
+            details.get("extension_display_name")
+            or details.get("extension_id")
+            or details.get("name")
+            or "Extension package"
+        )
     if event_type in {"tool_call", "tool_result", "tool_failed"}:
         return tool_name or "Tool"
     if event_type.startswith("agent_run_"):
@@ -102,7 +110,9 @@ def _title_for_audit_event(event: dict[str, Any]) -> str:
     return tool_name or event_type.replace("_", " ")
 
 
-def _kind_for_audit_event(event_type: str) -> str | None:
+def _kind_for_audit_event(event: dict[str, Any]) -> str | None:
+    event_type = str(event.get("event_type") or "")
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
     if event_type in {"tool_call", "tool_result"}:
         return event_type
     if event_type == "tool_failed":
@@ -118,10 +128,59 @@ def _kind_for_audit_event(event_type: str) -> str | None:
     if event_type.startswith("observer_delivery_"):
         return "delivery"
     if event_type.startswith("integration_"):
+        if details.get("integration_type") == "extension":
+            return "extension"
         return "integration"
     if event_type in {"tool_failed", "integration_failed", "llm_primary_failure", "llm_fallback_failure"}:
         return "failure"
     return None
+
+
+def _summary_for_extension_event(event: dict[str, Any]) -> str:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    status = str(details.get("status") or event.get("event_type") or "")
+    summary = {
+        "validated": "Validated extension package",
+        "install_failed": "Extension install failed",
+        "installed": "Installed extension package",
+        "enable_failed": "Extension enable failed",
+        "enabled": "Enabled extension package",
+        "disable_failed": "Extension disable failed",
+        "disabled": "Disabled extension package",
+        "configure_failed": "Extension configure failed",
+        "configured": "Configured extension package",
+        "remove_failed": "Extension remove failed",
+        "removed": "Removed extension package",
+        "save_source_failed": "Extension source save failed",
+        "source_saved": "Saved extension source",
+        "validate_failed": "Extension validation failed",
+    }.get(status, str(event.get("summary") or status.replace("_", " ")))
+    extras: list[str] = []
+    if isinstance(details.get("kind"), str) and str(details["kind"]).strip():
+        extras.append(str(details["kind"]))
+    if isinstance(details.get("location"), str) and str(details["location"]).strip():
+        extras.append(str(details["location"]))
+    issue_count = details.get("issue_count")
+    if isinstance(issue_count, int) and issue_count > 0:
+        extras.append(f"{issue_count} issue{'s' if issue_count != 1 else ''}")
+    load_error_count = details.get("load_error_count")
+    if isinstance(load_error_count, int) and load_error_count > 0:
+        extras.append(f"{load_error_count} load error{'s' if load_error_count != 1 else ''}")
+    changed_count = details.get("changed_count")
+    if isinstance(changed_count, int) and changed_count > 0:
+        extras.append(f"{changed_count} target{'s' if changed_count != 1 else ''}")
+    if details.get("ok") is False:
+        extras.append("not installable")
+    if isinstance(details.get("permission_status"), str) and details.get("permission_status") not in {"ok", "", None}:
+        extras.append(str(details["permission_status"]).replace("_", " "))
+    return " · ".join([summary, *extras]) if extras else summary
+
+
+def _summary_for_audit_event(event: dict[str, Any], kind: str) -> str:
+    if kind == "extension":
+        return _summary_for_extension_event(event)
+    event_type = str(event.get("event_type") or "")
+    return str(event.get("summary") or event_type.replace("_", " "))
 
 
 def _request_id_from_item(item: dict[str, Any]) -> str | None:
@@ -141,6 +200,11 @@ def _group_key_for_item(item: dict[str, Any]) -> str:
         return f"workflow:{item['id']}"
     if item["kind"] == "approval":
         return f"approval:{item['id']}"
+    if item["kind"] == "extension":
+        metadata = item.get("metadata")
+        extension_id = metadata.get("extension_id") if isinstance(metadata, dict) and isinstance(metadata.get("extension_id"), str) else item["id"]
+        action = metadata.get("action") if isinstance(metadata, dict) and isinstance(metadata.get("action"), str) else item["status"]
+        return f"extension:{extension_id}:{action}:{item['updated_at']}"
     if item["kind"] in {"intervention", "notification", "queued_insight"}:
         return f"guardian:{item['id']}"
     thread_id = item.get("thread_id") or "ambient"
@@ -471,7 +535,7 @@ async def get_activity_ledger(
             request_summaries.setdefault(request_id, str(event.get("summary")))
 
         event_type = str(event.get("event_type") or "")
-        kind = _kind_for_audit_event(event_type)
+        kind = _kind_for_audit_event(event)
         if kind is None:
             continue
         created_at = str(event.get("created_at") or "")
@@ -480,7 +544,7 @@ async def get_activity_ledger(
             "kind": kind,
             "category": _category_for_kind(kind),
             "title": _title_for_audit_event(event),
-            "summary": str(event.get("summary") or event_type.replace("_", " ")),
+            "summary": _summary_for_audit_event(event, kind),
             "status": _status_for_audit_event(event_type),
             "created_at": created_at,
             "updated_at": created_at,
@@ -493,6 +557,7 @@ async def get_activity_ledger(
             "recommended_actions": [],
             "source": (
                 "routing" if kind == "routing"
+                else "extension" if kind == "extension"
                 else "audit"
             ),
             "model": (

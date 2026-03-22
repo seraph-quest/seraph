@@ -310,9 +310,9 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
    package observer sources as typed extensions where appropriate so input reach fits the same architecture as skills, workflows, and connectors
 20. [ ] `channel-adapter-extensions-v1`:
    package output and delivery adapters as typed extensions where appropriate so reach surfaces stop being separate one-off integration paths
-21. [ ] `extension-permissions-and-approvals-v1`:
+21. [x] `extension-permissions-and-approvals-v1`:
    map extension-declared permissions cleanly into policy, approval, and execution behavior so packages cannot bypass Seraph’s trust boundaries
-22. [ ] `extension-audit-and-activity-v1`:
+22. [x] `extension-audit-and-activity-v1`:
    make extension install, update, enable, disable, health, and execution visible in Activity Ledger and audit so operators can explain what changed and why
 23. [ ] `extension-versioning-and-update-flow-v1`:
    add version-aware updates, compatibility checks, and bundled-vs-user-installed semantics so packages can evolve without hidden drift

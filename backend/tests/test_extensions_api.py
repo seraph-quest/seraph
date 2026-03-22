@@ -456,8 +456,8 @@ async def test_list_extensions_includes_bundled_core_capabilities(client, extens
 @pytest.mark.asyncio
 async def test_validate_extension_package_path_returns_manifest_report(client, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
-
-    response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
+    with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:
+        response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
 
     assert response.status_code == 200
     payload = response.json()
@@ -467,6 +467,30 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
     assert payload["permissions"]["tools"] == ["read_file"]
     assert payload["permission_summary"]["required"]["tools"] == ["read_file"]
     assert payload["approval_profile"]["requires_lifecycle_approval"] is False
+    assert log_event.await_count == 1
+    assert log_event.await_args.kwargs["integration_type"] == "extension"
+    assert log_event.await_args.kwargs["outcome"] == "succeeded"
+    assert log_event.await_args.kwargs["details"]["status"] == "validated"
+
+
+@pytest.mark.asyncio
+async def test_install_logs_failure_for_invalid_extension_package(client, extension_runtime, tmp_path):
+    package_dir = _write_invalid_observer_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event,
+    ):
+        response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+
+    assert response.status_code == 422
+    assert log_event.await_count == 1
+    assert log_event.await_args.kwargs["outcome"] == "failed"
+    assert log_event.await_args.kwargs["details"]["status"] == "install_failed"
+    assert log_event.await_args.kwargs["details"]["issue_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -674,7 +698,7 @@ async def test_enable_rejects_degraded_extension_with_invalid_workflow_before_ap
             "src.extensions.lifecycle.get_base_tools_and_active_skills",
             return_value=([SimpleNamespace(name="write_file")], [], "approval"),
         ),
-        patch("src.api.extensions.log_integration_event", AsyncMock()),
+        patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event,
     ):
         install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
         assert install_response.status_code == 409
@@ -704,6 +728,9 @@ async def test_enable_rejects_degraded_extension_with_invalid_workflow_before_ap
         enable_response = await client.post("/api/extensions/seraph.high-risk-pack/enable")
         assert enable_response.status_code == 422
         assert "degraded" in enable_response.json()["detail"]
+        assert log_event.await_args.kwargs["outcome"] == "failed"
+        assert log_event.await_args.kwargs["details"]["status"] == "enable_failed"
+        assert log_event.await_args.kwargs["details"]["issue_count"] >= 1
 
 
 @pytest.mark.asyncio

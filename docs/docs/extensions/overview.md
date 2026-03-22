@@ -119,3 +119,19 @@ Current validation depth:
   validation first, with deeper semantic validators landing in later slices
 
 For the concrete author workflow, continue with [Create A Capability Pack](./create-a-capability-pack.md).
+
+## Lifecycle visibility
+
+Extension lifecycle actions now land on Seraph's existing audit and activity seams.
+
+That includes:
+
+- validation attempts
+- installs
+- enable/disable actions
+- configuration changes
+- source saves
+- removal
+
+High-risk lifecycle actions still pause behind approvals when required, and failed
+extension actions now show up with the same lifecycle context in the Activity Ledger.

@@ -496,3 +496,80 @@ async def test_activity_ledger_limit_keeps_full_request_group_visible(client):
     assert payload["summary"]["visible_groups"] == 1
     assert len(payload["items"]) == 3
     assert {item["group_key"] for item in payload["items"]} == {"request:agent-ws:session-1:123"}
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_surfaces_extension_lifecycle_events(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-extension-install-1",
+                        "event_type": "integration_succeeded",
+                        "tool_name": "extension:seraph.test-installable",
+                        "summary": "Extension seraph.test-installable succeeded",
+                        "created_at": _iso_offset(minutes=-3),
+                        "session_id": None,
+                        "details": {
+                            "integration_type": "extension",
+                            "name": "seraph.test-installable",
+                            "extension_id": "seraph.test-installable",
+                            "extension_display_name": "Test Installable",
+                            "status": "installed",
+                            "action": "install",
+                            "kind": "capability-pack",
+                            "location": "workspace",
+                            "version": "2026.3.21",
+                            "issue_count": 0,
+                            "load_error_count": 0,
+                        },
+                    },
+                    {
+                        "id": "audit-extension-enable-1",
+                        "event_type": "integration_failed",
+                        "tool_name": "extension:seraph.test-installable",
+                        "summary": "Extension seraph.test-installable failed",
+                        "created_at": _iso_offset(minutes=-2),
+                        "session_id": None,
+                        "details": {
+                            "integration_type": "extension",
+                            "name": "seraph.test-installable",
+                            "extension_id": "seraph.test-installable",
+                            "extension_display_name": "Test Installable",
+                            "status": "enable_failed",
+                            "action": "enable",
+                            "kind": "capability-pack",
+                            "location": "workspace",
+                            "version": "2026.3.21",
+                            "issue_count": 2,
+                            "load_error_count": 1,
+                            "error": "extension 'seraph.test-installable' is degraded and cannot be enabled until validation issues are fixed",
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch("src.api.activity.session_manager.list_sessions", AsyncMock(return_value=[])),
+    ):
+        response = await client.get("/api/activity/ledger", params={"limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    items = payload["items"]
+
+    assert [item["kind"] for item in items] == ["extension", "extension"]
+    assert items[0]["title"] == "Test Installable"
+    assert items[0]["summary"] == "Extension enable failed · capability-pack · workspace · 2 issues · 1 load error"
+    assert items[0]["status"] == "failed"
+    assert items[0]["source"] == "extension"
+    assert items[0]["group_key"].startswith("extension:seraph.test-installable:enable:")
+    assert items[1]["summary"] == "Installed extension package · capability-pack · workspace"
+    assert payload["summary"]["categories"]["system"] == 2

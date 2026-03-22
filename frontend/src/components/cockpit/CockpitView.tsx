@@ -1237,6 +1237,7 @@ function activityEmoji(value: ActivityLedgerEntry): string {
   if (value.kind === "llm_call") return "🤖";
   if (value.kind === "workflow_run") return "⚙️";
   if (value.kind === "approval") return "⏳";
+  if (value.kind === "extension") return "🧩";
   if (value.kind === "notification" || value.kind === "queued_insight" || value.kind === "intervention") return "📣";
   if (value.kind === "routing") return "🧭";
   if (value.kind === "tool_call" || value.kind === "tool_result" || value.kind === "tool_failed") return "🔧";
@@ -1272,22 +1273,24 @@ function activityLeadPriority(value: ActivityLedgerEntry): number {
       return 0;
     case "workflow_run":
       return 1;
+    case "extension":
+      return 2;
     case "intervention":
     case "notification":
     case "queued_insight":
-      return 2;
-    case "agent_run":
       return 3;
-    case "llm_call":
+    case "agent_run":
       return 4;
-    case "routing":
+    case "llm_call":
       return 5;
+    case "routing":
+      return 6;
     case "tool_call":
     case "tool_result":
     case "tool_failed":
-      return 6;
-    default:
       return 7;
+    default:
+      return 8;
   }
 }
 
@@ -1300,6 +1303,22 @@ function chooseActivityLead(items: ActivityLedgerEntry[]): ActivityLedgerEntry {
 }
 
 function activityRowMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "extension") {
+    const parts: string[] = [activityStatusLabel(value)];
+    if (typeof value.metadata?.action === "string" && value.metadata.action.trim()) {
+      parts.push(value.metadata.action.replace(/_/g, " "));
+    }
+    if (typeof value.metadata?.location === "string" && value.metadata.location.trim()) {
+      parts.push(value.metadata.location);
+    }
+    if (typeof value.metadata?.kind === "string" && value.metadata.kind.trim()) {
+      parts.push(value.metadata.kind);
+    }
+    if (typeof value.metadata?.version === "string" && value.metadata.version.trim()) {
+      parts.push(value.metadata.version);
+    }
+    return parts.join(" · ");
+  }
   const parts: string[] = [activityStatusLabel(value)];
   if (value.thread_label) parts.push(value.thread_label);
   if (value.model) parts.push(_modelLabelForRow(value.model));
@@ -1328,6 +1347,9 @@ function activityRoutingSummary(value: ActivityLedgerEntry): string {
 
 function activityLeadDetail(value: ActivityLedgerEntry): string | null {
   if (value.kind === "routing") return activityRoutingSummary(value);
+  if (value.kind === "extension" && typeof value.metadata?.error === "string" && value.metadata.error.trim()) {
+    return value.metadata.error;
+  }
   return null;
 }
 

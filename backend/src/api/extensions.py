@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -36,6 +37,84 @@ class ExtensionConfigRequest(BaseModel):
 class ExtensionSourceSaveRequest(BaseModel):
     reference: str
     content: str
+
+
+def _extension_issue_count(preview: dict[str, Any] | None) -> int:
+    if not isinstance(preview, dict):
+        return 0
+    issues = preview.get("issues")
+    if isinstance(issues, list):
+        return len(issues)
+    results = preview.get("results")
+    if isinstance(results, list):
+        return sum(
+            len(result.get("issues", []))
+            for result in results
+            if isinstance(result, dict) and isinstance(result.get("issues"), list)
+        )
+    return 0
+
+
+def _extension_load_error_count(preview: dict[str, Any] | None) -> int:
+    if not isinstance(preview, dict):
+        return 0
+    load_errors = preview.get("load_errors")
+    return len(load_errors) if isinstance(load_errors, list) else 0
+
+
+async def _log_extension_lifecycle_event(
+    *,
+    action: str,
+    outcome: str,
+    preview: dict[str, Any] | None = None,
+    path: str | None = None,
+    error: str | None = None,
+    extra_details: dict[str, Any] | None = None,
+) -> None:
+    preview = preview if isinstance(preview, dict) else {}
+    permission_summary = preview.get("permission_summary")
+    permission_status = (
+        str(permission_summary.get("status"))
+        if isinstance(permission_summary, dict) and permission_summary.get("status") is not None
+        else None
+    )
+    extension_id = str(preview.get("id") or preview.get("extension_id") or "")
+    display_name = str(preview.get("display_name") or extension_id or Path(path or "extension").name or "extension")
+    details = {
+        "action": action,
+        "status": f"{action}_{outcome}" if outcome == "failed" else (
+            "validated" if action == "validate"
+            else "source_saved" if action == "save_source"
+            else "installed" if action == "install"
+            else "enabled" if action == "enable"
+            else "disabled" if action == "disable"
+            else "configured" if action == "configure"
+            else "removed" if action == "remove"
+            else action
+        ),
+        "path": preview.get("path") or path,
+        "manifest_path": preview.get("manifest_path"),
+        "extension_id": extension_id or None,
+        "extension_display_name": display_name,
+        "version": preview.get("version"),
+        "kind": preview.get("kind"),
+        "trust": preview.get("trust"),
+        "location": preview.get("location"),
+        "package_digest": preview.get("package_digest"),
+        "permission_status": permission_status,
+        "issue_count": _extension_issue_count(preview),
+        "load_error_count": _extension_load_error_count(preview),
+        "extension_status": preview.get("status"),
+        "ok": preview.get("ok"),
+        "error": error,
+        **(extra_details or {}),
+    }
+    await log_integration_event(
+        integration_type="extension",
+        name=extension_id or display_name,
+        outcome=outcome,
+        details={key: value for key, value in details.items() if value is not None},
+    )
 
 
 async def _require_extension_lifecycle_approval(action: str, preview: dict[str, Any]) -> None:
@@ -130,17 +209,29 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
     try:
         payload = save_extension_source(extension_id, req.reference, req.content)
     except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="save_source",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+            extra_details={"reference": req.reference},
+        )
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
     except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="save_source",
+            outcome="failed",
+            path=extension_id,
+            error=str(exc),
+            extra_details={"reference": req.reference},
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await log_integration_event(
-        integration_type="extension",
-        name=extension_id,
+    await _log_extension_lifecycle_event(
+        action="save_source",
         outcome="succeeded",
-        details={
-            "status": "source_saved",
-            "reference": req.reference,
-        },
+        preview=payload.get("extension"),
+        path=extension_id,
+        extra_details={"reference": req.reference},
     )
     return payload
 
@@ -148,13 +239,27 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
 @router.post("/extensions/validate")
 async def validate_extension_package_path(req: ExtensionPathRequest):
     try:
-        return validate_extension_path(req.path)
+        payload = validate_extension_path(req.path)
     except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="validate",
+            outcome="failed",
+            path=req.path,
+            error=str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="validate",
+        outcome="succeeded",
+        preview=payload,
+        path=req.path,
+    )
+    return payload
 
 
 @router.post("/extensions/install", status_code=201)
 async def install_extension_package(req: ExtensionPathRequest):
+    preview: dict[str, Any] | None = None
     try:
         preview = validate_extension_path(req.path)
         if not preview.get("ok", False):
@@ -162,17 +267,30 @@ async def install_extension_package(req: ExtensionPathRequest):
         await _require_extension_lifecycle_approval("install", preview)
         extension = install_extension_path(req.path)
     except FileExistsError as exc:
+        await _log_extension_lifecycle_event(
+            action="install",
+            outcome="failed",
+            preview=preview,
+            path=req.path,
+            error=str(exc),
+        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="install",
+            outcome="failed",
+            preview=preview,
+            path=req.path,
+            error=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await log_integration_event(
-        integration_type="extension",
-        name=extension["id"],
+    await _log_extension_lifecycle_event(
+        action="install",
         outcome="succeeded",
-        details={
-            "status": "installed",
-            "path": req.path,
-            "location": extension["location"],
+        preview=extension,
+        path=req.path,
+        extra_details={
+            "location": extension.get("location"),
         },
     )
     return {"status": "installed", "extension": extension}
@@ -180,6 +298,7 @@ async def install_extension_package(req: ExtensionPathRequest):
 
 @router.post("/extensions/{extension_id}/enable")
 async def enable_extension_package(extension_id: str):
+    preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
         if preview.get("status") != "ready":
@@ -189,16 +308,30 @@ async def enable_extension_package(extension_id: str):
         await _require_extension_lifecycle_approval("enable", preview)
         result = enable_extension(extension_id)
     except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="enable",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
     except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="enable",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await log_integration_event(
-        integration_type="extension",
-        name=extension_id,
+    await _log_extension_lifecycle_event(
+        action="enable",
         outcome="succeeded",
-        details={
-            "status": "enabled",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={
             "changed": result["changed"],
+            "changed_count": len(result.get("changed", [])),
         },
     )
     return {"status": "enabled", **result}
@@ -209,14 +342,21 @@ async def disable_extension_package(extension_id: str):
     try:
         result = disable_extension(extension_id)
     except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="disable",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
-    await log_integration_event(
-        integration_type="extension",
-        name=extension_id,
+    await _log_extension_lifecycle_event(
+        action="disable",
         outcome="succeeded",
-        details={
-            "status": "disabled",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={
             "changed": result["changed"],
+            "changed_count": len(result.get("changed", [])),
         },
     )
     return {"status": "disabled", **result}
@@ -227,33 +367,60 @@ async def configure_extension_package(extension_id: str, req: ExtensionConfigReq
     try:
         extension = configure_extension(extension_id, req.config)
     except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="configure",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+            extra_details={"config_keys": sorted(req.config.keys())},
+        )
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
     except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="configure",
+            outcome="failed",
+            path=extension_id,
+            error=str(exc),
+            extra_details={"config_keys": sorted(req.config.keys())},
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await log_integration_event(
-        integration_type="extension",
-        name=extension_id,
+    await _log_extension_lifecycle_event(
+        action="configure",
         outcome="succeeded",
-        details={
-            "status": "configured",
-            "config_keys": sorted(req.config.keys()),
-        },
+        preview=extension,
+        path=extension_id,
+        extra_details={"config_keys": sorted(req.config.keys())},
     )
     return {"status": "configured", "extension": extension}
 
 
 @router.delete("/extensions/{extension_id}")
 async def remove_extension_package(extension_id: str):
+    preview: dict[str, Any] | None = None
     try:
+        preview = get_extension(extension_id)
         remove_extension(extension_id)
     except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="remove",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
     except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="remove",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await log_integration_event(
-        integration_type="extension",
-        name=extension_id,
+    await _log_extension_lifecycle_event(
+        action="remove",
         outcome="succeeded",
-        details={"status": "removed"},
+        preview=preview,
+        path=extension_id,
     )
     return {"status": "removed", "name": extension_id}

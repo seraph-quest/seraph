@@ -11,7 +11,7 @@ Use it to ship:
 - provider presets
 - prompt packs
 - scheduled routines
-- later: connectors such as MCP packages and managed integrations
+- connector packs such as MCP packages and managed integrations
 
 The extension platform is deliberately **not** a general arbitrary-code plugin runtime.
 
@@ -65,7 +65,8 @@ At a higher level, Seraph treats extension work in three buckets:
 2. Connector extensions
    MCP packages and managed integrations.
 3. Trusted code plugins
-   Deferred. Not part of the current implementation path.
+   Explicitly out of scope for the current architecture. See the
+   [Trusted Code Plugins RFC](/research/trusted-code-plugins-rfc).
 
 ## Canonical layout
 

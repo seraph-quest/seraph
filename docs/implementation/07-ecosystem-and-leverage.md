@@ -8,6 +8,7 @@
 
 - primary design doc: [08. Ecosystem And Delegation](/research/ecosystem-and-delegation)
 - detailed strategy: [12. Extension Platform And MCP Strategy](/research/plugin-system-and-mcp-strategy)
+- trusted-code decision: [13. Trusted Code Plugins RFC](/research/trusted-code-plugins-rfc)
 
 ## Shipped On `develop`
 
@@ -54,6 +55,7 @@
 - [x] the backend now ships one `/api/extensions` lifecycle surface for list, inspect, validate, install, enable, disable, configure, and remove so automation no longer has to talk directly to per-surface skill/workflow/package seams even though the workspace UI still needs to adopt that API and the current `configure` step is metadata-only until typed runtime config contracts land
 - [x] extension studio is now manifest-aware for installed packages, with package manifests and package-backed workflow/skill sources loaded and saved through `/api/extensions/{id}/source` instead of always collapsing edits back into loose managed-file save paths
 - [x] new authored skills/workflows now land in the managed `workspace/extensions/workspace-capabilities/` package, while bundled catalog skill installs now land as manifest-backed extension packages under `workspace/extensions/`; old loose loaders remain read-only compatibility during the final cleanup window
+- [x] the trusted-code-plugins RFC is now closed for the current architecture with an explicit negative decision: Seraph continues with typed extension packs, MCP, managed connectors, and bundled native tools, not a general arbitrary-code plugin runtime
 
 ## Still To Do On `develop`
 
@@ -119,7 +121,7 @@
 - [x] extension audit and activity visibility
 - [x] extension versioning and update flow
 - [x] legacy loader cleanup for primary authoring/install paths
-- trusted-code-plugins RFC only after the typed extension platform is complete enough to judge whether privileged code plugins are actually needed
+- [x] trusted-code-plugins RFC concluded that privileged third-party code plugins stay out of scope for the current platform unless a future RFC reopens the decision under a much higher safety bar
 
 ## Required Authoring Docs And Tools
 

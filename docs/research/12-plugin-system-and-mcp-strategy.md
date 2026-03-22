@@ -12,6 +12,10 @@ This document answers:
 - whether Seraph should build a non-MCP alternative
 - how to execute the migration from the current codebase
 
+Follow-up decision:
+
+- [13. Trusted Code Plugins RFC](/research/trusted-code-plugins-rfc)
+
 ## Executive Summary
 
 Seraph should build a real extension platform, but not as one unrestricted in-process plugin runtime.
@@ -22,7 +26,7 @@ The right model is:
 - MCP as one connector type, not the whole ecosystem
 - a narrow first-party managed connector path for high-value integrations
 - core trust/safety/runtime boundaries kept inside Seraph
-- trusted code plugins deferred or heavily gated
+- trusted code plugins deferred, with the current RFC explicitly keeping them out of scope
 
 The strongest product decision is:
 
@@ -57,14 +61,14 @@ The strongest product decision is:
       ▼           ▼                       ▼                       ▼
 ┌───────────┐ ┌───────────────┐     ┌──────────────┐       ┌──────────────┐
 │Declarative│ │MCP Connectors │     │Managed       │       │Trusted Code  │
-│Extensions │ │               │     │Connectors    │       │Plugins       │
+│Extensions │ │               │     │Connectors    │       │Future RFC    │
 ├───────────┤ ├───────────────┤     ├──────────────┤       ├──────────────┤
-│skills     │ │MCP servers    │     │Slack         │       │signed tools  │
-│workflows  │ │resources      │     │Jira          │       │deep runtime  │
-│runbooks   │ │prompts/tools  │     │GitHub        │       │extensions    │
-│starter    │ │stdio/http     │     │Google        │       │later only    │
-│packs      │ │long-tail      │     │first-party   │       │trusted only  │
-│presets    │ │integrations   │     │curated UX    │       │heavily gated │
+│skills     │ │MCP servers    │     │Slack         │       │not shipped   │
+│workflows  │ │resources      │     │Jira          │       │not approved  │
+│runbooks   │ │prompts/tools  │     │GitHub        │       │revisit only  │
+│starter    │ │stdio/http     │     │Google        │       │with a new    │
+│packs      │ │long-tail      │     │first-party   │       │trusted-code  │
+│presets    │ │integrations   │     │curated UX    │       │RFC           │
 │routines   │ │               │     │              │       │              │
 └───────────┘ └─────── ───────┘     └──────────────┘       └──────────────┘
 ```

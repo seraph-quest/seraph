@@ -90,3 +90,9 @@ Managed connector note:
 - packaged managed connectors ship disabled until configured unless the definition explicitly sets `enabled: true`
 - operator-supplied config now lives in extension runtime state rather than the package manifest itself
 - enable/disable now goes through the shared connector toggle endpoint rather than raw connector-specific APIs
+
+Observer definition note:
+
+- `observer_definitions` now participate in the shared extension lifecycle
+- connector-level and package-level enable/disable both write lifecycle state overrides keyed by extension id and contribution reference
+- the observer runtime selector now honors those overrides directly, so disabling a higher-priority observer source yields to another enabled packaged definition of the same `source_type`, and disabling every packaged definition for that `source_type` removes it from active refresh entirely

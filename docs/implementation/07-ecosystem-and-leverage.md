@@ -112,7 +112,7 @@
 
 ### Phase 6: Reach Surface Migration
 
-- observer-source extensions
+- [x] observer-source extensions, including lifecycle-backed enable/disable for `observer_definitions`, runtime selector overrides wired into observer refresh, and connector health that now distinguishes active, disabled, invalid, and overridden packaged observer sources
 - channel-adapter extensions
 
 ### Phase 7: Hardening And Completion

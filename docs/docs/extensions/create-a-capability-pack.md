@@ -171,6 +171,9 @@ Current Studio support:
 - packaged managed connectors now also use `/api/extensions/{extension_id}/connectors/*`
   for health/test and enable/disable, while their operator-supplied config lives
   in extension runtime state rather than the package manifest
+- packaged observer definitions now also use `/api/extensions/{extension_id}/connectors/*`
+  for health/test and enable/disable, and their lifecycle state feeds the live
+  observer runtime selector
 - the standalone MCP config editor remains for manual servers only; packaged MCP definitions are
   read-only in Extension Studio until package-backed MCP source editing lands
 

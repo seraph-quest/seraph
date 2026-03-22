@@ -1153,6 +1153,7 @@ def _contribution_payload(
             else None
         )
         default_enabled = bool(contribution.metadata.get("default_enabled", True))
+        enabled = _connector_enabled(contribution, state_entry)
         valid_definition = all(
             isinstance(contribution.metadata.get(field_name), str) and str(contribution.metadata.get(field_name)).strip()
             for field_name in ("name", "source_type")
@@ -1162,6 +1163,7 @@ def _contribution_payload(
             "reference": contribution.reference,
             "resolved_path": normalized_path,
             "loaded": active_definition is not None,
+            "enabled": enabled,
         }
         payload["permission_profile"] = evaluate_contribution_permissions(
             extension,
@@ -1180,18 +1182,20 @@ def _contribution_payload(
             payload["status"] = "active"
         elif not valid_definition:
             payload["status"] = "invalid"
-        elif not default_enabled:
+        elif not enabled:
             payload["status"] = "disabled"
         else:
             payload["status"] = "overridden"
         payload["health"] = static_connector_health(
             active=payload["loaded"],
             valid=valid_definition,
-            default_enabled=default_enabled,
+            default_enabled=enabled,
             active_summary="Observer source is active in the runtime selection.",
             invalid_summary="Observer definition is invalid and cannot load.",
-            disabled_summary="Observer source is disabled by default.",
+            disabled_summary="Observer source is disabled in extension lifecycle state.",
             overridden_summary="Another extension currently owns this observer source.",
+            supports_enable=True,
+            supports_disable=True,
             supports_test=True,
         ).as_payload()
         return payload
@@ -1338,13 +1342,15 @@ def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
             targets.append({"type": "mcp_server", "name": target_name})
         elif contribution.contribution_type == "managed_connectors":
             targets.append({"type": "managed_connector", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "observer_definitions":
+            targets.append({"type": "observer_definition", "name": target_name, "reference": contribution.reference})
     return targets
 
 
 def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
     types: list[str] = []
     for contribution in extension.contributions:
-        if contribution.contribution_type in {"skills", "workflows", "mcp_servers", "managed_connectors"} and contribution.contribution_type not in types:
+        if contribution.contribution_type in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions"} and contribution.contribution_type not in types:
             types.append(contribution.contribution_type)
     return types
 
@@ -1352,7 +1358,7 @@ def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
 def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
     types: list[str] = []
     for contribution in extension.contributions:
-        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers", "managed_connectors"} and contribution.contribution_type not in types:
+        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions"} and contribution.contribution_type not in types:
             types.append(contribution.contribution_type)
     return types
 
@@ -1635,6 +1641,39 @@ def _set_managed_connector_enabled(
     }
 
 
+def _set_runtime_selector_contribution_enabled(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+    *,
+    enabled: bool,
+    changed_type: str,
+) -> dict[str, Any]:
+    contribution_name = contribution.metadata.get("name")
+    if not isinstance(contribution_name, str) or not contribution_name:
+        raise ValueError(
+            f"connector '{contribution.reference}' in extension '{extension.id}' is not a valid {changed_type} definition"
+        )
+    state_payload = _state_payload()
+    set_connector_enabled_override(
+        state_payload,
+        extension.id,
+        contribution.reference,
+        enabled=enabled,
+    )
+    _save_state(state_payload)
+    return {
+        "extension": get_extension(extension.id),
+        "connector": get_extension_connector(extension.id, contribution.reference),
+        "changed": {
+            "type": changed_type,
+            "name": contribution_name,
+            "reference": contribution.reference,
+            "enabled": enabled,
+            "ok": True,
+        },
+    }
+
+
 def set_extension_connector_enabled(
     extension_id: str,
     reference: str,
@@ -1651,6 +1690,13 @@ def set_extension_connector_enabled(
         raise KeyError(reference)
     if contribution.contribution_type == "managed_connectors":
         return _set_managed_connector_enabled(extension, contribution, enabled=enabled)
+    if contribution.contribution_type == "observer_definitions":
+        return _set_runtime_selector_contribution_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="observer_definition",
+        )
     if contribution.contribution_type != "mcp_servers":
         raise ValueError(
             f"connector '{reference}' in extension '{extension_id}' does not support enable or disable yet"
@@ -2052,7 +2098,29 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                 if enabled and (not config_entry or config_errors):
                     raise ValueError(
                         f"managed connector '{connector_name}' requires valid configuration before enable"
-                    )
+                )
+                set_connector_enabled_override(
+                    state_payload,
+                    extension.id,
+                    contribution.reference,
+                    enabled=enabled,
+                )
+                ok = True
+        elif target["type"] == "observer_definition":
+            contribution = next(
+                (
+                    item
+                    for item in extension.contributions
+                    if item.reference == target.get("reference")
+                    and item.contribution_type == "observer_definitions"
+                ),
+                None,
+            )
+            if contribution is None:
+                ok = False
+            else:
+                if state_payload is None:
+                    state_payload = _state_payload()
                 set_connector_enabled_override(
                     state_payload,
                     extension.id,

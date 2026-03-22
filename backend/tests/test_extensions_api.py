@@ -1229,6 +1229,7 @@ async def test_mixed_extension_enabled_state_tracks_non_connector_targets_when_m
 async def test_extension_connector_listing_exposes_generic_health_contract(client, extension_runtime, tmp_path):
     mcp_package = _write_mcp_connector_extension(tmp_path)
     managed_package = _write_managed_connector_extension(tmp_path)
+    observer_package = _write_observer_extension(tmp_path)
 
     with patch(
         "src.extensions.lifecycle.get_base_tools_and_active_skills",
@@ -1247,6 +1248,9 @@ async def test_extension_connector_listing_exposes_generic_health_contract(clien
 
         managed_install = await client.post("/api/extensions/install", json={"path": str(managed_package)})
         assert managed_install.status_code == 201
+
+        observer_install = await client.post("/api/extensions/install", json={"path": str(observer_package)})
+        assert observer_install.status_code == 201
 
         mcp_connectors = await client.get("/api/extensions/seraph.test-connector/connectors")
         assert mcp_connectors.status_code == 200
@@ -1270,6 +1274,17 @@ async def test_extension_connector_listing_exposes_generic_health_contract(clien
         assert managed_connector["health"]["supports_test"] is True
         assert managed_connector["health"]["supports_enable"] is True
         assert managed_connector["health"]["enabled"] is False
+
+        observer_connectors = await client.get("/api/extensions/seraph.calendar-observer/connectors")
+        assert observer_connectors.status_code == 200
+        observer_payload = observer_connectors.json()
+        assert observer_payload["summary"]["total"] == 1
+        observer_connector = observer_payload["connectors"][0]
+        assert observer_connector["type"] == "observer_definitions"
+        assert observer_connector["health"]["state"] == "ready"
+        assert observer_connector["health"]["supports_test"] is True
+        assert observer_connector["health"]["supports_enable"] is True
+        assert observer_connector["health"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -1504,14 +1519,85 @@ async def test_install_workspace_observer_extension_exposes_typed_observer_metad
         install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
         assert install_response.status_code == 201
         installed = install_response.json()["extension"]
-        assert installed["passive_contribution_types"] == ["observer_definitions"]
+        assert installed["enabled"] is True
+        assert installed["toggleable_contribution_types"] == ["observer_definitions"]
+        assert installed["passive_contribution_types"] == []
         observer = next(item for item in installed["contributions"] if item["type"] == "observer_definitions")
         assert observer["name"] == "calendar"
         assert observer["source_type"] == "calendar"
         assert observer["default_enabled"] is True
+        assert observer["enabled"] is True
         assert observer["requires_network"] is True
         assert observer["loaded"] is True
         assert observer["status"] == "active"
+        assert observer["health"]["supports_enable"] is True
+
+
+@pytest.mark.asyncio
+async def test_observer_connector_toggle_updates_extension_and_runtime_selection(client, extension_runtime, tmp_path):
+    package_dir = _write_observer_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        disable_response = await client.post(
+            "/api/extensions/seraph.calendar-observer/connectors/enabled",
+            json={"reference": "observers/definitions/calendar.yaml", "enabled": False},
+        )
+        assert disable_response.status_code == 200
+        disabled_extension = disable_response.json()["extension"]
+        disabled_connector = disable_response.json()["connector"]
+        assert disabled_extension["enabled"] is False
+        assert disabled_connector["enabled"] is False
+        assert disabled_connector["status"] == "disabled"
+
+        list_response = await client.get("/api/extensions")
+        assert list_response.status_code == 200
+        extensions = {item["id"]: item for item in list_response.json()["extensions"]}
+        workspace_extension = extensions["seraph.calendar-observer"]
+        bundled_extension = extensions["seraph.core-observer-sources"]
+
+        workspace_observer = next(
+            item
+            for item in workspace_extension["contributions"]
+            if item["type"] == "observer_definitions" and item["source_type"] == "calendar"
+        )
+        bundled_observer = next(
+            item
+            for item in bundled_extension["contributions"]
+            if item["type"] == "observer_definitions" and item["source_type"] == "calendar"
+        )
+        assert workspace_observer["enabled"] is False
+        assert workspace_observer["loaded"] is False
+        assert workspace_observer["status"] == "disabled"
+        assert bundled_observer["loaded"] is True
+        assert bundled_observer["status"] == "active"
+
+        observer_test = await client.post(
+            "/api/extensions/seraph.calendar-observer/connectors/test",
+            json={"reference": "observers/definitions/calendar.yaml"},
+        )
+        assert observer_test.status_code == 200
+        assert observer_test.json()["status"] == "disabled"
+        assert observer_test.json()["message"] == "Observer source is disabled in extension lifecycle state."
+
+        enable_response = await client.post(
+            "/api/extensions/seraph.calendar-observer/connectors/enabled",
+            json={"reference": "observers/definitions/calendar.yaml", "enabled": True},
+        )
+        assert enable_response.status_code == 200
+        enabled_extension = enable_response.json()["extension"]
+        enabled_connector = enable_response.json()["connector"]
+        assert enabled_extension["enabled"] is True
+        assert enabled_connector["enabled"] is True
+        assert enabled_connector["status"] == "active"
 
 
 @pytest.mark.asyncio

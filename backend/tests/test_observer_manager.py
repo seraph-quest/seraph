@@ -5,9 +5,11 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 
+from config.settings import settings
+from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
-from src.observer.manager import ContextManager
+from src.observer.manager import ContextManager, _active_observer_definitions
 
 
 class TestContextManagerDefaults:
@@ -31,6 +33,30 @@ class TestContextManagerDefaults:
 
 
 class TestContextManagerRefresh:
+    def test_active_observer_definitions_can_disable_all_packaged_sources(self, tmp_path):
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        original_workspace_dir = settings.workspace_dir
+        settings.workspace_dir = str(workspace_dir)
+        try:
+            save_extension_state_payload(
+                {
+                    "extensions": {
+                        "seraph.core-observer-sources": {
+                            "connector_state": {
+                                "observers/definitions/time.yaml": {"enabled": False},
+                                "observers/definitions/calendar.yaml": {"enabled": False},
+                                "observers/definitions/git.yaml": {"enabled": False},
+                                "observers/definitions/goals.yaml": {"enabled": False},
+                            }
+                        }
+                    }
+                }
+            )
+            assert _active_observer_definitions() == []
+        finally:
+            settings.workspace_dir = original_workspace_dir
+
     @pytest.mark.asyncio
     async def test_refresh_populates_time(self):
         mgr = ContextManager()

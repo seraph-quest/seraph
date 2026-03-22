@@ -55,6 +55,7 @@ def _active_observer_definitions() -> list[tuple[str, str]]:
     from config.settings import settings
     from src.extensions.observers import select_active_observer_definitions
     from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
+    from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
 
     snapshot = ExtensionRegistry(
         manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
@@ -62,9 +63,17 @@ def _active_observer_definitions() -> list[tuple[str, str]]:
         workflow_dirs=[],
         mcp_runtime=None,
     ).snapshot()
-    active_definitions = select_active_observer_definitions(snapshot.list_contributions("observer_definitions"))
+    contributions = snapshot.list_contributions("observer_definitions")
+    state_payload = load_extension_state_payload()
+    state_by_id = state_payload.get("extensions")
+    active_definitions = select_active_observer_definitions(
+        contributions,
+        enabled_overrides=connector_enabled_overrides(state_by_id),
+    )
     if active_definitions:
         return [(item.source_type, item.name) for item in active_definitions]
+    if contributions:
+        return []
     return [
         ("time", "time"),
         ("calendar", "calendar"),

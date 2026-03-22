@@ -225,6 +225,59 @@ def _write_managed_connector_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_mixed_managed_connector_extension(root: Path) -> Path:
+    package_dir = root / "mixed-managed-pack"
+    (package_dir / "connectors" / "managed").mkdir(parents=True)
+    (package_dir / "workflows").mkdir()
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.mixed-managed\n"
+        "version: 2026.3.21\n"
+        "display_name: Mixed Managed\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  workflows:\n"
+        "    - workflows/local-workflow.md\n"
+        "  managed_connectors:\n"
+        "    - connectors/managed/github.yaml\n"
+        "permissions:\n"
+        "  tools: [read_file]\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "workflows" / "local-workflow.md").write_text(
+        "---\n"
+        "name: local-workflow\n"
+        "description: Local workflow for atomic toggle test\n"
+        "requires:\n"
+        "  tools: [read_file]\n"
+        "steps:\n"
+        "  - id: inspect\n"
+        "    tool: read_file\n"
+        "    arguments:\n"
+        "      file_path: notes/test.md\n"
+        "---\n\n"
+        "Use the local workflow.\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "managed" / "github.yaml").write_text(
+        "name: github-managed\n"
+        "provider: github\n"
+        "description: Curated GitHub connector\n"
+        "auth_kind: oauth\n"
+        "config_fields:\n"
+        "  - key: installation_id\n"
+        "    label: Installation ID\n"
+        "    required: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_observer_extension(root: Path) -> Path:
     package_dir = root / "observer-pack"
     (package_dir / "observers" / "definitions").mkdir(parents=True)
@@ -469,6 +522,10 @@ async def test_list_extensions_includes_bundled_core_capabilities(client, extens
     assert bundled["location"] == "bundled"
     assert bundled["removable"] is False
     assert bundled["enable_supported"] is True
+    managed = next(item for item in payload["extensions"] if item["id"] == "seraph.core-managed-connectors")
+    assert managed["location"] == "bundled"
+    assert managed["enable_supported"] is True
+    assert managed["toggleable_contribution_types"] == ["managed_connectors"]
 
 
 @pytest.mark.asyncio
@@ -1011,17 +1068,17 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
         assert install_response.status_code == 201
         installed = install_response.json()["extension"]
         assert installed["id"] == "seraph.managed-github"
-        assert installed["enabled"] is None
-        assert installed["toggleable_contribution_types"] == []
-        assert installed["passive_contribution_types"] == ["managed_connectors"]
+        assert installed["enabled"] is False
+        assert installed["toggleable_contribution_types"] == ["managed_connectors"]
+        assert installed["passive_contribution_types"] == []
         assert installed["configurable"] is True
         assert installed["config_scope"] == "metadata_and_managed_connectors"
         connector = next(item for item in installed["contributions"] if item["type"] == "managed_connectors")
         assert connector["name"] == "github-managed"
         assert connector["provider"] == "github"
         assert connector["loaded"] is False
-        assert connector["status"] == "not_configured"
-        assert "enabled" not in connector
+        assert connector["enabled"] is False
+        assert connector["status"] == "requires_config"
 
         configure_response = await client.post(
             "/api/extensions/seraph.managed-github/configure",
@@ -1039,11 +1096,31 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
         assert configure_response.status_code == 200
         configured = configure_response.json()["extension"]
         connector = next(item for item in configured["contributions"] if item["type"] == "managed_connectors")
-        assert configured["enabled"] is None
+        assert configured["enabled"] is False
         assert connector["configured"] is True
+        assert connector["enabled"] is False
         assert connector["config_keys"] == ["api_base_url", "installation_id"]
-        assert connector["status"] == "configured"
-        assert "enabled" not in connector
+        assert connector["status"] == "disabled"
+
+        enable_response = await client.post("/api/extensions/seraph.managed-github/enable")
+        assert enable_response.status_code == 200
+        enabled_extension = enable_response.json()["extension"]
+        enabled_connector = next(
+            item for item in enabled_extension["contributions"] if item["type"] == "managed_connectors"
+        )
+        assert enabled_extension["enabled"] is True
+        assert enabled_connector["enabled"] is True
+        assert enabled_connector["status"] == "ready"
+
+        disable_response = await client.post("/api/extensions/seraph.managed-github/disable")
+        assert disable_response.status_code == 200
+        disabled_extension = disable_response.json()["extension"]
+        disabled_connector = next(
+            item for item in disabled_extension["contributions"] if item["type"] == "managed_connectors"
+        )
+        assert disabled_extension["enabled"] is False
+        assert disabled_connector["enabled"] is False
+        assert disabled_connector["status"] == "disabled"
 
         invalid_config_response = await client.post(
             "/api/extensions/seraph.managed-github/configure",
@@ -1097,6 +1174,58 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
 
 
 @pytest.mark.asyncio
+async def test_enable_extension_with_invalid_managed_connector_does_not_partially_toggle_other_targets(client, extension_runtime, tmp_path):
+    package_dir = _write_mixed_managed_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        disable_response = await client.post("/api/extensions/seraph.mixed-managed/disable")
+        assert disable_response.status_code == 200
+        assert workflow_manager.get_workflow("local-workflow") is not None
+        assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+        enable_response = await client.post("/api/extensions/seraph.mixed-managed/enable")
+        assert enable_response.status_code == 422
+        assert "requires valid configuration before enable" in enable_response.json()["detail"]
+        assert workflow_manager.get_workflow("local-workflow") is not None
+        assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+
+@pytest.mark.asyncio
+async def test_mixed_extension_enabled_state_tracks_non_connector_targets_when_managed_connector_defaults_disabled(
+    client,
+    extension_runtime,
+    tmp_path,
+):
+    package_dir = _write_mixed_managed_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+
+        assert installed["enabled"] is True
+        workflow = next(item for item in installed["contributions"] if item["type"] == "workflows")
+        connector = next(item for item in installed["contributions"] if item["type"] == "managed_connectors")
+        assert workflow["enabled"] is True
+        assert connector["enabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_extension_connector_listing_exposes_generic_health_contract(client, extension_runtime, tmp_path):
     mcp_package = _write_mcp_connector_extension(tmp_path)
     managed_package = _write_managed_connector_extension(tmp_path)
@@ -1139,6 +1268,8 @@ async def test_extension_connector_listing_exposes_generic_health_contract(clien
         assert managed_connector["health"]["state"] == "requires_config"
         assert managed_connector["health"]["supports_configure"] is True
         assert managed_connector["health"]["supports_test"] is True
+        assert managed_connector["health"]["supports_enable"] is True
+        assert managed_connector["health"]["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -1313,6 +1444,13 @@ async def test_extension_connector_test_endpoint_returns_managed_connector_healt
         assert first_test.status_code == 200
         assert first_test.json()["status"] == "requires_config"
 
+        invalid_enable = await client.post(
+            "/api/extensions/seraph.managed-github/connectors/enabled",
+            json={"reference": "connectors/managed/github.yaml", "enabled": True},
+        )
+        assert invalid_enable.status_code == 422
+        assert "requires valid configuration before enable" in invalid_enable.json()["detail"]
+
         configure_response = await client.post(
             "/api/extensions/seraph.managed-github/configure",
             json={
@@ -1333,8 +1471,23 @@ async def test_extension_connector_test_endpoint_returns_managed_connector_healt
             json={"reference": "connectors/managed/github.yaml"},
         )
         assert second_test.status_code == 200
-        assert second_test.json()["status"] == "ready"
-        assert second_test.json()["health"]["summary"] == "Managed connector configuration is valid and ready."
+        assert second_test.json()["status"] == "disabled"
+        assert second_test.json()["health"]["summary"] == "Managed connector is configured but disabled."
+
+        enable_response = await client.post(
+            "/api/extensions/seraph.managed-github/connectors/enabled",
+            json={"reference": "connectors/managed/github.yaml", "enabled": True},
+        )
+        assert enable_response.status_code == 200
+        assert enable_response.json()["connector"]["enabled"] is True
+
+        third_test = await client.post(
+            "/api/extensions/seraph.managed-github/connectors/test",
+            json={"reference": "connectors/managed/github.yaml"},
+        )
+        assert third_test.status_code == 200
+        assert third_test.json()["status"] == "ready"
+        assert third_test.json()["health"]["summary"] == "Managed connector configuration is valid and ready."
 
 
 @pytest.mark.asyncio

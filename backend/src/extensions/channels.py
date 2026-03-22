@@ -90,6 +90,8 @@ def load_channel_adapter_definition(path: Path) -> ChannelAdapterDefinition:
 
 def select_active_channel_adapters(
     contributions: list["ExtensionContributionRecord"],
+    *,
+    enabled_overrides: dict[tuple[str, str], bool] | None = None,
 ) -> list[ActiveChannelAdapter]:
     selected_by_transport: dict[str, ActiveChannelAdapter] = {}
 
@@ -103,7 +105,8 @@ def select_active_channel_adapters(
         if not isinstance(name, str) or not name:
             continue
         default_enabled = bool(contribution.metadata.get("default_enabled", True))
-        if not default_enabled:
+        enabled = enabled_overrides.get((contribution.extension_id, contribution.reference), default_enabled) if enabled_overrides else default_enabled
+        if not enabled:
             continue
         candidate = ActiveChannelAdapter(
             extension_id=contribution.extension_id,

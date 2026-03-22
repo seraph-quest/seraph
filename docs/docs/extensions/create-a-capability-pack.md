@@ -143,6 +143,9 @@ Current backend endpoints:
 - `POST /api/extensions/{extension_id}/disable`
 - `POST /api/extensions/{extension_id}/configure`
 - `DELETE /api/extensions/{extension_id}`
+- `GET /api/extensions/{extension_id}/connectors`
+- `POST /api/extensions/{extension_id}/connectors/test`
+- `POST /api/extensions/{extension_id}/connectors/enabled`
 
 Install/update rules:
 
@@ -165,6 +168,9 @@ Current Studio support:
   `/api/extensions/{extension_id}/source`
 - packaged MCP connectors now test and toggle through `/api/extensions/{extension_id}/connectors/*`
   instead of raw `/api/mcp`
+- packaged managed connectors now also use `/api/extensions/{extension_id}/connectors/*`
+  for health/test and enable/disable, while their operator-supplied config lives
+  in extension runtime state rather than the package manifest
 - the standalone MCP config editor remains for manual servers only; packaged MCP definitions are
   read-only in Extension Studio until package-backed MCP source editing lands
 

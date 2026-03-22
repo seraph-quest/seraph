@@ -83,3 +83,10 @@ Current content-validation depth is also uneven by design:
 - connector definitions can get payload and network-permission checks
 - the remaining contribution types currently rely on manifest, layout, and file
   existence checks until later slices add deeper validators
+
+Managed connector note:
+
+- `managed_connectors` now participate in the shared extension lifecycle
+- packaged managed connectors ship disabled until configured unless the definition explicitly sets `enabled: true`
+- operator-supplied config now lives in extension runtime state rather than the package manifest itself
+- enable/disable now goes through the shared connector toggle endpoint rather than raw connector-specific APIs

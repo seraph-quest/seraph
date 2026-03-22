@@ -59,6 +59,7 @@ class ManagedConnectorDefinition:
     provider: str
     description: str = ""
     auth_kind: str = "api_key"
+    enabled: bool = False
     capabilities: tuple[str, ...] = ()
     setup_steps: tuple[str, ...] = ()
     config_fields: tuple[ManagedConnectorField, ...] = ()
@@ -69,6 +70,7 @@ class ManagedConnectorDefinition:
             "provider": self.provider,
             "description": self.description,
             "auth_kind": self.auth_kind,
+            "default_enabled": self.enabled,
             "capabilities": list(self.capabilities),
             "setup_steps": list(self.setup_steps),
             "config_fields": [field.as_metadata() for field in self.config_fields],
@@ -201,6 +203,11 @@ def parse_managed_connector_definition(payload: Any, *, source: str) -> ManagedC
             f"{source}: managed connector auth_kind '{auth_kind}' is not supported"
         )
 
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: managed connector enabled must be a boolean")
+    enabled = False if raw_enabled is None else raw_enabled
+
     capabilities = _parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities")
     setup_steps = _parse_string_list(payload.get("setup_steps"), source=source, field_name="setup_steps")
 
@@ -262,6 +269,7 @@ def parse_managed_connector_definition(payload: Any, *, source: str) -> ManagedC
         provider=provider,
         description=description,
         auth_kind=auth_kind,
+        enabled=enabled,
         capabilities=capabilities,
         setup_steps=setup_steps,
         config_fields=tuple(config_fields),

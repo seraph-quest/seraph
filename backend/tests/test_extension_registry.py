@@ -414,6 +414,7 @@ config_fields:
     assert contribution.metadata["name"] == "github-managed"
     assert contribution.metadata["provider"] == "github"
     assert contribution.metadata["auth_kind"] == "oauth"
+    assert contribution.metadata["default_enabled"] is False
     assert contribution.metadata["capabilities"] == ["pull_requests.read", "issues.write"]
     assert contribution.metadata["config_fields"][1]["input"] == "url"
 

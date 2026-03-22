@@ -91,6 +91,8 @@ def load_observer_definition(path: Path) -> ObserverDefinition:
 
 def select_active_observer_definitions(
     contributions: list["ExtensionContributionRecord"],
+    *,
+    enabled_overrides: dict[tuple[str, str], bool] | None = None,
 ) -> list[ActiveObserverDefinition]:
     selected_by_source_type: dict[str, ActiveObserverDefinition] = {}
 
@@ -104,7 +106,8 @@ def select_active_observer_definitions(
         if not isinstance(name, str) or not name:
             continue
         default_enabled = bool(contribution.metadata.get("default_enabled", True))
-        if not default_enabled:
+        enabled = enabled_overrides.get((contribution.extension_id, contribution.reference), default_enabled) if enabled_overrides else default_enabled
+        if not enabled:
             continue
         candidate = ActiveObserverDefinition(
             extension_id=contribution.extension_id,

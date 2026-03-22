@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
@@ -47,6 +46,14 @@ from src.extensions.registry import (
     default_manifest_roots_for_workspace,
 )
 from src.extensions.scaffold import validate_extension_package
+from src.extensions.state import (
+    connector_enabled_override,
+    connector_enabled_overrides,
+    load_extension_state_payload,
+    save_extension_state_payload,
+    set_connector_enabled_override,
+    state_path,
+)
 from src.runbooks.loader import scan_runbook_paths
 from src.skills.loader import parse_skill_content, scan_skill_paths
 from src.runbooks.manager import runbook_manager
@@ -58,7 +65,6 @@ from src.workflows.loader import parse_workflow_content, scan_workflow_paths
 from src.workflows.manager import workflow_manager
 
 
-_STATE_FILE_NAME = "extensions-state.json"
 _EDITABLE_STUDIO_TYPES = {"skills", "workflows"}
 _STUDIO_TYPE_ORDER = {
     "manifest": 0,
@@ -184,7 +190,7 @@ def _workspace_extensions_root() -> str:
 
 
 def _state_path() -> str:
-    return os.path.join(_workspace_root(), _STATE_FILE_NAME)
+    return state_path()
 
 
 def _ensure_manifest_roots() -> list[str]:
@@ -327,6 +333,20 @@ def _managed_connector_config_errors(
     return errors
 
 
+def _connector_default_enabled(contribution: ExtensionContributionRecord) -> bool:
+    return bool(contribution.metadata.get("default_enabled", True))
+
+
+def _connector_enabled(
+    contribution: ExtensionContributionRecord,
+    state_entry: dict[str, Any] | None,
+) -> bool:
+    enabled_override = connector_enabled_override(state_entry, contribution.reference)
+    if enabled_override is not None:
+        return enabled_override
+    return _connector_default_enabled(contribution)
+
+
 def _install_mcp_servers_for_extension(extension: ExtensionRecord) -> None:
     definition_items = _mcp_definition_items_for_extension(extension)
     for _, definition in definition_items:
@@ -427,26 +447,11 @@ def _registry() -> ExtensionRegistry:
 
 
 def _state_payload() -> dict[str, Any]:
-    path = _state_path()
-    if not os.path.isfile(path):
-        return {"extensions": {}}
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return {"extensions": {}}
-    extensions = payload.get("extensions")
-    if not isinstance(extensions, dict):
-        return {"extensions": {}}
-    return {"extensions": extensions}
+    return load_extension_state_payload()
 
 
 def _save_state(payload: dict[str, Any]) -> None:
-    path = _state_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    save_extension_state_payload(payload)
 
 
 def _serialize_load_error(error: ExtensionLoadErrorRecord) -> dict[str, Any]:
@@ -979,7 +984,10 @@ def _validate_extension_candidate_package(
         _validate_extension_candidate_root(extension, candidate_root)
 
 
-def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
+def _contribution_indexes(
+    *,
+    state_by_id: dict[str, Any] | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
     base_tools, active_skill_names, _ = get_base_tools_and_active_skills()
     available_tool_names = [tool.name for tool in base_tools]
     skills = {
@@ -1007,12 +1015,16 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
     }
     mcp_servers = _mcp_runtime_index()
     observer_snapshot = _registry().snapshot()
+    enabled_overrides = connector_enabled_overrides(state_by_id)
     channel_adapters = {
         os.path.abspath(item.resolved_path): {
             "name": item.name,
             "transport": item.transport,
         }
-        for item in select_active_channel_adapters(observer_snapshot.list_contributions("channel_adapters"))
+        for item in select_active_channel_adapters(
+            observer_snapshot.list_contributions("channel_adapters"),
+            enabled_overrides=enabled_overrides,
+        )
         if item.resolved_path
     }
     observer_definitions = {
@@ -1020,7 +1032,10 @@ def _contribution_indexes() -> dict[str, dict[str, dict[str, Any]]]:
             "name": item.name,
             "source_type": item.source_type,
         }
-        for item in select_active_observer_definitions(observer_snapshot.list_contributions("observer_definitions"))
+        for item in select_active_observer_definitions(
+            observer_snapshot.list_contributions("observer_definitions"),
+            enabled_overrides=enabled_overrides,
+        )
         if item.resolved_path
     }
     return {
@@ -1081,11 +1096,15 @@ def _contribution_payload(
         payload.setdefault("status", health.state)
         return payload
     if contribution.contribution_type == "managed_connectors":
+        default_enabled = _connector_default_enabled(contribution)
+        enabled = _connector_enabled(contribution, state_entry)
         payload = {
             "type": contribution.contribution_type,
             "reference": contribution.reference,
             "resolved_path": normalized_path,
             "loaded": False,
+            "default_enabled": default_enabled,
+            "enabled": enabled,
         }
         payload["permission_profile"] = evaluate_contribution_permissions(
             extension,
@@ -1109,18 +1128,23 @@ def _contribution_payload(
             payload["config_errors"] = config_errors
         if not config_entry:
             payload["configured"] = False
-            payload["status"] = "not_configured"
+            payload["status"] = "requires_config"
         elif config_errors:
             payload["configured"] = False
             payload["status"] = "invalid_config"
+        elif not enabled:
+            payload["configured"] = True
+            payload["status"] = "disabled"
         else:
             payload["configured"] = True
-            payload["status"] = "configured"
+            payload["status"] = "ready"
         payload["health"] = managed_connector_health(
             contribution.metadata,
             config_entry,
             config_errors,
+            enabled=enabled,
         ).as_payload()
+        payload["status"] = str(payload["health"].get("state") or payload["status"])
         return payload
     if contribution.contribution_type == "observer_definitions":
         active_definition = (
@@ -1312,13 +1336,15 @@ def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
             targets.append({"type": "workflow", "name": target_name})
         elif contribution.contribution_type == "mcp_servers":
             targets.append({"type": "mcp_server", "name": target_name})
+        elif contribution.contribution_type == "managed_connectors":
+            targets.append({"type": "managed_connector", "name": target_name, "reference": contribution.reference})
     return targets
 
 
 def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
     types: list[str] = []
     for contribution in extension.contributions:
-        if contribution.contribution_type in {"skills", "workflows", "mcp_servers"} and contribution.contribution_type not in types:
+        if contribution.contribution_type in {"skills", "workflows", "mcp_servers", "managed_connectors"} and contribution.contribution_type not in types:
             types.append(contribution.contribution_type)
     return types
 
@@ -1326,7 +1352,7 @@ def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
 def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
     types: list[str] = []
     for contribution in extension.contributions:
-        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers"} and contribution.contribution_type not in types:
+        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers", "managed_connectors"} and contribution.contribution_type not in types:
             types.append(contribution.contribution_type)
     return types
 
@@ -1378,7 +1404,7 @@ def _extension_payload(
     doctor_by_id: dict[str, Any],
     state_by_id: dict[str, Any],
 ) -> dict[str, Any]:
-    indexes = _contribution_indexes()
+    indexes = _contribution_indexes(state_by_id=state_by_id)
     doctor_result = doctor_by_id.get(extension.id)
     issues = []
     if doctor_result is not None:
@@ -1399,15 +1425,32 @@ def _extension_payload(
             if isinstance(contribution.get("permission_profile"), dict)
         ],
     )
+    toggleable_types = _toggleable_contribution_types(extension)
+    non_managed_toggleable_types = {
+        contribution_type
+        for contribution_type in toggleable_types
+        if contribution_type != "managed_connectors"
+    }
     enabled_values = [
         bool(item["enabled"])
         for item in contributions
-        if isinstance(item, dict) and "enabled" in item
+        if isinstance(item, dict)
+        and "enabled" in item
+        and (
+            (
+                isinstance(item.get("type"), str)
+                and item["type"] in non_managed_toggleable_types
+            )
+            if non_managed_toggleable_types
+            else (
+                isinstance(item.get("type"), str)
+                and item["type"] in toggleable_types
+            )
+        )
     ]
     enabled: bool | None = None
     if enabled_values:
         enabled = all(enabled_values)
-    toggleable_types = _toggleable_contribution_types(extension)
     passive_types = _passive_contribution_types(extension)
     managed_connector_present = any(
         contribution.contribution_type == "managed_connectors"
@@ -1552,6 +1595,46 @@ def get_extension_connector(extension_id: str, reference: str) -> dict[str, Any]
     raise KeyError(reference)
 
 
+def _set_managed_connector_enabled(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    connector_name = contribution.metadata.get("name")
+    if not isinstance(connector_name, str) or not connector_name:
+        raise ValueError(
+            f"connector '{contribution.reference}' in extension '{extension.id}' is not a valid managed connector definition"
+        )
+    state_payload = _state_payload()
+    state_by_id = state_payload.get("extensions")
+    state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict) else {}
+    config_entry = _managed_connector_config(state_entry, connector_name)
+    config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
+    if enabled and (not config_entry or config_errors):
+        raise ValueError(
+            f"managed connector '{connector_name}' requires valid configuration before enable"
+        )
+    set_connector_enabled_override(
+        state_payload,
+        extension.id,
+        contribution.reference,
+        enabled=enabled,
+    )
+    _save_state(state_payload)
+    return {
+        "extension": get_extension(extension.id),
+        "connector": get_extension_connector(extension.id, contribution.reference),
+        "changed": {
+            "type": "managed_connector",
+            "name": connector_name,
+            "reference": contribution.reference,
+            "enabled": enabled,
+            "ok": True,
+        },
+    }
+
+
 def set_extension_connector_enabled(
     extension_id: str,
     reference: str,
@@ -1566,6 +1649,8 @@ def set_extension_connector_enabled(
     contribution = next((item for item in extension.contributions if item.reference == reference), None)
     if contribution is None:
         raise KeyError(reference)
+    if contribution.contribution_type == "managed_connectors":
+        return _set_managed_connector_enabled(extension, contribution, enabled=enabled)
     if contribution.contribution_type != "mcp_servers":
         raise ValueError(
             f"connector '{reference}' in extension '{extension_id}' does not support enable or disable yet"
@@ -1867,8 +1952,43 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         definition.name: contribution.reference
         for contribution, definition in _mcp_definition_items_for_extension(extension)
     }
+    targets = _toggle_targets(extension)
+    if enabled:
+        state_payload = _state_payload()
+        state_by_id = state_payload.get("extensions")
+        state_entry = (
+            state_by_id.get(extension.id)
+            if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+            else {}
+        )
+        for target in targets:
+            if target["type"] != "managed_connector":
+                continue
+            contribution = next(
+                (
+                    item
+                    for item in extension.contributions
+                    if item.reference == target.get("reference")
+                    and item.contribution_type == "managed_connectors"
+                ),
+                None,
+            )
+            if contribution is None:
+                continue
+            connector_name = contribution.metadata.get("name")
+            if not isinstance(connector_name, str) or not connector_name:
+                raise ValueError(
+                    f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid managed connector definition"
+                )
+            config_entry = _managed_connector_config(state_entry, connector_name)
+            config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
+            if not config_entry or config_errors:
+                raise ValueError(
+                    f"managed connector '{connector_name}' requires valid configuration before enable"
+                )
     changed: list[dict[str, Any]] = []
-    for target in _toggle_targets(extension):
+    state_payload: dict[str, Any] | None = None
+    for target in targets:
         target_name = target["name"]
         ok = False
         if target["type"] == "skill":
@@ -1901,12 +2021,53 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                         source="extension",
                     )
                     ok = True
+        elif target["type"] == "managed_connector":
+            contribution = next(
+                (
+                    item
+                    for item in extension.contributions
+                    if item.reference == target.get("reference")
+                    and item.contribution_type == "managed_connectors"
+                ),
+                None,
+            )
+            if contribution is None:
+                ok = False
+            else:
+                connector_name = contribution.metadata.get("name")
+                if not isinstance(connector_name, str) or not connector_name:
+                    raise ValueError(
+                        f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid managed connector definition"
+                    )
+                if state_payload is None:
+                    state_payload = _state_payload()
+                state_by_id = state_payload.get("extensions")
+                state_entry = (
+                    state_by_id.get(extension.id)
+                    if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+                    else {}
+                )
+                config_entry = _managed_connector_config(state_entry, connector_name)
+                config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
+                if enabled and (not config_entry or config_errors):
+                    raise ValueError(
+                        f"managed connector '{connector_name}' requires valid configuration before enable"
+                    )
+                set_connector_enabled_override(
+                    state_payload,
+                    extension.id,
+                    contribution.reference,
+                    enabled=enabled,
+                )
+                ok = True
         changed.append({
             "type": target["type"],
             "name": target_name,
             "enabled": enabled,
             "ok": ok,
         })
+    if state_payload is not None:
+        _save_state(state_payload)
     return {
         "extension": get_extension(extension_id),
         "changed": changed,

@@ -1,7 +1,7 @@
 <h1 align="center">Seraph</h1>
 
 <p align="center">
-  <strong>A proactive AI guardian with persistent memory, observation, and real-world action</strong>
+  <strong>A local-first AI guardian workspace for proactive work</strong>
 </p>
 
 <p align="center">
@@ -12,10 +12,44 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a guardian workspace browser interface, persistent identity, long-term memory, priorities tracked in a hierarchical goal system, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is workspace-first.
+  Seraph is a local guardian prototype for people who want an AI system that can keep state, watch what is happening on the desktop, use tools, run workflows, and proactively surface useful actions instead of waiting for one-off prompts.
 </p>
 
 ---
+
+## What Seraph Is
+
+Seraph is a workspace-first AI agent with:
+
+- persistent identity and long-term memory
+- proactive scheduling, briefings, reviews, and intervention policy
+- tool use, reusable workflows, and plug-and-play MCP server integration
+- a browser cockpit for live operation and inspection
+- an optional macOS daemon for window tracking and OCR-backed screen awareness
+
+This repository is for builders and power users who want to run, inspect, and extend a serious local guardian prototype rather than a chat-only assistant shell.
+
+## Current State
+
+Shipped today on `develop`:
+
+- browser workspace UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations
+- 17 built-in tool capabilities plus workflow, starter-pack, skill, and MCP integration surfaces
+- runtime routing, fallback, approval, audit, and policy foundations
+- a dense operator cockpit with activity history, approvals, interventions, and workflow inspection
+
+Still in progress:
+
+- broader native reach beyond the current browser + macOS path
+- stronger long-horizon guardian intelligence and intervention learning
+- deeper execution hardening and richer extension ergonomics
+- a fully complete end-state product; Seraph is usable now, but still under active development
+
+Start with:
+
+- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
+- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 
 ## Quick Start
 
@@ -184,3 +218,11 @@ Start with:
 - [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 - [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
 - [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)
+
+---
+
+## Get Involved
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR
+- Use [SUPPORT.md](SUPPORT.md) for questions, setup help, and roadmap pointers
+- Report security issues through [SECURITY.md](SECURITY.md)

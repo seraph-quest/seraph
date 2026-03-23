@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue
+    url: https://github.com/seraph-quest/seraph/blob/develop/SECURITY.md
+    about: Do not file public issues for vulnerabilities. Follow SECURITY.md instead.
+  - name: Support and contribution guide
+    url: https://github.com/seraph-quest/seraph/blob/develop/SUPPORT.md
+    about: Start here for setup help, contribution rules, and project status links.

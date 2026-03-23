@@ -257,7 +257,7 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
                 {
                     "name": "daily-standup",
                     "description": "Standup",
-                    "requires_tools": ["shell_execute"],
+                    "requires_tools": ["execute_code"],
                     "user_invocable": True,
                     "enabled": False,
                     "file_path": "/tmp/daily-standup.md",
@@ -327,10 +327,10 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
     assert payload["mcp_policy_mode"] == "approval"
     assert payload["approval_mode"] == "high_risk"
 
-    shell_tool = next(tool for tool in payload["native_tools"] if tool["name"] == "shell_execute")
-    assert shell_tool["availability"] == "blocked"
-    assert shell_tool["blocked_reason"] == "tool_policy_balanced"
-    assert shell_tool["recommended_actions"][0]["type"] == "set_tool_policy"
+    execute_code_tool = next(tool for tool in payload["native_tools"] if tool["name"] == "execute_code")
+    assert execute_code_tool["availability"] == "blocked"
+    assert execute_code_tool["blocked_reason"] == "tool_policy_balanced"
+    assert execute_code_tool["recommended_actions"][0]["type"] == "set_tool_policy"
 
     web_briefing = next(skill for skill in payload["skills"] if skill["name"] == "web-briefing")
     assert web_briefing["availability"] == "blocked"
@@ -1011,7 +1011,7 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
                 {
                     "name": "daily-standup",
                     "description": "Generate a quick standup",
-                    "requires_tools": ["shell_execute"],
+                    "requires_tools": ["execute_code"],
                     "user_invocable": True,
                     "enabled": True,
                     "file_path": "/tmp/daily-standup.md",
@@ -1065,7 +1065,7 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
     pack = payload["starter_packs"][0]
     assert pack["name"] == "daily-operator-rhythm"
     assert pack["blocked_skills"][0]["name"] == "daily-standup"
-    assert pack["blocked_skills"][0]["missing_tools"] == ["shell_execute"]
+    assert pack["blocked_skills"][0]["missing_tools"] == ["execute_code"]
     assert any(action["type"] == "set_tool_policy" and action["mode"] == "full" for action in pack["recommended_actions"])
     assert not any(action["type"] == "activate_starter_pack" for action in pack["recommended_actions"])
 

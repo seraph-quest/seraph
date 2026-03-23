@@ -12,6 +12,37 @@ function makeId(): string {
 
 const WS_BACKOFF_MAX_MS = 30_000;
 
+type ClarificationPayload = {
+  content?: string;
+  message?: string;
+  question?: string;
+  reason?: string;
+  options?: string[];
+};
+
+export function resolveClarificationSessionId(
+  detail: Record<string, unknown> | null | undefined,
+  fallbackSessionId: string | null,
+): string | null {
+  return typeof detail?.session_id === "string" ? detail.session_id : fallbackSessionId;
+}
+
+export function buildClarificationMessage(
+  detail: ClarificationPayload,
+  sessionId: string | null,
+): ChatMessage {
+  return {
+    id: makeId(),
+    role: "clarification",
+    content: detail.message ?? detail.content ?? "I need one more detail before I can continue.",
+    timestamp: Date.now(),
+    sessionId,
+    clarificationQuestion: detail.question,
+    clarificationReason: detail.reason,
+    clarificationOptions: Array.isArray(detail.options) ? detail.options : undefined,
+  };
+}
+
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -118,6 +149,16 @@ export function useWebSocket() {
             approvalStatus: "pending",
           };
           addMessage(approvalMsg);
+          return false;
+        }
+
+        if (response.status === 409 && detail?.type === "clarification_required") {
+          const nextSessionId = resolveClarificationSessionId(detail, sessionId);
+          if (nextSessionId) {
+            setSessionId(nextSessionId);
+          }
+          addMessage(buildClarificationMessage(detail, nextSessionId));
+          await useChatStore.getState().loadSessions();
           return false;
         }
 
@@ -275,6 +316,10 @@ export function useWebSocket() {
             approvalStatus: "pending",
           };
           addMessage(approvalMsg);
+        } else if (data.type === "clarification_required") {
+          setAgentBusy(false);
+
+          addMessage(buildClarificationMessage(data, data.session_id));
         } else if (data.type === "proactive") {
           // Phase 3: Proactive messages from Seraph
           const proactiveMsg: ChatMessage = {

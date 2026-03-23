@@ -36,6 +36,31 @@ def _custom_result_payload(tool: Any, arguments: dict[str, Any], result: Any) ->
     return None
 
 
+def _custom_call_payload(tool: Any, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    hook = getattr(tool, "get_audit_call_payload", None)
+    if not callable(hook):
+        return None
+    payload = hook(arguments)
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == 2
+        and isinstance(payload[0], str)
+        and isinstance(payload[1], dict)
+    ):
+        return payload
+    return None
+
+
+def _custom_audit_arguments(tool: Any, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    hook = getattr(tool, "get_audit_arguments", None)
+    if not callable(hook):
+        return None
+    payload = hook(arguments)
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
 class AuditedTool(Tool):
     """Tool wrapper that records execution lifecycle events for real invocations."""
 
@@ -62,15 +87,24 @@ class AuditedTool(Tool):
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)
+        audit_arguments = _custom_audit_arguments(self.wrapped_tool, arguments)
+        if audit_arguments is None:
+            audit_arguments = redact_for_audit(arguments)
 
         if session_id is None:
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
+        custom_call_payload = _custom_call_payload(self.wrapped_tool, arguments)
+        if custom_call_payload is not None:
+            call_summary, call_details = custom_call_payload
+        else:
+            call_summary = format_tool_call_summary(self.name, arguments, set())
+            call_details = {"arguments": audit_arguments}
         self._log_event(
             session_id=session_id,
             event_type="tool_call",
-            summary=format_tool_call_summary(self.name, arguments, set()),
-            details={"arguments": redact_for_audit(arguments)},
+            summary=call_summary,
+            details=call_details,
         )
 
         try:
@@ -81,7 +115,7 @@ class AuditedTool(Tool):
                 event_type="tool_failed",
                 summary=f"{self.name} raised an error",
                 details={
-                    "arguments": redact_for_audit(arguments),
+                    "arguments": audit_arguments,
                     "error": redact_for_audit(str(exc)),
                 },
             )
@@ -97,7 +131,7 @@ class AuditedTool(Tool):
             event_type="tool_result",
             summary=result_summary,
             details={
-                "arguments": redact_for_audit(arguments),
+                "arguments": audit_arguments,
                 **result_details,
             },
         )

@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     sandbox_url: str = "http://sandbox:8060"
     sandbox_timeout: int = 35
     browser_timeout: int = 30
+    browser_site_allowlist: str = ""  # comma-separated hostname patterns allowed for browse/search
+    browser_site_blocklist: str = ""  # comma-separated hostname patterns blocked for browse/search
 
     # Phase 3.5 — Timeouts
     agent_chat_timeout: int = 120    # seconds

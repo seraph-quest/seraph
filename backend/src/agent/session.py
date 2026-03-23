@@ -1,18 +1,47 @@
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
 
+from sqlalchemy import func
 from sqlmodel import select, col
 
 from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
-from src.db.models import Session, Message
+from src.db.models import Message, ScheduledJob, Session, SessionTodo
 
 logger = logging.getLogger(__name__)
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _matching_snippet(text: str, query: str, *, snippet_chars: int) -> str:
+    flattened = text.replace("\n", " ").strip()
+    if len(flattened) <= snippet_chars:
+        return flattened
+
+    normalized_text = flattened.lower()
+    normalized_query = query.strip().lower()
+    match_index = normalized_text.find(normalized_query)
+    if match_index < 0:
+        return flattened[:snippet_chars] + "..."
+
+    match_end = match_index + len(normalized_query)
+    padding = max(20, (snippet_chars - len(normalized_query)) // 2)
+    start = max(0, match_index - padding)
+    end = min(len(flattened), match_end + padding)
+    snippet = flattened[start:end].strip()
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(flattened):
+        snippet = snippet + "..."
+    return snippet
 
 
 class SessionManager:
@@ -54,6 +83,19 @@ class SessionManager:
             )
             for msg in msgs.scalars().all():
                 await db.delete(msg)
+            todos = await db.execute(
+                select(SessionTodo).where(SessionTodo.session_id == session_id)
+            )
+            for todo in todos.scalars().all():
+                await db.delete(todo)
+            scheduled_jobs = await db.execute(
+                select(ScheduledJob).where(
+                    (ScheduledJob.session_id == session_id)
+                    | (ScheduledJob.created_by_session_id == session_id)
+                )
+            )
+            for scheduled_job in scheduled_jobs.scalars().all():
+                await db.delete(scheduled_job)
             await db.delete(session)
             return True
 
@@ -100,12 +142,28 @@ class SessionManager:
             stmt = select(Session)
             if exclude_session_id:
                 stmt = stmt.where(Session.id != exclude_session_id)
-            result = await db.execute(
-                stmt.order_by(col(Session.updated_at).desc()).limit(limit_sessions)
-            )
-            sessions = result.scalars().all()
+            session_result = await db.execute(stmt)
+            sessions = session_result.scalars().all()
             if not sessions:
                 return ""
+
+            recency_stmt = (
+                select(Message.session_id, func.max(Message.created_at))
+                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                .group_by(Message.session_id)
+            )
+            if exclude_session_id:
+                recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
+            recency_rows = await db.execute(recency_stmt)
+            conversation_recency = {
+                session_id: latest_at
+                for session_id, latest_at in recency_rows.all()
+            }
+            sessions = sorted(
+                sessions,
+                key=lambda session: conversation_recency.get(session.id) or session.created_at,
+                reverse=True,
+            )[:limit_sessions]
 
             lines: list[str] = []
             for session in sessions:
@@ -127,6 +185,97 @@ class SessionManager:
                     lines.append(f"- {title}: no user-facing messages yet")
 
             return "\n".join(lines)
+
+    async def search_sessions(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        exclude_session_id: str | None = None,
+        snippet_chars: int = 180,
+    ) -> list[dict]:
+        normalized_query = query.strip().lower()
+        if not normalized_query:
+            return []
+
+        async with get_session() as db:
+            session_stmt = select(Session)
+            if exclude_session_id:
+                session_stmt = session_stmt.where(Session.id != exclude_session_id)
+            session_rows = await db.execute(session_stmt)
+            sessions = session_rows.scalars().all()
+            if not sessions:
+                return []
+
+            session_map = {session.id: session for session in sessions}
+            pattern = f"%{_escape_like(normalized_query)}%"
+            recency_rows = await db.execute(
+                select(Message.session_id, func.max(Message.created_at))
+                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                .group_by(Message.session_id)
+            )
+            message_recency = {
+                session_id: latest_at
+                for session_id, latest_at in recency_rows.all()
+            }
+
+            title_hits = {
+                session.id: {
+                    "session_id": session.id,
+                    "title": session.title or "Untitled session",
+                    "matched_at": message_recency.get(session.id) or session.created_at,
+                    "snippet": session.title or "Untitled session",
+                    "source": "title",
+                }
+                for session in sessions
+                if normalized_query in (session.title or "").lower()
+            }
+
+            message_stmt = (
+                select(Message)
+                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                .where(func.lower(Message.content).like(pattern, escape="\\"))
+                .order_by(col(Message.created_at).desc())
+            )
+            if exclude_session_id:
+                message_stmt = message_stmt.where(Message.session_id != exclude_session_id)
+            message_rows = await db.execute(message_stmt)
+
+            combined = dict(title_hits)
+            for message in message_rows.scalars().all():
+                session = session_map.get(message.session_id)
+                if session is None:
+                    continue
+                if message.session_id in combined:
+                    continue
+                combined[message.session_id] = {
+                    "session_id": message.session_id,
+                    "title": session.title or "Untitled session",
+                    "matched_at": message.created_at,
+                    "snippet": _matching_snippet(
+                        message.content,
+                        normalized_query,
+                        snippet_chars=snippet_chars,
+                    ),
+                    "source": "message",
+                }
+
+            ordered = sorted(
+                combined.values(),
+                key=lambda item: item["matched_at"],
+                reverse=True,
+            )
+
+            return [
+                {
+                    "session_id": item["session_id"],
+                    "title": item["title"],
+                    "matched_at": item["matched_at"].isoformat(),
+                    "snippet": item["snippet"],
+                    "source": item["source"],
+                }
+                for item in ordered[:limit]
+            ]
 
     async def update_title(self, session_id: str, title: str) -> bool:
         async with get_session() as db:
@@ -223,12 +372,185 @@ class SessionManager:
                     "id": m.id,
                     "role": m.role,
                     "content": m.content,
+                    "metadata": json.loads(m.metadata_json) if m.metadata_json else None,
                     "step_number": m.step_number,
                     "tool_used": m.tool_used,
                     "created_at": m.created_at.isoformat(),
                 }
                 for m in result.scalars().all()
             ]
+
+    async def get_todos(self, session_id: str) -> list[dict]:
+        async with get_session() as db:
+            result = await db.execute(
+                select(SessionTodo)
+                .where(SessionTodo.session_id == session_id)
+                .order_by(col(SessionTodo.sort_order).asc(), col(SessionTodo.created_at).asc())
+            )
+            return [
+                {
+                    "id": todo.id,
+                    "content": todo.content,
+                    "completed": bool(todo.completed),
+                    "sort_order": todo.sort_order,
+                    "created_at": todo.created_at.isoformat(),
+                    "updated_at": todo.updated_at.isoformat(),
+                }
+                for todo in result.scalars().all()
+            ]
+
+    async def replace_todos(self, session_id: str, items: list[dict]) -> list[dict]:
+        async with get_session() as db:
+            existing = await db.execute(
+                select(SessionTodo).where(SessionTodo.session_id == session_id)
+            )
+            for todo in existing.scalars().all():
+                await db.delete(todo)
+
+            now = datetime.now(timezone.utc)
+            for index, item in enumerate(items):
+                todo = SessionTodo(
+                    session_id=session_id,
+                    content=str(item.get("content", "")).strip(),
+                    completed=bool(item.get("completed", False)),
+                    sort_order=index,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(todo)
+
+            session = await db.execute(select(Session).where(Session.id == session_id))
+            current = session.scalars().first()
+            if current:
+                current.updated_at = now
+                db.add(current)
+
+        return await self.get_todos(session_id)
+
+    async def append_todos(self, session_id: str, items: list[dict]) -> list[dict]:
+        async with get_session() as db:
+            existing = await db.execute(
+                select(SessionTodo)
+                .where(SessionTodo.session_id == session_id)
+                .order_by(col(SessionTodo.sort_order).desc())
+                .limit(1)
+            )
+            last = existing.scalars().first()
+            next_sort_order = (last.sort_order + 1) if last else 0
+            now = datetime.now(timezone.utc)
+            for item in items:
+                todo = SessionTodo(
+                    session_id=session_id,
+                    content=str(item.get("content", "")).strip(),
+                    completed=bool(item.get("completed", False)),
+                    sort_order=next_sort_order,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(todo)
+                next_sort_order += 1
+
+            session = await db.execute(select(Session).where(Session.id == session_id))
+            current = session.scalars().first()
+            if current:
+                current.updated_at = now
+                db.add(current)
+
+        return await self.get_todos(session_id)
+
+    async def update_todo_completion(
+        self,
+        session_id: str,
+        item_ref: str,
+        *,
+        completed: bool,
+    ) -> list[dict] | None:
+        async with get_session() as db:
+            todo = await self._resolve_todo(db, session_id, item_ref)
+            if todo is None:
+                return None
+            todo.completed = completed
+            todo.updated_at = datetime.now(timezone.utc)
+            db.add(todo)
+            session = await db.execute(select(Session).where(Session.id == session_id))
+            current = session.scalars().first()
+            if current:
+                current.updated_at = datetime.now(timezone.utc)
+                db.add(current)
+
+        return await self.get_todos(session_id)
+
+    async def remove_todo(self, session_id: str, item_ref: str) -> list[dict] | None:
+        async with get_session() as db:
+            todo = await self._resolve_todo(db, session_id, item_ref)
+            if todo is None:
+                return None
+            removed_sort_order = todo.sort_order
+            await db.delete(todo)
+            later_items = await db.execute(
+                select(SessionTodo)
+                .where(SessionTodo.session_id == session_id)
+                .where(SessionTodo.sort_order > removed_sort_order)
+                .order_by(col(SessionTodo.sort_order).asc())
+            )
+            for index, item in enumerate(later_items.scalars().all(), start=removed_sort_order):
+                item.sort_order = index
+                item.updated_at = datetime.now(timezone.utc)
+                db.add(item)
+            session = await db.execute(select(Session).where(Session.id == session_id))
+            current = session.scalars().first()
+            if current:
+                current.updated_at = datetime.now(timezone.utc)
+                db.add(current)
+
+        return await self.get_todos(session_id)
+
+    async def clear_todos(self, session_id: str) -> None:
+        async with get_session() as db:
+            existing = await db.execute(
+                select(SessionTodo).where(SessionTodo.session_id == session_id)
+            )
+            for todo in existing.scalars().all():
+                await db.delete(todo)
+            session = await db.execute(select(Session).where(Session.id == session_id))
+            current = session.scalars().first()
+            if current:
+                current.updated_at = datetime.now(timezone.utc)
+                db.add(current)
+
+    async def _resolve_todo(
+        self,
+        db,
+        session_id: str,
+        item_ref: str,
+    ) -> SessionTodo | None:
+        normalized = item_ref.strip()
+        if not normalized:
+            return None
+
+        direct = await db.execute(
+            select(SessionTodo)
+            .where(SessionTodo.session_id == session_id)
+            .where(SessionTodo.id == normalized)
+        )
+        todo = direct.scalars().first()
+        if todo is not None:
+            return todo
+
+        if normalized.isdigit():
+            parsed_index = int(normalized)
+            if parsed_index <= 0:
+                return None
+            index = parsed_index - 1
+            ordered = await db.execute(
+                select(SessionTodo)
+                .where(SessionTodo.session_id == session_id)
+                .order_by(col(SessionTodo.sort_order).asc(), col(SessionTodo.created_at).asc())
+            )
+            items = ordered.scalars().all()
+            if 0 <= index < len(items):
+                return items[index]
+        return None
 
     async def generate_title(self, session_id: str) -> str | None:
         """Generate a short title for a session using LLM."""

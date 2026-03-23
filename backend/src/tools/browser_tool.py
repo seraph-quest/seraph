@@ -1,7 +1,6 @@
 """Browser automation tool — extracts content from web pages using Playwright."""
 
 import asyncio
-import ipaddress
 import logging
 from urllib.parse import urlparse
 
@@ -9,42 +8,32 @@ from smolagents import tool
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
+from src.security.site_policy import SiteAccessDecision, evaluate_site_access
 
 logger = logging.getLogger(__name__)
 
-# Block access to internal/private networks
-_BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "[::1]"}
-
-
-def _is_internal_url(url: str) -> bool:
-    """Check if a URL points to an internal/private network address."""
+def _browser_details(url: str, action: str, decision: SiteAccessDecision | None = None) -> dict[str, str | bool]:
     parsed = urlparse(url)
-    hostname = parsed.hostname or ""
-
-    if hostname in _BLOCKED_HOSTS:
-        return True
-
-    # Check for private IP ranges
-    try:
-        ip = ipaddress.ip_address(hostname)
-        return ip.is_private or ip.is_loopback or ip.is_link_local
-    except ValueError:
-        pass
-
-    # Block common internal hostnames
-    if hostname.endswith((".local", ".internal", ".localhost")):
-        return True
-
-    return False
-
-
-def _browser_details(url: str, action: str) -> dict[str, str]:
-    parsed = urlparse(url)
-    return {
+    details: dict[str, str | bool] = {
         "hostname": parsed.hostname or "",
         "scheme": parsed.scheme or "",
         "action": action,
     }
+    if decision is not None:
+        details["site_policy_reason"] = decision.reason or ""
+        details["site_policy_rule"] = decision.matched_rule or ""
+        details["site_allowlist_active"] = decision.allowlist_active
+    return details
+
+
+def _blocked_site_message(decision: SiteAccessDecision) -> str:
+    if decision.reason == "internal_private":
+        return "Error: Access to internal/private network addresses is not allowed."
+    if decision.reason == "blocklisted_domain":
+        return f"Error: Access to '{decision.hostname}' is blocked by site policy."
+    if decision.reason == "not_allowlisted":
+        return f"Error: Access to '{decision.hostname}' is not permitted by the browser site allowlist."
+    return "Error: URL could not be evaluated by site policy."
 
 
 async def _browse(url: str, action: str) -> str:
@@ -124,14 +113,15 @@ def browse_webpage(url: str, action: str = "extract") -> str:
     if not url.startswith(("http://", "https://")):
         return "Error: URL must start with http:// or https://"
 
-    if _is_internal_url(url):
+    decision = evaluate_site_access(url)
+    if not decision.allowed:
         log_integration_event_sync(
             integration_type="browser",
             name="playwright",
             outcome="blocked",
-            details=_browser_details(url, action),
+            details=_browser_details(url, action, decision),
         )
-        return "Error: Access to internal/private network addresses is not allowed."
+        return _blocked_site_message(decision)
 
     if action not in ("extract", "html", "screenshot"):
         return f"Error: action must be 'extract', 'html', or 'screenshot', got '{action}'"
@@ -149,7 +139,7 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             integration_type="browser",
             name="playwright",
             outcome="succeeded",
-            details=_browser_details(url, action),
+            details=_browser_details(url, action, decision),
         )
         return result
     except (TimeoutError, PlaywrightTimeoutError) as e:
@@ -158,7 +148,7 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             name="playwright",
             outcome="timed_out",
             details={
-                **_browser_details(url, action),
+                **_browser_details(url, action, decision),
                 "timeout_seconds": settings.browser_timeout,
                 "error": str(e),
             },
@@ -171,7 +161,7 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             name="playwright",
             outcome="failed",
             details={
-                **_browser_details(url, action),
+                **_browser_details(url, action, decision),
                 "error": str(e),
             },
         )

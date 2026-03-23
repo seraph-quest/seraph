@@ -578,6 +578,7 @@ function formatAge(value: number | string): string {
 
 function labelForRole(message: ChatMessage): string {
   if (message.role === "approval") return "approval";
+  if (message.role === "clarification") return "clarification";
   if (message.role === "proactive") return message.interventionType ?? "proactive";
   if (message.role === "step") return message.toolUsed ?? "step";
   return message.role;

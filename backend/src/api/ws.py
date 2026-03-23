@@ -11,6 +11,7 @@ from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.agent.exceptions import ClarificationRequired
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -262,6 +263,44 @@ async def websocket_chat(websocket: WebSocket):
                         approval_id=exc.approval_id,
                         tool_name=exc.tool_name,
                         risk_level=exc.risk_level,
+                    ).model_dump_json()
+                )
+                continue
+            except ClarificationRequired as exc:
+                rendered = await redact_secrets_in_text(exc.render_message())
+                await session_manager.add_message(
+                    session.id,
+                    "assistant",
+                    rendered,
+                    metadata_json=json.dumps({
+                        "display_role": "clarification",
+                        "question": exc.question,
+                        "reason": exc.reason,
+                        "options": exc.options,
+                    }),
+                )
+                await audit_repository.log_event(
+                    session_id=session.id,
+                    actor="agent",
+                    event_type="clarification_requested",
+                    tool_name="clarify",
+                    risk_level="low",
+                    policy_mode=get_current_tool_policy_mode(),
+                    summary=exc.question,
+                    details={
+                        "reason": exc.reason,
+                        "options": exc.options,
+                    },
+                )
+                await websocket.send_text(
+                    WSResponse(
+                        type="clarification_required",
+                        content=rendered,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                        question=exc.question,
+                        reason=exc.reason or None,
+                        options=exc.options or None,
                     ).model_dump_json()
                 )
                 continue

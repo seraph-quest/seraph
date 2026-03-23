@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.agent.exceptions import ClarificationRequired
 from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
@@ -93,6 +94,35 @@ class TestChatAPI:
         assert detail["approval_id"] == "approval-123"
         assert detail["tool_name"] == "shell_execute"
         mock_merge_details.assert_awaited_once_with("approval-123", {"resume_message": "Run this"})
+
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.build_agent")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_clarification_required(self, mock_onboarding, mock_create_agent, mock_search, client):
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = ClarificationRequired(
+            question="Which city should I check?",
+            reason="Weather depends on location.",
+            options=["Wroclaw", "Warsaw"],
+        )
+        mock_onboarding.return_value = mock_agent
+
+        response = await client.post("/api/chat", json={"message": "What is the weather?"})
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["type"] == "clarification_required"
+        assert isinstance(detail["session_id"], str)
+        assert detail["question"] == "Which city should I check?"
+        assert detail["reason"] == "Weather depends on location."
+        assert detail["options"] == ["Wroclaw", "Warsaw"]
+        assert "Which city should I check?" in detail["message"]
+
+        session_id = detail["session_id"]
+        history = await client.get(f"/api/sessions/{session_id}/messages")
+        assert history.status_code == 200
+        messages = history.json()
+        assert messages[-1]["metadata"]["display_role"] == "clarification"
+        assert messages[-1]["metadata"]["options"] == ["Wroclaw", "Warsaw"]
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")

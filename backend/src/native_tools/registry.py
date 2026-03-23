@@ -4,6 +4,16 @@ Native tools have static entries here. Workflow metadata remains dynamic and is
 resolved through the workflow manager when requested.
 """
 
+TOOL_NAME_ALIASES: dict[str, str] = {
+    "shell_execute": "execute_code",
+}
+
+
+def canonical_tool_name(tool_name: str) -> str:
+    """Return the canonical runtime tool name for a tool or legacy alias."""
+    return TOOL_NAME_ALIASES.get(tool_name, tool_name)
+
+
 TOOL_METADATA: dict[str, dict] = {
     # Phase 1 tools
     "web_search": {
@@ -57,10 +67,65 @@ TOOL_METADATA: dict[str, dict] = {
         "execution_boundaries": ["guardian_state_read"],
     },
     # Phase 2 tools
-    "shell_execute": {
-        "description": "Execute code in a sandboxed environment",
+    "execute_code": {
+        "description": "Execute bounded code in a sandboxed environment",
         "policy_modes": ["full"],
         "execution_boundaries": ["sandbox_execution"],
+    },
+    "delegate_task": {
+        "description": "Delegate a bounded subtask to a specialist runtime",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["delegation"],
+    },
+    "clarify": {
+        "description": "Request a missing input from the user before continuing",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["conversation"],
+    },
+    "todo": {
+        "description": "Manage the current session's persisted task list",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["conversation_state"],
+    },
+    "session_search": {
+        "description": "Search prior session history for bounded relevant snippets",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["conversation_history_read"],
+    },
+    "get_scheduled_jobs": {
+        "description": "List persisted scheduled jobs and their runtime status",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["automation_state"],
+    },
+    "manage_scheduled_job": {
+        "description": "Create, update, pause, resume, or delete persisted scheduled jobs",
+        "policy_modes": ["balanced", "full"],
+        "execution_boundaries": ["automation_state"],
+    },
+    "run_command": {
+        "description": "Run an approved workspace-scoped command inside the runtime container",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_execution"],
+    },
+    "start_process": {
+        "description": "Start an approved workspace-scoped background process inside the runtime container",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_management"],
+    },
+    "list_processes": {
+        "description": "List background processes started through the runtime process manager",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_read"],
+    },
+    "read_process_output": {
+        "description": "Read recent stdout/stderr output for a managed background process",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_read"],
+    },
+    "stop_process": {
+        "description": "Stop a managed background process inside the runtime container",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_management"],
     },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
@@ -98,7 +163,7 @@ TOOL_METADATA: dict[str, dict] = {
 
 def get_tool_metadata(tool_name: str) -> dict | None:
     """Get metadata for a bundled native tool or a derived workflow tool."""
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = TOOL_METADATA.get(canonical_tool_name(tool_name))
     if metadata is not None:
         return metadata
     try:

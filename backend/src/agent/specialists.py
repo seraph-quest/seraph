@@ -42,7 +42,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "read_file": "files",
     "write_file": "files",
     "fill_template": "files",
-    "shell_execute": "files",
+    "execute_code": "files",
 }
 
 # Reverse index: domain → list of tool names
@@ -206,6 +206,7 @@ def build_all_specialists() -> list[ToolCallingAgent]:
             wrap_tools_for_secret_refs(filter_tools(discover_tools(), mode))
         )
     )
+    all_tools = [tool for tool in all_tools if tool.name != "delegate_task"]
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []

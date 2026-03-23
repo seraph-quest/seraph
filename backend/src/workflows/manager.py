@@ -15,7 +15,7 @@ from smolagents import Tool
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.approval.repository import fingerprint_tool_call
-from src.native_tools.registry import TOOL_METADATA
+from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
 from src.workflows.loader import Workflow, scan_workflow_paths
 
 logger = logging.getLogger(__name__)
@@ -118,6 +118,10 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _canonicalize_tool_names(tool_names: list[str]) -> list[str]:
+    return list(dict.fromkeys(canonical_tool_name(tool_name) for tool_name in tool_names))
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -159,6 +163,8 @@ class WorkflowTool(Tool):
 
         for step in self.workflow.steps:
             tool = self.tools_by_name.get(step.tool)
+            if tool is None:
+                tool = self.tools_by_name.get(canonical_tool_name(step.tool))
             if tool is None:
                 raise RuntimeError(
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
@@ -504,7 +510,7 @@ class WorkflowManager:
                 "tool_name": workflow.tool_name,
                 "description": workflow.description,
                 "inputs": workflow.inputs,
-                "requires_tools": workflow.requires_tools,
+                "requires_tools": _canonicalize_tool_names(workflow.requires_tools),
                 "requires_skills": workflow.requires_skills,
                 "user_invocable": workflow.user_invocable,
                 "enabled": workflow.enabled,
@@ -587,7 +593,7 @@ class WorkflowManager:
         available_tool_names: list[str],
         active_skill_names: list[str],
     ) -> list[Workflow]:
-        tool_set = set(available_tool_names)
+        tool_set = {canonical_tool_name(name) for name in available_tool_names}
         skill_set = set(active_skill_names)
         snapshot = self._snapshot()
         extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
@@ -602,7 +608,7 @@ class WorkflowManager:
             if not permission_profile["ok"]:
                 continue
             if workflow.step_tools and not all(
-                tool_name in tool_set for tool_name in workflow.step_tools
+                canonical_tool_name(tool_name) in tool_set for tool_name in workflow.step_tools
             ):
                 continue
             if workflow.requires_skills and not all(
@@ -636,7 +642,7 @@ class WorkflowManager:
             "description": workflow.description,
             "inputs": workflow.inputs,
             "policy_modes": policy_modes,
-            "requires_tools": workflow.requires_tools,
+            "requires_tools": _canonicalize_tool_names(workflow.requires_tools),
             "requires_skills": workflow.requires_skills,
             "step_count": len(workflow.steps),
             "execution_boundaries": self._infer_execution_boundaries(workflow),
@@ -652,11 +658,11 @@ class WorkflowManager:
         *,
         permission_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        tool_set = set(available_tool_names)
+        tool_set = {canonical_tool_name(name) for name in available_tool_names}
         skill_set = set(active_skill_names)
         missing_tools = [
-            tool_name for tool_name in workflow.requires_tools
-            if tool_name not in tool_set
+            canonical_tool_name(tool_name) for tool_name in workflow.requires_tools
+            if canonical_tool_name(tool_name) not in tool_set
         ]
         missing_skills = [
             skill_name for skill_name in workflow.requires_skills
@@ -684,24 +690,26 @@ class WorkflowManager:
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:
         step_tools = workflow.step_tools
-        if any(tool_name.startswith("mcp_") for tool_name in step_tools):
+        canonical_step_tools = [canonical_tool_name(tool_name) for tool_name in step_tools]
+        if any(tool_name.startswith("mcp_") for tool_name in canonical_step_tools):
             return ["full"]
         if any(
             tool_name in {"write_file", "update_goal", "update_soul", "store_secret", "delete_secret"}
-            for tool_name in step_tools
+            for tool_name in canonical_step_tools
         ):
             return ["balanced", "full"]
-        if any(tool_name in {"shell_execute", "get_secret"} for tool_name in step_tools):
+        if any(tool_name in {"execute_code", "get_secret"} for tool_name in canonical_step_tools):
             return ["full"]
         return ["safe", "balanced", "full"]
 
     def _infer_execution_boundaries(self, workflow: Workflow) -> list[str]:
         boundaries: list[str] = []
         for tool_name in workflow.step_tools:
-            if tool_name.startswith("mcp_"):
+            canonical_name = canonical_tool_name(tool_name)
+            if canonical_name.startswith("mcp_"):
                 boundaries.append("external_mcp")
                 continue
-            tool_meta = TOOL_METADATA.get(tool_name, {})
+            tool_meta = TOOL_METADATA.get(canonical_name, {})
             for boundary in tool_meta.get("execution_boundaries", []):
                 if boundary not in boundaries:
                     boundaries.append(boundary)
@@ -717,9 +725,10 @@ class WorkflowManager:
 
     def _accepts_secret_refs(self, workflow: Workflow) -> bool:
         for tool_name in workflow.step_tools:
-            if tool_name.startswith("mcp_"):
+            canonical_name = canonical_tool_name(tool_name)
+            if canonical_name.startswith("mcp_"):
                 return True
-            tool_meta = TOOL_METADATA.get(tool_name, {})
+            tool_meta = TOOL_METADATA.get(canonical_name, {})
             if bool(tool_meta.get("accepts_secret_refs", False)):
                 return True
         return False

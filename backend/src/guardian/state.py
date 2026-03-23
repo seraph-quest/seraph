@@ -35,6 +35,7 @@ class GuardianState:
     confidence: GuardianStateConfidence
     recent_execution_summary: str = ""
     learning_guidance: str = ""
+    bounded_memory_context: str = ""
 
     @property
     def active_goals_summary(self) -> str:
@@ -59,6 +60,9 @@ class GuardianState:
 
         if self.active_goals_summary:
             lines.extend(["", "Active goals:", self.active_goals_summary])
+
+        if self.bounded_memory_context:
+            lines.extend(["", "Bounded recall:", self.bounded_memory_context])
 
         if self.memory_context:
             lines.extend(["", "Relevant memories:", self.memory_context])
@@ -225,6 +229,63 @@ def _learning_guidance_text(
     return "\n".join(f"- {line}" for line in guidance)
 
 
+def _extract_soul_section_lines(soul_context: str, section: str, *, limit: int) -> tuple[str, ...]:
+    header = f"## {section}".lower()
+    lines = soul_context.splitlines()
+    in_section = False
+    extracted: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.lower().startswith("## "):
+            if line.lower() == header:
+                in_section = True
+                continue
+            if in_section:
+                break
+        if not in_section or not line:
+            continue
+        if line.startswith("("):
+            continue
+        if line.startswith("- "):
+            key, _, value = line[2:].partition(":")
+            if _ and not value.strip():
+                continue
+        extracted.append(line)
+        if len(extracted) >= limit:
+            break
+    return tuple(extracted)
+
+
+def _summarize_bounded_memory(*, soul_context: str, todos: list[dict[str, object]]) -> str:
+    identity_bits = _extract_soul_section_lines(soul_context, "Identity", limit=3)
+    goal_bits = _extract_soul_section_lines(soul_context, "Goals", limit=3)
+    personality_bits = _extract_soul_section_lines(soul_context, "Personality Notes", limit=2)
+
+    open_todos = [
+        str(item.get("content", "")).strip()
+        for item in todos
+        if not item.get("completed") and str(item.get("content", "")).strip()
+    ][:4]
+    completed_todos = [
+        str(item.get("content", "")).strip()
+        for item in todos
+        if item.get("completed") and str(item.get("content", "")).strip()
+    ][:2]
+
+    lines: list[str] = []
+    if identity_bits:
+        lines.append(f"- Identity: {' | '.join(identity_bits)}")
+    if goal_bits:
+        lines.append(f"- Goal memory: {' | '.join(goal_bits)}")
+    if personality_bits:
+        lines.append(f"- Preferences: {' | '.join(personality_bits)}")
+    if open_todos:
+        lines.append(f"- Open todos: {' | '.join(open_todos)}")
+    if completed_todos:
+        lines.append(f"- Recently completed: {' | '.join(completed_todos)}")
+    return "\n".join(lines)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -250,6 +311,7 @@ async def build_guardian_state(
         if session_id is not None
         else ""
     )
+    session_todos = await session_manager.get_todos(session_id) if session_id is not None else []
     recent_sessions_summary = await session_manager.get_recent_sessions_summary(
         exclude_session_id=session_id
     )
@@ -283,6 +345,10 @@ async def build_guardian_state(
         f"- [{item['category']}] {item['text']}"
         for item in memory_results
         if isinstance(item.get("category"), str) and isinstance(item.get("text"), str)
+    )
+    bounded_memory_context = _summarize_bounded_memory(
+        soul_context=soul_context,
+        todos=session_todos,
     )
     grouped_memory: dict[str, list[str]] = {}
     for item in memory_results:
@@ -337,6 +403,7 @@ async def build_guardian_state(
         soul_context=soul_context,
         observer_context=observer_context,
         world_model=world_model,
+        bounded_memory_context=bounded_memory_context,
         memory_context=memory_context,
         current_session_history=current_session_history,
         recent_sessions_summary=recent_sessions_summary,

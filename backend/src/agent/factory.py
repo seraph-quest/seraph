@@ -33,6 +33,8 @@ def get_base_tools_and_active_skills() -> tuple[list, list[str], str]:
             wrap_tools_for_secret_refs(filter_tools(discover_tools(), tool_mode))
         )
     )
+    if not settings.use_delegation:
+        native_tools = [tool for tool in native_tools if tool.name != "delegate_task"]
     filtered_mcp_tools = filter_tools(
         mcp_manager.get_tools(),
         tool_mode,

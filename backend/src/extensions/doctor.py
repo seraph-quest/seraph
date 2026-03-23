@@ -19,6 +19,7 @@ from src.extensions.registry import (
     ExtensionRecord,
     ExtensionRegistrySnapshot,
 )
+from src.security.context_scan import scan_text_for_suspicious_context
 from src.skills.loader import parse_skill_content
 from src.workflows.loader import parse_workflow_content
 import yaml
@@ -30,6 +31,7 @@ _CONNECTOR_CONTRIBUTIONS = {
     "channel_adapters",
     "workspace_adapters",
 }
+_CONTEXT_SCANNED_CONTRIBUTIONS = {"skills", "workflows", "prompt_packs"}
 
 
 @dataclass(frozen=True)
@@ -186,6 +188,25 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
             issues.append(unreadable_issue)
             continue
         assert content is not None
+
+        if contribution.contribution_type in _CONTEXT_SCANNED_CONTRIBUTIONS:
+            for finding in scan_text_for_suspicious_context(content):
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="suspicious_context_content",
+                        severity="error",
+                        message=(
+                            "Contribution contains suspicious prompt-bearing content "
+                            f"({finding.description}: '{finding.excerpt}')"
+                        ),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix=(
+                            "remove instruction-override, secret-exfiltration, or policy-bypass "
+                            "language from the package content"
+                        ),
+                    )
+                )
 
         if contribution.contribution_type == "skills":
             errors: list[dict[str, str]] = []

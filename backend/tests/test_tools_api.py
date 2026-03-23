@@ -7,13 +7,94 @@ from src.observer.context import CurrentContext
 
 
 @pytest.mark.asyncio
-async def test_tools_api_full_mode_includes_shell_execute(client):
+async def test_tools_api_full_mode_includes_execute_code(client):
     ctx = CurrentContext(tool_policy_mode="full")
     with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
         resp = await client.get("/api/tools")
     assert resp.status_code == 200
     names = {tool["name"] for tool in resp.json()}
-    assert "shell_execute" in names
+    assert "execute_code" in names
+    assert "run_command" in names
+    assert "start_process" in names
+    assert "list_processes" in names
+    assert "read_process_output" in names
+    assert "stop_process" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_clarify_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "clarify" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_todo_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "todo" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_session_search_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "session_search" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_get_scheduled_jobs_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "get_scheduled_jobs" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_balanced_mode_keeps_delegate_task_available(client):
+    ctx = CurrentContext(tool_policy_mode="balanced")
+    with (
+        patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+        patch("src.agent.factory.settings.use_delegation", True),
+    ):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "delegate_task" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_balanced_mode_keeps_manage_scheduled_job_available(client):
+    ctx = CurrentContext(tool_policy_mode="balanced")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "manage_scheduled_job" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_hides_delegate_task_when_delegation_is_disabled(client):
+    ctx = CurrentContext(tool_policy_mode="full")
+    with (
+        patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+        patch("src.agent.factory.settings.use_delegation", False),
+    ):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "delegate_task" not in names
 
 
 @pytest.mark.asyncio
@@ -24,7 +105,8 @@ async def test_tools_api_balanced_mode_hides_full_only_tools(client):
     assert resp.status_code == 200
     names = {tool["name"] for tool in resp.json()}
     assert "write_file" in names
-    assert "shell_execute" not in names
+    assert "execute_code" not in names
+    assert "run_command" not in names
     assert "get_secret" not in names
 
 

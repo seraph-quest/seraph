@@ -6,14 +6,16 @@ from smolagents import Tool
 
 from config.settings import settings
 from src.agent.onboarding import create_onboarding_agent
+from src.agent.session import session_manager
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.tools.audit import AuditedTool, wrap_tools_for_audit
+from src.tools.todo_tool import todo
 
 
 class DummyEchoTool(Tool):
-    name = "shell_execute"
+    name = "execute_code"
     description = "Dummy echo tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
@@ -23,7 +25,7 @@ class DummyEchoTool(Tool):
 
 
 class DummyFailTool(Tool):
-    name = "shell_execute"
+    name = "execute_code"
     description = "Dummy failing tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
@@ -80,7 +82,7 @@ def test_audited_tool_logs_call_and_result(async_db):
     tool_results = [e for e in events if e["event_type"] == "tool_result"]
     assert len(tool_calls) == 1
     assert len(tool_results) == 1
-    assert tool_calls[0]["tool_name"] == "shell_execute"
+    assert tool_calls[0]["tool_name"] == "execute_code"
     assert tool_results[0]["details"]["content_redacted"] is True
 
 
@@ -104,7 +106,7 @@ def test_audited_tool_logs_failure(async_db):
     tool_failures = [e for e in events if e["event_type"] == "tool_failed"]
     assert len(tool_calls) == 1
     assert len(tool_failures) == 1
-    assert tool_failures[0]["tool_name"] == "shell_execute"
+    assert tool_failures[0]["tool_name"] == "execute_code"
     assert tool_failures[0]["details"]["error"] == "failed:print('hi')"
 
 
@@ -128,6 +130,37 @@ def test_audited_tool_uses_custom_result_payload(async_db):
     assert tool_result["details"]["workflow_name"] == "web-brief-to-file"
     assert tool_result["details"]["artifact_paths"] == ["notes/brief.md"]
     assert tool_result["details"]["step_tools"] == ["web_search", "write_file"]
+
+
+def test_audited_todo_tool_redacts_tool_call_arguments(async_db):
+    asyncio.run(session_manager.get_or_create("s1"))
+    tool = wrap_tools_for_audit([todo])[0]
+    tokens = set_runtime_context("s1", "off")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            tool(action="set", items="alpha-secret-value\nbeta-secret-value")
+    finally:
+        reset_runtime_context(tokens)
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return events
+
+    events = asyncio.run(_fetch())
+    todo_events = [
+        event
+        for event in events
+        if event["tool_name"] == "todo" and event["event_type"] in {"tool_call", "tool_result"}
+    ]
+    assert len(todo_events) == 2
+    for event in todo_events:
+        assert "alpha-secret-value" not in event["summary"]
+        assert "beta-secret-value" not in event["summary"]
+        assert event["details"]["arguments"]["action"] == "set"
+        assert event["details"]["arguments"]["item_count"] == 2
+        assert event["details"]["arguments"]["items_redacted"] is True
+        assert "items" not in event["details"]["arguments"]
 
 
 def test_audited_tool_logging_fails_open(async_db):

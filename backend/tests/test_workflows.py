@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.extensions.registry import default_manifest_roots_for_workspace
-from src.workflows.loader import Workflow, _parse_workflow_file, load_workflows
-from src.workflows.manager import WorkflowManager
+from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
+from src.workflows.manager import WorkflowManager, WorkflowTool
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import get_tools
@@ -30,6 +30,9 @@ class DummyTool:
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         self.calls.append(kwargs)
         return self._responder(**kwargs)
+
+    def forward(self, *args, **kwargs):
+        return self.__call__(*args, **kwargs)
 
 
 def _write_manifest_workflow_package(
@@ -240,6 +243,25 @@ class TestWorkflowManager:
         assert mgr2.get_workflow("web-brief-to-file").enabled is False
         assert mgr2.enable("web-brief-to-file") is True
         assert mgr2.get_workflow("web-brief-to-file").enabled is True
+
+    def test_workflow_tool_resolves_legacy_shell_execute_alias(self):
+        workflow = Workflow(
+            name="legacy-shell-workflow",
+            description="Legacy shell alias workflow",
+            inputs={},
+            steps=[WorkflowStep(id="run", tool="shell_execute", arguments={"code": "print('hello')"})],
+            requires_tools=["shell_execute"],
+        )
+        execute_code = DummyTool("execute_code", lambda code: f"ran {code}")
+        workflow_tool = WorkflowTool(workflow, {"execute_code": execute_code})
+
+        assert "ran print('hello')" in workflow_tool()
+        assert execute_code.calls == [{"code": "print('hello')"}]
+
+        mgr = WorkflowManager()
+        mgr._workflows = [workflow]
+        assert mgr.list_workflows()[0]["requires_tools"] == ["execute_code"]
+        assert mgr.get_tool_metadata(workflow.tool_name)["requires_tools"] == ["execute_code"]
 
     def test_manifest_backed_workflow_with_missing_manifest_permissions_is_not_active(self, tmp_path):
         workflows_dir = tmp_path / "workflows"

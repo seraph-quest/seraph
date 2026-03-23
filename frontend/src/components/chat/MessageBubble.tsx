@@ -14,6 +14,7 @@ const ROLE_STYLES: Record<string, string> = {
   error: "bg-retro-error/20 border-l-2 border-retro-error text-red-300",
   proactive: "bg-retro-border/10 border-l-2 border-retro-border text-retro-text",
   approval: "bg-yellow-500/10 border-l-2 border-yellow-400 text-retro-text",
+  clarification: "bg-cyan-500/10 border-l-2 border-cyan-300 text-retro-text",
 };
 
 const ROLE_LABELS: Record<string, string> = {
@@ -23,6 +24,7 @@ const ROLE_LABELS: Record<string, string> = {
   error: "Error",
   proactive: "Seraph",
   approval: "Approval",
+  clarification: "Clarify",
 };
 
 export function MessageBubble({ message }: MessageBubbleProps) {
@@ -32,6 +34,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const label = ROLE_LABELS[message.role] ?? "Agent";
   const isStep = message.role === "step";
   const isApproval = message.role === "approval";
+  const isClarification = message.role === "clarification";
 
   const handleApproval = async (decision: "approve" | "deny") => {
     if (!message.approvalId || submitting || approvalStatus !== "pending") return;
@@ -80,6 +83,18 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       <div className="text-[11px] leading-relaxed break-words whitespace-pre-wrap">
         {message.content}
       </div>
+      {isClarification && message.clarificationOptions && message.clarificationOptions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {message.clarificationOptions.map((option) => (
+            <span
+              key={option}
+              className="text-[10px] px-2 py-1 border border-cyan-400/40 text-cyan-200 rounded-sm"
+            >
+              {option}
+            </span>
+          ))}
+        </div>
+      )}
       {isApproval && (
         <div className="mt-2 flex items-center gap-2">
           {approvalStatus === "pending" ? (

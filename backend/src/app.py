@@ -14,7 +14,7 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.memory.soul import ensure_soul_exists
 from src.runbooks.manager import runbook_manager
-from src.scheduler.engine import init_scheduler, shutdown_scheduler
+from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
@@ -69,13 +69,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         import logging
         logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
-    init_scheduler()
-    try:
-        from src.observer.manager import context_manager
-        await context_manager.refresh()
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
     mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
     if not os.path.exists(mcp_config):
@@ -108,6 +101,14 @@ async def lifespan(app: FastAPI):
         os.path.join(settings.workspace_dir, "starter-packs.json"),
         manifest_roots=manifest_roots,
     )
+    init_scheduler()
+    await sync_scheduled_jobs()
+    try:
+        from src.observer.manager import context_manager
+        await context_manager.refresh()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()

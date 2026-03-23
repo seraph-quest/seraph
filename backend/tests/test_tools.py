@@ -3,10 +3,22 @@ from unittest.mock import patch
 
 import pytest
 
+from config.settings import settings
 from src.audit.repository import audit_repository
 from src.tools.filesystem_tool import _safe_resolve, read_file, write_file
 from src.tools.template_tool import fill_template
 from src.tools.web_search_tool import web_search
+
+
+@pytest.fixture(autouse=True)
+def reset_site_policy():
+    original_allowlist = settings.browser_site_allowlist
+    original_blocklist = settings.browser_site_blocklist
+    settings.browser_site_allowlist = ""
+    settings.browser_site_blocklist = ""
+    yield
+    settings.browser_site_allowlist = original_allowlist
+    settings.browser_site_blocklist = original_blocklist
 
 
 class TestFilesystemTool:
@@ -285,3 +297,92 @@ class TestWebSearch:
         assert events
         assert events[0]["tool_name"] == "web_search:duckduckgo"
         assert events[0]["details"]["timeout_seconds"] == 15
+
+    def test_web_search_filters_site_policy_blocked_results(self, async_db):
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Blocked", "href": "https://blocked.example.com", "body": "Should not surface"},
+                    {"title": "Allowed", "href": "https://allowed.example.org", "body": "Safe result"},
+                ]
+
+        settings.browser_site_blocklist = "example.com"
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("search policy")
+
+        assert "Allowed" in result
+        assert "Blocked" not in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["details"]["filtered_result_count"] == 1
+        assert events[0]["details"]["blocked_hostnames"] == ["blocked.example.com"]
+
+    def test_web_search_returns_no_allowed_results_when_allowlist_blocks_everything(self, async_db):
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Other", "href": "https://elsewhere.example.net", "body": "Nope"},
+                ]
+
+        settings.browser_site_allowlist = "allowed.example.org"
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("allowlisted search")
+
+        assert "No allowed results found" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_blocked"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "web_search:duckduckgo"
+        assert events[0]["details"]["filtered_result_count"] == 1
+        assert events[0]["details"]["blocked_reasons"] == ["not_allowlisted"]
+
+    def test_web_search_filters_missing_href_when_allowlist_active(self, async_db):
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Missing URL", "href": "", "body": "Should not bypass policy"},
+                    {"title": "Allowed", "href": "https://allowed.example.org", "body": "Safe result"},
+                ]
+
+        settings.browser_site_allowlist = "allowed.example.org"
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("missing href")
+
+        assert "Allowed" in result
+        assert "Missing URL" not in result

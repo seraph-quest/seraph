@@ -14,12 +14,9 @@ Do not open public GitHub issues for security-sensitive reports.
 
 Instead:
 
-1. Use GitHub private vulnerability reporting if it is enabled for this repository.
-2. If private reporting is not available, contact the maintainers directly through a private channel before sharing details publicly.
-3. Include the affected branch, commit, environment details, impact, and reproduction steps if known.
-4. Give the maintainers reasonable time to confirm and prepare a fix before public disclosure.
-
-If you do not have a maintainer contact yet, open a minimal issue requesting a private security contact path without disclosing the vulnerability details.
+1. Use GitHub private vulnerability reporting for this repository: `https://github.com/seraph-quest/seraph/security/advisories/new`
+2. If that form is unavailable, email `nat@neurion.ai` with the affected branch, commit, environment details, impact, and reproduction steps.
+3. Give the maintainers reasonable time to confirm and prepare a fix before public disclosure.
 
 ## Scope Notes
 

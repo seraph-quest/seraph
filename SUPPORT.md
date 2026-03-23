@@ -13,7 +13,7 @@ Start with:
 For local development:
 
 ```bash
-cp .env.dev.example .env.dev
+cp env.dev.example .env.dev
 ./manage.sh -e dev local up
 ```
 

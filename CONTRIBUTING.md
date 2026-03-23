@@ -24,7 +24,7 @@ Target `develop` with your pull request. Only merge `develop` into `main` when e
 Recommended local flow:
 
 ```bash
-cp .env.dev.example .env.dev
+cp env.dev.example .env.dev
 # Set OPENROUTER_API_KEY in .env.dev
 ./manage.sh -e dev local up
 ```

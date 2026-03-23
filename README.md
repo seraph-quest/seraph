@@ -1,7 +1,7 @@
 <h1 align="center">Seraph</h1>
 
 <p align="center">
-  <strong>A local-first AI guardian workspace for proactive work</strong>
+  <strong>An AI guardian that remembers, watches, and acts</strong>
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  Seraph is a local guardian prototype for people who want an AI system that can keep state, watch what is happening on the desktop, use tools, run workflows, and proactively surface useful actions instead of waiting for one-off prompts.
+  Seraph is a proactive AI system for people who want an agent that can keep state, watch what is happening on the desktop, use tools, run workflows, and surface useful actions instead of waiting for one-off prompts.
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ Seraph is a workspace-first AI agent with:
 - a browser cockpit for live operation and inspection
 - an optional macOS daemon for window tracking and OCR-backed screen awareness
 
-This repository is for builders and power users who want to run, inspect, and extend a serious local guardian prototype rather than a chat-only assistant shell.
+This repository is for builders and power users who want to run, inspect, and extend a serious guardian prototype rather than a chat-only assistant shell.
 
 ## Current State
 
@@ -67,7 +67,7 @@ Start with:
 
 ```bash
 # 1. Configure
-cp .env.dev.example .env.dev
+cp env.dev.example .env.dev
 # Edit .env.dev and set OPENROUTER_API_KEY=your-key-here
 
 # 2. Launch

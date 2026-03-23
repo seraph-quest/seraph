@@ -286,9 +286,41 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
                 pattern_consumed = True
                 index += 2
                 continue
+            if arg.startswith("-f") and arg != "-f" and not arg.startswith("--"):
+                _ensure_workspace_scoped_path(arg[2:], cwd, label="-f path")
+                pattern_consumed = True
+                index += 1
+                continue
+            if arg.startswith("-") and not arg.startswith("--"):
+                short_flag_operand_index = arg.find("f", 1)
+                if 1 <= short_flag_operand_index < len(arg) - 1:
+                    _ensure_workspace_scoped_path(arg[short_flag_operand_index + 1 :], cwd, label="-f path")
+                    pattern_consumed = True
+                    index += 1
+                    continue
             if arg.startswith("--file="):
                 _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--file path")
                 pattern_consumed = True
+                index += 1
+                continue
+            if command_name == "grep" and arg in {"--exclude-from"}:
+                if index + 1 >= len(args):
+                    raise ValueError(f"{arg} requires a path argument.")
+                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                index += 2
+                continue
+            if command_name == "grep" and arg.startswith("--exclude-from="):
+                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--exclude-from path")
+                index += 1
+                continue
+            if command_name == "rg" and arg in {"--ignore-file"}:
+                if index + 1 >= len(args):
+                    raise ValueError(f"{arg} requires a path argument.")
+                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                index += 2
+                continue
+            if command_name == "rg" and arg.startswith("--ignore-file="):
+                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--ignore-file path")
                 index += 1
                 continue
             if arg.startswith("-"):

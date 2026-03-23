@@ -69,7 +69,7 @@ def _summarize_workflow_result(workflow: Workflow, step_results: dict[str, dict[
         result = str(step_state.get("result", ""))
         if len(result) > 240:
             result = result[:237] + "..."
-        lines.append(f"- {step.id} ({step.tool}): {result}")
+        lines.append(f"- {step.id} ({canonical_tool_name(step.tool)}): {result}")
     return "\n".join(lines)
 
 
@@ -160,11 +160,12 @@ class WorkflowTool(Tool):
         continued_error_steps: list[str] = []
         artifact_paths = _collect_artifact_paths(workflow_inputs)
         step_records: list[dict[str, Any]] = []
+        canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
 
-        for step in self.workflow.steps:
+        for step, canonical_step_tool in zip(self.workflow.steps, canonical_step_tools, strict=False):
             tool = self.tools_by_name.get(step.tool)
             if tool is None:
-                tool = self.tools_by_name.get(canonical_tool_name(step.tool))
+                tool = self.tools_by_name.get(canonical_step_tool)
             if tool is None:
                 raise RuntimeError(
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
@@ -192,7 +193,7 @@ class WorkflowTool(Tool):
             step_completed_at = _utc_now_iso()
             duration_ms = int((time.perf_counter() - started) * 1000)
             context["steps"][step.id] = {
-                "tool": step.tool,
+                "tool": canonical_step_tool,
                 "arguments": rendered_arguments,
                 "result": result,
             }
@@ -203,7 +204,7 @@ class WorkflowTool(Tool):
             step_records.append({
                 "id": step.id,
                 "index": len(step_records) + 1,
-                "tool": step.tool,
+                "tool": canonical_step_tool,
                 "status": step_status,
                 "argument_keys": (
                     sorted(str(key) for key in rendered_arguments.keys())
@@ -238,7 +239,7 @@ class WorkflowTool(Tool):
                 "workflow_name": self.workflow.name,
                 "run_fingerprint": run_fingerprint,
                 "step_count": len(self.workflow.steps),
-                "step_tools": [step.tool for step in self.workflow.steps],
+                "step_tools": canonical_step_tools,
                 "step_records": step_records,
                 "checkpoint_step_ids": [str(step["id"]) for step in step_records if step.get("id")],
                 "last_completed_step_id": (

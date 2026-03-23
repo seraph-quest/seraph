@@ -222,6 +222,7 @@ interface CapabilityAction {
   type:
     | "toggle_skill"
     | "toggle_workflow"
+    | "enable_extension"
     | "toggle_mcp_server"
     | "test_mcp_server"
     | "test_native_notification"
@@ -596,7 +597,7 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   const mode = typeof action.mode === "string" ? action.mode : null;
   const status = typeof action.status === "string" ? action.status : null;
   const detail = typeof action.detail === "string" ? action.detail : null;
-  const target = name ?? mode ?? detail ?? "";
+  const target = (typeof action.target === "string" ? action.target : null) ?? name ?? mode ?? detail ?? "";
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
 }
 
@@ -3846,6 +3847,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     label: string,
   ) {
     const safeTypes = new Set<CapabilityAction["type"]>([
+      "enable_extension",
       "toggle_skill",
       "toggle_workflow",
       "toggle_mcp_server",
@@ -3864,69 +3866,77 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     setOperatorStatus(`Repairing ${label}...`);
+    let completed = true;
     for (const action of allowedActions) {
-      await runCapabilityAction(action);
+      const result = await runCapabilityAction(action);
+      completed = completed && result;
+    }
+    if (!completed) {
+      return;
     }
     setOperatorStatus(`${label} repair sequence applied`);
     appendOperatorFeed(`${label} repair sequence applied`, "success");
   }
 
-  async function runCapabilityAction(action: CapabilityAction | null | undefined) {
-    if (!action) return;
+  async function runCapabilityAction(action: CapabilityAction | null | undefined): Promise<boolean> {
+    if (!action) return false;
     switch (action.type) {
+      case "enable_extension":
+        if (action.name) return enableExtensionPackage(action.name, typeof action.target === "string" ? action.target : undefined);
+        return false;
       case "toggle_skill": {
         const skill = skills.find((item) => item.name === action.name);
         if (skill) await toggleSkill(skill);
-        return;
+        return true;
       }
       case "toggle_workflow": {
         const workflow = workflows.find((item) => item.name === action.name);
         if (workflow) await toggleWorkflow(workflow, Boolean(action.enabled));
-        return;
+        return true;
       }
       case "toggle_mcp_server": {
         const server = mcpServers.find((item) => item.name === action.name);
         if (server) await toggleMcpServer(server);
-        return;
+        return true;
       }
       case "test_mcp_server": {
         const server = mcpServers.find((item) => item.name === action.name);
         if (server) await testMcpServer(server);
-        return;
+        return true;
       }
       case "test_native_notification":
         await sendTestNativeNotification();
-        return;
+        return true;
       case "set_tool_policy":
         if (action.mode === "safe" || action.mode === "balanced" || action.mode === "full") {
           await updateToolPolicy(action.mode);
         }
-        return;
+        return true;
       case "set_mcp_policy":
         if (action.mode === "disabled" || action.mode === "approval" || action.mode === "full") {
           await updateMcpPolicy(action.mode);
         }
-        return;
+        return true;
       case "install_catalog_item": {
         const item = catalogItems.find((entry) => entry.name === action.name);
         if (item) await installCatalogItem(item);
-        return;
+        return true;
       }
       case "activate_starter_pack": {
         const pack = starterPacks.find((entry) => entry.name === action.name);
         if (pack) await activateStarterPack(pack);
-        return;
+        return true;
       }
       case "draft_workflow": {
         const workflow = workflows.find((entry) => entry.name === action.name);
         if (workflow) queueComposerDraft(buildWorkflowDraft(workflow));
-        return;
+        return true;
       }
       case "open_settings":
         setSettingsPanelOpen(true);
-        return;
+        return true;
       default:
-        return;
+        return false;
     }
   }
 
@@ -4018,6 +4028,37 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } catch {
       setOperatorStatus(`Failed to update ${skill.name}`);
       appendOperatorFeed(`Failed to update skill ${skill.name}`, "failed");
+    }
+  }
+
+  async function enableExtensionPackage(extensionId: string, displayName?: string): Promise<boolean> {
+    const extensionPackage = extensionPackages.find((item) => item.id === extensionId);
+    const label = displayName ?? extensionPackage?.display_name ?? extensionId;
+    setOperatorStatus(`Enabling ${label}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/enable`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const approvalHandled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to enable ${label}`,
+          setOperatorStatus,
+        );
+        if (!approvalHandled) {
+          appendOperatorFeed(`Failed to enable extension ${label}`, "failed");
+        }
+        return false;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${label} enabled`);
+      appendOperatorFeed(`${label} enabled`, "success");
+      return true;
+    } catch {
+      setOperatorStatus(`Failed to enable ${label}`);
+      appendOperatorFeed(`Failed to enable extension ${label}`, "failed");
+      return false;
     }
   }
 

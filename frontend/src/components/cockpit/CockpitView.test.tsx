@@ -891,6 +891,190 @@ describe("CockpitView", () => {
     );
   });
 
+  it("routes manual bootstrap extension enables through the lifecycle approval path", async () => {
+    let approvalQueued = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { total_items: 0, visible_groups: 0 } }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse(
+          approvalQueued
+            ? [{
+              id: "approval-extension-enable",
+              session_id: null,
+              thread_id: null,
+              thread_label: null,
+              tool_name: "extension_enable",
+              risk_level: "high",
+              status: "pending",
+              summary: "Enable Research Pack contributions with high-risk capabilities",
+              created_at: "2026-03-23T10:00:00Z",
+              resume_message: null,
+              extension_id: "seraph.research-pack",
+              extension_display_name: "Research Pack",
+              extension_action: "enable",
+              package_path: "/tmp/workspace/extensions/research-pack",
+              lifecycle_boundaries: ["workspace_write"],
+              permissions: { tool_names: ["write_file"] },
+            }]
+            : [],
+        ));
+      }
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [{
+            id: "runbook:research-briefing",
+            name: "research-briefing",
+            label: "Research briefing",
+            description: "Enable packaged workflow support and resume the runbook",
+            source: "workflow",
+            command: "Run workflow \"web-brief-to-file\" with query=\"seraph\".",
+            availability: "blocked",
+            blocking_reasons: ["workflow packaged in a disabled extension"],
+            recommended_actions: [{ type: "enable_extension", label: "Enable Research Pack", name: "seraph.research-pack", target: "Research Pack" }],
+            parameter_schema: {},
+            risk_level: "medium",
+            execution_boundaries: ["workspace_write"],
+            action: { type: "draft_workflow", label: "Draft workflow", name: "web-brief-to-file" },
+          }],
+        }));
+      }
+      if (url.includes("/api/capabilities/preflight")) {
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:research-briefing",
+          label: "Research briefing",
+          description: "Enable packaged workflow support and resume the runbook",
+          availability: "blocked",
+          blocking_reasons: ["workflow packaged in a disabled extension"],
+          autorepair_actions: [],
+          recommended_actions: [{ type: "enable_extension", label: "Enable Research Pack", name: "seraph.research-pack", target: "Research Pack" }],
+          ready: false,
+          can_autorepair: false,
+        }));
+      }
+      if (url.includes("/api/capabilities/bootstrap")) {
+        expect(init?.method).toBe("POST");
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:research-briefing",
+          label: "Research briefing",
+          status: "blocked",
+          ready: false,
+          availability: "blocked",
+          blocking_reasons: ["workflow packaged in a disabled extension"],
+          applied_actions: [],
+          manual_actions: [{ type: "enable_extension", label: "Enable Research Pack", name: "seraph.research-pack", target: "Research Pack" }],
+        }));
+      }
+      if (url.includes("/api/extensions/seraph.research-pack/enable") && init?.method === "POST") {
+        approvalQueued = true;
+        return Promise.resolve(mockResponse({
+          detail: {
+            type: "approval_required",
+            approval_id: "approval-extension-enable",
+            tool_name: "extension_enable",
+            risk_level: "high",
+            message: "Enable extension 'Research Pack' with access to high-risk capabilities. Approve it first, then retry the extension action.",
+          },
+        }, false, 409));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.research-pack",
+            display_name: "Research Pack",
+            version: "2026.3.21",
+            kind: "capability-pack",
+            trust: "local",
+            source: "manifest",
+            location: "workspace",
+            status: "ready",
+            summary: "Research workflows",
+            issues: [],
+            load_errors: [],
+            toggle_targets: [{ type: "workflow", name: "web-brief-to-file" }],
+            toggleable_contribution_types: ["workflows"],
+            passive_contribution_types: ["runbooks"],
+            enable_supported: true,
+            disable_supported: false,
+            removable: true,
+            enabled_scope: "toggleable_contributions",
+            configurable: false,
+            metadata_supported: false,
+            config_scope: "metadata_only",
+            enabled: false,
+            config: {},
+            studio_files: [],
+          }],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
+    const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
+    expect(runbookRow).not.toBeNull();
+    fireEvent.click(within(runbookRow as HTMLElement).getByRole("button", { name: "repair" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.research-pack/enable"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(await screen.findByText("Enable Research Pack contributions with high-risk capabilities")).toBeInTheDocument();
+    expect(await screen.findByText("approval-extension-enable")).toBeInTheDocument();
+    expect(screen.queryByText("Research briefing repair sequence applied")).not.toBeInTheDocument();
+  });
+
   it("keeps step repair visible even when replay is blocked", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

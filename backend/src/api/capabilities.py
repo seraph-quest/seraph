@@ -22,6 +22,7 @@ from src.api.catalog import (
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
+from src.extensions.lifecycle import get_extension
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
 from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
@@ -829,6 +830,36 @@ def _action_key(action: dict[str, Any]) -> tuple[str, str | None, str | None, bo
     )
 
 
+def _extension_enable_action(extension_id: str | None) -> dict[str, Any] | None:
+    if not extension_id:
+        return None
+    try:
+        extension = get_extension(str(extension_id))
+    except KeyError:
+        return None
+    if not bool(extension.get("enable_supported")):
+        return None
+    display_name = str(extension.get("display_name") or extension_id)
+    return {
+        "type": "enable_extension",
+        "label": f"Enable {display_name}",
+        "name": str(extension_id),
+        "target": display_name,
+    }
+
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None, str | None, bool | None, str | None]] = set()
+    for action in actions:
+        key = _action_key(action)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+    return deduped
+
+
 def _ordered_bootstrap_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         actions,
@@ -1001,12 +1032,18 @@ def _attach_skill_actions(
     for skill in skills:
         actions: list[dict[str, Any]] = []
         if not skill.get("enabled", False):
-            actions.append({
-                "type": "toggle_skill",
-                "label": "Enable skill",
-                "name": skill["name"],
-                "enabled": True,
-            })
+            extension_action = _extension_enable_action(
+                str(skill.get("extension_id")) if skill.get("extension_id") else None,
+            )
+            if extension_action is not None:
+                actions.append(extension_action)
+            else:
+                actions.append({
+                    "type": "toggle_skill",
+                    "label": "Enable skill",
+                    "name": skill["name"],
+                    "enabled": True,
+                })
         for missing_tool in skill.get("missing_tools", []):
             blocked_tool = tool_status.get(str(missing_tool))
             suggested_mode = _recommended_tool_policy_mode(
@@ -1019,7 +1056,7 @@ def _attach_skill_actions(
                     "label": f"Allow {missing_tool}",
                     "mode": suggested_mode,
                 })
-        skill["recommended_actions"] = actions
+        skill["recommended_actions"] = _dedupe_actions(actions)
 
 
 def _attach_workflow_actions(
@@ -1035,22 +1072,34 @@ def _attach_workflow_actions(
         actions: list[dict[str, Any]] = []
         blocked_skill_tools: list[str] = []
         if not workflow.get("enabled", False):
-            actions.append({
-                "type": "toggle_workflow",
-                "label": "Enable workflow",
-                "name": workflow["name"],
-                "enabled": True,
-            })
+            extension_action = _extension_enable_action(
+                str(workflow.get("extension_id")) if workflow.get("extension_id") else None,
+            )
+            if extension_action is not None:
+                actions.append(extension_action)
+            else:
+                actions.append({
+                    "type": "toggle_workflow",
+                    "label": "Enable workflow",
+                    "name": workflow["name"],
+                    "enabled": True,
+                })
         for missing_skill in workflow.get("missing_skills", []):
             skill = skills_by_name.get(str(missing_skill))
             if skill is not None:
                 if not skill.get("enabled", False):
-                    actions.append({
-                        "type": "toggle_skill",
-                        "label": f"Enable {missing_skill}",
-                        "name": missing_skill,
-                        "enabled": True,
-                    })
+                    extension_action = _extension_enable_action(
+                        str(skill.get("extension_id")) if skill.get("extension_id") else None,
+                    )
+                    if extension_action is not None:
+                        actions.append(extension_action)
+                    else:
+                        actions.append({
+                            "type": "toggle_skill",
+                            "label": f"Enable {missing_skill}",
+                            "name": missing_skill,
+                            "enabled": True,
+                        })
                 blocked_skill_tools.extend(
                     str(tool_name)
                     for tool_name in skill.get("missing_tools", []) or []
@@ -1085,7 +1134,7 @@ def _attach_workflow_actions(
                 "label": "Draft workflow",
                 "name": workflow["name"],
             })
-        workflow["recommended_actions"] = actions
+        workflow["recommended_actions"] = _dedupe_actions(actions)
 
 
 def _attach_tool_actions(native_tools: list[dict[str, Any]]) -> None:
@@ -1611,7 +1660,11 @@ async def bootstrap_capability(body: CapabilityBootstrapRequest):
         safe_actions = [
             action
             for action in preflight.get("autorepair_actions", []) or []
-            if isinstance(action, dict) and _action_key(action) not in seen_actions
+            if (
+                isinstance(action, dict)
+                and str(action.get("type") or "") in _SAFE_AUTOREPAIR_ACTION_TYPES
+                and _action_key(action) not in seen_actions
+            )
         ]
         if not safe_actions:
             break

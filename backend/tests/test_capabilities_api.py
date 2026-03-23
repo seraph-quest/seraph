@@ -144,6 +144,84 @@ def test_load_starter_packs_does_not_fallback_when_manager_is_initialized():
     fallback_manager_cls.assert_not_called()
 
 
+def test_attach_skill_actions_uses_extension_enable_for_packaged_disabled_skills():
+    from src.api.capabilities import _attach_skill_actions
+
+    skills = [
+        {
+            "name": "web-briefing",
+            "enabled": False,
+            "extension_id": "seraph.research-pack",
+            "missing_tools": [],
+        }
+    ]
+
+    with patch(
+        "src.api.capabilities.get_extension",
+        return_value={
+            "id": "seraph.research-pack",
+            "display_name": "Research Pack",
+            "enable_supported": True,
+        },
+    ):
+        _attach_skill_actions(skills, native_tools=[], tool_mode="balanced")
+
+    assert skills[0]["recommended_actions"] == [
+        {
+            "type": "enable_extension",
+            "label": "Enable Research Pack",
+            "name": "seraph.research-pack",
+            "target": "Research Pack",
+        }
+    ]
+
+
+def test_attach_workflow_actions_uses_extension_enable_for_packaged_disabled_workflows():
+    from src.api.capabilities import _attach_workflow_actions
+
+    workflows = [
+        {
+            "name": "web-brief-to-file",
+            "enabled": False,
+            "extension_id": "seraph.research-pack",
+            "missing_skills": ["web-briefing"],
+            "missing_tools": [],
+        }
+    ]
+    skills_by_name = {
+        "web-briefing": {
+            "name": "web-briefing",
+            "enabled": False,
+            "extension_id": "seraph.research-pack",
+            "missing_tools": [],
+        }
+    }
+
+    with patch(
+        "src.api.capabilities.get_extension",
+        return_value={
+            "id": "seraph.research-pack",
+            "display_name": "Research Pack",
+            "enable_supported": True,
+        },
+    ):
+        _attach_workflow_actions(
+            workflows,
+            native_tools=[],
+            skills_by_name=skills_by_name,
+            tool_mode="balanced",
+        )
+
+    assert workflows[0]["recommended_actions"] == [
+        {
+            "type": "enable_extension",
+            "label": "Enable Research Pack",
+            "name": "seraph.research-pack",
+            "target": "Research Pack",
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs(client):
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
@@ -1117,6 +1195,70 @@ async def test_capability_bootstrap_can_apply_mcp_toggle_actions(client):
     assert payload["applied_actions"][0]["type"] == "toggle_mcp_server"
     assert payload["doctor_plan"]["applied_actions"][0]["type"] == "toggle_mcp_server"
     apply_action.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_leaves_extension_enable_actions_manual(client):
+    blocked_preflight = {
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Research and save",
+        "availability": "blocked",
+        "blocking_reasons": ["workflow packaged in a disabled extension"],
+        "recommended_actions": [
+            {
+                "type": "enable_extension",
+                "label": "Enable Research Pack",
+                "name": "seraph.research-pack",
+                "target": "Research Pack",
+            }
+        ],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "parameter_schema": {"query": {"type": "string"}},
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "autorepair_actions": [
+            {
+                "type": "enable_extension",
+                "label": "Enable Research Pack",
+                "name": "seraph.research-pack",
+                "target": "Research Pack",
+            }
+        ],
+        "can_autorepair": False,
+        "ready": False,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"workflows_ready": 0}},
+                {"summary": {"workflows_ready": 0}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, blocked_preflight],
+        ),
+        patch("src.api.capabilities._apply_safe_capability_action", AsyncMock()) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()) as log_event,
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "workflow", "name": "web-brief-to-file"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "blocked"
+    assert payload["ready"] is False
+    assert payload["applied_actions"] == []
+    assert payload["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["doctor_plan"]["manual_actions"] == blocked_preflight["recommended_actions"]
+    apply_action.assert_not_awaited()
+    log_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio

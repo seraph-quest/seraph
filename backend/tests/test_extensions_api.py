@@ -147,6 +147,7 @@ def _write_mcp_connector_extension(
     url: str = "https://example.test/mcp",
     description: str = "Packaged GitHub MCP",
     auth_hint: str = "Set GITHUB_TOKEN before enabling the connector",
+    headers: str = '{"Authorization": "Bearer ${GITHUB_TOKEN}"}',
     package_name: str = "connector-pack",
 ) -> Path:
     package_dir = root / package_name
@@ -173,7 +174,7 @@ def _write_mcp_connector_extension(
         '  "name": "github-packaged",\n'
         f'  "url": "{url}",\n'
         f'  "description": "{description}",\n'
-        '  "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},\n'
+        f'  "headers": {headers},\n'
         f'  "auth_hint": "{auth_hint}",\n'
         '  "transport": "streamable-http"\n'
         "}\n",
@@ -994,7 +995,8 @@ async def test_update_workspace_connector_refreshes_packaged_mcp_server(client, 
         version="2026.4.01",
         url="https://example.test/mcp/v2",
         description="Updated packaged GitHub MCP",
-        auth_hint="Use GITHUB_TOKEN with repo scope before enabling the connector",
+        auth_hint="",
+        headers='{"Authorization": "Bearer ${UPDATED_GITHUB_TOKEN}"}',
     )
 
     with patch(
@@ -1046,9 +1048,10 @@ async def test_update_workspace_connector_refreshes_packaged_mcp_server(client, 
         assert updated["version"] == "2026.4.01"
         assert mcp_manager._config["github-packaged"]["url"] == "https://example.test/mcp/v2"
         assert mcp_manager._config["github-packaged"]["description"] == "Updated packaged GitHub MCP"
-        assert mcp_manager._config["github-packaged"]["auth_hint"] == (
-            "Use GITHUB_TOKEN with repo scope before enabling the connector"
-        )
+        assert "auth_hint" not in mcp_manager._config["github-packaged"]
+        assert mcp_manager._config["github-packaged"]["headers"] == {
+            "Authorization": "Bearer ${UPDATED_GITHUB_TOKEN}"
+        }
         assert mcp_manager._config["github-packaged"]["enabled"] is True
         assert connect_mock.call_count == 2
         assert disconnect_mock.call_count == 1

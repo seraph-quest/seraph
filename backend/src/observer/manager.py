@@ -133,7 +133,9 @@ class ContextManager:
                 goal_data = source_results.get("goals", {})
 
                 # Derive data quality
-                if sources_ok == sources_total:
+                if sources_total == 0:
+                    data_quality = "stale"
+                elif sources_ok == sources_total:
                     data_quality = "good"
                 elif sources_ok == 0:
                     data_quality = "stale"

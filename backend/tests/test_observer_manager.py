@@ -103,6 +103,23 @@ class TestContextManagerRefresh:
         goals_mock.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_refresh_with_no_active_packaged_sources_marks_data_quality_stale(self):
+        mgr = ContextManager()
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[]), \
+             patch("src.observer.sources.time_source.gather_time") as time_mock, \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock) as calendar_mock, \
+             patch("src.observer.sources.git_source.gather_git") as git_mock, \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock) as goals_mock:
+            ctx = await mgr.refresh()
+
+        assert ctx.data_quality == "stale"
+        time_mock.assert_not_called()
+        calendar_mock.assert_not_called()
+        git_mock.assert_not_called()
+        goals_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_refresh_preserves_screen_context(self):
         mgr = ContextManager()
         mgr.update_screen_context("VS Code", "Editing Python")

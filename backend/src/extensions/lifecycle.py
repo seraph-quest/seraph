@@ -415,16 +415,8 @@ def _sync_mcp_servers_for_updated_extension(
     for name, definition in updated_definitions.items():
         previous_state = mcp_manager._config.get(name, {})
         enabled = bool(previous_state.get("enabled", False))
-        headers = previous_state.get("headers") if isinstance(previous_state.get("headers"), dict) else definition.headers
-        auth_hint = (
-            definition.auth_hint
-            if definition.auth_hint
-            else (
-                str(previous_state.get("auth_hint"))
-                if isinstance(previous_state.get("auth_hint"), str) and previous_state.get("auth_hint")
-                else ""
-            )
-        )
+        headers = definition.headers
+        auth_hint = definition.auth_hint
         if name in mcp_manager._config:
             mcp_manager.update_server(
                 name,

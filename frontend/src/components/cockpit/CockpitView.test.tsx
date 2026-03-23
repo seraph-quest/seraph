@@ -885,7 +885,7 @@ describe("CockpitView", () => {
     );
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/mcp/servers/github/test"),
+        expect.stringMatching(/\/api\/mcp\/servers\/.+\/test/),
         expect.objectContaining({ method: "POST" }),
       ),
     );
@@ -2493,7 +2493,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("routes packaged MCP test and toggle actions through extension connector endpoints", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));

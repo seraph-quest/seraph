@@ -17,7 +17,7 @@
 
 <p align="center">
   <a href="assets/github/seraph-demo.mp4">
-    <img src="assets/github/seraph-demo-poster.jpg" alt="Seraph workspace demo" width="900" />
+    <img src="assets/github/seraph-demo-preview.gif" alt="Seraph workspace demo" width="900" />
   </a>
 </p>
 

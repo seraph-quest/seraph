@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import col, select
 
+from config.settings import settings
 from src.api.capabilities import _recommended_tool_policy_mode
 from src.agent.session import session_manager
 from src.agent.factory import get_base_tools_and_active_skills
@@ -20,6 +21,8 @@ from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import AuditEvent
+from src.extensions.registry import default_manifest_roots_for_workspace
+from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import workflow_manager
@@ -58,9 +61,21 @@ def _resolve_workflow_file_name(file_name: str | None, *, default_name: str) -> 
         or normalized.startswith("..")
         or os.path.basename(normalized) != normalized
     ):
-        raise HTTPException(status_code=400, detail="Workflow file name must stay within the managed workflows directory")
+        raise HTTPException(status_code=400, detail="Workflow file name must stay within the managed workspace package")
     stem, _ = os.path.splitext(normalized)
     return _safe_markdown_filename(stem or normalized)
+
+
+def _ensure_workflow_manager_workspace_extensions_loaded() -> None:
+    workflows_dir = workflow_manager._workflows_dir or os.path.join(settings.workspace_dir, "workflows")
+    manifest_roots = list(workflow_manager._manifest_roots or [])
+    changed = not bool(workflow_manager._workflows_dir)
+    for root in default_manifest_roots_for_workspace(settings.workspace_dir):
+        if root not in manifest_roots:
+            manifest_roots.append(root)
+            changed = True
+    if changed:
+        workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
 
 
 def _validate_workflow_content(content: str, *, path: str = "<draft>") -> dict[str, Any]:
@@ -1095,13 +1110,8 @@ async def save_workflow_draft(req: WorkflowDraftRequest):
         req.file_name,
         default_name=_safe_markdown_filename(str(validation["workflow"]["name"])),
     )
-    workflows_dir = workflow_manager._workflows_dir
-    if not workflows_dir:
-        raise HTTPException(status_code=500, detail="Workflow manager is not initialized")
-    os.makedirs(workflows_dir, exist_ok=True)
-    target_path = os.path.join(workflows_dir, file_name)
-    with open(target_path, "w", encoding="utf-8") as handle:
-        handle.write(req.content)
+    _ensure_workflow_manager_workspace_extensions_loaded()
+    target_path = str(save_workspace_contribution("workflows", file_name=file_name, content=req.content))
     workflows = workflow_manager.reload()
     await log_integration_event(
         integration_type="workflow",

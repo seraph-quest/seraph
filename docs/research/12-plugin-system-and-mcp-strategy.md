@@ -1,4 +1,4 @@
-# 12. Plugin System And MCP Strategy
+# 12. Extension Platform And MCP Strategy
 
 ## Goal
 
@@ -6,11 +6,15 @@ Define a Seraph extension model that compounds capability without turning the pr
 
 This document answers:
 
-- whether Seraph should build a real plugin system
+- whether Seraph should build a real extension platform
 - what should become an extension versus stay core
 - how MCP should fit into the architecture
 - whether Seraph should build a non-MCP alternative
 - how to execute the migration from the current codebase
+
+Follow-up decision:
+
+- [13. Trusted Code Plugins RFC](/research/trusted-code-plugins-rfc)
 
 ## Executive Summary
 
@@ -22,7 +26,7 @@ The right model is:
 - MCP as one connector type, not the whole ecosystem
 - a narrow first-party managed connector path for high-value integrations
 - core trust/safety/runtime boundaries kept inside Seraph
-- trusted code plugins deferred or heavily gated
+- trusted code plugins deferred, with the current RFC explicitly keeping them out of scope
 
 The strongest product decision is:
 
@@ -57,14 +61,14 @@ The strongest product decision is:
       ▼           ▼                       ▼                       ▼
 ┌───────────┐ ┌───────────────┐     ┌──────────────┐       ┌──────────────┐
 │Declarative│ │MCP Connectors │     │Managed       │       │Trusted Code  │
-│Extensions │ │               │     │Connectors    │       │Plugins       │
+│Extensions │ │               │     │Connectors    │       │Future RFC    │
 ├───────────┤ ├───────────────┤     ├──────────────┤       ├──────────────┤
-│skills     │ │MCP servers    │     │Slack         │       │native tools  │
-│workflows  │ │resources      │     │Jira          │       │deep runtime  │
-│runbooks   │ │prompts/tools  │     │GitHub        │       │extensions    │
-│starter    │ │stdio/http     │     │Google        │       │later only    │
-│packs      │ │long-tail      │     │first-party   │       │trusted only  │
-│presets    │ │integrations   │     │curated UX    │       │heavily gated │
+│skills     │ │MCP servers    │     │Slack         │       │not shipped   │
+│workflows  │ │resources      │     │Jira          │       │not approved  │
+│runbooks   │ │prompts/tools  │     │GitHub        │       │revisit only  │
+│starter    │ │stdio/http     │     │Google        │       │with a new    │
+│packs      │ │long-tail      │     │first-party   │       │trusted-code  │
+│presets    │ │integrations   │     │curated UX    │       │RFC           │
 │routines   │ │               │     │              │       │              │
 └───────────┘ └─────── ───────┘     └──────────────┘       └──────────────┘
 ```
@@ -88,16 +92,16 @@ Seraph already has multiple extension seams, but they are not unified under one 
   - `backend/src/api/catalog.py`
   - `backend/src/api/capabilities.py`
 
-### Existing internal code plugin surface
+### Existing bundled native-tool discovery surface
 
 Seraph also has repo-local Python tool discovery:
 
-- `backend/src/plugins/loader.py`
-- `backend/src/plugins/registry.py`
+- `backend/src/native_tools/loader.py`
+- `backend/src/native_tools/registry.py`
 
 Important nuance:
 
-- this is not a general plugin system
+- this is not a general arbitrary-code plugin system
 - it only auto-discovers trusted, bundled Python tools in `backend/src/tools`
 - it does not install or sandbox third-party code
 
@@ -465,6 +469,10 @@ Extensions should contribute capabilities inside those systems, not replace them
 
 Seraph should introduce one extension manifest and one package/install lifecycle.
 
+For the current migration, the canonical manifest should cover `capability-pack`
+and `connector-pack` only. Trusted code remains deferred to the later RFC slice
+instead of being normalized into the first manifest contract.
+
 ### Manifest structure
 
 ```text
@@ -476,12 +484,29 @@ capability-pack
 │  └─ web-brief-to-file.md
 ├─ runbooks/
 │  └─ research-briefing.yaml
+├─ starter-packs/
+│  └─ research.json
 ├─ mcp/
 │  └─ http-request.json
 ├─ observers/
-│  └─ calendar-source.yaml
-└─ presets/
-   └─ provider-routing.yaml
+│  ├─ definitions/
+│  │  └─ calendar.yaml
+│  └─ connectors/
+│     └─ calendar-sync.yaml
+├─ presets/
+│  └─ provider/
+│     └─ routing.yaml
+├─ prompts/
+│  └─ guardian.md
+├─ routines/
+│  └─ daily-review.yaml
+├─ connectors/
+│  └─ managed/
+│     └─ slack.yaml
+├─ channels/
+│  └─ desktop.yaml
+└─ workspace/
+   └─ live-view.yaml
 ```
 
 Example:
@@ -511,6 +536,25 @@ permissions:
     - write_file
   network: true
 ```
+
+Here `trust` is package provenance (`bundled`, `local`, or later `verified`),
+not a replacement for the trust-tier architecture above.
+
+For the current migration, these package roots are canonical:
+
+- `skills/`
+- `workflows/`
+- `runbooks/`
+- `starter-packs/`
+- `presets/provider/`
+- `prompts/`
+- `routines/`
+- `mcp/`
+- `connectors/managed/`
+- `observers/definitions/`
+- `observers/connectors/`
+- `channels/`
+- `workspace/`
 
 This lets one package contribute multiple typed surfaces without inventing a universal runtime plugin contract.
 
@@ -639,6 +683,10 @@ Rule of thumb:
 
 ## Recommended Execution Plan
 
+Canonical slice ownership lives in `docs/implementation/00-master-roadmap.md`.
+This section groups the same transition into phases so the architectural logic
+stays readable without duplicating a competing queue.
+
 ## Phase 1: Clarify today's architecture
 
 Goal:
@@ -651,10 +699,12 @@ Work:
 - document current extension types explicitly in API and docs
 - define the extension manifest schema
 
-PR slices:
+Queue slices:
 
 1. `extension-model-terminology-v1`
 2. `extension-manifest-schema-v1`
+3. `extension-registry-and-loader-v1`
+4. `extension-validation-and-doctor-v1`
 
 ## Phase 2: Package the declarative surfaces
 
@@ -668,11 +718,16 @@ Work:
 - make bundled defaults ship as real extension packages
 - support local install/update/remove for capability packs
 
-PR slices:
+Queue slices:
 
-3. `capability-packaging-v1`
-4. `bundled-capability-packs-v1`
-5. `extension-lifecycle-ui-v1`
+5. `extension-package-layout-v1`
+6. `extension-scaffold-tools-v1`
+7. `extension-authoring-docs-v1`
+8. `example-capability-pack-v1`
+9. `capability-packaging-skills-v1`
+10. `capability-packaging-workflows-v1`
+11. `capability-packaging-runbooks-and-starter-packs-v1`
+12. `bundled-capability-packs-v1`
 
 ## Phase 3: Normalize connector surfaces
 
@@ -687,11 +742,14 @@ Work:
 - add managed connector abstraction for first-party integrations
 - keep the same cockpit lifecycle for both
 
-PR slices:
+Queue slices:
 
-6. `connector-manifest-and-health-v1`
-7. `mcp-package-and-install-flow-v1`
-8. `managed-connectors-v1`
+13. `extension-lifecycle-api-v1`
+14. `extension-studio-manifest-awareness-v1`
+15. `extension-lifecycle-ui-v1`
+16. `connector-manifest-and-health-v1`
+17. `mcp-packaging-and-install-flow-v1`
+18. `managed-connectors-v1`
 
 ## Phase 4: Extend input/output reach cleanly
 
@@ -705,10 +763,14 @@ Work:
 - delivery/channel adapters
 - workspace/surface adapters
 
-PR slices:
+Queue slices:
 
-9. `observer-source-extensions-v1`
-10. `channel-adapter-extensions-v1`
+19. `observer-source-extensions-v1`
+20. `channel-adapter-extensions-v1`
+21. `extension-permissions-and-approvals-v1`
+22. `extension-audit-and-activity-v1`
+23. `extension-versioning-and-update-flow-v1`
+24. `legacy-loader-cleanup-v1`
 
 ## Phase 5: Reassess trusted code plugins
 
@@ -721,9 +783,9 @@ Work:
 - only after phases 1-4 prove insufficient
 - if needed, introduce signed or explicitly trusted code plugins with strong policy gates
 
-PR slice:
+Queue slice:
 
-11. `trusted-code-plugins-rfc-v1`
+25. `trusted-code-plugins-rfc-v1`
 
 ## Product recommendation
 

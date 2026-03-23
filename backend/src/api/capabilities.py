@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
-import shutil
 import tempfile
 from typing import Any
 
@@ -23,9 +22,14 @@ from src.api.catalog import (
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
+from src.extensions.lifecycle import get_extension
+from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
+from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
-from src.plugins.registry import TOOL_METADATA, get_tool_metadata
+from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
+from src.runbooks.manager import runbook_manager
 from src.skills.manager import skill_manager
+from src.starter_packs.manager import StarterPackManager, starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import (
     MCP_POLICY_MODES,
@@ -37,13 +41,12 @@ from src.tools.policy import (
     is_tool_allowed,
 )
 from src.workflows.manager import workflow_manager
-from src.workflows.loader import scan_workflows, sanitize_workflow_name
+from src.workflows.loader import scan_workflow_paths, scan_workflows, sanitize_workflow_name
 
 router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
-_STARTER_PACKS_PATH = os.path.join(_DEFAULTS_DIR, "starter-packs.json")
-_BUNDLED_WORKFLOWS_DIR = os.path.join(_DEFAULTS_DIR, "workflows")
+_BUNDLED_CORE_CAPABILITIES_DIR = os.path.join(_DEFAULTS_DIR, "extensions", "core-capabilities")
 _SAFE_AUTOREPAIR_ACTION_TYPES = {
     "toggle_skill",
     "toggle_workflow",
@@ -64,6 +67,18 @@ _BOOTSTRAP_ACTION_PRIORITY = {
 }
 
 
+def _ensure_workflow_manager_workspace_extensions_loaded() -> None:
+    workflows_dir = workflow_manager._workflows_dir or os.path.join(settings.workspace_dir, "workflows")
+    manifest_roots = list(workflow_manager._manifest_roots or [])
+    changed = not bool(workflow_manager._workflows_dir)
+    for root in default_manifest_roots_for_workspace(settings.workspace_dir):
+        if root not in manifest_roots:
+            manifest_roots.append(root)
+            changed = True
+    if changed:
+        workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
+
+
 class CapabilityBootstrapRequest(BaseModel):
     target_type: str
     name: str
@@ -74,13 +89,34 @@ class WorkflowDraftRequest(BaseModel):
 
 
 def _load_starter_packs() -> list[dict[str, Any]]:
-    path = os.path.normpath(_STARTER_PACKS_PATH)
-    if not os.path.isfile(path):
-        return []
-    with open(path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    packs = payload.get("packs", [])
-    return packs if isinstance(packs, list) else []
+    packs = starter_pack_manager.list_packs()
+    if packs or starter_pack_manager.is_initialized():
+        return packs
+    fallback_manager = StarterPackManager()
+    fallback_manager.init(
+        os.path.join(settings.workspace_dir, "starter-packs.json"),
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+    )
+    bundled_packs = fallback_manager.list_packs()
+    return [
+        {
+            "name": pack["name"],
+            "label": pack["label"],
+            "description": pack["description"],
+            "skills": list(pack.get("skills", [])),
+            "workflows": list(pack.get("workflows", [])),
+            "install_items": list(pack.get("install_items", [])),
+            "sample_prompt": pack.get("sample_prompt", ""),
+            "file_path": pack.get("file_path", ""),
+            "source": pack.get("source", "manifest"),
+            "extension_id": pack.get("extension_id"),
+        }
+        for pack in bundled_packs
+    ]
+
+
+def _load_explicit_runbooks() -> list[dict[str, Any]]:
+    return runbook_manager.list_runbooks()
 
 
 async def _persist_runtime_mode(column: str, mode: str) -> None:
@@ -110,14 +146,51 @@ async def _set_mcp_policy_mode(mode: str) -> bool:
     return True
 
 
-def _seed_bundled_workflow(name: str) -> bool:
-    source = os.path.join(os.path.normpath(_BUNDLED_WORKFLOWS_DIR), f"{name}.md")
-    if not os.path.isfile(source):
+def _bundled_workflow_source_by_name(name: str) -> str | None:
+    registry = ExtensionRegistry(
+        manifest_roots=[bundled_manifest_root()],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+    contribution_paths = [
+        str(resolved_path)
+        for contribution in registry.snapshot().list_contributions("workflows")
+        if isinstance((resolved_path := contribution.metadata.get("resolved_path")), str) and resolved_path
+    ]
+    workflows, _ = scan_workflow_paths(contribution_paths)
+    for workflow in workflows:
+        if workflow.name == name:
+            return workflow.file_path
+    return None
+
+
+def _ensure_bundled_workflow_available(name: str) -> bool:
+    if workflow_manager.get_workflow(name) is not None:
+        return True
+    workflow_manager.reload()
+    if workflow_manager.get_workflow(name) is not None:
+        return True
+    source = _bundled_workflow_source_by_name(name)
+    if not source or not os.path.isfile(source):
         return False
-    destination_dir = os.path.join(settings.workspace_dir, "workflows")
+    destination_dir = (
+        workflow_manager._workflows_dir
+        if getattr(workflow_manager, "_workflows_dir", "")
+        else os.path.join(settings.workspace_dir, "workflows")
+    )
+    manifest_roots = list(getattr(workflow_manager, "_manifest_roots", []) or [])
+    if not manifest_roots:
+        manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
+    bundled_root = bundled_manifest_root()
+    if bundled_root not in manifest_roots:
+        manifest_roots.append(bundled_root)
     os.makedirs(destination_dir, exist_ok=True)
-    shutil.copy2(source, os.path.join(destination_dir, f"{name}.md"))
-    return True
+    workflow_manager.init(
+        destination_dir,
+        manifest_roots=manifest_roots,
+    )
+    return workflow_manager.get_workflow(name) is not None
 
 
 def _skill_status_map(available_tool_names: list[str]) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -278,11 +351,112 @@ def _starter_pack_install_item_statuses(pack: dict[str, Any]) -> list[dict[str, 
     return statuses
 
 
+def _explicit_runbook_entries(
+    explicit_runbooks: list[dict[str, Any]],
+    *,
+    workflows_by_name: dict[str, dict[str, Any]],
+    starter_packs_by_name: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+    entries: list[dict[str, Any]] = []
+    referenced_workflows: set[str] = set()
+    referenced_starter_packs: set[str] = set()
+
+    for runbook in explicit_runbooks:
+        runbook_id = str(runbook.get("id") or "").strip()
+        title = str(runbook.get("title") or "").strip()
+        summary = str(runbook.get("summary") or "").strip()
+        if not runbook_id or not title or not summary:
+            continue
+
+        workflow_name = str(runbook.get("workflow") or "").strip() or None
+        starter_pack_name = str(runbook.get("starter_pack") or "").strip() or None
+        command = str(runbook.get("command") or "").strip() or None
+
+        availability = "ready"
+        blocking_reasons: list[str] = []
+        recommended_actions: list[dict[str, Any]] = []
+        parameter_schema: dict[str, Any] = {}
+        risk_level = "low"
+        execution_boundaries: list[str] = ["advisory"]
+        action: dict[str, Any] | None = None
+
+        if workflow_name is not None:
+            referenced_workflows.add(workflow_name)
+            workflow = workflows_by_name.get(workflow_name)
+            if workflow is None:
+                availability = "blocked"
+                blocking_reasons = [f"missing workflow: {workflow_name}"]
+            else:
+                availability = str(workflow.get("availability") or "unknown")
+                blocking_reasons = _workflow_blocking_reasons(workflow)
+                recommended_actions = [
+                    item for item in workflow.get("recommended_actions", []) or []
+                    if isinstance(item, dict)
+                ]
+                parameter_schema = workflow.get("inputs", {}) if isinstance(workflow.get("inputs"), dict) else {}
+                risk_level = str(workflow.get("risk_level") or "unknown")
+                execution_boundaries = [
+                    str(value)
+                    for value in workflow.get("execution_boundaries", []) or []
+                    if isinstance(value, str)
+                ]
+                action = {"type": "draft_workflow", "label": "Draft workflow", "name": workflow_name}
+                if command is None:
+                    command = _workflow_draft(workflow)
+        elif starter_pack_name is not None:
+            referenced_starter_packs.add(starter_pack_name)
+            pack = starter_packs_by_name.get(starter_pack_name)
+            if pack is None:
+                availability = "blocked"
+                blocking_reasons = [f"missing starter pack: {starter_pack_name}"]
+                risk_level = "medium"
+                execution_boundaries = ["capability_activation"]
+            else:
+                availability = str(pack.get("availability") or "unknown")
+                blocking_reasons = _starter_pack_blocking_reasons(pack)
+                recommended_actions = [
+                    item for item in pack.get("recommended_actions", []) or []
+                    if isinstance(item, dict)
+                ]
+                risk_level = "medium"
+                execution_boundaries = ["capability_activation"]
+                action = {"type": "activate_starter_pack", "label": "Activate pack", "name": starter_pack_name}
+                if command is None:
+                    command = str(pack.get("sample_prompt") or "").strip() or None
+        else:
+            action = (
+                {"type": "draft_message", "label": "Use runbook", "content": command}
+                if command is not None
+                else None
+            )
+
+        entries.append({
+            "id": runbook_id,
+            "name": runbook_id,
+            "label": title,
+            "description": summary,
+            "source": "extension_runbook",
+            "command": command,
+            "availability": availability,
+            "blocking_reasons": blocking_reasons,
+            "recommended_actions": recommended_actions,
+            "parameter_schema": parameter_schema,
+            "risk_level": risk_level,
+            "execution_boundaries": execution_boundaries,
+            "action": action,
+            "file_path": runbook.get("file_path"),
+            "extension_id": runbook.get("extension_id"),
+        })
+
+    return entries, referenced_workflows, referenced_starter_packs
+
+
 def _recommended_actions(
     *,
     skills_by_name: dict[str, dict[str, Any]],
     workflows_by_name: dict[str, dict[str, Any]],
     starter_packs: list[dict[str, Any]],
+    explicit_runbooks: list[dict[str, Any]],
     native_tools: list[dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
     tool_mode: str,
@@ -420,13 +594,19 @@ def _recommended_actions(
                     },
                 })
 
-    runbooks: list[dict[str, Any]] = []
     packs_by_name = {
         str(pack["name"]): pack
         for pack in starter_packs
         if isinstance(pack, dict) and isinstance(pack.get("name"), str)
     }
+    runbooks, explicit_workflow_refs, explicit_starter_pack_refs = _explicit_runbook_entries(
+        explicit_runbooks,
+        workflows_by_name=workflows_by_name,
+        starter_packs_by_name=packs_by_name,
+    )
     for pack_name, pack in packs_by_name.items():
+        if pack_name in explicit_starter_pack_refs:
+            continue
         sample_prompt = str(pack.get("sample_prompt") or "").strip()
         if not sample_prompt:
             continue
@@ -447,6 +627,8 @@ def _recommended_actions(
         })
 
     for workflow in workflows_by_name.values():
+        if str(workflow["name"]) in explicit_workflow_refs:
+            continue
         if not bool(workflow.get("user_invocable", False)):
             continue
         runbooks.append({
@@ -553,11 +735,11 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
 
     for item_name in [str(item) for item in pack.get("install_items", [])]:
         install_result = install_catalog_item_by_name(item_name)
-        if install_result["ok"]:
+        if install_result["ok"] or install_result["status"] == "already_installed":
             installed_catalog_items.append({
                 "name": item_name,
                 "type": install_result["type"],
-                "status": install_result["status"],
+                "status": "installed",
             })
             continue
         if install_result["status"] != "already_installed":
@@ -576,10 +758,9 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
 
     for workflow_name in pack.get("workflows", []):
         if workflow_manager.get_workflow(str(workflow_name)) is None:
-            if not _seed_bundled_workflow(str(workflow_name)):
+            if not _ensure_bundled_workflow_available(str(workflow_name)):
                 missing_entries.append(f"workflow:{workflow_name}")
                 continue
-            workflow_manager.reload()
         if workflow_manager.enable(str(workflow_name)):
             changed_workflows.append(str(workflow_name))
         else:
@@ -647,6 +828,36 @@ def _action_key(action: dict[str, Any]) -> tuple[str, str | None, str | None, bo
         bool(action.get("enabled")) if action.get("enabled") is not None else None,
         str(action.get("target")) if action.get("target") is not None else None,
     )
+
+
+def _extension_enable_action(extension_id: str | None) -> dict[str, Any] | None:
+    if not extension_id:
+        return None
+    try:
+        extension = get_extension(str(extension_id))
+    except KeyError:
+        return None
+    if not bool(extension.get("enable_supported")):
+        return None
+    display_name = str(extension.get("display_name") or extension_id)
+    return {
+        "type": "enable_extension",
+        "label": f"Enable {display_name}",
+        "name": str(extension_id),
+        "target": display_name,
+    }
+
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None, str | None, bool | None, str | None]] = set()
+    for action in actions:
+        key = _action_key(action)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+    return deduped
 
 
 def _ordered_bootstrap_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -821,12 +1032,18 @@ def _attach_skill_actions(
     for skill in skills:
         actions: list[dict[str, Any]] = []
         if not skill.get("enabled", False):
-            actions.append({
-                "type": "toggle_skill",
-                "label": "Enable skill",
-                "name": skill["name"],
-                "enabled": True,
-            })
+            extension_action = _extension_enable_action(
+                str(skill.get("extension_id")) if skill.get("extension_id") else None,
+            )
+            if extension_action is not None:
+                actions.append(extension_action)
+            else:
+                actions.append({
+                    "type": "toggle_skill",
+                    "label": "Enable skill",
+                    "name": skill["name"],
+                    "enabled": True,
+                })
         for missing_tool in skill.get("missing_tools", []):
             blocked_tool = tool_status.get(str(missing_tool))
             suggested_mode = _recommended_tool_policy_mode(
@@ -839,7 +1056,7 @@ def _attach_skill_actions(
                     "label": f"Allow {missing_tool}",
                     "mode": suggested_mode,
                 })
-        skill["recommended_actions"] = actions
+        skill["recommended_actions"] = _dedupe_actions(actions)
 
 
 def _attach_workflow_actions(
@@ -855,22 +1072,34 @@ def _attach_workflow_actions(
         actions: list[dict[str, Any]] = []
         blocked_skill_tools: list[str] = []
         if not workflow.get("enabled", False):
-            actions.append({
-                "type": "toggle_workflow",
-                "label": "Enable workflow",
-                "name": workflow["name"],
-                "enabled": True,
-            })
+            extension_action = _extension_enable_action(
+                str(workflow.get("extension_id")) if workflow.get("extension_id") else None,
+            )
+            if extension_action is not None:
+                actions.append(extension_action)
+            else:
+                actions.append({
+                    "type": "toggle_workflow",
+                    "label": "Enable workflow",
+                    "name": workflow["name"],
+                    "enabled": True,
+                })
         for missing_skill in workflow.get("missing_skills", []):
             skill = skills_by_name.get(str(missing_skill))
             if skill is not None:
                 if not skill.get("enabled", False):
-                    actions.append({
-                        "type": "toggle_skill",
-                        "label": f"Enable {missing_skill}",
-                        "name": missing_skill,
-                        "enabled": True,
-                    })
+                    extension_action = _extension_enable_action(
+                        str(skill.get("extension_id")) if skill.get("extension_id") else None,
+                    )
+                    if extension_action is not None:
+                        actions.append(extension_action)
+                    else:
+                        actions.append({
+                            "type": "toggle_skill",
+                            "label": f"Enable {missing_skill}",
+                            "name": missing_skill,
+                            "enabled": True,
+                        })
                 blocked_skill_tools.extend(
                     str(tool_name)
                     for tool_name in skill.get("missing_tools", []) or []
@@ -905,7 +1134,7 @@ def _attach_workflow_actions(
                 "label": "Draft workflow",
                 "name": workflow["name"],
             })
-        workflow["recommended_actions"] = actions
+        workflow["recommended_actions"] = _dedupe_actions(actions)
 
 
 def _attach_tool_actions(native_tools: list[dict[str, Any]]) -> None:
@@ -1091,6 +1320,9 @@ def _starter_pack_statuses(
             "label": pack.get("label", pack["name"]),
             "description": pack.get("description", ""),
             "sample_prompt": pack.get("sample_prompt", ""),
+            "file_path": pack.get("file_path"),
+            "source": pack.get("source", "legacy"),
+            "extension_id": pack.get("extension_id"),
             "skills": skill_names,
             "workflows": workflow_names,
             "install_items": install_items,
@@ -1136,6 +1368,7 @@ def _build_capability_overview() -> dict[str, Any]:
         native_tools=native_tools,
         tool_mode=tool_mode,
     )
+    explicit_runbooks = _load_explicit_runbooks()
     _attach_tool_actions(native_tools)
     _attach_skill_actions(skills, native_tools=native_tools, tool_mode=tool_mode)
     _attach_workflow_actions(
@@ -1149,6 +1382,7 @@ def _build_capability_overview() -> dict[str, Any]:
         skills_by_name=skills_by_name,
         workflows_by_name=workflows_by_name,
         starter_packs=starter_packs,
+        explicit_runbooks=explicit_runbooks,
         native_tools=native_tools,
         mcp_servers=mcp_servers,
         tool_mode=tool_mode,
@@ -1363,11 +1597,8 @@ async def save_workflow_draft(body: WorkflowDraftRequest):
         raise HTTPException(status_code=400, detail="Workflow draft is invalid")
     workflow_name = str(validation["workflow"]["name"])
     file_name = f"{sanitize_workflow_name(workflow_name)}.md"
-    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
-    os.makedirs(workflows_dir, exist_ok=True)
-    file_path = os.path.join(workflows_dir, file_name)
-    with open(file_path, "w", encoding="utf-8") as handle:
-        handle.write(body.content)
+    _ensure_workflow_manager_workspace_extensions_loaded()
+    file_path = str(save_workspace_contribution("workflows", file_name=file_name, content=body.content))
     workflow_manager.reload()
     await log_integration_event(
         integration_type="workflow_draft",
@@ -1429,7 +1660,11 @@ async def bootstrap_capability(body: CapabilityBootstrapRequest):
         safe_actions = [
             action
             for action in preflight.get("autorepair_actions", []) or []
-            if isinstance(action, dict) and _action_key(action) not in seen_actions
+            if (
+                isinstance(action, dict)
+                and str(action.get("type") or "") in _SAFE_AUTOREPAIR_ACTION_TYPES
+                and _action_key(action) not in seen_actions
+            )
         ]
         if not safe_actions:
             break

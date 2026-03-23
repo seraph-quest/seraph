@@ -42,7 +42,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
 - [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
 - [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now `capability-marketplace-and-versioned-packs-v1`, because Seraph now exposes meaningful capability discovery, install-doctor bootstrap, extension authoring, and first branch/resume control, so the next biggest capability gain is safer versioned package distribution plus deeper studio and debugger depth.
+- [x] The next strategic focus is now the extension-platform transition beginning with `extension-model-terminology-v1`, `extension-manifest-schema-v1`, and `extension-registry-and-loader-v1`, because Seraph now needs one coherent extension architecture for skills, workflows, starter packs, runbooks, and MCP connectors before deeper marketplace or managed-connector work can land cleanly.
 - [x] `capability-pack-autoinstall-and-bootstrap-v3`, `extension-authoring-and-validation-studio-v1`, `workflow-step-branching-and-resume-v1`, `cockpit-density-and-live-operator-views-v4`, `provider-policy-explainability-and-budgets-v3`, `execution-safety-hardening-v9`, `native-channel-expansion-v5`, `world-model-memory-fusion-v9`, `guardian-learning-policy-v9`, and `guardian-behavioral-evals-v9` are now represented in the shipped state this branch is preparing to merge.
 - [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
 

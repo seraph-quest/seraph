@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from config.settings import settings
 from src.agent.factory import get_tools
-from src.plugins.registry import get_tool_metadata
+from src.native_tools.registry import get_tool_metadata
 from src.tools.policy import (
     get_current_mcp_policy_mode,
     get_current_tool_policy_mode,

@@ -582,9 +582,9 @@ Two options are available:
 - **Stdio proxy**: Use the stdio proxy (`mcp-servers/stdio-proxy/`) to wrap `github-mcp-server` as an HTTP endpoint. Add it to `data/stdio-proxies.json`, start with `./manage.sh -e dev proxy start`, then register with `./mcp.sh add github http://host.docker.internal:<port>/mcp`.
 - **GitHub's hosted MCP endpoint**: `https://api.githubcopilot.com/mcp/` — register directly with `./mcp.sh add github https://api.githubcopilot.com/mcp/` and configure a GitHub token via the Settings UI.
 
-## Optional: SKILL.md Plugins
+## Optional: SKILL.md Skills
 
-Skills are zero-code markdown plugins that extend the agent's behavior. Drop a `.md` file in `data/skills/` with YAML frontmatter and the agent gains new capabilities via prompt injection.
+Skills are zero-code markdown capability contributions that extend the agent's behavior. Drop a `.md` file in `data/skills/` with YAML frontmatter and the agent gains new capabilities via prompt injection.
 
 ```yaml
 ---

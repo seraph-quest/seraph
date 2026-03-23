@@ -36,6 +36,8 @@ export interface WorkflowInfo {
   enabled: boolean;
   step_count: number;
   file_path: string;
+  source?: string;
+  extension_id?: string | null;
   policy_modes: string[];
   execution_boundaries: string[];
   risk_level: string;

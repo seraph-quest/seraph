@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 
 from src.observer.manager import context_manager
-from src.plugins.registry import get_tool_metadata
+from src.native_tools.registry import get_tool_metadata
 
 TOOL_POLICY_MODES = ("safe", "balanced", "full")
 DEFAULT_TOOL_POLICY_MODE = "full"

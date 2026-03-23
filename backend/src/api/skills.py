@@ -1,4 +1,4 @@
-"""Skills API — list, toggle, reload, validate, and save SKILL.md plugins."""
+"""Skills API — list, toggle, reload, validate, and save SKILL.md skills."""
 
 import os
 import re
@@ -6,8 +6,11 @@ import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.agent.factory import get_base_tools_and_active_skills
+from src.extensions.registry import default_manifest_roots_for_workspace
+from src.extensions.workspace_package import save_workspace_contribution
 from src.skills.loader import parse_skill_content
 from src.skills.manager import skill_manager
 
@@ -41,9 +44,21 @@ def _resolve_skill_file_name(file_name: str | None, *, default_name: str) -> str
         or normalized.startswith("..")
         or os.path.basename(normalized) != normalized
     ):
-        raise HTTPException(status_code=400, detail="Skill file name must stay within the managed skills directory")
+        raise HTTPException(status_code=400, detail="Skill file name must stay within the managed workspace package")
     stem, _ = os.path.splitext(normalized)
     return _safe_markdown_filename(stem or normalized)
+
+
+def _ensure_skill_manager_workspace_extensions_loaded() -> None:
+    skills_dir = skill_manager._skills_dir or os.path.join(settings.workspace_dir, "skills")
+    manifest_roots = list(skill_manager._manifest_roots or [])
+    changed = not bool(skill_manager._skills_dir)
+    for root in default_manifest_roots_for_workspace(settings.workspace_dir):
+        if root not in manifest_roots:
+            manifest_roots.append(root)
+            changed = True
+    if changed:
+        skill_manager.init(skills_dir, manifest_roots=manifest_roots)
 
 
 def _validate_skill_content(content: str, *, path: str = "<draft>") -> dict[str, object]:
@@ -124,13 +139,8 @@ async def save_skill_draft(req: SkillDraftRequest):
         req.file_name,
         default_name=_safe_markdown_filename(str(validation["skill"]["name"])),
     )
-    skills_dir = skill_manager._skills_dir
-    if not skills_dir:
-        raise HTTPException(status_code=500, detail="Skill manager is not initialized")
-    os.makedirs(skills_dir, exist_ok=True)
-    target_path = os.path.join(skills_dir, file_name)
-    with open(target_path, "w", encoding="utf-8") as handle:
-        handle.write(req.content)
+    _ensure_skill_manager_workspace_extensions_loaded()
+    target_path = str(save_workspace_contribution("skills", file_name=file_name, content=req.content))
     skills = skill_manager.reload()
     await log_integration_event(
         integration_type="skill",

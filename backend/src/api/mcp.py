@@ -13,6 +13,18 @@ from src.tools.mcp_manager import mcp_manager
 router = APIRouter()
 
 
+def _packaged_server_detail(name: str, config: dict[str, object], *, action: str) -> str:
+    extension_label = (
+        str(config.get("extension_display_name"))
+        if isinstance(config.get("extension_display_name"), str) and str(config.get("extension_display_name")).strip()
+        else str(config.get("extension_id") or "extension package")
+    )
+    return (
+        f"Server '{name}' is managed by {extension_label}; "
+        f"use the extension connector lifecycle instead of raw MCP {action}."
+    )
+
+
 class AddServerRequest(BaseModel):
     name: str
     url: str
@@ -105,6 +117,9 @@ async def add_server(req: AddServerRequest):
 @router.put("/mcp/servers/{name}")
 async def update_server(name: str, req: UpdateServerRequest):
     """Update an MCP server (enable/disable, etc.)."""
+    config = mcp_manager._config.get(name)
+    if isinstance(config, dict) and config.get("source") == "extension":
+        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="updates"))
     updates = req.model_dump(exclude_none=True)
     if not mcp_manager.update_server(name, **updates):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
@@ -114,6 +129,9 @@ async def update_server(name: str, req: UpdateServerRequest):
 @router.delete("/mcp/servers/{name}")
 async def remove_server(name: str):
     """Remove an MCP server from config."""
+    config = mcp_manager._config.get(name)
+    if isinstance(config, dict) and config.get("source") == "extension":
+        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="removal"))
     if not mcp_manager.remove_server(name):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "removed", "name": name}
@@ -122,6 +140,9 @@ async def remove_server(name: str):
 @router.post("/mcp/servers/{name}/token")
 async def set_server_token(name: str, req: SetTokenRequest):
     """Set auth token for an MCP server. Reconnects if enabled."""
+    config = mcp_manager._config.get(name)
+    if isinstance(config, dict) and config.get("source") == "extension":
+        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="token updates"))
     if not mcp_manager.set_token(name, req.token):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     configs = mcp_manager.get_config()
@@ -135,6 +156,8 @@ async def test_server(name: str):
     config = mcp_manager._config.get(name)
     if not config:
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
+    if config.get("source") == "extension":
+        raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="tests"))
     url = config["url"]
 
     # Check for unresolved env vars before attempting connection

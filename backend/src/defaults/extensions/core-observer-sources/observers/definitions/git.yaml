@@ -1,0 +1,4 @@
+name: git
+source_type: git
+description: Built-in git activity observer for recent repository work.
+enabled: true

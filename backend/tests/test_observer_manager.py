@@ -5,9 +5,11 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 
+from config.settings import settings
+from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
-from src.observer.manager import ContextManager
+from src.observer.manager import ContextManager, _active_observer_definitions
 
 
 class TestContextManagerDefaults:
@@ -31,6 +33,30 @@ class TestContextManagerDefaults:
 
 
 class TestContextManagerRefresh:
+    def test_active_observer_definitions_can_disable_all_packaged_sources(self, tmp_path):
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir()
+        original_workspace_dir = settings.workspace_dir
+        settings.workspace_dir = str(workspace_dir)
+        try:
+            save_extension_state_payload(
+                {
+                    "extensions": {
+                        "seraph.core-observer-sources": {
+                            "connector_state": {
+                                "observers/definitions/time.yaml": {"enabled": False},
+                                "observers/definitions/calendar.yaml": {"enabled": False},
+                                "observers/definitions/git.yaml": {"enabled": False},
+                                "observers/definitions/goals.yaml": {"enabled": False},
+                            }
+                        }
+                    }
+                }
+            )
+            assert _active_observer_definitions() == []
+        finally:
+            settings.workspace_dir = original_workspace_dir
+
     @pytest.mark.asyncio
     async def test_refresh_populates_time(self):
         mgr = ContextManager()
@@ -52,6 +78,46 @@ class TestContextManagerRefresh:
         assert ctx.time_of_day == "morning"
         assert ctx.day_of_week == "Monday"
         assert ctx.is_working_hours is True
+
+    @pytest.mark.asyncio
+    async def test_refresh_uses_extension_backed_observer_source_selection(self):
+        mgr = ContextManager()
+        calendar_mock = AsyncMock(return_value={"upcoming_events": [], "current_event": None})
+        git_mock = MagicMock(return_value={"recent_git_activity": [{"message": "should not run"}]})
+        goals_mock = AsyncMock(return_value={"active_goals_summary": "should not run"})
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "morning",
+                 "day_of_week": "Monday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.calendar_source.gather_calendar", calendar_mock), \
+             patch("src.observer.sources.git_source.gather_git", git_mock), \
+             patch("src.observer.sources.goal_source.gather_goals", goals_mock):
+            ctx = await mgr.refresh()
+
+        assert ctx.time_of_day == "morning"
+        calendar_mock.assert_not_called()
+        git_mock.assert_not_called()
+        goals_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refresh_with_no_active_packaged_sources_marks_data_quality_stale(self):
+        mgr = ContextManager()
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[]), \
+             patch("src.observer.sources.time_source.gather_time") as time_mock, \
+             patch("src.observer.sources.calendar_source.gather_calendar", new_callable=AsyncMock) as calendar_mock, \
+             patch("src.observer.sources.git_source.gather_git") as git_mock, \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock) as goals_mock:
+            ctx = await mgr.refresh()
+
+        assert ctx.data_quality == "stale"
+        time_mock.assert_not_called()
+        calendar_mock.assert_not_called()
+        git_mock.assert_not_called()
+        goals_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refresh_preserves_screen_context(self):

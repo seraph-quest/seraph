@@ -7,7 +7,8 @@
 ## Paired Research
 
 - primary design doc: [08. Ecosystem And Delegation](/research/ecosystem-and-delegation)
-- detailed strategy: [12. Plugin System And MCP Strategy](/research/plugin-system-and-mcp-strategy)
+- detailed strategy: [12. Extension Platform And MCP Strategy](/research/plugin-system-and-mcp-strategy)
+- trusted-code decision: [13. Trusted Code Plugins RFC](/research/trusted-code-plugins-rfc)
 
 ## Shipped On `develop`
 
@@ -41,14 +42,98 @@
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships `capability-discovery-and-activation-v1`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, and `extension-debugging-and-recovery-v1`
 - [x] this workstream now also ships `capability-preflight-and-autorepair-v1`, `threaded-operator-timeline-v1`, and `workflow-runbooks-and-parameterized-replay-v1`
-- [x] this workstream now hands the queue forward to versioned capability distribution, deeper extension-studio ergonomics, and a visual workflow debugger rather than first-pass visibility
+- [x] this workstream now hands the queue forward to the full extension-platform transition program rather than isolated extension UX slices
+- [x] the first extension-platform foundation slices now cover terminology cleanup, canonical manifests, the transitional registry seam, and structured doctor diagnostics
+- [x] the extension-platform foundation now also pins one canonical on-disk package layout and package-boundary resolution rules for contribution files
+- [x] the authoring path now includes first local scaffold and validation commands for capability-pack package creation instead of forcing hand-authored manifests
+- [x] the authoring path now also includes first-class public docs for extension overview, package creation, manifest fields, contribution types, validation, and migration instead of leaving the new architecture trapped in research docs
+- [x] the authoring path now includes one canonical in-repo example package that is validated in tests and pinned to current scaffold output so contributors and docs share the same golden reference
+- [x] the runtime now loads manifest-backed skill contributions through the extension registry while still preserving legacy loose-skill compatibility during the coexistence window
+- [x] the runtime now also loads manifest-backed workflow contributions through the same registry seam, including packaged workflow diagnostics and manifest-preferred duplicate resolution during the coexistence window
+- [x] the runtime now also loads manifest-backed starter packs and explicit runbooks through the same registry seam, and the capabilities surface now publishes packaged starter-pack metadata plus extension-backed runbook entries instead of treating both surfaces as legacy-only inventory
+- [x] startup/runtime loading now serves bundled default skills, workflows, starter packs, and explicit runbooks from a real `seraph.core-capabilities` package under `backend/src/defaults/extensions/`, with workspace extension packs taking precedence over bundled defaults while install/bootstrap/catalog flows and legacy loose-file coexistence are still being migrated
+- [x] the backend now ships one `/api/extensions` lifecycle surface for list, inspect, validate, install, enable, disable, configure, and remove so automation no longer has to talk directly to per-surface skill/workflow/package seams even though the workspace UI still needs to adopt that API and the current `configure` step is metadata-only until typed runtime config contracts land
+- [x] extension studio is now manifest-aware for installed packages, with package manifests and package-backed workflow/skill sources loaded and saved through `/api/extensions/{id}/source` instead of always collapsing edits back into loose managed-file save paths
+- [x] new authored skills/workflows now land in the managed `workspace/extensions/workspace-capabilities/` package, while bundled catalog skill installs now land as manifest-backed extension packages under `workspace/extensions/`; old loose loaders remain read-only compatibility during the final cleanup window
+- [x] the trusted-code-plugins RFC is now closed for the current architecture with an explicit negative decision: Seraph continues with typed extension packs, MCP, managed connectors, and bundled native tools, not a general arbitrary-code plugin runtime
 
 ## Still To Do On `develop`
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the first install/recommendation, preflight/autorepair, policy-aware recovery actions, installable catalog surfaces, bounded bootstrap flow, and first extension-studio save path
+- [ ] workspace lifecycle controls, richer extension health/test surfaces, and connector-aware lifecycle handling beyond the new backend `/api/extensions` API
 - [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, branch/resume checkpoints, replay guardrails, parameterized reruns, approval-aware recovery, diagnostics endpoint, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the cockpit-native operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, and first extension studio
 - [ ] better leverage of delegation without making the product harder to trust or reason about
+
+## Extension Platform Execution Rules
+
+- every numbered item below is an internal PR-sized slice, even if multiple slices are later batched into one GitHub PR
+- each slice must end with a subagent review pass for bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete
+- public docs, scaffolding scripts, validation tooling, and a canonical example pack are part of the architecture transition itself, not follow-up polish
+- built-in declarative capabilities must migrate onto the same packaged extension model as user-authored capabilities before this program is considered complete
+- trusted arbitrary-code plugins are not part of the implementation path unless the final RFC explicitly approves them
+- the canonical ordered slice queue lives in [the roadmap](./00-master-roadmap.md#current-extension-platform-transition-queue); this workstream doc summarizes the same program by phase so the queue definition does not drift across docs
+- the result of each mandatory subagent review pass must be rolled into the eventual GitHub PR `Validation` section before any slice is marked complete in the implementation docs
+
+## Transition Phases
+
+### Phase 1: Foundation
+
+- terminology cleanup for `plugins` versus `native_tools`, connectors, and capability packs
+- canonical manifest schema and typed `contributes` contract
+- unified extension registry and loader
+- validation and doctor outputs
+- standardized package layout
+
+### Phase 2: Authoring Path
+
+- scaffold and validation tools for package authors
+- first-class public docs for adding new capability packs
+- one canonical schema-valid example package for docs, tests, and future contributors
+
+### Phase 3: Declarative Capability Migration
+
+- manifest-backed packaging for skills
+- manifest-backed packaging for workflows
+- manifest-backed packaging for runbooks and starter packs
+- migration of bundled declarative defaults onto the same packaged extension model
+
+### Phase 4: Lifecycle And Studio
+
+- [x] unified extension lifecycle API
+- [x] manifest-aware extension studio with package manifest plus package-backed workflow/skill source editing
+- [x] unified workspace lifecycle UI for install, validate, health, enablement, configuration, and removal, including approval-aware lifecycle recovery through Pending approvals and the inspector
+
+### Phase 5: Connector Unification
+
+- [x] connector manifests and health hooks, including one normalized connector-health contract plus extension-native connector list/test endpoints
+- [x] MCP packaging and install flow inside the extension platform, including package-owned MCP runtime metadata, extension-native connector enable/disable control, cockpit routing for packaged MCP test/toggle actions, raw `/api/mcp` mutation paths now blocked for extension-owned servers, and package-owned MCP definitions now read-only in Extension Studio until package-backed MCP source editing lands
+- [x] managed connectors for curated high-trust integrations, including bundled managed connector packs plus config-aware enable/disable routed through the shared extension lifecycle instead of staying passive metadata
+
+### Phase 6: Reach Surface Migration
+
+- [x] observer-source extensions, including lifecycle-backed enable/disable for `observer_definitions`, runtime selector overrides wired into observer refresh, and connector health that now distinguishes active, disabled, invalid, and overridden packaged observer sources
+- [x] channel-adapter extensions, including lifecycle-backed enable/disable for `channel_adapters`, delivery transport selector overrides wired into proactive delivery, connector health that now distinguishes active, degraded, disabled, invalid, and overridden packaged channel transports, and an explicit boundary that the concrete websocket/native delivery implementations remain core-owned even though packaged adapters now drive selector state
+
+### Phase 7: Hardening And Completion
+
+- [x] extension permissions and approvals
+- [x] extension audit and activity visibility
+- [x] extension versioning and update flow
+- [x] legacy loader cleanup for primary authoring/install paths
+- [x] trusted-code-plugins RFC concluded that privileged third-party code plugins stay out of scope for the current platform unless a future RFC reopens the decision under a much higher safety bar
+
+## Required Authoring Docs And Tools
+
+- [x] public extension overview that explains typed contributions, trust tiers, and what stays core
+- [x] step-by-step guide for creating a new capability pack
+- [x] manifest reference with every supported field documented
+- [x] contribution-type reference for skills, workflows, runbooks, starter packs, presets, connectors, and later observer/channel adapters
+- [x] validation and doctor guide for package errors and repair flows
+- [x] migration guide from loose skills/workflows/MCP configs to packaged extensions
+- [x] local scaffold tool for generating a new extension package
+- [x] local validation tool for checking a package before install
+- [x] canonical example package in-repo that docs, tests, and contributors can all rely on; it should be schema-valid immediately and become runtime-backed once the packaging slices land
 
 ## Non-Goals
 

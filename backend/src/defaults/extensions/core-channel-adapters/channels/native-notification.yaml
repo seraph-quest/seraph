@@ -1,0 +1,4 @@
+name: native-notification
+transport: native_notification
+description: Native daemon delivery adapter for desktop notifications and action cards.
+enabled: true

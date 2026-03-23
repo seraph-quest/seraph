@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, _parse_workflow_file, load_workflows
 from src.workflows.manager import WorkflowManager
 from src.approval.exceptions import ApprovalRequired
@@ -29,6 +30,59 @@ class DummyTool:
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         self.calls.append(kwargs)
         return self._responder(**kwargs)
+
+
+def _write_manifest_workflow_package(
+    root,
+    *,
+    package_name: str = "research-pack",
+    extension_id: str = "seraph.research-pack",
+    workflow_file_name: str = "packaged.md",
+    workflow_name: str = "packaged-workflow",
+    description: str = "Packaged workflow",
+    step_tool: str = "web_search",
+    manifest_reference: str | None = None,
+    workflow_content: str | None = None,
+):
+    package_dir = root / "extensions" / package_name
+    package_dir.mkdir(parents=True, exist_ok=True)
+    reference = manifest_reference or f"workflows/{workflow_file_name}"
+    (package_dir / "manifest.yaml").write_text(
+        "id: " + extension_id + "\n"
+        "version: 2026.3.21\n"
+        "display_name: Research Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  workflows:\n"
+        f"    - {reference}\n"
+        "permissions:\n"
+        "  tools: []\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    if workflow_content is None:
+        workflow_content = (
+            "---\n"
+            f"name: {workflow_name}\n"
+            f"description: {description}\n"
+            "requires:\n"
+            f"  tools: [{step_tool}]\n"
+            "steps:\n"
+            "  - id: run\n"
+            f"    tool: {step_tool}\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Packaged workflow.\n"
+        )
+    workflows_path = package_dir / "workflows"
+    workflows_path.mkdir(exist_ok=True)
+    (workflows_path / workflow_file_name).write_text(workflow_content, encoding="utf-8")
+    return package_dir
 
 
 @pytest.fixture
@@ -186,6 +240,299 @@ class TestWorkflowManager:
         assert mgr2.get_workflow("web-brief-to-file").enabled is False
         assert mgr2.enable("web-brief-to-file") is True
         assert mgr2.get_workflow("web-brief-to-file").enabled is True
+
+    def test_manifest_backed_workflow_with_missing_manifest_permissions_is_not_active(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        _write_manifest_workflow_package(
+            tmp_path,
+            workflow_name="packaged-workflow",
+            description="Packaged workflow",
+            step_tool="write_file",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        listed = {
+            workflow["name"]: workflow
+            for workflow in mgr.list_workflows(
+                available_tool_names=["write_file"],
+                active_skill_names=[],
+            )
+        }
+        assert listed["packaged-workflow"]["permission_status"] == "insufficient"
+        assert listed["packaged-workflow"]["missing_manifest_tools"] == ["write_file"]
+        assert listed["packaged-workflow"]["is_available"] is False
+        assert mgr.get_active_workflows(["write_file"], []) == []
+
+    def test_init_loads_manifest_backed_workflows_alongside_legacy_workflows(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "legacy.md").write_text(
+            "---\n"
+            "name: legacy-workflow\n"
+            "description: Legacy workflow\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Legacy workflow.\n",
+            encoding="utf-8",
+        )
+        _write_manifest_workflow_package(
+            tmp_path,
+            workflow_name="packaged-workflow",
+            description="Packaged workflow",
+            step_tool="write_file",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        listed = {workflow["name"]: workflow for workflow in mgr.list_workflows()}
+        assert set(listed) == {"legacy-workflow", "packaged-workflow"}
+        assert listed["legacy-workflow"]["source"] == "legacy"
+        assert listed["legacy-workflow"]["extension_id"].startswith("legacy.workflows.")
+        assert listed["packaged-workflow"]["source"] == "manifest"
+        assert listed["packaged-workflow"]["extension_id"] == "seraph.research-pack"
+
+    def test_manifest_backed_workflow_parse_errors_surface_in_diagnostics(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        _write_manifest_workflow_package(
+            tmp_path,
+            package_name="broken-pack",
+            extension_id="seraph.broken-pack",
+            workflow_file_name="broken.md",
+            manifest_reference="workflows/broken.md",
+            workflow_content="not frontmatter",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        diagnostics = mgr.get_diagnostics()
+        assert diagnostics["loaded_count"] == 0
+        assert diagnostics["error_count"] == 1
+        assert diagnostics["load_errors"][0]["phase"] == "manifest-workflows"
+        assert diagnostics["load_errors"][0]["file_path"].endswith("broken.md")
+
+    def test_manifest_workflow_layout_errors_surface_without_workflows_directory(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        package_dir = tmp_path / "extensions" / "broken-layout-pack"
+        package_dir.mkdir(parents=True)
+        (package_dir / "manifest.yaml").write_text(
+            "id: seraph.broken-layout-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Broken Layout Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  workflows:\n"
+            "    - wrong-dir/packaged.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        diagnostics = mgr.get_diagnostics()
+        assert diagnostics["loaded_count"] == 0
+        assert diagnostics["error_count"] == 1
+        assert diagnostics["load_errors"][0]["phase"] == "manifest"
+        assert diagnostics["load_errors"][0]["file_path"].endswith("manifest.yaml")
+
+    def test_malformed_manifest_errors_surface_as_shared_manifest_errors(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        package_dir = tmp_path / "extensions" / "broken-manifest-pack"
+        package_dir.mkdir(parents=True)
+        (package_dir / "manifest.yaml").write_text("id: [broken\n", encoding="utf-8")
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        diagnostics = mgr.get_diagnostics()
+        assert diagnostics["loaded_count"] == 0
+        assert diagnostics["error_count"] == 0
+        assert diagnostics["shared_error_count"] == 1
+        assert diagnostics["shared_manifest_errors"][0]["phase"] == "manifest"
+        assert diagnostics["shared_manifest_errors"][0]["file_path"].endswith("manifest.yaml")
+
+    def test_unrelated_manifest_validation_errors_stay_out_of_workflow_load_errors(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        package_dir = tmp_path / "extensions" / "mixed-pack"
+        workflows_path = package_dir / "workflows"
+        workflows_path.mkdir(parents=True)
+        (workflows_path / "packaged.md").write_text(
+            "---\n"
+            "name: packaged-workflow\n"
+            "description: Packaged workflow\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: run\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Packaged workflow.\n",
+            encoding="utf-8",
+        )
+        (package_dir / "manifest.yaml").write_text(
+            "id: seraph.mixed-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Mixed Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: LOCAL\n"
+            "contributes:\n"
+            "  workflows:\n"
+            "    - workflows/packaged.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        diagnostics = mgr.get_diagnostics()
+        assert diagnostics["error_count"] == 0
+        assert diagnostics["shared_error_count"] == 1
+        assert diagnostics["shared_manifest_errors"][0]["phase"] == "manifest"
+        assert diagnostics["shared_manifest_errors"][0]["file_path"].endswith("manifest.yaml")
+
+    def test_incompatible_manifest_backed_workflow_stays_in_workflow_load_errors(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        package_dir = tmp_path / "extensions" / "future-pack"
+        workflows_path = package_dir / "workflows"
+        workflows_path.mkdir(parents=True)
+        (workflows_path / "packaged.md").write_text(
+            "---\n"
+            "name: packaged-workflow\n"
+            "description: Packaged workflow\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: run\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Packaged workflow.\n",
+            encoding="utf-8",
+        )
+        (package_dir / "manifest.yaml").write_text(
+            "id: seraph.future-pack\n"
+            "version: 2026.3.21\n"
+            "display_name: Future Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=9999.1.1\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  workflows:\n"
+            "    - workflows/packaged.md\n"
+            "permissions:\n"
+            "  tools: []\n"
+            "  network: false\n",
+            encoding="utf-8",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        diagnostics = mgr.get_diagnostics()
+        assert diagnostics["error_count"] == 1
+        assert diagnostics["load_errors"][0]["phase"] == "compatibility"
+        assert diagnostics["shared_error_count"] == 0
+
+    def test_manifest_backed_workflow_names_win_duplicate_name_collisions(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "duplicate.md").write_text(
+            "---\n"
+            "name: shared-workflow\n"
+            "description: Legacy workflow\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Legacy workflow.\n",
+            encoding="utf-8",
+        )
+        _write_manifest_workflow_package(
+            tmp_path,
+            workflow_name="shared-workflow",
+            description="Manifest workflow",
+            step_tool="write_file",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        assert [workflow["name"] for workflow in mgr.list_workflows()] == ["shared-workflow"]
+        selected = mgr.get_workflow("shared-workflow")
+        assert selected is not None
+        assert selected.source == "manifest"
+        assert selected.description == "Manifest workflow"
+        assert any(error["phase"] == "duplicate-workflow-name" for error in mgr.get_diagnostics()["load_errors"])
+
+    def test_manifest_backed_workflow_tool_names_win_duplicate_tool_collisions(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "duplicate.md").write_text(
+            "---\n"
+            "name: shared-workflow\n"
+            "description: Legacy workflow\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Legacy workflow.\n",
+            encoding="utf-8",
+        )
+        _write_manifest_workflow_package(
+            tmp_path,
+            workflow_name="shared_workflow",
+            description="Manifest workflow",
+            step_tool="write_file",
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+
+        assert [workflow["name"] for workflow in mgr.list_workflows()] == ["shared_workflow"]
+        selected = mgr.get_workflow("shared_workflow")
+        assert selected is not None
+        assert selected.source == "manifest"
+        assert selected.description == "Manifest workflow"
+        assert any(error["phase"] == "duplicate-workflow-tool-name" for error in mgr.get_diagnostics()["load_errors"])
 
     def test_build_tools_executes_steps_sequentially(self, workflows_dir):
         mgr = WorkflowManager()
@@ -992,6 +1339,8 @@ def test_list_workflows_includes_policy_metadata(workflows_dir):
     assert web_brief["execution_boundaries"] == ["external_read", "workspace_write"]
     assert web_brief["risk_level"] == "medium"
     assert web_brief["accepts_secret_refs"] is False
+    assert web_brief["source"] == "legacy"
+    assert web_brief["extension_id"].startswith("legacy.workflows.")
 
 
 def test_list_workflows_includes_runtime_availability(workflows_dir):
@@ -1007,6 +1356,45 @@ def test_list_workflows_includes_runtime_availability(workflows_dir):
     assert web_brief["is_available"] is False
     assert web_brief["missing_tools"] == ["write_file"]
     assert web_brief["missing_skills"] == []
+
+
+@pytest.fixture
+def _setup_manifest_workflow_manager(tmp_path):
+    from src.workflows.manager import workflow_manager
+
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    (workflows_dir / "legacy.md").write_text(
+        "---\n"
+        "name: legacy-workflow\n"
+        "description: Legacy workflow\n"
+        "requires:\n"
+        "  tools: [web_search]\n"
+        "steps:\n"
+        "  - id: search\n"
+        "    tool: web_search\n"
+        "    arguments: {}\n"
+        "---\n\n"
+        "Legacy workflow.\n",
+        encoding="utf-8",
+    )
+    _write_manifest_workflow_package(
+        tmp_path,
+        workflow_name="packaged-workflow",
+        description="Packaged workflow",
+        step_tool="write_file",
+    )
+
+    workflow_manager.init(str(workflows_dir), manifest_roots=[str(tmp_path / "extensions")])
+    yield
+    workflow_manager._workflows = []
+    workflow_manager._load_errors = []
+    workflow_manager._shared_manifest_errors = []
+    workflow_manager._disabled = set()
+    workflow_manager._workflows_dir = ""
+    workflow_manager._manifest_roots = []
+    workflow_manager._config_path = ""
+    workflow_manager._registry = None
 
 
 class TestWorkflowApi:
@@ -1053,6 +1441,38 @@ class TestWorkflowApi:
         assert resp.json()["workflows"][0]["accepts_secret_refs"] is False
         assert resp.json()["workflows"][0]["is_available"] is False
         assert resp.json()["workflows"][0]["missing_tools"] == ["write_file"]
+
+    @pytest.mark.asyncio
+    async def test_list_workflows_includes_manifest_backed_entries(self, client, _setup_manifest_workflow_manager):
+        with patch(
+            "src.api.workflows.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="web_search"), SimpleNamespace(name="write_file")], [], "disabled"),
+        ):
+            resp = await client.get("/api/workflows")
+
+        assert resp.status_code == 200
+        workflows = {item["name"]: item for item in resp.json()["workflows"]}
+        assert set(workflows) == {"legacy-workflow", "packaged-workflow"}
+        assert workflows["legacy-workflow"]["source"] == "legacy"
+        assert workflows["legacy-workflow"]["extension_id"].startswith("legacy.workflows.")
+        assert workflows["packaged-workflow"]["source"] == "manifest"
+        assert workflows["packaged-workflow"]["extension_id"] == "seraph.research-pack"
+
+    @pytest.mark.asyncio
+    async def test_enable_disable_manifest_backed_workflow(self, client, _setup_manifest_workflow_manager):
+        resp = await client.put(
+            "/api/workflows/packaged-workflow",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 200
+
+        with patch(
+            "src.api.workflows.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="web_search"), SimpleNamespace(name="write_file")], [], "disabled"),
+        ):
+            resp = await client.get("/api/workflows")
+        workflows = {item["name"]: item for item in resp.json()["workflows"]}
+        assert workflows["packaged-workflow"]["enabled"] is False
 
     @pytest.mark.asyncio
     async def test_update_workflow_logs(self, client):
@@ -1109,6 +1529,7 @@ class TestWorkflowApi:
         )
         with (
             patch("src.api.workflows.workflow_manager._workflows_dir", "/tmp/workflows"),
+            patch("src.extensions.workspace_package.settings.workspace_dir", "/tmp"),
             patch(
                 "src.api.workflows.get_base_tools_and_active_skills",
                 return_value=([SimpleNamespace(name="write_file")], [], "disabled"),
@@ -1120,7 +1541,48 @@ class TestWorkflowApi:
             )
 
         assert resp.status_code == 400
-        assert "managed workflows directory" in resp.json()["detail"]
+        assert "managed workspace package" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_save_workflow_draft_persists_to_managed_workspace_package(self, client, tmp_path):
+        content = (
+            "---\n"
+            "name: Retryable Save\n"
+            "description: Save a note\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/brief.md\n"
+            "      content: hello\n"
+            "---\n"
+        )
+        with (
+            patch("src.api.workflows.workflow_manager._workflows_dir", str(tmp_path / "workflows")),
+            patch("src.api.workflows.workflow_manager._manifest_roots", []),
+            patch("src.extensions.workspace_package.settings.workspace_dir", str(tmp_path)),
+            patch(
+                "src.api.workflows.get_base_tools_and_active_skills",
+                return_value=([SimpleNamespace(name="write_file")], [], "disabled"),
+            ),
+            patch("src.api.workflows.workflow_manager.init") as init_manager,
+            patch("src.api.workflows.workflow_manager.reload", return_value=[]),
+            patch("src.api.workflows.log_integration_event", AsyncMock()),
+        ):
+            resp = await client.post("/api/workflows/save", json={"content": content})
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["status"] == "saved"
+        init_manager.assert_called_once_with(
+            str(tmp_path / "workflows"),
+            manifest_roots=default_manifest_roots_for_workspace(str(tmp_path)),
+        )
+        assert payload["file_path"].endswith(
+            "extensions/workspace-capabilities/workflows/retryable-save.md"
+        )
 
 
 class TestWorkflowSurfaces:

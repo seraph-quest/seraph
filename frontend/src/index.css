@@ -988,6 +988,12 @@ body {
   background: rgba(7, 20, 31, 0.38);
 }
 
+.cockpit-studio-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .cockpit-studio-main {
   min-height: 0;
   overflow: auto;
@@ -1003,6 +1009,10 @@ body {
 .cockpit-studio-textarea {
   min-height: 180px;
   resize: vertical;
+}
+
+.cockpit-studio-textarea--compact {
+  min-height: 120px;
 }
 
 .cockpit-list--palette {

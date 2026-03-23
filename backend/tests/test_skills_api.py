@@ -2,6 +2,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.extensions.registry import default_manifest_roots_for_workspace
+
 
 @pytest.mark.asyncio
 async def test_validate_skill_draft_returns_runtime_readiness(client):
@@ -41,12 +43,16 @@ async def test_save_skill_draft_persists_and_reloads(client, tmp_path):
         "---\n\n"
         "Use the web tools.\n"
     )
+    skills_dir = tmp_path / "skills"
     with (
-        patch("src.api.skills.skill_manager._skills_dir", str(tmp_path)),
+        patch("src.api.skills.skill_manager._skills_dir", str(skills_dir)),
+        patch("src.api.skills.skill_manager._manifest_roots", []),
+        patch("src.extensions.workspace_package.settings.workspace_dir", str(tmp_path)),
         patch(
             "src.api.skills.get_base_tools_and_active_skills",
             return_value=([type("Tool", (), {"name": "web_search"})()], [], "disabled"),
         ),
+        patch("src.api.skills.skill_manager.init") as init_manager,
         patch(
             "src.api.skills.skill_manager.reload",
             return_value=[{"name": "Web Briefing", "enabled": True}],
@@ -59,7 +65,8 @@ async def test_save_skill_draft_persists_and_reloads(client, tmp_path):
     payload = resp.json()
     assert payload["status"] == "saved"
     assert payload["valid"] is True
-    assert payload["file_path"].endswith("web-briefing.md")
+    assert payload["file_path"].endswith("extensions/workspace-capabilities/skills/web-briefing.md")
+    init_manager.assert_called_once_with(str(skills_dir), manifest_roots=default_manifest_roots_for_workspace(str(tmp_path)))
     reload_skills.assert_called_once()
     log_event.assert_awaited_once()
 
@@ -84,6 +91,7 @@ async def test_save_skill_draft_rejects_path_traversal(client):
     )
     with (
         patch("src.api.skills.skill_manager._skills_dir", "/tmp/skills"),
+        patch("src.extensions.workspace_package.settings.workspace_dir", "/tmp"),
         patch(
             "src.api.skills.get_base_tools_and_active_skills",
             return_value=([type("Tool", (), {"name": "web_search"})()], [], "disabled"),
@@ -95,7 +103,7 @@ async def test_save_skill_draft_rejects_path_traversal(client):
         )
 
     assert resp.status_code == 400
-    assert "managed skills directory" in resp.json()["detail"]
+    assert "managed workspace package" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ When these docs are updated on an open feature branch, they describe the intende
 
 - `docs/research/` defines target product shape, evidence rules, benchmark logic, and superiority program logic.
 - `docs/implementation/STATUS.md` is the fastest shipped-state snapshot.
-- this roadmap owns the live 10-PR queue and queue refresh rule.
+- this roadmap owns the live implementation queue and queue refresh rule.
 - `docs/implementation/08-docs-contract.md` explains the boundary between research truth and implementation truth.
 - `docs/implementation/09-benchmark-status.md` mirrors the benchmark axes from research as shipped implementation status.
 - `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
@@ -261,42 +261,77 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `human-world-model-v1`:
    deepen guardian-state quality from retrieval-plus-heuristics into a stronger explicit human/world model that can support consistently better intervention quality
 
-## Current Rolling 10-PR List
+## Current Extension Platform Transition Queue
 
 This is the authoritative PR list for the implementation side.
-It should always show the next 10 most valuable PRs, while the latest completed batch remains visible above.
+For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
 
 - every entry below is a numbered PR-sized slice
-- the current active item is `#1 capability-marketplace-and-versioned-packs-v1`
+- the queue below is the full canonical transition program; shipped slices stay visible here until the entire migration is complete
+- this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
 
-1. [ ] `capability-marketplace-and-versioned-packs-v1`:
-   turn starter packs and bundled capability installs into versioned, updateable, provenance-aware packages with clearer compatibility checks, changelogs, and safer upgrade paths
-2. [ ] `extension-authoring-and-validation-studio-v2`:
-   deepen the extension studio into a first-class authoring environment with richer schemas, templates, history, and safer publish-or-rollback flows for workflows, skills, and MCP configs
-3. [ ] `workflow-visual-branch-debugger-v1`:
-   move branch/resume control from checkpoint lists into a visual workflow debugger with step graphs, branch lineage, artifact deltas, and targeted checkpoint resume
-4. [ ] `cockpit-density-and-live-operator-views-v5`:
-   make the cockpit feel materially more Hermes-like with denser live logs, stronger keyboard routing, less pane friction, and more operator-first timeline composition
-5. [ ] `execution-safety-hardening-v10`:
-   harden capability install/update flows, studio save paths, branch-debugger mutations, and native continuation execution before the growing operator surface compounds unsafe leverage
-6. [ ] `provider-policy-simulation-and-budget-planning-v1`:
-   add operator-facing "what would route where?" previews, budget planning, and fallback simulation so provider policy becomes actively steerable rather than only inspectable after the fact
-7. [ ] `native-inbox-and-cross-device-threading-v1`:
-   broaden native reach into a more coherent inbox-style continuity surface with stronger thread handoff and richer cross-device/browser-native follow-through
-8. [ ] `world-model-project-graph-v1`:
-   deepen durable modeling into a more explicit project graph with linked commitments, collaborators, obligations, and thread-aware evidence lineage
-9. [ ] `guardian-learning-policy-v10`:
-   make learned guidance shape thread choice, escalation cadence, branch recovery prompts, and operator-facing guidance more explicitly across the full capability surface
-10. [ ] `guardian-behavioral-evals-v10`:
-   add deterministic contracts for versioned capability installs, studio authoring flows, visual branch recovery, provider-policy simulation, and deeper learning-conditioned guardian behavior
+1. [x] `extension-model-terminology-v1`:
+   rename the misleading internal `plugins/` concept into clearer terms such as `native_tools`, `connector`, and `capability_pack` so the codebase and docs stop implying that Seraph already has a general arbitrary-code plugin runtime
+2. [x] `extension-manifest-schema-v1`:
+   add the first canonical extension manifest, schema validator, compatibility rules, and typed `contributes` contract so every later slice builds on one explicit package format instead of ad hoc files
+3. [x] `extension-registry-and-loader-v1`:
+   introduce one extension registry and loader abstraction that can enumerate manifests and typed contributions while preserving current skill, workflow, and MCP behavior during migration
+4. [x] `extension-validation-and-doctor-v1`:
+   add structured extension validation and doctor outputs for schema errors, missing references, compatibility failures, and permission mismatches so broken packs become diagnosable before install or execution
+5. [x] `extension-package-layout-v1`:
+   standardize the on-disk package structure for capability packs and connectors so one package can contribute skills, workflows, runbooks, starter packs, presets, and later connector definitions coherently
+6. [x] `extension-scaffold-tools-v1`:
+   ship local scaffolding and validation tools so adding a new capability pack does not require hand-authoring manifests and directory structure from scratch
+7. [x] `extension-authoring-docs-v1`:
+   publish first-class docs for creating capability packs, manifest fields, contribution types, validation, repair, and migration from the current loose-file model
+8. [x] `example-capability-pack-v1`:
+   add one canonical schema-valid example package that includes at least a skill, workflow, and runbook so docs, tests, and future contributors all share one golden reference before the migrated loaders become the default runtime path
+9. [x] `capability-packaging-skills-v1`:
+   migrate skill loading into manifest-backed capability packs with backward compatibility during the transition so skills become first-class extension contributions
+10. [x] `capability-packaging-workflows-v1`:
+   migrate workflow loading into manifest-backed capability packs with validated references and metadata so workflows stop living on a separate loading path
+11. [x] `capability-packaging-runbooks-and-starter-packs-v1`:
+   move runbooks and starter packs into the same manifest-backed architecture so higher-level reusable capability bundles stop being special-case inventory, with explicit runbook contributions and packaged starter packs now loaded through the extension registry during the coexistence window
+12. [x] `bundled-capability-packs-v1`:
+   convert Seraph’s shipped declarative defaults into real bundled capability packs so startup/runtime loading now prefers bundled skills, workflows, starter packs, and explicit runbooks from `backend/src/defaults/extensions/core-capabilities/` through the same manifest-root registry seam, with workspace packages taking precedence over bundled defaults during the coexistence window while install/bootstrap/catalog flows still finish their legacy-copy migration in later slices
+13. [x] `extension-lifecycle-api-v1`:
+   add one lifecycle API for install, validate, enable, disable, configure, inspect, and remove so UI and automation flows stop talking to per-surface install logic, with the backend now shipping `/api/extensions` list/inspect/validate/install/enable/disable/configure/remove endpoints while workspace lifecycle UI still lands in the next slice and the first `configure` step remains metadata-only until typed runtime config contracts arrive
+14. [x] `extension-studio-manifest-awareness-v1`:
+   make the extension studio package-aware so authors edit manifests and package-backed workflow/skill members together instead of forcing loose-file-only save paths, with `/api/extensions/{id}/source` now backing workspace package manifests and package-backed authoring while the studio sidebar groups manifests with their packaged members and still falls back to legacy loose-file paths where migration slices have not finished yet
+15. [x] `extension-lifecycle-ui-v1`:
+   surface the unified extension lifecycle in the workspace so install, validation, health, enablement, configuration, and removal all happen through one operator path, with the extension studio now handling approval-required install/update/enable flows honestly, focusing Pending approvals on lifecycle gates, and exposing extension lifecycle context inside the approvals inspector instead of collapsing structured approval responses into generic failures
+16. [x] `connector-manifest-and-health-v1`:
+   define the connector package shape with auth/config metadata and health/test hooks so connectors stop being an architectural exception, with extension payloads now exposing one normalized connector health contract, extension-native `/api/extensions/{id}/connectors` listing, and `/api/extensions/{id}/connectors/test` dispatch so MCP, managed connectors, observer sources, and channel adapters stop relying on completely different inspection paths; MCP now gets a live packaged test path through that endpoint while the later connector-runtime slices deepen managed-connector, observer, and channel-adapter status reporting on top of the shared contract
+17. [x] `mcp-packaging-and-install-flow-v1`:
+   move MCP server definitions into the extension package model and lifecycle so MCP becomes one connector type inside the platform instead of a separate world, with packaged MCP installs now persisting extension ownership metadata into the runtime config, extension-native `/api/extensions/{id}/connectors/enabled` toggle control, cockpit MCP test/toggle actions routed through extension connector endpoints when a server is package-owned, raw `/api/mcp` update/remove/test/token endpoints refusing package-managed servers, and package-owned MCP definitions now read-only in Extension Studio until package-backed MCP source editing lands
+18. [x] `managed-connectors-v1`:
+   add the curated non-MCP connector abstraction for first-party or high-trust integrations that need stronger UX, rollout, telemetry, and auth control than raw MCP, with bundled `seraph.core-managed-connectors`, manifest-backed managed connector defaults now shipping disabled until configured, extension-level and connector-level enable/disable wired through the shared lifecycle state, `/api/extensions/{id}/connectors/enabled` now supporting managed connectors, and managed connector health/test responses distinguishing `requires_config`, `disabled`, and `ready` instead of treating them as passive metadata
+19. [x] `observer-source-extensions-v1`:
+   package observer sources as typed extensions where appropriate so input reach fits the same architecture as skills, workflows, and connectors, with `observer_definitions` now promoted from passive metadata into shared lifecycle state, package-level and connector-level enable/disable both routed through extension state overrides, extension payloads and connector health exposing effective `enabled` status, and the observer runtime selector now honoring overrides directly so higher-priority disables yield to the next enabled packaged definition of the same `source_type` while disabling every packaged definition for that `source_type` leaves the selector empty instead of reviving hardcoded fallbacks
+20. [x] `channel-adapter-extensions-v1`:
+   package channel-adapter selection metadata as typed extensions so proactive delivery transport choice stops being a one-off config path, with `channel_adapters` now promoted from passive metadata into shared lifecycle state, package-level and connector-level enable/disable both routed through extension state overrides, extension payloads and connector health exposing effective `enabled` status, and the delivery transport selector now honoring overrides directly so higher-priority disables yield to the next enabled packaged adapter for that transport while disabling every packaged adapter for that transport leaves delivery without a fallback transport; the concrete websocket/native delivery implementations remain core-owned in this slice
+21. [x] `extension-permissions-and-approvals-v1`:
+   map extension-declared permissions cleanly into policy, approval, and execution behavior so packages cannot bypass Seraph’s trust boundaries
+22. [x] `extension-audit-and-activity-v1`:
+   make extension install, update, enable, disable, health, and execution visible in Activity Ledger and audit so operators can explain what changed and why
+23. [x] `extension-versioning-and-update-flow-v1`:
+   add version-aware updates, compatibility checks, and bundled-vs-user-installed semantics so packages can evolve without hidden drift, with validation now returning lifecycle plans for install vs update vs workspace override, the lifecycle API shipping a dedicated update path, and packaged MCP connectors refreshing their runtime config cleanly during workspace package upgrades
+24. [x] `legacy-loader-cleanup-v1`:
+   demote the old loose-file authoring/install paths so the new extension platform is now the supported primary write path, with new skill/workflow saves landing in the managed `workspace/extensions/workspace-capabilities/` package, bundled catalog skill installs landing as manifest-backed packages under `workspace/extensions/`, and old loose loaders remaining read-only transitional compatibility
+25. [x] `trusted-code-plugins-rfc-v1`:
+   explicitly decide whether privileged code plugins are needed at all, with the current RFC closing the question for this architecture: Seraph continues with typed extension packs, connector packs, MCP, managed connectors, and bundled native tools rather than a general arbitrary-code plugin runtime
 
 ## Queue Maintenance Rule
 
-- keep exactly 10 future PRs visible here
+- keep the full active queue for architecture-transition programs visible here until the transition is complete
 - keep the most recent completed 10-PR batch visible above with checkmarks
 - do not delete the immediately previous completed batch until a later cleanup pass
-- rerank and rewrite the queue whenever the number of landed PRs from the published queue is divisible by 5
+- keep landed slices in the active queue marked `[x]` until a full 10-slice completed batch is ready to move into the completed-batches section
+- when 5 slices from the published queue have landed, rerank only the remaining open items while leaving the landed items in place
+- when 10 slices from the published queue have landed, move that completed set into the completed-batches history and renumber the remaining active queue
 - rerank earlier if new evidence from `docs/research/` materially changes the priority order
+- each internal slice must close with a subagent review pass against bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete or rolled into a final GitHub PR
+- the result of that subagent review must be recorded in the eventual GitHub PR `Validation` section before any slice is marked complete in these docs
 
 ## Delivery Order
 
@@ -310,14 +345,18 @@ It should always show the next 10 most valuable PRs, while the latest completed 
 
 Implementation docs `08` through `10` are supporting mirror layers for this roadmap, not additional workstreams.
 
-## Stable Interfaces
+## Stable Interfaces Outside This Transition
 
 - the browser and WebSocket chat surface
 - the observer daemon ingest path
-- `SKILL.md`-based skill loading
 - runtime-path-based LLM routing and fallback settings
 - runtime audit and eval harness contracts
-- MCP server configuration and server-management APIs
+
+## Transitional Interfaces Slated For Migration
+
+- `SKILL.md`-based skill loading
+- loose workflow loading from the current workspace file layout
+- MCP server configuration and server-management APIs as they exist before connector manifests and packaged install flows land
 
 ## Current Shipped Slice On `develop`
 

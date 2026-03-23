@@ -71,6 +71,12 @@ interface PendingApproval {
   summary: string;
   created_at: string;
   resume_message?: string | null;
+  extension_id?: string | null;
+  extension_display_name?: string | null;
+  extension_action?: string | null;
+  package_path?: string | null;
+  lifecycle_boundaries?: string[] | null;
+  permissions?: Record<string, unknown> | null;
 }
 
 interface DaemonPresenceState {
@@ -136,6 +142,8 @@ interface SkillInfo {
   enabled: boolean;
   description?: string;
   file_path?: string;
+  source?: string;
+  extension_id?: string | null;
   requires_tools?: string[];
   user_invocable?: boolean;
   availability?: "ready" | "blocked" | "disabled";
@@ -155,6 +163,10 @@ interface McpServerInfo {
   status_message?: string | null;
   has_headers?: boolean;
   auth_hint?: string;
+  source?: string;
+  extension_id?: string | null;
+  extension_reference?: string | null;
+  extension_display_name?: string | null;
   availability?: "ready" | "blocked" | "disabled";
   blocked_reason?: string | null;
   recommended_actions?: CapabilityAction[];
@@ -172,7 +184,14 @@ interface ToolInfo {
 }
 
 interface OperatorEntity {
-  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition" | "activity_item";
+  entityType:
+    | "tool"
+    | "skill"
+    | "mcp"
+    | "starter_pack"
+    | "workflow_definition"
+    | "extension_manifest"
+    | "activity_item";
   name: string;
   meta: string;
   summary: string;
@@ -203,6 +222,7 @@ interface CapabilityAction {
   type:
     | "toggle_skill"
     | "toggle_workflow"
+    | "enable_extension"
     | "toggle_mcp_server"
     | "test_mcp_server"
     | "test_native_notification"
@@ -281,12 +301,122 @@ interface DoctorPlanRecord {
 
 interface ExtensionStudioEntry {
   id: string;
-  entityType: "workflow_definition" | "skill" | "mcp";
+  entityType: "workflow_definition" | "skill" | "mcp" | "extension_manifest";
   name: string;
   summary: string;
   availability: string;
   meta: string;
   entity: OperatorEntity;
+  extensionId?: string | null;
+  packageReference?: string | null;
+  packageDisplayName?: string | null;
+  packageVersion?: string | null;
+  packageLocation?: string | null;
+  packageTrust?: string | null;
+  studioFormat?: string | null;
+  saveSupported?: boolean;
+  validationSupported?: boolean;
+}
+
+interface ExtensionStudioFileInfo {
+  key: string;
+  role: "manifest" | "contribution";
+  reference: string;
+  resolved_path?: string | null;
+  label: string;
+  display_type: string;
+  contribution_type?: string | null;
+  format: string;
+  editable: boolean;
+  save_supported: boolean;
+  validation_supported: boolean;
+  loaded: boolean;
+  name?: string | null;
+  status?: string | null;
+  source?: string | null;
+}
+
+interface ExtensionIssueInfo {
+  code: string;
+  severity: string;
+  message: string;
+  contribution_type?: string | null;
+  reference?: string | null;
+  suggested_fix?: string | null;
+}
+
+interface ExtensionLoadErrorInfo {
+  source: string;
+  message: string;
+  phase: string;
+  details: Array<Record<string, unknown>>;
+}
+
+interface ExtensionToggleTargetInfo {
+  type: string;
+  name: string;
+}
+
+interface ExtensionPackageInfo {
+  id: string;
+  display_name: string;
+  version?: string | null;
+  kind: string;
+  trust: string;
+  source: string;
+  location: string;
+  status: string;
+  summary?: string | null;
+  description?: string | null;
+  compatibility?: { seraph: string } | null;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  issues: ExtensionIssueInfo[];
+  load_errors: ExtensionLoadErrorInfo[];
+  toggle_targets: ExtensionToggleTargetInfo[];
+  toggleable_contribution_types: string[];
+  passive_contribution_types: string[];
+  enable_supported: boolean;
+  disable_supported: boolean;
+  removable: boolean;
+  enabled_scope: string;
+  configurable: boolean;
+  metadata_supported: boolean;
+  config_scope: string;
+  enabled?: boolean | null;
+  config: Record<string, unknown>;
+  studio_files: ExtensionStudioFileInfo[];
+}
+
+interface ExtensionLifecyclePlan {
+  mode: string;
+  recommended_action: "install" | "update" | "none";
+  install_allowed: boolean;
+  update_supported: boolean;
+  current_location?: string | null;
+  current_version?: string | null;
+  current_source?: string | null;
+  candidate_version?: string | null;
+  version_relation?: string | null;
+  package_changed: boolean;
+}
+
+interface ExtensionPathPreview {
+  path: string;
+  extension_id: string;
+  display_name: string;
+  version?: string | null;
+  ok: boolean;
+  results: Array<{ issues?: unknown[] }>;
+  load_errors?: Array<Record<string, unknown>>;
+  lifecycle_plan?: ExtensionLifecyclePlan | null;
+}
+
+interface ExtensionLifecycleApprovalDetail {
+  type: "approval_required";
+  approval_id: string;
+  tool_name: string;
+  risk_level: string;
+  message: string;
 }
 
 type LoggedOperatorError = Error & { operatorLogged?: boolean };
@@ -467,7 +597,7 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   const mode = typeof action.mode === "string" ? action.mode : null;
   const status = typeof action.status === "string" ? action.status : null;
   const detail = typeof action.detail === "string" ? action.detail : null;
-  const target = name ?? mode ?? detail ?? "";
+  const target = (typeof action.target === "string" ? action.target : null) ?? name ?? mode ?? detail ?? "";
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
 }
 
@@ -499,6 +629,220 @@ function managedFileName(value: unknown): string | null {
   return candidate && candidate.trim() ? candidate.trim() : null;
 }
 
+function normalizeExtensionStudioFile(value: Record<string, unknown>): ExtensionStudioFileInfo | null {
+  if (typeof value.key !== "string" || typeof value.reference !== "string" || typeof value.label !== "string") {
+    return null;
+  }
+  const role = value.role === "manifest" ? "manifest" : "contribution";
+  return {
+    key: value.key,
+    role,
+    reference: value.reference,
+    resolved_path: typeof value.resolved_path === "string" ? value.resolved_path : null,
+    label: value.label,
+    display_type: typeof value.display_type === "string" ? value.display_type : "file",
+    contribution_type: typeof value.contribution_type === "string" ? value.contribution_type : null,
+    format: typeof value.format === "string" ? value.format : "text",
+    editable: Boolean(value.editable),
+    save_supported: Boolean(value.save_supported),
+    validation_supported: Boolean(value.validation_supported),
+    loaded: value.loaded !== false,
+    name: typeof value.name === "string" ? value.name : null,
+    status: typeof value.status === "string" ? value.status : null,
+    source: typeof value.source === "string" ? value.source : null,
+  };
+}
+
+function normalizeExtensionIssue(value: Record<string, unknown>): ExtensionIssueInfo | null {
+  if (
+    typeof value.code !== "string"
+    || typeof value.severity !== "string"
+    || typeof value.message !== "string"
+  ) {
+    return null;
+  }
+  return {
+    code: value.code,
+    severity: value.severity,
+    message: value.message,
+    contribution_type: typeof value.contribution_type === "string" ? value.contribution_type : null,
+    reference: typeof value.reference === "string" ? value.reference : null,
+    suggested_fix: typeof value.suggested_fix === "string" ? value.suggested_fix : null,
+  };
+}
+
+function normalizeExtensionLoadError(value: Record<string, unknown>): ExtensionLoadErrorInfo | null {
+  if (
+    typeof value.source !== "string"
+    || typeof value.message !== "string"
+    || typeof value.phase !== "string"
+  ) {
+    return null;
+  }
+  return {
+    source: value.source,
+    message: value.message,
+    phase: value.phase,
+    details: Array.isArray(value.details)
+      ? value.details.flatMap((entry) => (
+        entry && typeof entry === "object" && !Array.isArray(entry)
+          ? [entry as Record<string, unknown>]
+          : []
+      ))
+      : [],
+  };
+}
+
+function normalizeExtensionToggleTarget(value: Record<string, unknown>): ExtensionToggleTargetInfo | null {
+  if (typeof value.type !== "string" || typeof value.name !== "string") {
+    return null;
+  }
+  return {
+    type: value.type,
+    name: value.name,
+  };
+}
+
+function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPackageInfo | null {
+  if (
+    typeof value.id !== "string"
+    || typeof value.display_name !== "string"
+    || typeof value.kind !== "string"
+    || typeof value.trust !== "string"
+    || typeof value.source !== "string"
+    || typeof value.location !== "string"
+    || typeof value.status !== "string"
+  ) {
+    return null;
+  }
+  const studioFiles = Array.isArray(value.studio_files)
+    ? value.studio_files.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionStudioFile(entry as Record<string, unknown>)].filter(Boolean) as ExtensionStudioFileInfo[]
+        : []
+    ))
+    : [];
+  const issues = Array.isArray(value.issues)
+    ? value.issues.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionIssue(entry as Record<string, unknown>)].filter(Boolean) as ExtensionIssueInfo[]
+        : []
+    ))
+    : [];
+  const loadErrors = Array.isArray(value.load_errors)
+    ? value.load_errors.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionLoadError(entry as Record<string, unknown>)].filter(Boolean) as ExtensionLoadErrorInfo[]
+        : []
+    ))
+    : [];
+  const toggleTargets = Array.isArray(value.toggle_targets)
+    ? value.toggle_targets.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionToggleTarget(entry as Record<string, unknown>)].filter(Boolean) as ExtensionToggleTargetInfo[]
+        : []
+    ))
+    : [];
+  return {
+    id: value.id,
+    display_name: value.display_name,
+    version: typeof value.version === "string" ? value.version : null,
+    kind: value.kind,
+    trust: value.trust,
+    source: value.source,
+    location: value.location,
+    status: value.status,
+    summary: typeof value.summary === "string" ? value.summary : null,
+    description: typeof value.description === "string" ? value.description : null,
+    compatibility:
+      value.compatibility && typeof value.compatibility === "object" && !Array.isArray(value.compatibility)
+        ? { seraph: String((value.compatibility as Record<string, unknown>).seraph ?? "") }
+        : null,
+    publisher:
+      value.publisher && typeof value.publisher === "object" && !Array.isArray(value.publisher)
+        ? {
+          name: String((value.publisher as Record<string, unknown>).name ?? ""),
+          homepage:
+            typeof (value.publisher as Record<string, unknown>).homepage === "string"
+              ? String((value.publisher as Record<string, unknown>).homepage)
+              : null,
+          support:
+            typeof (value.publisher as Record<string, unknown>).support === "string"
+              ? String((value.publisher as Record<string, unknown>).support)
+              : null,
+        }
+        : null,
+    issues,
+    load_errors: loadErrors,
+    toggle_targets: toggleTargets,
+    toggleable_contribution_types: Array.isArray(value.toggleable_contribution_types)
+      ? value.toggleable_contribution_types.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    passive_contribution_types: Array.isArray(value.passive_contribution_types)
+      ? value.passive_contribution_types.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    enable_supported: Boolean(value.enable_supported),
+    disable_supported: Boolean(value.disable_supported),
+    removable: Boolean(value.removable),
+    enabled_scope: typeof value.enabled_scope === "string" ? value.enabled_scope : "none",
+    configurable: Boolean(value.configurable),
+    metadata_supported: Boolean(value.metadata_supported),
+    config_scope: typeof value.config_scope === "string" ? value.config_scope : "none",
+    enabled:
+      typeof value.enabled === "boolean"
+        ? value.enabled
+        : value.enabled === null
+          ? null
+          : undefined,
+    config:
+      value.config && typeof value.config === "object" && !Array.isArray(value.config)
+        ? value.config as Record<string, unknown>
+        : {},
+    studio_files: studioFiles,
+  };
+}
+
+function normalizeExtensionPackagesPayload(payload: unknown): ExtensionPackageInfo[] {
+  if (
+    !payload
+    || typeof payload !== "object"
+    || !Array.isArray((payload as { extensions?: unknown }).extensions)
+  ) {
+    return [];
+  }
+  return ((payload as { extensions?: unknown }).extensions as unknown[]).flatMap((entry) => (
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? [normalizeExtensionPackage(entry as Record<string, unknown>)].filter(Boolean) as ExtensionPackageInfo[]
+      : []
+  ));
+}
+
+function normalizeExtensionLifecycleApprovalDetail(payload: unknown): ExtensionLifecycleApprovalDetail | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const detail = (payload as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return null;
+  }
+  const detailRecord = detail as Record<string, unknown>;
+  const type = typeof detailRecord.type === "string" ? detailRecord.type : "";
+  if (type !== "approval_required") {
+    return null;
+  }
+  const approvalId = typeof detailRecord.approval_id === "string" ? detailRecord.approval_id : "";
+  const toolName = typeof detailRecord.tool_name === "string" ? detailRecord.tool_name : "extension_lifecycle";
+  const riskLevel = typeof detailRecord.risk_level === "string" ? detailRecord.risk_level : "high";
+  const message = typeof detailRecord.message === "string" ? detailRecord.message : "Approval required before retrying the extension action.";
+  return {
+    type: "approval_required",
+    approval_id: approvalId,
+    tool_name: toolName,
+    risk_level: riskLevel,
+    message,
+  };
+}
+
 function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
   return {
     entityType: "workflow_definition",
@@ -507,6 +851,8 @@ function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
     summary: workflow.description,
     details: {
       file_path: workflow.file_path,
+      source: workflow.source,
+      extension_id: workflow.extension_id ?? null,
       tool_name: workflow.tool_name,
       enabled: workflow.enabled,
       user_invocable: workflow.user_invocable,
@@ -534,6 +880,8 @@ function buildSkillEntity(skill: SkillInfo): OperatorEntity {
       enabled: skill.enabled,
       user_invocable: skill.user_invocable ?? false,
       file_path: skill.file_path ?? "",
+      source: skill.source,
+      extension_id: skill.extension_id ?? null,
       requires_tools: skill.requires_tools ?? [],
       missing_tools: skill.missing_tools ?? [],
       recommended_actions: skill.recommended_actions ?? [],
@@ -558,8 +906,49 @@ function buildMcpEntity(server: McpServerInfo): OperatorEntity {
       auth_hint: server.auth_hint ?? "",
       status_message: server.status_message ?? "",
       enabled: server.enabled,
+      source: server.source ?? "manual",
+      extension_id: server.extension_id ?? null,
+      extension_reference: server.extension_reference ?? null,
+      extension_display_name: server.extension_display_name ?? null,
       has_headers: server.has_headers ?? false,
       recommended_actions: server.recommended_actions ?? [],
+    },
+  };
+}
+
+function buildExtensionManifestEntity(extension: ExtensionPackageInfo): OperatorEntity {
+  return {
+    entityType: "extension_manifest",
+    name: extension.display_name,
+    meta: `${extension.location} · ${extension.trust} · ${extension.version ?? "unknown version"}`,
+    summary: extension.summary || extension.description || "Extension package manifest",
+    details: {
+      extension_id: extension.id,
+      kind: extension.kind,
+      trust: extension.trust,
+      location: extension.location,
+      status: extension.status,
+      version: extension.version ?? "",
+      compatibility: extension.compatibility ?? null,
+      publisher: extension.publisher ?? null,
+      file_path: "manifest.yaml",
+      studio_reference: "manifest.yaml",
+      save_supported: extension.location === "workspace",
+      validation_supported: true,
+      issues: extension.issues,
+      load_errors: extension.load_errors,
+      toggle_targets: extension.toggle_targets,
+      toggleable_contribution_types: extension.toggleable_contribution_types,
+      passive_contribution_types: extension.passive_contribution_types,
+      enable_supported: extension.enable_supported,
+      disable_supported: extension.disable_supported,
+      removable: extension.removable,
+      enabled_scope: extension.enabled_scope,
+      configurable: extension.configurable,
+      metadata_supported: extension.metadata_supported,
+      config_scope: extension.config_scope,
+      enabled: extension.enabled ?? null,
+      config: extension.config,
     },
   };
 }
@@ -921,6 +1310,7 @@ function activityEmoji(value: ActivityLedgerEntry): string {
   if (value.kind === "llm_call") return "🤖";
   if (value.kind === "workflow_run") return "⚙️";
   if (value.kind === "approval") return "⏳";
+  if (value.kind === "extension") return "🧩";
   if (value.kind === "notification" || value.kind === "queued_insight" || value.kind === "intervention") return "📣";
   if (value.kind === "routing") return "🧭";
   if (value.kind === "tool_call" || value.kind === "tool_result" || value.kind === "tool_failed") return "🔧";
@@ -956,22 +1346,24 @@ function activityLeadPriority(value: ActivityLedgerEntry): number {
       return 0;
     case "workflow_run":
       return 1;
+    case "extension":
+      return 2;
     case "intervention":
     case "notification":
     case "queued_insight":
-      return 2;
-    case "agent_run":
       return 3;
-    case "llm_call":
+    case "agent_run":
       return 4;
-    case "routing":
+    case "llm_call":
       return 5;
+    case "routing":
+      return 6;
     case "tool_call":
     case "tool_result":
     case "tool_failed":
-      return 6;
-    default:
       return 7;
+    default:
+      return 8;
   }
 }
 
@@ -984,6 +1376,22 @@ function chooseActivityLead(items: ActivityLedgerEntry[]): ActivityLedgerEntry {
 }
 
 function activityRowMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "extension") {
+    const parts: string[] = [activityStatusLabel(value)];
+    if (typeof value.metadata?.action === "string" && value.metadata.action.trim()) {
+      parts.push(value.metadata.action.replace(/_/g, " "));
+    }
+    if (typeof value.metadata?.location === "string" && value.metadata.location.trim()) {
+      parts.push(value.metadata.location);
+    }
+    if (typeof value.metadata?.kind === "string" && value.metadata.kind.trim()) {
+      parts.push(value.metadata.kind);
+    }
+    if (typeof value.metadata?.version === "string" && value.metadata.version.trim()) {
+      parts.push(value.metadata.version);
+    }
+    return parts.join(" · ");
+  }
   const parts: string[] = [activityStatusLabel(value)];
   if (value.thread_label) parts.push(value.thread_label);
   if (value.model) parts.push(_modelLabelForRow(value.model));
@@ -1012,6 +1420,9 @@ function activityRoutingSummary(value: ActivityLedgerEntry): string {
 
 function activityLeadDetail(value: ActivityLedgerEntry): string | null {
   if (value.kind === "routing") return activityRoutingSummary(value);
+  if (value.kind === "extension" && typeof value.metadata?.error === "string" && value.metadata.error.trim()) {
+    return value.metadata.error;
+  }
   return null;
 }
 
@@ -1391,6 +1802,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [catalogItems, setCatalogItems] = useState<CatalogItemInfo[]>([]);
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
+  const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
@@ -1404,6 +1816,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [studioSelectedId, setStudioSelectedId] = useState<string | null>(null);
   const [studioDraft, setStudioDraft] = useState("");
   const [studioStatus, setStudioStatus] = useState<string | null>(null);
+  const [studioPackageStatus, setStudioPackageStatus] = useState<string | null>(null);
+  const [studioPackagePreview, setStudioPackagePreview] = useState<ExtensionPathPreview | null>(null);
   const [studioBusy, setStudioBusy] = useState<string | null>(null);
   const [studioPreflight, setStudioPreflight] = useState<CapabilityPreflightResponse | null>(null);
   const [studioWorkflowDiagnostics, setStudioWorkflowDiagnostics] = useState<WorkflowDiagnosticsPayload | null>(null);
@@ -1411,6 +1825,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [studioMcpTestResult, setStudioMcpTestResult] = useState<Record<string, unknown> | null>(null);
   const [studioMcpUrl, setStudioMcpUrl] = useState("");
   const [studioMcpDescription, setStudioMcpDescription] = useState("");
+  const [studioExtensionPath, setStudioExtensionPath] = useState("");
+  const [studioExtensionConfigDraft, setStudioExtensionConfigDraft] = useState("{}");
+  const [studioExtensionConfigDirty, setStudioExtensionConfigDirty] = useState(false);
+  const [pendingLifecycleApprovalId, setPendingLifecycleApprovalId] = useState<string | null>(null);
+  const studioExtensionConfigSelectionRef = useRef<string | null>(null);
   const studioSelectionRef = useRef<string | null>(null);
   const studioLoadRequestRef = useRef(0);
   const studioValidationRequestRef = useRef(0);
@@ -1523,6 +1942,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     writeRunbookMacros(savedRunbooks);
   }, [savedRunbooks]);
 
+  useEffect(() => {
+    if (!pendingLifecycleApprovalId) return;
+    const approval = pendingApprovals.find((item) => item.id === pendingLifecycleApprovalId);
+    if (!approval) return;
+    focusPane("approvals_pane");
+    setSelectedInspector({ kind: "approval", approval });
+    setPendingLifecycleApprovalId(null);
+  }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
+
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
     const fetchJson = async (url: string) => {
       try {
@@ -1547,6 +1975,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       approvalsResult,
       continuityResult,
       capabilitiesResult,
+      extensionsResult,
       activityLedgerResult,
       workflowRunsResult,
       toolModeResult,
@@ -1559,6 +1988,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
       fetchJson(`${API_URL}/api/observer/continuity`),
       fetchJson(`${API_URL}/api/capabilities/overview`),
+      fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
@@ -1600,6 +2030,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
       );
       setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
+    }
+    if (extensionsResult.ok) {
+      setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
+    } else {
+      setExtensionPackages([]);
     }
     if (
       activityLedgerResult.ok
@@ -1730,6 +2165,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
   }, [windowsMenuOpen]);
+
+  useEffect(() => {
+    if (!studioOpen) return;
+    let cancelled = false;
+    void refreshCockpit(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshCockpit, studioOpen]);
 
   useEffect(() => {
     syncCockpitPaneStack(paneVisibility);
@@ -1909,9 +2353,48 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => savedRunbooks,
     [savedRunbooks],
   );
+  const extensionPackagesById = useMemo(
+    () => new Map(extensionPackages.map((item) => [item.id, item])),
+    [extensionPackages],
+  );
+
+  const matchPackageFile = useCallback(
+    (
+      extensionId: string | null | undefined,
+      displayType: "skill" | "workflow" | "mcp_server",
+      name: string,
+      filePath: string | null | undefined,
+    ): ExtensionStudioFileInfo | null => {
+      if (!extensionId) return null;
+      const extensionPackage = extensionPackagesById.get(extensionId);
+      if (!extensionPackage) return null;
+      return extensionPackage.studio_files.find((entry) => {
+        if (entry.role !== "contribution" || entry.display_type !== displayType) return false;
+        if (entry.name === name) return true;
+        return typeof entry.resolved_path === "string" && !!filePath && entry.resolved_path === filePath;
+      }) ?? null;
+    },
+    [extensionPackagesById],
+  );
+
   const studioEntries = useMemo<ExtensionStudioEntry[]>(
     () => [
       ...workflows.map((workflow) => ({
+        ...(() => {
+          const packageFile = matchPackageFile(workflow.extension_id, "workflow", workflow.name, workflow.file_path);
+          const extensionPackage = workflow.extension_id ? extensionPackagesById.get(workflow.extension_id) ?? null : null;
+          return {
+            extensionId: workflow.extension_id ?? null,
+            packageReference: packageFile?.reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: packageFile?.format ?? null,
+            saveSupported: workflow.extension_id ? (packageFile?.save_supported ?? false) : true,
+            validationSupported: workflow.extension_id ? (packageFile?.validation_supported ?? false) : true,
+          };
+        })(),
         id: `workflow:${workflow.name}`,
         entityType: "workflow_definition" as const,
         name: workflow.name,
@@ -1928,8 +2411,38 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         availability: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
         meta: skill.user_invocable ? "invocable skill" : "support skill",
         entity: buildSkillEntity(skill),
+        ...(() => {
+          const packageFile = matchPackageFile(skill.extension_id, "skill", skill.name, skill.file_path ?? null);
+          const extensionPackage = skill.extension_id ? extensionPackagesById.get(skill.extension_id) ?? null : null;
+          return {
+            extensionId: skill.extension_id ?? null,
+            packageReference: packageFile?.reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: packageFile?.format ?? null,
+            saveSupported: skill.extension_id ? (packageFile?.save_supported ?? false) : true,
+            validationSupported: skill.extension_id ? (packageFile?.validation_supported ?? false) : true,
+          };
+        })(),
       })),
       ...mcpServers.map((server) => ({
+        ...(() => {
+          const extensionPackage = server.extension_id ? extensionPackagesById.get(server.extension_id) ?? null : null;
+          const packagedServer = server.source === "extension" && !!server.extension_id;
+          return {
+            extensionId: server.extension_id ?? null,
+            packageReference: server.extension_reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? server.extension_display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: null,
+            saveSupported: packagedServer ? false : true,
+            validationSupported: packagedServer ? false : true,
+          };
+        })(),
         id: `mcp:${server.name}`,
         entityType: "mcp" as const,
         name: server.name,
@@ -1938,20 +2451,154 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         meta: `${server.status ?? "unknown"} · ${server.tool_count ?? 0} tools`,
         entity: buildMcpEntity(server),
       })),
+      ...extensionPackages.map((extensionPackage) => {
+        const manifestFile = extensionPackage.studio_files.find((entry) => entry.role === "manifest") ?? null;
+        return {
+          id: `extension:${extensionPackage.id}`,
+          entityType: "extension_manifest" as const,
+          name: extensionPackage.display_name,
+          summary: extensionPackage.summary || extensionPackage.description || "Extension package manifest",
+          availability: extensionPackage.status,
+          meta: `${extensionPackage.location} · ${extensionPackage.trust} · ${extensionPackage.version ?? "unknown version"}`,
+          entity: buildExtensionManifestEntity(extensionPackage),
+          extensionId: extensionPackage.id,
+          packageReference: manifestFile?.reference ?? null,
+          packageDisplayName: extensionPackage.display_name,
+          packageVersion: extensionPackage.version ?? null,
+          packageLocation: extensionPackage.location,
+          packageTrust: extensionPackage.trust,
+          studioFormat: manifestFile?.format ?? "yaml",
+          saveSupported: manifestFile?.save_supported ?? false,
+          validationSupported: manifestFile?.validation_supported ?? false,
+        };
+      }),
     ],
-    [mcpServers, skills, workflows],
+    [extensionPackages, extensionPackagesById, matchPackageFile, mcpServers, skills, workflows],
   );
   const selectedStudioEntry = useMemo(
     () => studioEntries.find((entry) => entry.id === studioSelectedId) ?? studioEntries[0] ?? null,
     [studioEntries, studioSelectedId],
   );
+  const selectedExtensionPackage = useMemo(
+    () => (
+      selectedStudioEntry?.extensionId
+        ? extensionPackagesById.get(selectedStudioEntry.extensionId) ?? null
+        : null
+    ),
+    [extensionPackagesById, selectedStudioEntry?.extensionId],
+  );
+  const studioMcpReadOnly = selectedStudioEntry?.entityType === "mcp" && !!selectedStudioEntry.extensionId;
+  const selectedExtensionToggleAction = useMemo(() => {
+    if (!selectedExtensionPackage) return null;
+    const currentlyEnabled = selectedExtensionPackage.enabled !== false;
+    const toggleSupported = currentlyEnabled
+      ? selectedExtensionPackage.disable_supported
+      : selectedExtensionPackage.enable_supported;
+    if (!toggleSupported) return null;
+    const scopeLabel =
+      selectedExtensionPackage.enabled_scope === "toggleable_contributions"
+        ? "contributions"
+        : "extension";
+    return {
+      nextEnabled: !currentlyEnabled,
+      label: `${currentlyEnabled ? "Disable" : "Enable"} ${scopeLabel}`,
+    };
+  }, [selectedExtensionPackage]);
   useEffect(() => {
     studioSelectionRef.current = selectedStudioEntry?.id ?? null;
   }, [selectedStudioEntry?.id]);
+  useEffect(() => {
+    if (selectedStudioEntry?.entityType === "extension_manifest") {
+      const nextSelection = selectedExtensionPackage?.id ?? null;
+      const nextConfig =
+        selectedExtensionPackage?.config && Object.keys(selectedExtensionPackage.config).length > 0
+          ? selectedExtensionPackage.config
+          : {};
+      const nextDraft = JSON.stringify(nextConfig, null, 2);
+      const selectionChanged = studioExtensionConfigSelectionRef.current !== nextSelection;
+      studioExtensionConfigSelectionRef.current = nextSelection;
+      if (selectionChanged || !studioExtensionConfigDirty) {
+        setStudioExtensionConfigDraft(nextDraft);
+        setStudioExtensionConfigDirty(false);
+      }
+      return;
+    }
+    studioExtensionConfigSelectionRef.current = null;
+    setStudioExtensionConfigDirty(false);
+    setStudioExtensionConfigDraft("{}");
+  }, [selectedExtensionPackage?.config, selectedExtensionPackage?.id, selectedStudioEntry?.entityType, studioExtensionConfigDirty]);
   const studioRecommendedActions = useMemo(
     () => readActionList(selectedStudioEntry?.entity.details.recommended_actions),
     [selectedStudioEntry],
   );
+  const studioPackagePreviewIssueCount = useMemo(() => {
+    if (!studioPackagePreview || !Array.isArray(studioPackagePreview.results)) return 0;
+    return studioPackagePreview.results.reduce((count, result) => {
+      const issues = Array.isArray(result?.issues) ? result.issues.length : 0;
+      return count + issues;
+    }, 0);
+  }, [studioPackagePreview]);
+  const studioPackagePreviewHasLoadErrors = useMemo(
+    () => Array.isArray(studioPackagePreview?.load_errors) && studioPackagePreview.load_errors.length > 0,
+    [studioPackagePreview],
+  );
+  const studioPackagePreviewActionable = useMemo(
+    () => Boolean(studioPackagePreview?.ok)
+      && !studioPackagePreviewHasLoadErrors
+      && studioPackagePreviewIssueCount === 0,
+    [studioPackagePreview, studioPackagePreviewHasLoadErrors, studioPackagePreviewIssueCount],
+  );
+  const studioPackageAction = useMemo(() => {
+    const lifecyclePlan = studioPackagePreview?.lifecycle_plan;
+    const recommendedAction = lifecyclePlan?.recommended_action ?? "install";
+    if (recommendedAction === "update") {
+      return {
+        key: "update",
+        label: "Update package",
+        disabled: !studioPackagePreviewActionable,
+      };
+    }
+    if (recommendedAction === "none") {
+      return {
+        key: "none",
+        label: "Up to date",
+        disabled: true,
+      };
+    }
+    return {
+      key: "install",
+      label: "Install package",
+      disabled: !studioPackagePreviewActionable,
+    };
+  }, [studioPackagePreview, studioPackagePreviewActionable]);
+  const studioSidebarSections = useMemo(() => {
+    const grouped = new Map<string, ExtensionStudioEntry[]>();
+    extensionPackages.forEach((extensionPackage) => {
+      grouped.set(extensionPackage.id, []);
+    });
+    const standalone: ExtensionStudioEntry[] = [];
+    studioEntries.forEach((entry) => {
+      if (entry.extensionId && grouped.has(entry.extensionId)) {
+        grouped.get(entry.extensionId)?.push(entry);
+      } else {
+        standalone.push(entry);
+      }
+    });
+    const sortEntries = (entries: ExtensionStudioEntry[]) => entries.slice().sort((left, right) => {
+      if (left.entityType === "extension_manifest" && right.entityType !== "extension_manifest") return -1;
+      if (right.entityType === "extension_manifest" && left.entityType !== "extension_manifest") return 1;
+      return left.name.localeCompare(right.name);
+    });
+    return {
+      packages: extensionPackages
+        .map((extensionPackage) => ({
+          extension: extensionPackage,
+          entries: sortEntries(grouped.get(extensionPackage.id) ?? []),
+        }))
+        .filter((group) => group.entries.length > 0),
+      standalone: sortEntries(standalone),
+    };
+  }, [extensionPackages, studioEntries]);
 
   useEffect(() => {
     if (!studioOpen) return;
@@ -1992,8 +2639,42 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ? selectedStudioEntry.entity.details.description
         : "",
     );
+    if (selectedStudioEntry.entityType === "mcp" && selectedStudioEntry.extensionId) {
+      setStudioStatus("Packaged MCP definitions are read-only here; use connector test/toggle controls or update the package itself.");
+    }
     const loadStudioSource = async () => {
       try {
+        if (selectedStudioEntry.extensionId && selectedStudioEntry.packageReference && selectedStudioEntry.entityType !== "mcp") {
+          const response = await fetch(
+            `${API_URL}/api/extensions/${encodeURIComponent(selectedStudioEntry.extensionId)}/source?reference=${encodeURIComponent(selectedStudioEntry.packageReference)}`,
+          );
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(
+              payload.validation && typeof payload.validation === "object"
+                ? payload.validation as Record<string, unknown>
+                : null,
+            );
+            if (selectedStudioEntry.entityType === "extension_manifest") {
+              setStudioStatus(`${selectedStudioEntry.packageDisplayName ?? selectedStudioEntry.name} manifest loaded`);
+            }
+          }
+          return;
+        }
+        if (selectedStudioEntry.extensionId && selectedStudioEntry.entityType !== "mcp") {
+          if (!cancelled && requestId === studioLoadRequestRef.current && studioSelectionRef.current === entryId) {
+            setStudioDraftValidation(null);
+            setStudioStatus(`Reload extension package metadata before editing ${selectedStudioEntry.name}`);
+          }
+          return;
+        }
         if (selectedStudioEntry.entityType === "workflow_definition") {
           const response = await fetch(`${API_URL}/api/workflows/${encodeURIComponent(selectedStudioEntry.name)}/source`);
           const payload = await response.json().catch(() => null);
@@ -2198,6 +2879,31 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
 
+  async function handleExtensionLifecycleFailure(
+    payload: unknown,
+    fallbackMessage: string,
+    setStatus: (value: string) => void,
+  ): Promise<boolean> {
+    const approvalDetail = normalizeExtensionLifecycleApprovalDetail(payload);
+    if (approvalDetail) {
+      setPendingLifecycleApprovalId(approvalDetail.approval_id || null);
+      setStatus(`${approvalDetail.message} Review Pending approvals, then retry.`);
+      focusPane("approvals_pane");
+      await refreshCockpit();
+      appendOperatorFeed(
+        `${approvalDetail.tool_name} requires ${approvalDetail.risk_level} approval`,
+        "info",
+      );
+      return true;
+    }
+
+    const detail = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { detail?: unknown }).detail
+      : null;
+    setStatus(typeof detail === "string" ? detail : fallbackMessage);
+    return false;
+  }
+
   function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
     const next: DoctorPlanRecord = {
       ...plan,
@@ -2237,6 +2943,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setStudioBusy("validation");
     setStudioStatus(`Validating ${entry.name}...`);
     try {
+      if (entry.entityType === "extension_manifest" && entry.extensionId && entry.packageReference) {
+        const response = await fetch(
+          `${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source?reference=${encodeURIComponent(entry.packageReference)}`,
+        );
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(
+          payload?.validation && typeof payload.validation === "object"
+            ? payload.validation as Record<string, unknown>
+            : null,
+        );
+        if (!response.ok) {
+          setStudioStatus(typeof payload?.detail === "string" ? payload.detail : `Failed to validate ${entry.name}`);
+        } else {
+          setStudioStatus(`${entry.packageDisplayName ?? entry.name} manifest is valid`);
+        }
+        return;
+      }
+
       if (entry.entityType === "workflow_definition") {
         const [validationResponse, preflightResponse, diagnosticsResponse] = await Promise.all([
           fetch(`${API_URL}/api/workflows/validate`, {
@@ -2358,12 +3083,57 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     const entry = selectedStudioEntry;
+    if (entry.extensionId && !entry.packageReference) {
+      setStudioStatus(`Reload extension packages before saving ${entry.name}`);
+      return;
+    }
     const entryId = entry.id;
     const fileName = managedFileName(entry.entity.details.file_path);
     const requestId = ++studioSaveRequestRef.current;
     setStudioBusy("save");
     setStudioStatus(`Saving ${entry.name}...`);
     try {
+      if (entry.extensionId && entry.packageReference) {
+        const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reference: entry.packageReference,
+            content: studioDraft,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+            setStudioStatus(
+              typeof payload?.detail === "string"
+                ? payload.detail
+                : `Failed to save ${entry.name}`,
+            );
+          }
+          return;
+        }
+        await refreshCockpit();
+        if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(
+          payload?.validation && typeof payload.validation === "object"
+            ? payload.validation as Record<string, unknown>
+            : null,
+        );
+        setStudioStatus(
+          entry.entityType === "extension_manifest"
+            ? `${entry.packageDisplayName ?? entry.name} manifest saved`
+            : `${entry.name} saved`,
+        );
+        appendOperatorFeed(
+          entry.entityType === "extension_manifest"
+            ? `${entry.packageDisplayName ?? entry.name} manifest saved`
+            : `${entry.name} saved`,
+          "success",
+        );
+        return;
+      }
+
       const endpoint = entry.entityType === "workflow_definition"
         ? `${API_URL}/api/workflows/save`
         : `${API_URL}/api/skills/save`;
@@ -2444,6 +3214,254 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
         setStudioBusy(null);
       }
+    }
+  }
+
+  async function validateStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-validate");
+    setStudioPackagePreview(null);
+    setStudioPackageStatus(`Validating ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/validate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setStudioPackageStatus(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : `Failed to validate ${path}`,
+        );
+        return;
+      }
+      const preview = payload as ExtensionPathPreview;
+      setStudioPackagePreview(preview);
+      const issueCount = Array.isArray(payload?.results)
+        ? payload.results.reduce((count: number, result: unknown) => {
+          if (!result || typeof result !== "object" || Array.isArray(result)) return count;
+          const issues = Array.isArray((result as { issues?: unknown }).issues)
+            ? ((result as { issues?: unknown }).issues as unknown[]).length
+            : 0;
+          return count + issues;
+        }, 0)
+        : 0;
+      const loadErrorCount = Array.isArray(payload?.load_errors) ? payload.load_errors.length : 0;
+      const lifecyclePlan = preview.lifecycle_plan;
+      const packageLabel = payload?.display_name ?? payload?.extension_id ?? path;
+      const currentVersion = lifecyclePlan?.current_version;
+      const candidateVersion = lifecyclePlan?.candidate_version ?? payload?.version;
+      const location = lifecyclePlan?.current_location;
+      const validationFailureSummary = [
+        issueCount > 0 ? `${issueCount} doctor issue${issueCount === 1 ? "" : "s"}` : null,
+        loadErrorCount > 0 ? `${loadErrorCount} load error${loadErrorCount === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(" and ");
+      setStudioPackageStatus(
+        issueCount > 0 || loadErrorCount > 0 || payload?.ok === false
+          ? `${packageLabel} failed validation${validationFailureSummary ? ` with ${validationFailureSummary}` : ""}`
+          : lifecyclePlan?.recommended_action === "update"
+            ? `${packageLabel} can update ${currentVersion ?? "installed package"} -> ${candidateVersion ?? "candidate"}`
+            : lifecyclePlan?.mode === "workspace_override"
+              ? `${packageLabel} will install as a workspace override for the ${location ?? "bundled"} package`
+              : lifecyclePlan?.recommended_action === "none"
+                ? `${packageLabel} is already up to date`
+                : `${packageLabel} is valid and installable`,
+      );
+    } catch {
+      setStudioPackagePreview(null);
+      setStudioPackageStatus(`Failed to validate ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function installStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-install");
+    setStudioPackageStatus(`Installing ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/install`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(payload, `Failed to install ${path}`, setStudioPackageStatus);
+        return;
+      }
+      await refreshCockpit();
+      setStudioPackagePreview(null);
+      const extensionId = typeof payload?.extension?.id === "string" ? payload.extension.id : null;
+      if (extensionId) {
+        setStudioSelectedId(`extension:${extensionId}`);
+      }
+      setStudioPackageStatus(
+        `${payload?.extension?.display_name ?? extensionId ?? path} installed`,
+      );
+      appendOperatorFeed(
+        `Installed extension package: ${payload?.extension?.display_name ?? extensionId ?? path}`,
+        "success",
+      );
+    } catch {
+      setStudioPackageStatus(`Failed to install ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function updateStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-update");
+    setStudioPackageStatus(`Updating ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(payload, `Failed to update ${path}`, setStudioPackageStatus);
+        return;
+      }
+      await refreshCockpit();
+      setStudioPackagePreview(null);
+      const extensionId = typeof payload?.extension?.id === "string" ? payload.extension.id : null;
+      if (extensionId) {
+        setStudioSelectedId(`extension:${extensionId}`);
+      }
+      setStudioPackageStatus(
+        `${payload?.extension?.display_name ?? extensionId ?? path} updated`,
+      );
+      appendOperatorFeed(
+        `Updated extension package: ${payload?.extension?.display_name ?? extensionId ?? path}`,
+        "success",
+      );
+    } catch {
+      setStudioPackageStatus(`Failed to update ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function setSelectedExtensionEnabled(enabled: boolean) {
+    const extensionId = selectedExtensionPackage?.id;
+    if (!extensionId) return;
+    setStudioBusy(enabled ? "extension-enable" : "extension-disable");
+    setStudioStatus(`${enabled ? "Enabling" : "Disabling"} ${selectedExtensionPackage.display_name}...`);
+    try {
+      const response = await fetch(
+        `${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/${enabled ? "enable" : "disable"}`,
+        { method: "POST" },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to ${enabled ? "enable" : "disable"} ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
+        );
+        return;
+      }
+      await refreshCockpit();
+      setStudioStatus(
+        `${selectedExtensionPackage.display_name} ${enabled ? "enabled" : "disabled"}`,
+      );
+      appendOperatorFeed(
+        `${selectedExtensionPackage.display_name} ${enabled ? "enabled" : "disabled"}`,
+        "success",
+      );
+    } catch {
+      setStudioStatus(`Failed to ${enabled ? "enable" : "disable"} ${selectedExtensionPackage.display_name}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function saveSelectedExtensionMetadata() {
+    const extensionId = selectedExtensionPackage?.id;
+    if (!extensionId) return;
+    let configPayload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(studioExtensionConfigDraft);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setStudioStatus("Extension metadata must be a JSON object");
+        return;
+      }
+      configPayload = parsed as Record<string, unknown>;
+    } catch {
+      setStudioStatus("Extension metadata must be valid JSON");
+      return;
+    }
+    setStudioBusy("extension-configure");
+    setStudioStatus(`Saving metadata for ${selectedExtensionPackage.display_name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/configure`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: configPayload }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to save metadata for ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
+        );
+        return;
+      }
+      setStudioExtensionConfigDirty(false);
+      await refreshCockpit();
+      setStudioStatus(`${selectedExtensionPackage.display_name} metadata saved`);
+      appendOperatorFeed(`${selectedExtensionPackage.display_name} metadata saved`, "success");
+    } catch {
+      setStudioStatus(`Failed to save metadata for ${selectedExtensionPackage.display_name}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function removeSelectedExtension() {
+    const extensionId = selectedExtensionPackage?.id;
+    if (!extensionId) return;
+    setStudioBusy("extension-remove");
+    setStudioStatus(`Removing ${selectedExtensionPackage.display_name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}`, {
+        method: "DELETE",
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to remove ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
+        );
+        return;
+      }
+      await refreshCockpit();
+      setStudioSelectedId(null);
+      setStudioStatus(`${selectedExtensionPackage.display_name} removed`);
+      appendOperatorFeed(`${selectedExtensionPackage.display_name} removed`, "success");
+    } catch {
+      setStudioStatus(`Failed to remove ${selectedExtensionPackage.display_name}`);
+    } finally {
+      setStudioBusy(null);
     }
   }
 
@@ -2829,6 +3847,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     label: string,
   ) {
     const safeTypes = new Set<CapabilityAction["type"]>([
+      "enable_extension",
       "toggle_skill",
       "toggle_workflow",
       "toggle_mcp_server",
@@ -2847,69 +3866,77 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     setOperatorStatus(`Repairing ${label}...`);
+    let completed = true;
     for (const action of allowedActions) {
-      await runCapabilityAction(action);
+      const result = await runCapabilityAction(action);
+      completed = completed && result;
+    }
+    if (!completed) {
+      return;
     }
     setOperatorStatus(`${label} repair sequence applied`);
     appendOperatorFeed(`${label} repair sequence applied`, "success");
   }
 
-  async function runCapabilityAction(action: CapabilityAction | null | undefined) {
-    if (!action) return;
+  async function runCapabilityAction(action: CapabilityAction | null | undefined): Promise<boolean> {
+    if (!action) return false;
     switch (action.type) {
+      case "enable_extension":
+        if (action.name) return enableExtensionPackage(action.name, typeof action.target === "string" ? action.target : undefined);
+        return false;
       case "toggle_skill": {
         const skill = skills.find((item) => item.name === action.name);
         if (skill) await toggleSkill(skill);
-        return;
+        return true;
       }
       case "toggle_workflow": {
         const workflow = workflows.find((item) => item.name === action.name);
         if (workflow) await toggleWorkflow(workflow, Boolean(action.enabled));
-        return;
+        return true;
       }
       case "toggle_mcp_server": {
         const server = mcpServers.find((item) => item.name === action.name);
         if (server) await toggleMcpServer(server);
-        return;
+        return true;
       }
       case "test_mcp_server": {
         const server = mcpServers.find((item) => item.name === action.name);
         if (server) await testMcpServer(server);
-        return;
+        return true;
       }
       case "test_native_notification":
         await sendTestNativeNotification();
-        return;
+        return true;
       case "set_tool_policy":
         if (action.mode === "safe" || action.mode === "balanced" || action.mode === "full") {
           await updateToolPolicy(action.mode);
         }
-        return;
+        return true;
       case "set_mcp_policy":
         if (action.mode === "disabled" || action.mode === "approval" || action.mode === "full") {
           await updateMcpPolicy(action.mode);
         }
-        return;
+        return true;
       case "install_catalog_item": {
         const item = catalogItems.find((entry) => entry.name === action.name);
         if (item) await installCatalogItem(item);
-        return;
+        return true;
       }
       case "activate_starter_pack": {
         const pack = starterPacks.find((entry) => entry.name === action.name);
         if (pack) await activateStarterPack(pack);
-        return;
+        return true;
       }
       case "draft_workflow": {
         const workflow = workflows.find((entry) => entry.name === action.name);
         if (workflow) queueComposerDraft(buildWorkflowDraft(workflow));
-        return;
+        return true;
       }
       case "open_settings":
         setSettingsPanelOpen(true);
-        return;
+        return true;
       default:
-        return;
+        return false;
     }
   }
 
@@ -3004,17 +4031,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function enableExtensionPackage(extensionId: string, displayName?: string): Promise<boolean> {
+    const extensionPackage = extensionPackages.find((item) => item.id === extensionId);
+    const label = displayName ?? extensionPackage?.display_name ?? extensionId;
+    setOperatorStatus(`Enabling ${label}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/enable`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const approvalHandled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to enable ${label}`,
+          setOperatorStatus,
+        );
+        if (!approvalHandled) {
+          appendOperatorFeed(`Failed to enable extension ${label}`, "failed");
+        }
+        return false;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${label} enabled`);
+      appendOperatorFeed(`${label} enabled`, "success");
+      return true;
+    } catch {
+      setOperatorStatus(`Failed to enable ${label}`);
+      appendOperatorFeed(`Failed to enable extension ${label}`, "failed");
+      return false;
+    }
+  }
+
   async function toggleMcpServer(server: McpServerInfo) {
     setOperatorStatus(`${server.enabled ? "Disabling" : "Enabling"} ${server.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: !server.enabled }),
-      });
+      const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
+      const response = await fetch(
+        packagedServer
+          ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/enabled`
+          : `${API_URL}/api/mcp/servers/${server.name}`,
+        packagedServer
+          ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: server.extension_reference, enabled: !server.enabled }),
+          }
+          : {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: !server.enabled }),
+          },
+      );
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setOperatorStatus(`Failed to update ${server.name}`);
-        appendOperatorFeed(`Failed to update MCP ${server.name}`, "failed");
+        const approvalHandled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to update ${server.name}`,
+          setOperatorStatus,
+        );
+        if (!approvalHandled) {
+          appendOperatorFeed(`Failed to update MCP ${server.name}`, "failed");
+        }
         return;
       }
       await refreshCockpit();
@@ -3029,7 +4106,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function testMcpServer(server: McpServerInfo) {
     setOperatorStatus(`Testing ${server.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
+      const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
+      const response = await fetch(
+        packagedServer
+          ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/test`
+          : `${API_URL}/api/mcp/servers/${server.name}/test`,
+        packagedServer
+          ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: server.extension_reference }),
+          }
+          : { method: "POST" },
+      );
       const payload = await response.json();
       if (!response.ok) {
         setOperatorStatus(payload.detail || `${server.name} test failed`);
@@ -3076,6 +4165,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: approval.status,
         resolution: approvalState[approval.id] ?? "pending",
         resume_message: approval.resume_message ?? "n/a",
+        extension_id: approval.extension_id ?? "n/a",
+        extension_display_name: approval.extension_display_name ?? "n/a",
+        extension_action: approval.extension_action ?? "n/a",
+        package_path: approval.package_path ?? "n/a",
+        lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
+        permissions: approval.permissions ?? {},
       };
     } else if (selectedInspector.kind === "workflow") {
       const workflow = selectedInspector.workflow;
@@ -5364,7 +6459,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         )}
       </div>
 
-      {studioOpen && selectedStudioEntry && (
+      {studioOpen && (
         <div className="cockpit-overlay-backdrop" onClick={() => setStudioOpen(false)}>
           <section
             className="cockpit-palette cockpit-studio"
@@ -5375,12 +6470,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <div className="cockpit-window-header-main">
                 <div className="cockpit-window-title">Extension studio</div>
                 <div className="cockpit-window-meta">
-                  validate, repair, and author workflows, skills, and MCP config from one workspace
+                  validate, repair, and author extension packages, workflows, skills, and MCP config from one workspace
                 </div>
               </div>
               <div className="cockpit-window-controls">
                 <div className="cockpit-window-meta">
-                  {selectedStudioEntry.entityType.replace(/_/g, " ")} · {selectedStudioEntry.availability}
+                  {selectedStudioEntry
+                    ? `${selectedStudioEntry.entityType.replace(/_/g, " ")} · ${selectedStudioEntry.availability}`
+                    : "package lifecycle · install / validate"}
                 </div>
                 <button
                   type="button"
@@ -5399,27 +6496,124 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <span className="cockpit-key">extensions</span>
                   <span className="cockpit-operator-link">{studioEntries.length} loaded</span>
                 </div>
-                <div className="cockpit-list cockpit-list--palette">
-                  {studioEntries.map((entry) => (
+                <div className="cockpit-studio-sidebar-group">
+                  <div className="cockpit-operator-row">
+                    <span className="cockpit-key">package path</span>
+                    <span className="cockpit-row-age">install / validate</span>
+                  </div>
+                  <input
+                    className="cockpit-input"
+                    aria-label="Extension package path"
+                    value={studioExtensionPath}
+                    onChange={(event) => {
+                      setStudioExtensionPath(event.target.value);
+                      setStudioPackagePreview(null);
+                      setStudioPackageStatus(null);
+                    }}
+                    placeholder="/path/to/extension-pack"
+                  />
+                  <div className="cockpit-feedback-row">
                     <button
-                      key={entry.id}
-                      type="button"
-                      className={`cockpit-sublist-button ${selectedStudioEntry.id === entry.id ? "active" : ""}`}
-                      onClick={() => setStudioSelectedId(entry.id)}
+                      className="cockpit-feedback-button"
+                      onClick={() => void validateStudioExtensionPath()}
+                      disabled={
+                        studioBusy === "extension-validate"
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-update"
+                      }
                     >
-                      <span>{entry.name}</span>
-                      <span className="cockpit-row-age">{entry.entityType === "workflow_definition" ? "workflow" : entry.entityType}</span>
+                      Validate path
                     </button>
-                  ))}
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void (
+                        studioPackageAction.key === "update"
+                          ? updateStudioExtensionPath()
+                          : installStudioExtensionPath()
+                      )}
+                      disabled={
+                        studioPackageAction.disabled
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-validate"
+                        || studioBusy === "extension-update"
+                      }
+                    >
+                      {studioPackageAction.label}
+                    </button>
+                  </div>
+                  {studioPackageStatus ? (
+                    <div className="cockpit-sublist-item">{studioPackageStatus}</div>
+                  ) : null}
                 </div>
+                {studioSidebarSections.packages.map((group) => (
+                  <div key={group.extension.id} className="cockpit-studio-sidebar-group">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">{group.extension.display_name}</span>
+                      <span className="cockpit-row-age">{group.extension.location}</span>
+                    </div>
+                    <div className="cockpit-list cockpit-list--palette">
+                      {group.entries.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          className={`cockpit-sublist-button ${selectedStudioEntry?.id === entry.id ? "active" : ""}`}
+                          onClick={() => setStudioSelectedId(entry.id)}
+                        >
+                          <span>{entry.entityType === "extension_manifest" ? "manifest.yaml" : entry.name}</span>
+                          <span className="cockpit-row-age">
+                            {entry.entityType === "workflow_definition"
+                              ? "workflow"
+                              : entry.entityType === "extension_manifest"
+                                ? "manifest"
+                                : entry.entityType}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {studioSidebarSections.standalone.length ? (
+                  <div className="cockpit-studio-sidebar-group">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">standalone</span>
+                      <span className="cockpit-row-age">{studioSidebarSections.standalone.length}</span>
+                    </div>
+                    <div className="cockpit-list cockpit-list--palette">
+                      {studioSidebarSections.standalone.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          className={`cockpit-sublist-button ${selectedStudioEntry?.id === entry.id ? "active" : ""}`}
+                          onClick={() => setStudioSelectedId(entry.id)}
+                        >
+                          <span>{entry.name}</span>
+                          <span className="cockpit-row-age">{entry.entityType === "workflow_definition" ? "workflow" : entry.entityType}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </aside>
               <div className="cockpit-studio-main">
+                {selectedStudioEntry ? (
                 <div className="cockpit-inspector">
                   <div className="cockpit-inspector-title">{selectedStudioEntry.name}</div>
                   <div className="cockpit-inspector-meta">{selectedStudioEntry.meta}</div>
                   <div className="cockpit-inspector-body">{selectedStudioEntry.summary}</div>
                   <div className="cockpit-chip-row">
                     <span className="cockpit-chip">{selectedStudioEntry.availability}</span>
+                    {selectedStudioEntry.packageDisplayName ? (
+                      <span className="cockpit-chip">
+                        {selectedStudioEntry.packageDisplayName}
+                        {selectedStudioEntry.packageVersion ? ` · ${selectedStudioEntry.packageVersion}` : ""}
+                      </span>
+                    ) : null}
+                    {selectedStudioEntry.packageLocation ? (
+                      <span className="cockpit-chip">
+                        {selectedStudioEntry.packageLocation}
+                        {selectedStudioEntry.packageTrust ? ` · ${selectedStudioEntry.packageTrust}` : ""}
+                      </span>
+                    ) : null}
                     {typeof selectedStudioEntry.entity.details.file_path === "string" && selectedStudioEntry.entity.details.file_path
                       ? <span className="cockpit-chip">{String(selectedStudioEntry.entity.details.file_path)}</span>
                       : null}
@@ -5431,18 +6625,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <button
                       className="cockpit-feedback-button"
                       onClick={() => void refreshStudioValidation()}
-                      disabled={studioBusy === "validation"}
+                      disabled={studioBusy === "validation" || selectedStudioEntry.validationSupported === false}
                     >
-                      {selectedStudioEntry.entityType === "mcp" ? "Validate config" : "Refresh validation"}
+                      {selectedStudioEntry.entityType === "mcp"
+                        ? "Validate config"
+                        : selectedStudioEntry.entityType === "extension_manifest"
+                          ? "Validate manifest"
+                          : "Refresh validation"}
                     </button>
                     <button
                       className="cockpit-feedback-button"
                       onClick={() => void saveStudioDraft()}
-                      disabled={studioBusy === "save"}
+                      disabled={studioBusy === "save" || selectedStudioEntry.saveSupported === false}
                     >
-                      {selectedStudioEntry.entityType === "mcp" ? "Save config" : "Save draft"}
+                      {selectedStudioEntry.entityType === "mcp"
+                        ? "Save config"
+                        : selectedStudioEntry.entityType === "extension_manifest"
+                          ? "Save manifest"
+                          : "Save draft"}
                     </button>
-                    {selectedStudioEntry.entityType !== "mcp" ? (
+                    {selectedStudioEntry.entityType !== "mcp" && selectedStudioEntry.entityType !== "extension_manifest" ? (
                       <button
                         className="cockpit-feedback-button"
                         onClick={() => queueComposerDraft(studioDraft)}
@@ -5456,6 +6658,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         onClick={() => void runCapabilityActions(studioRecommendedActions, selectedStudioEntry.name)}
                       >
                         Run repairs
+                      </button>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionToggleAction ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void setSelectedExtensionEnabled(selectedExtensionToggleAction.nextEnabled)}
+                        disabled={studioBusy === "extension-enable" || studioBusy === "extension-disable"}
+                      >
+                        {selectedExtensionToggleAction.label}
+                      </button>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.metadata_supported ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void saveSelectedExtensionMetadata()}
+                        disabled={studioBusy === "extension-configure"}
+                      >
+                        Save metadata
+                      </button>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.removable ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void removeSelectedExtension()}
+                        disabled={studioBusy === "extension-remove"}
+                      >
+                        Remove package
                       </button>
                     ) : null}
                     <button
@@ -5474,11 +6703,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-value">
                         {studioPreflight
                           ? `${studioPreflight.ready ? "ready" : "blocked"} · ${studioPreflight.blocking_reasons.join(" · ") || "no blockers"}`
-                          : selectedStudioEntry.entityType === "skill"
-                            ? "Use validation to check draft syntax and current runtime blockers."
+                          : selectedStudioEntry.entityType === "extension_manifest"
+                            ? "Manage install state, metadata, and manifest integrity from one package surface."
+                            : selectedStudioEntry.entityType === "skill"
+                              ? "Use validation to check draft syntax and current runtime blockers."
                             : "Run validation to capture a current plan."}
                       </div>
                     </div>
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">package state</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.status}
+                          {selectedExtensionPackage.enabled_scope !== "none"
+                            ? ` · ${selectedExtensionPackage.enabled === false ? "disabled" : "enabled"}`
+                            : ""}
+                          {selectedExtensionPackage.toggleable_contribution_types.length
+                            ? ` · toggles ${selectedExtensionPackage.toggleable_contribution_types.join(", ")}`
+                            : ""}
+                          {selectedExtensionPackage.passive_contribution_types.length
+                            ? ` · passive ${selectedExtensionPackage.passive_contribution_types.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.issues.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">doctor issues</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.issues.map((issue) => issue.message).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.load_errors.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">load errors</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.load_errors.map((error) => error.message).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.toggle_targets.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">toggle targets</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.toggle_targets
+                            .map((target) => `${target.type.replace(/_/g, " ")} ${target.name}`)
+                            .join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.metadata_supported ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">metadata scope</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.config_scope.replace(/_/g, " ")}
+                          {selectedExtensionPackage.publisher?.name
+                            ? ` · publisher ${selectedExtensionPackage.publisher.name}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
                     {studioDraftValidation ? (
                       <div className="cockpit-inspector-stack-row">
                         <div className="cockpit-key">draft status</div>
@@ -5557,6 +6842,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         value={studioMcpUrl}
                         onChange={(event) => setStudioMcpUrl(event.target.value)}
                         placeholder="http://host.docker.internal:9001/mcp"
+                        disabled={studioMcpReadOnly}
                       />
                       <label className="cockpit-key" htmlFor="studio-mcp-description">description</label>
                       <input
@@ -5565,20 +6851,64 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         value={studioMcpDescription}
                         onChange={(event) => setStudioMcpDescription(event.target.value)}
                         placeholder="What this MCP server provides"
+                        disabled={studioMcpReadOnly}
                       />
                     </div>
                   ) : (
                     <div className="cockpit-studio-form">
-                      <label className="cockpit-key" htmlFor="studio-authoring-draft">authoring draft</label>
+                      <label className="cockpit-key" htmlFor="studio-authoring-draft">
+                        {selectedStudioEntry.entityType === "extension_manifest" ? "manifest draft" : "authoring draft"}
+                      </label>
                       <textarea
                         id="studio-authoring-draft"
                         className="cockpit-input cockpit-studio-textarea"
                         value={studioDraft}
                         onChange={(event) => setStudioDraft(event.target.value)}
                       />
+                      {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.metadata_supported ? (
+                        <>
+                          <label className="cockpit-key" htmlFor="studio-extension-config">package metadata</label>
+                          <textarea
+                            id="studio-extension-config"
+                            className="cockpit-input cockpit-studio-textarea cockpit-studio-textarea--compact"
+                            value={studioExtensionConfigDraft}
+                            onChange={(event) => {
+                              setStudioExtensionConfigDraft(event.target.value);
+                              setStudioExtensionConfigDirty(true);
+                            }}
+                          />
+                        </>
+                      ) : null}
                     </div>
                   )}
                 </div>
+                ) : (
+                  <div className="cockpit-inspector">
+                    <div className="cockpit-inspector-title">Extension packages</div>
+                    <div className="cockpit-inspector-meta">install, validate, and inspect lifecycle state</div>
+                    <div className="cockpit-inspector-body">
+                      Enter a local package path to validate or install a new extension. Installed packages appear in the left sidebar with manifest-backed lifecycle controls.
+                    </div>
+                    <div className="cockpit-inspector-stack">
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">loaded packages</div>
+                        <div className="cockpit-value">{extensionPackages.length}</div>
+                      </div>
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">workspace packages</div>
+                        <div className="cockpit-value">
+                          {extensionPackages.filter((item) => item.location === "workspace").length}
+                        </div>
+                      </div>
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">doctor state</div>
+                        <div className="cockpit-value">
+                          {extensionPackages.filter((item) => item.status === "degraded").length} degraded
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </section>

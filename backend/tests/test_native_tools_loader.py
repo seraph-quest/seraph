@@ -1,9 +1,10 @@
-"""Tests for plugin loader (src/plugins/loader.py)."""
+"""Tests for bundled native tool discovery and legacy plugin aliases."""
 
 import pytest
 
-import src.plugins.loader as loader_mod
-from src.plugins.loader import discover_tools, reload_tools
+import src.native_tools.loader as loader_mod
+import src.plugins.loader as legacy_loader_mod
+from src.native_tools.loader import discover_tools, reload_tools
 
 
 @pytest.fixture(autouse=True)
@@ -40,3 +41,12 @@ class TestDiscoverTools:
         t2 = reload_tools()
         assert t1 is not t2
         assert len(t2) > 0
+
+    def test_legacy_loader_alias_shares_module_state(self):
+        assert legacy_loader_mod is loader_mod
+
+        legacy_loader_mod._discovered_tools = ["sentinel"]
+        assert loader_mod._discovered_tools == ["sentinel"]
+
+        loader_mod._discovered_tools = None
+        assert legacy_loader_mod._discovered_tools is None

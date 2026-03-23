@@ -67,6 +67,7 @@ const config: Config = {
   themeConfig: {
     colorMode: {
       defaultMode: 'dark',
+      disableSwitch: true,
       respectPrefersColorScheme: false,
     },
     navbar: {
@@ -151,7 +152,7 @@ const config: Config = {
       copyright: `Copyright ${new Date().getFullYear()} Seraph. Built with Docusaurus.`,
     },
     prism: {
-      theme: prismThemes.github,
+      theme: prismThemes.dracula,
       darkTheme: prismThemes.dracula,
     },
   } satisfies Preset.ThemeConfig,

@@ -1,0 +1,18 @@
+name: browserbase
+description: Browserbase-style provider definition that currently stages credentials and uses the local browser runtime as fallback for browsing work.
+provider_kind: browserbase
+enabled: false
+capabilities:
+  - staged_remote_provider
+  - local_fallback
+  - snapshots
+  - page_refs
+config_fields:
+  - key: api_key
+    label: Browserbase API Key
+    input: password
+    required: true
+  - key: project_id
+    label: Project ID
+    input: text
+    required: false

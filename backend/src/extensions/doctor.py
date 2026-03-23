@@ -12,6 +12,7 @@ from src.extensions.capability_contributions import (
     parse_context_pack_definition,
     parse_messaging_connector_definition,
     parse_node_adapter_definition,
+    parse_provider_preset_definition,
     parse_speech_profile_definition,
     parse_toolset_preset_definition,
 )
@@ -53,6 +54,7 @@ _DEFINITION_PARSERS = {
     "browser_providers": ("invalid_browser_provider", "browser provider", parse_browser_provider_definition),
     "messaging_connectors": ("invalid_messaging_connector", "messaging connector", parse_messaging_connector_definition),
     "speech_profiles": ("invalid_speech_profile", "speech profile", parse_speech_profile_definition),
+    "provider_presets": ("invalid_provider_preset", "provider preset", parse_provider_preset_definition),
     "node_adapters": ("invalid_node_adapter", "node adapter", parse_node_adapter_definition),
 }
 
@@ -181,7 +183,11 @@ def _connector_implies_network(payload: Any) -> bool:
     )
 
 
-def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
+def doctor_extension(
+    extension: ExtensionRecord,
+    *,
+    available_mcp_server_names: set[str] | None = None,
+) -> ExtensionDoctorResult:
     issues: list[ExtensionDoctorIssue] = []
 
     if extension.source != "manifest" or extension.manifest is None:
@@ -425,6 +431,26 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                             suggested_fix="set manifest.permissions.network to true for networked toolsets",
                         )
                     )
+                if definition.include_mcp_servers:
+                    missing_servers = sorted(
+                        server_name
+                        for server_name in definition.include_mcp_servers
+                        if server_name not in (available_mcp_server_names or set())
+                    )
+                    if missing_servers:
+                        issues.append(
+                            ExtensionDoctorIssue(
+                                code="missing_mcp_server_reference",
+                                severity="error",
+                                message=(
+                                    "Toolset preset references MCP servers that are not available in the current "
+                                    f"registry/runtime: {', '.join(missing_servers)}"
+                                ),
+                                contribution_type=contribution.contribution_type,
+                                reference=contribution.reference,
+                                suggested_fix="fix include_mcp_servers or install/configure the missing MCP server packages first",
+                            )
+                        )
                 continue
             permission_profile = evaluate_contribution_permissions(
                 extension,
@@ -570,7 +596,29 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
 
 
 def doctor_snapshot(snapshot: ExtensionRegistrySnapshot) -> ExtensionDoctorReport:
+    try:
+        from src.tools.mcp_manager import mcp_manager
+
+        runtime_mcp_servers = {
+            str(name).strip()
+            for name in getattr(mcp_manager, "_config", {}).keys()
+            if str(name).strip()
+        }
+    except Exception:
+        runtime_mcp_servers = set()
+    packaged_mcp_servers = {
+        str(contribution.metadata.get("name")).strip()
+        for contribution in snapshot.list_contributions("mcp_servers")
+        if isinstance(contribution.metadata.get("name"), str) and str(contribution.metadata.get("name")).strip()
+    }
+    available_mcp_server_names = packaged_mcp_servers | runtime_mcp_servers
     return ExtensionDoctorReport(
-        results=[doctor_extension(extension) for extension in snapshot.extensions],
+        results=[
+            doctor_extension(
+                extension,
+                available_mcp_server_names=available_mcp_server_names,
+            )
+            for extension in snapshot.extensions
+        ],
         load_errors=list(snapshot.load_errors),
     )

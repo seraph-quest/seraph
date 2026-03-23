@@ -39,6 +39,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "get_goal_progress": "goals",
     "web_search": "research",
     "browse_webpage": "research",
+    "browser_session": "research",
     "read_file": "files",
     "write_file": "files",
     "fill_template": "files",

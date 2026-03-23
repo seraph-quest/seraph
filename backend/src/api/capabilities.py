@@ -1,4 +1,4 @@
-"""Capability overview API — aggregated tools, skills, workflows, MCP, and starter packs."""
+"""Capability overview API — aggregated tools, skills, workflows, MCP, packs, and starter packs."""
 
 from __future__ import annotations
 
@@ -535,6 +535,54 @@ def _recommended_actions(
                 "description": server.get("description", ""),
                 "action": {"type": "install_catalog_item", "label": "Install MCP server", "name": name},
             })
+
+    for extension in catalog.get("extension_packages", []):
+        if not isinstance(extension, dict):
+            continue
+        catalog_id = str(extension.get("catalog_id") or "").strip()
+        display_name = str(extension.get("name") or catalog_id or "extension-pack").strip()
+        if not catalog_id:
+            continue
+        installed = bool(extension.get("installed"))
+        update_available = bool(extension.get("update_available"))
+        status = str(extension.get("status") or "ready")
+        action_label = "Update pack" if installed and update_available else "Install pack"
+        recommended_actions = (
+            []
+            if status != "ready" or (installed and not update_available)
+            else [{"type": "install_catalog_item", "label": action_label, "name": catalog_id}]
+        )
+        catalog_items.append({
+            "name": display_name,
+            "catalog_id": catalog_id,
+            "type": "extension_pack",
+            "description": extension.get("description", ""),
+            "category": extension.get("category", ""),
+            "bundled": bool(extension.get("bundled", False)),
+            "installed": installed,
+            "update_available": update_available,
+            "version": extension.get("version"),
+            "installed_version": extension.get("installed_version"),
+            "trust": extension.get("trust"),
+            "contribution_types": list(extension.get("contribution_types") or []),
+            "status": status,
+            "doctor_ok": bool(extension.get("doctor_ok", status == "ready")),
+            "issues": list(extension.get("issues") or []),
+            "load_errors": list(extension.get("load_errors") or []),
+            "recommended_actions": recommended_actions,
+        })
+        if status != "ready" or (installed and not update_available):
+            continue
+        add_recommendation({
+            "id": f"catalog-extension:{catalog_id}",
+            "label": f"{action_label} {display_name}",
+            "description": str(extension.get("description") or ""),
+            "action": {
+                "type": "install_catalog_item",
+                "label": action_label,
+                "name": catalog_id,
+            },
+        })
 
     for workflow_name, workflow in workflows_by_name.items():
         for missing_skill in workflow.get("missing_skills", []):
@@ -1181,6 +1229,38 @@ def _attach_mcp_actions(mcp_servers: list[dict[str, Any]], *, mcp_mode: str) -> 
         server["recommended_actions"] = actions
 
 
+def _mcp_toolset_preset_map() -> dict[str, list[dict[str, Any]]]:
+    registry = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+    preset_map: dict[str, list[dict[str, Any]]] = {}
+    for extension in registry.snapshot().extensions:
+        for contribution in extension.contributions:
+            if contribution.contribution_type != "toolset_presets":
+                continue
+            preset_name = str(contribution.metadata.get("name") or "").strip()
+            servers = [
+                server_name
+                for server_name in contribution.metadata.get("include_mcp_servers", []) or []
+                if isinstance(server_name, str) and server_name.strip()
+            ]
+            if not preset_name or not servers:
+                continue
+            summary = {
+                "name": preset_name,
+                "description": str(contribution.metadata.get("description") or ""),
+                "reference": contribution.reference,
+                "extension_id": extension.id,
+                "extension_display_name": extension.display_name,
+            }
+            for server_name in servers:
+                preset_map.setdefault(server_name, []).append(summary)
+    return preset_map
+
+
 def _workflow_status_map(
     available_tool_names: list[str],
     active_skill_names: list[str],
@@ -1228,6 +1308,7 @@ def _tool_status_list(tool_mode: str) -> list[dict[str, Any]]:
 
 def _mcp_status_list(mcp_mode: str) -> list[dict[str, Any]]:
     servers = []
+    preset_map = _mcp_toolset_preset_map()
     for server in mcp_manager.get_config():
         status = server.get("status", "disconnected")
         enabled = bool(server.get("enabled", False))
@@ -1249,10 +1330,19 @@ def _mcp_status_list(mcp_mode: str) -> list[dict[str, Any]]:
         else:
             availability = "blocked"
             blocked_reason = "disconnected"
+        tool_names = sorted(
+            {
+                str(getattr(tool, "name", "")).strip()
+                for tool in mcp_manager.get_server_tools(str(server.get("name") or ""))
+                if str(getattr(tool, "name", "")).strip()
+            }
+        )
         servers.append({
             **server,
             "availability": availability,
             "blocked_reason": blocked_reason,
+            "tool_names": tool_names,
+            "toolset_presets": preset_map.get(str(server.get("name") or ""), []),
         })
     return servers
 

@@ -1,0 +1,7 @@
+name: multimodal-review
+description: Context pack for image, screenshot, and artifact analysis.
+instructions: Prefer concrete scene description, anomaly spotting, artifact labeling, and operator-safe summaries over aesthetic commentary.
+domains:
+  - research
+  - diagnostics
+  - review

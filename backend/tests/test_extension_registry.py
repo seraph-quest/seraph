@@ -49,6 +49,7 @@ def test_registry_enriches_wave2_contribution_metadata(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "guardian-reach"
     (pack_dir / "presets" / "toolset").mkdir(parents=True)
     (pack_dir / "context").mkdir()
+    (pack_dir / "prompts").mkdir()
     (pack_dir / "automation").mkdir()
     (pack_dir / "connectors" / "browser").mkdir(parents=True)
     (pack_dir / "connectors" / "messaging").mkdir()
@@ -73,6 +74,8 @@ contributes:
     - presets/toolset/research.yaml
   context_packs:
     - context/research.yaml
+  prompt_packs:
+    - prompts/review.md
   automation_triggers:
     - automation/daily-brief.yaml
   browser_providers:
@@ -92,6 +95,10 @@ contributes:
     )
     (pack_dir / "context" / "research.yaml").write_text(
         "name: research\ninstructions: Keep context tight.\ndomains:\n  - research\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "prompts" / "review.md").write_text(
+        "# Review Prompt\n\nUse this pack when reviewing artifacts.\n",
         encoding="utf-8",
     )
     (pack_dir / "automation" / "daily-brief.yaml").write_text(
@@ -127,6 +134,8 @@ contributes:
     contributions = {item.contribution_type: item.metadata for item in extension.contributions}
     assert contributions["toolset_presets"]["include_tools"] == ["read_file"]
     assert contributions["context_packs"]["domains"] == ["research"]
+    assert contributions["prompt_packs"]["name"] == "review-prompt"
+    assert contributions["prompt_packs"]["title"] == "Review Prompt"
     assert contributions["automation_triggers"]["requires_network"] is True
     assert contributions["browser_providers"]["provider_kind"] == "browserbase"
     assert contributions["messaging_connectors"]["platform"] == "telegram"

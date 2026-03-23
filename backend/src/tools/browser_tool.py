@@ -154,7 +154,7 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             },
         )
         logger.exception("Browser automation timed out")
-        return f"Error browsing {url}: timed out after {settings.browser_timeout}s"
+        return f"Error: browsing {url} timed out after {settings.browser_timeout}s"
     except Exception as e:
         log_integration_event_sync(
             integration_type="browser",
@@ -166,4 +166,4 @@ def browse_webpage(url: str, action: str = "extract") -> str:
             },
         )
         logger.exception("Browser automation failed")
-        return f"Error browsing {url}: {e}"
+        return f"Error: browsing {url} failed: {e}"

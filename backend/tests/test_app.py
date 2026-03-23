@@ -28,3 +28,10 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["provider"] == "openrouter"
     assert payload["model"] == settings.default_model
     assert payload["model_label"] == settings.default_model.split("/")[-1]
+
+
+@pytest.mark.asyncio
+async def test_browser_session_api_is_not_publicly_exposed(client):
+    response = await client.get("/api/browser/sessions")
+
+    assert response.status_code == 404

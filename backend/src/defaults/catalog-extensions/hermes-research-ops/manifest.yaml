@@ -1,0 +1,23 @@
+id: seraph.hermes-research-ops
+version: 2026.3.23
+display_name: Hermes Research Ops
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Optional Hermes-style research and synthesis skills.
+description: Adds deeper multi-source research and synthesis helpers on top of Seraph's runtime tools.
+permissions:
+  tools:
+    - browse_webpage
+    - web_search
+    - write_file
+  network: true
+contributes:
+  skills:
+    - skills/deep-research.md
+    - skills/evidence-snapshot.md
+  toolset_presets:
+    - presets/toolset/research-ops.yaml

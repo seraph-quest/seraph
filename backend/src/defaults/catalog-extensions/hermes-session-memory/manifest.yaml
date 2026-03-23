@@ -1,0 +1,23 @@
+id: seraph.hermes-session-memory
+version: 2026.3.23
+display_name: Hermes Session Memory
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Optional Hermes-style session recall and checklist skills.
+description: Adds bounded session recall, handoff, and checklist-oriented working-memory helpers.
+permissions:
+  tools:
+    - clarify
+    - session_search
+    - todo
+  network: false
+contributes:
+  skills:
+    - skills/session-recall.md
+    - skills/session-checklist.md
+  context_packs:
+    - context/session-memory.yaml

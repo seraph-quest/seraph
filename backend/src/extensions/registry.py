@@ -18,6 +18,8 @@ from src.extensions.capability_contributions import (
     load_context_pack_definition,
     load_messaging_connector_definition,
     load_node_adapter_definition,
+    load_prompt_pack_definition,
+    load_provider_preset_definition,
     load_speech_profile_definition,
     load_toolset_preset_definition,
 )
@@ -322,6 +324,11 @@ class ExtensionRegistry:
                         metadata.update(load_context_pack_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
+                if contribution_type == "prompt_packs":
+                    try:
+                        metadata.update(load_prompt_pack_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
                 if contribution_type == "automation_triggers":
                     try:
                         metadata.update(load_automation_trigger_definition(resolved_path).as_metadata())
@@ -350,6 +357,11 @@ class ExtensionRegistry:
                 if contribution_type == "speech_profiles":
                     try:
                         metadata.update(load_speech_profile_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "provider_presets":
+                    try:
+                        metadata.update(load_provider_preset_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
                 if contribution_type == "node_adapters":

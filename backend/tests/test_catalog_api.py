@@ -199,6 +199,44 @@ def bundled_skills_dir(tmp_path):
 
 class TestCatalogAPI:
     @pytest.mark.asyncio
+    async def test_get_catalog_includes_extension_packages(self, client):
+        resp = await client.get("/api/catalog")
+
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        extension_ids = {
+            item["catalog_id"]
+            for item in items
+            if item["type"] == "extension_pack"
+        }
+        assert "seraph.hermes-session-memory" in extension_ids
+        session_memory = next(item for item in items if item.get("catalog_id") == "seraph.hermes-session-memory")
+        assert session_memory["name"] == "Hermes Session Memory"
+        assert session_memory["bundled"] is True
+        assert "skills" in session_memory["contribution_types"]
+        browserbase = next(item for item in items if item.get("catalog_id") == "seraph.hermes-browserbase")
+        assert browserbase["name"] == "Hermes Browserbase"
+        assert "browser_providers" in browserbase["contribution_types"]
+        browser_ops = next(item for item in items if item.get("catalog_id") == "seraph.hermes-browser-ops")
+        assert browser_ops["name"] == "Hermes Browser Ops"
+        assert "toolset_presets" in browser_ops["contribution_types"]
+        telegram = next(item for item in items if item.get("catalog_id") == "seraph.hermes-telegram-relay")
+        assert telegram["name"] == "Hermes Telegram Relay"
+        assert telegram["kind"] == "connector-pack"
+        assert "messaging_connectors" in telegram["contribution_types"]
+        discord = next(item for item in items if item.get("catalog_id") == "seraph.hermes-discord-relay")
+        assert discord["name"] == "Hermes Discord Relay"
+        slack = next(item for item in items if item.get("catalog_id") == "seraph.hermes-slack-relay")
+        assert slack["name"] == "Hermes Slack Relay"
+        speech = next(item for item in items if item.get("catalog_id") == "seraph.hermes-speech-ops")
+        assert speech["name"] == "Hermes Speech Ops"
+        assert "speech_profiles" in speech["contribution_types"]
+        multimodal = next(item for item in items if item.get("catalog_id") == "seraph.hermes-multimodal-review")
+        assert multimodal["name"] == "Hermes Multimodal Review"
+        assert "prompt_packs" in multimodal["contribution_types"]
+        assert "context_packs" in multimodal["contribution_types"]
+
+    @pytest.mark.asyncio
     async def test_get_catalog_returns_items(self, client, catalog_data, workspace_dir):
         with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
              patch("src.api.catalog.settings") as mock_settings, \
@@ -399,6 +437,305 @@ class TestCatalogAPI:
         with patch("src.api.catalog._load_catalog", return_value=catalog_data):
             resp = await client.post("/api/catalog/install/nonexistent")
             assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_extension_pack_success(self, client, catalog_extension_runtime):
+        resp = await client.post("/api/catalog/install/Hermes Session Memory")
+
+        assert resp.status_code == 201
+        payload = resp.json()
+        assert payload["status"] == "installed"
+        assert payload["type"] == "extension_pack"
+        assert payload["extension_id"] == "seraph.hermes-session-memory"
+        assert Path(
+            catalog_extension_runtime,
+            "extensions",
+            "seraph-hermes-session-memory",
+            "manifest.yaml",
+        ).is_file()
+
+    @pytest.mark.asyncio
+    async def test_get_catalog_marks_invalid_extension_pack_as_degraded(self, client, tmp_path):
+        bad_root = tmp_path / "bad-catalog"
+        package_dir = bad_root / "broken-pack"
+        package_dir.mkdir(parents=True)
+        (package_dir / "manifest.yaml").write_text(
+            "id: seraph.broken-pack\n"
+            "version: 2026.3.23\n"
+            "display_name: Broken Pack\n"
+            "kind: capability-pack\n"
+            "compatibility:\n"
+            "  seraph: \">=2026.3.19\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: bundled\n"
+            "contributes:\n"
+            "  skills:\n"
+            "    - skills/missing.md\n",
+            encoding="utf-8",
+        )
+
+        with patch("src.api.catalog._CATALOG_EXTENSION_ROOT", str(bad_root)):
+            resp = await client.get("/api/catalog")
+
+        assert resp.status_code == 200
+        broken = next(item for item in resp.json()["items"] if item.get("catalog_id") == "seraph.broken-pack")
+        assert broken["status"] == "degraded"
+        assert broken["doctor_ok"] is False
+        assert broken["issues"]
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_extension_pack_updates_existing_workspace_install(self, client, catalog_extension_runtime):
+        first = await client.post("/api/catalog/install/seraph.hermes-session-memory")
+        assert first.status_code == 201
+
+        installed_manifest = Path(
+            catalog_extension_runtime,
+            "extensions",
+            "seraph-hermes-session-memory",
+            "manifest.yaml",
+        )
+        manifest_text = installed_manifest.read_text(encoding="utf-8").replace("version: 2026.3.23", "version: 2026.3.19")
+        installed_manifest.write_text(manifest_text, encoding="utf-8")
+
+        update = await client.post("/api/catalog/install/seraph.hermes-session-memory")
+
+        assert update.status_code == 201
+        payload = update.json()
+        assert payload["status"] == "updated"
+        assert payload["type"] == "extension_pack"
+        assert "version: 2026.3.23" in installed_manifest.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_messaging_connector_pack_can_be_configured_and_enabled(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.hermes-telegram-relay")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        install = await client.post("/api/catalog/install/seraph.hermes-telegram-relay")
+        assert install.status_code == 201
+        payload = install.json()
+        assert payload["status"] == "installed"
+        assert payload["extension_id"] == "seraph.hermes-telegram-relay"
+
+        connectors = await client.get("/api/extensions/seraph.hermes-telegram-relay/connectors")
+        assert connectors.status_code == 200
+        connector = connectors.json()["connectors"][0]
+        assert connector["type"] == "messaging_connectors"
+        assert connector["status"] == "requires_config"
+
+        configure = await client.post(
+            "/api/extensions/seraph.hermes-telegram-relay/configure",
+            json={
+                "config": {
+                    "messaging_connectors": {
+                        "telegram": {
+                            "bot_token": "secret",
+                            "default_chat_id": "12345",
+                        }
+                    }
+                }
+            },
+        )
+        assert configure.status_code == 409
+        configure_approval_id = configure.json()["detail"]["approval_id"]
+        approve_configure = await client.post(f"/api/approvals/{configure_approval_id}/approve")
+        assert approve_configure.status_code == 200
+
+        configure = await client.post(
+            "/api/extensions/seraph.hermes-telegram-relay/configure",
+            json={
+                "config": {
+                    "messaging_connectors": {
+                        "telegram": {
+                            "bot_token": "secret",
+                            "default_chat_id": "12345",
+                        }
+                    }
+                }
+            },
+        )
+        assert configure.status_code == 200
+        configured_extension = configure.json()["extension"]
+        configured_connector_config = configured_extension["config"]["messaging_connectors"]["telegram"]
+        assert configured_connector_config["bot_token"] == "__SERAPH_STORED_SECRET__"
+        assert configured_connector_config["default_chat_id"] == "12345"
+
+        reconfigure = await client.post(
+            "/api/extensions/seraph.hermes-telegram-relay/configure",
+            json={"config": configured_extension["config"]},
+        )
+        assert reconfigure.status_code == 200
+
+        enable_connector = await client.post(
+            "/api/extensions/seraph.hermes-telegram-relay/connectors/enabled",
+            json={"reference": "connectors/messaging/telegram.yaml", "enabled": True},
+        )
+        assert enable_connector.status_code == 200
+        assert enable_connector.json()["connector"]["status"] == "planned"
+
+        enable_extension = await client.post("/api/extensions/seraph.hermes-telegram-relay/enable")
+        assert enable_extension.status_code == 200
+        extension_payload = enable_extension.json()["extension"]
+        messaging_connector = next(
+            contribution
+            for contribution in extension_payload["contributions"]
+            if contribution["type"] == "messaging_connectors"
+        )
+        assert messaging_connector["enabled"] is True
+        assert messaging_connector["status"] == "planned"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("catalog_id", "connector_name", "reference", "config"),
+        [
+            (
+                "seraph.hermes-discord-relay",
+                "discord",
+                "connectors/messaging/discord.yaml",
+                {"bot_token": "secret", "guild_id": "guild-1"},
+            ),
+            (
+                "seraph.hermes-slack-relay",
+                "slack",
+                "connectors/messaging/slack.yaml",
+                {"bot_token": "secret", "app_token": "app-secret"},
+            ),
+        ],
+    )
+    async def test_install_catalog_additional_messaging_connector_packs(
+        self,
+        client,
+        catalog_extension_runtime,
+        catalog_id,
+        connector_name,
+        reference,
+        config,
+    ):
+        install = await client.post(f"/api/catalog/install/{catalog_id}")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        install = await client.post(f"/api/catalog/install/{catalog_id}")
+        assert install.status_code == 201
+
+        configure = await client.post(
+            f"/api/extensions/{catalog_id}/configure",
+            json={"config": {"messaging_connectors": {connector_name: config}}},
+        )
+        assert configure.status_code == 409
+        configure_approval_id = configure.json()["detail"]["approval_id"]
+        approve_configure = await client.post(f"/api/approvals/{configure_approval_id}/approve")
+        assert approve_configure.status_code == 200
+
+        configure = await client.post(
+            f"/api/extensions/{catalog_id}/configure",
+            json={"config": {"messaging_connectors": {connector_name: config}}},
+        )
+        assert configure.status_code == 200
+
+        enable_connector = await client.post(
+            f"/api/extensions/{catalog_id}/connectors/enabled",
+            json={"reference": reference, "enabled": True},
+        )
+        assert enable_connector.status_code == 200
+        assert enable_connector.json()["connector"]["status"] == "planned"
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_browserbase_pack_surfaces_browser_provider_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.hermes-browserbase"
+
+        extension = await client.get("/api/extensions/seraph.hermes-browserbase")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        provider = next(item for item in contributions if item["type"] == "browser_providers")
+        preset = next(item for item in contributions if item["type"] == "toolset_presets")
+        assert provider["name"] == "browserbase"
+        assert provider["provider_kind"] == "browserbase"
+        assert provider["status"] == "requires_config"
+        assert preset["name"] == "browserbase-ops"
+        assert "browser_session" in preset["include_tools"]
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_browser_ops_pack_surfaces_browser_skills_and_toolset(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.hermes-browser-ops")
+
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.hermes-browser-ops"
+
+        extension = await client.get("/api/extensions/seraph.hermes-browser-ops")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        skill_names = {
+            item["name"]
+            for item in contributions
+            if item["type"] == "skills"
+        }
+        preset = next(item for item in contributions if item["type"] == "toolset_presets")
+        assert skill_names == {"browser-session-review", "browser-snapshot"}
+        assert preset["name"] == "browser-session-ops"
+        assert "browser_session" in preset["include_tools"]
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_speech_pack_surfaces_speech_profile_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.hermes-speech-ops")
+
+        assert install.status_code == 201
+        payload = install.json()
+        assert payload["extension_id"] == "seraph.hermes-speech-ops"
+
+        extension = await client.get("/api/extensions/seraph.hermes-speech-ops")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        speech_profile = next(item for item in contributions if item["type"] == "speech_profiles")
+        prompt_pack = next(item for item in contributions if item["type"] == "prompt_packs")
+        assert speech_profile["name"] == "openai-realtime-voice"
+        assert speech_profile["supports_tts"] is True
+        assert speech_profile["supports_stt"] is True
+        assert prompt_pack["name"] == "voice-relay"
+        assert prompt_pack["title"] == "Voice Relay"
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_multimodal_pack_surfaces_provider_preset_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.hermes-multimodal-review")
+
+        assert install.status_code == 201
+        payload = install.json()
+        assert payload["extension_id"] == "seraph.hermes-multimodal-review"
+
+        extension = await client.get("/api/extensions/seraph.hermes-multimodal-review")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        context_pack = next(item for item in contributions if item["type"] == "context_packs")
+        prompt_pack = next(item for item in contributions if item["type"] == "prompt_packs")
+        provider_preset = next(item for item in contributions if item["type"] == "provider_presets")
+        assert context_pack["name"] == "multimodal-review"
+        assert "review" in context_pack["domains"]
+        assert prompt_pack["name"] == "vision-triage"
+        assert prompt_pack["title"] == "Vision Triage"
+        assert provider_preset["name"] == "multimodal-review"
+        assert provider_preset["default_model"] == "multimodal-primary"
 
     @pytest.mark.asyncio
     async def test_install_already_installed_skill(

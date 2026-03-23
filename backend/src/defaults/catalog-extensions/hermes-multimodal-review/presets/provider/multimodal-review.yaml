@@ -1,0 +1,4 @@
+name: multimodal-review
+label: Multimodal Review
+default_model: multimodal-primary
+notes: Prefer a multimodal-capable runtime target for image, screenshot, or artifact analysis.

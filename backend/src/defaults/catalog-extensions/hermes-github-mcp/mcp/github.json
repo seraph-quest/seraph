@@ -1,0 +1,11 @@
+{
+  "name": "github",
+  "url": "https://api.githubcopilot.com/mcp/",
+  "description": "GitHub MCP bridge for repository, issue, and pull request operations.",
+  "headers": {
+    "Authorization": "Bearer ${GITHUB_TOKEN}"
+  },
+  "auth_hint": "Set GITHUB_TOKEN before enabling the packaged GitHub MCP connector.",
+  "transport": "streamable-http",
+  "enabled": false
+}

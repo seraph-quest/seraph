@@ -132,6 +132,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "browser_session": {
+        "description": "Manage structured browser sessions, page refs, and snapshots for the current session",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["external_read"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

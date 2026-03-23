@@ -1,0 +1,18 @@
+id: seraph.hermes-github-mcp
+version: 2026.3.23
+display_name: Hermes GitHub MCP
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: GitHub MCP connector packaged with a matching operator toolset preset.
+description: Installs a packaged GitHub MCP connector and a toolset preset that makes the server easier to reason about in the operator surface.
+permissions:
+  network: true
+contributes:
+  mcp_servers:
+    - mcp/github.json
+  toolset_presets:
+    - presets/toolset/github-operator.yaml

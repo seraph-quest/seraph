@@ -1,0 +1,20 @@
+id: seraph.hermes-multimodal-review
+version: 2026.3.23
+display_name: Hermes Multimodal Review
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Multimodal prompt and context assets for image, screenshot, and artifact review workflows.
+description: Packages multimodal review scaffolding so Seraph can carry explicit image and artifact-analysis guidance through the extension platform while the richer media runtime continues to evolve.
+permissions:
+  network: false
+contributes:
+  context_packs:
+    - context/multimodal-review.yaml
+  prompt_packs:
+    - prompts/vision-triage.md
+  provider_presets:
+    - presets/provider/multimodal-review.yaml

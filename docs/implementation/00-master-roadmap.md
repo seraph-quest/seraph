@@ -391,21 +391,21 @@ See [Capability Import Wave 2](./12-capability-import-wave-2.md) for the impleme
 
 ### Wave 3: Hermes Packaged Reach And Capability Parity
 
-17. [ ] `hermes-skill-registry-v1`:
+17. [x] `hermes-skill-registry-v1`:
     build the first real install, search, update, and trust-scanned registry loop for skill packs so Seraph’s extension ecosystem compounds more like Hermes
-18. [ ] `hermes-optional-skill-packs-v1`:
+18. [x] `hermes-optional-skill-packs-v1`:
     add optional installable skill packs instead of only bundled defaults so operators can grow capability breadth without repo edits
-19. [ ] `hermes-mcp-toolset-bridge-v1`:
+19. [x] `hermes-mcp-toolset-bridge-v1`:
     make MCP servers publish cleaner toolset and preset surfaces with stronger per-server filtering, visibility, and activation ergonomics
-20. [ ] `hermes-browserbase-connector-v1`:
+20. [x] `hermes-browserbase-connector-v1`:
     add a managed Browserbase-style browser provider package so Seraph gains a stronger isolated browser lane without overloading generic web tools
-21. [ ] `hermes-browser-session-ops-v1`:
+21. [x] `hermes-browser-session-ops-v1`:
     add stronger browser session primitives such as page refs, snapshots, and more structured browser actions so browsing can support real multi-step operator work
-22. [ ] `hermes-messaging-connectors-wave1-v1`:
+22. [x] `hermes-messaging-connectors-wave1-v1`:
     ship the first high-value messaging connectors such as Telegram, Discord, and Slack through the new messaging-connector contribution type
-23. [ ] `hermes-vision-image-speech-v1`:
-    import the most valuable Hermes multimodal surfaces, including vision, image generation, and TTS or STT paths where they fit Seraph’s operator product
-24. [ ] `hermes-skill-authoring-loop-v1`:
+23. [x] `hermes-vision-image-speech-v1`:
+    import the most valuable Hermes multimodal packaging surfaces as operator-ready speech and multimodal scaffolding, without overclaiming a full remote media runtime before those transports ship
+24. [x] `hermes-skill-authoring-loop-v1`:
     let Seraph create, patch, validate, and install skill packs more directly so the extension platform compounds through agent-assisted authoring
 
 ### Wave 4: Selective OpenClaw Imports

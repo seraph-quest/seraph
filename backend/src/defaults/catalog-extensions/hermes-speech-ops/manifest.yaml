@@ -1,0 +1,18 @@
+id: seraph.hermes-speech-ops
+version: 2026.3.23
+display_name: Hermes Speech Ops
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Speech profiles and operator guidance for future TTS and STT delivery paths.
+description: Packages voice-facing operator assets so Seraph can carry explicit speech profiles, wake-word guidance, and delivery prompts even before the full voice runtime arrives.
+permissions:
+  network: true
+contributes:
+  speech_profiles:
+    - speech/openai-realtime-voice.yaml
+  prompt_packs:
+    - prompts/voice-relay.md

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 from src.extensions.connectors import ConnectorDefinitionError, load_connector_payload
@@ -100,6 +101,7 @@ class ToolsetPresetDefinition:
     description: str = ""
     mode: str = ""
     include_tools: tuple[str, ...] = ()
+    include_mcp_servers: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
     execution_boundaries: tuple[str, ...] = ()
@@ -111,6 +113,7 @@ class ToolsetPresetDefinition:
             "description": self.description,
             "mode": self.mode,
             "include_tools": list(self.include_tools),
+            "include_mcp_servers": list(self.include_mcp_servers),
             "exclude_tools": list(self.exclude_tools),
             "capabilities": list(self.capabilities),
             "execution_boundaries": list(self.execution_boundaries),
@@ -137,6 +140,22 @@ class ContextPackDefinition:
             "profile_fields": list(self.profile_fields),
             "prompt_refs": list(self.prompt_refs),
             "domains": list(self.domains),
+        }
+
+
+@dataclass(frozen=True)
+class PromptPackDefinition:
+    name: str
+    title: str
+    description: str = ""
+    instructions: str = ""
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "instructions": self.instructions,
         }
 
 
@@ -237,6 +256,22 @@ class SpeechProfileDefinition:
 
 
 @dataclass(frozen=True)
+class ProviderPresetDefinition:
+    name: str
+    label: str = ""
+    default_model: str = ""
+    notes: str = ""
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "default_model": self.default_model,
+            "notes": self.notes,
+        }
+
+
+@dataclass(frozen=True)
 class NodeAdapterDefinition:
     name: str
     adapter_kind: str
@@ -272,6 +307,10 @@ def _parse_named_object(payload: Any, *, source: str, noun: str) -> tuple[str, s
     return raw_name.strip(), raw_description.strip() if isinstance(raw_description, str) else ""
 
 
+def _slugify_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "prompt-pack"
+
+
 def parse_toolset_preset_definition(payload: Any, *, source: str) -> ToolsetPresetDefinition:
     name, description = _parse_named_object(payload, source=source, noun="toolset preset")
     if not isinstance(payload, dict):
@@ -280,6 +319,11 @@ def parse_toolset_preset_definition(payload: Any, *, source: str) -> ToolsetPres
     if raw_mode is not None and not isinstance(raw_mode, str):
         raise ConnectorDefinitionError(f"{source}: toolset preset mode must be a string")
     include_tools = _parse_string_list(payload.get("include_tools"), source=source, field_name="include_tools")
+    include_mcp_servers = _parse_string_list(
+        payload.get("include_mcp_servers"),
+        source=source,
+        field_name="include_mcp_servers",
+    )
     exclude_tools = _parse_string_list(payload.get("exclude_tools"), source=source, field_name="exclude_tools")
     capabilities = _parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities")
     execution_boundaries = _parse_string_list(
@@ -290,15 +334,16 @@ def parse_toolset_preset_definition(payload: Any, *, source: str) -> ToolsetPres
     raw_enabled = payload.get("enabled")
     if raw_enabled is not None and not isinstance(raw_enabled, bool):
         raise ConnectorDefinitionError(f"{source}: toolset preset enabled must be a boolean")
-    if not any((include_tools, exclude_tools, capabilities, execution_boundaries)):
+    if not any((include_tools, include_mcp_servers, exclude_tools, capabilities, execution_boundaries)):
         raise ConnectorDefinitionError(
-            f"{source}: toolset preset must declare tools, capabilities, or execution boundaries"
+            f"{source}: toolset preset must declare tools, MCP servers, capabilities, or execution boundaries"
         )
     return ToolsetPresetDefinition(
         name=name,
         description=description,
         mode=raw_mode.strip() if isinstance(raw_mode, str) and raw_mode.strip() else "",
         include_tools=include_tools,
+        include_mcp_servers=include_mcp_servers,
         exclude_tools=exclude_tools,
         capabilities=capabilities,
         execution_boundaries=execution_boundaries,
@@ -330,6 +375,41 @@ def parse_context_pack_definition(payload: Any, *, source: str) -> ContextPackDe
         profile_fields=profile_fields,
         prompt_refs=prompt_refs,
         domains=domains,
+    )
+
+
+def parse_prompt_pack_definition(content: str, *, source: str) -> PromptPackDefinition:
+    if not isinstance(content, str):
+        raise ConnectorDefinitionError(f"{source}: prompt pack must be UTF-8 text")
+    normalized = content.strip()
+    if not normalized:
+        raise ConnectorDefinitionError(f"{source}: prompt pack must not be empty")
+
+    title = ""
+    description = ""
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not title and line.startswith("#"):
+            title = line.lstrip("#").strip()
+            continue
+        if not description and not line.startswith(("-", "*")):
+            description = line
+            break
+
+    fallback_name = Path(source).stem.replace("_", "-")
+    if title:
+        name = _slugify_name(title)
+    else:
+        name = _slugify_name(fallback_name)
+        title = fallback_name.replace("-", " ").title()
+
+    return PromptPackDefinition(
+        name=name,
+        title=title,
+        description=description,
+        instructions=normalized,
     )
 
 
@@ -454,6 +534,30 @@ def parse_speech_profile_definition(payload: Any, *, source: str) -> SpeechProfi
     )
 
 
+def parse_provider_preset_definition(payload: Any, *, source: str) -> ProviderPresetDefinition:
+    name, _description = _parse_named_object(payload, source=source, noun="provider preset")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: provider preset definition must be an object")
+    raw_label = payload.get("label")
+    raw_default_model = payload.get("default_model")
+    raw_notes = payload.get("notes")
+    for field_name, value in {
+        "label": raw_label,
+        "default_model": raw_default_model,
+        "notes": raw_notes,
+    }.items():
+        if value is not None and not isinstance(value, str):
+            raise ConnectorDefinitionError(f"{source}: provider preset {field_name} must be a string")
+    if not isinstance(raw_default_model, str) or not raw_default_model.strip():
+        raise ConnectorDefinitionError(f"{source}: provider preset must include a non-empty default_model")
+    return ProviderPresetDefinition(
+        name=name,
+        label=raw_label.strip() if isinstance(raw_label, str) else "",
+        default_model=raw_default_model.strip(),
+        notes=raw_notes.strip() if isinstance(raw_notes, str) else "",
+    )
+
+
 def parse_node_adapter_definition(payload: Any, *, source: str) -> NodeAdapterDefinition:
     name, description = _parse_named_object(payload, source=source, noun="node adapter")
     if not isinstance(payload, dict):
@@ -489,6 +593,10 @@ def load_context_pack_definition(path: Path) -> ContextPackDefinition:
     return parse_context_pack_definition(load_connector_payload(path), source=str(path))
 
 
+def load_prompt_pack_definition(path: Path) -> PromptPackDefinition:
+    return parse_prompt_pack_definition(path.read_text(encoding="utf-8"), source=str(path))
+
+
 def load_automation_trigger_definition(path: Path) -> AutomationTriggerDefinition:
     return parse_automation_trigger_definition(load_connector_payload(path), source=str(path))
 
@@ -503,6 +611,10 @@ def load_messaging_connector_definition(path: Path) -> MessagingConnectorDefinit
 
 def load_speech_profile_definition(path: Path) -> SpeechProfileDefinition:
     return parse_speech_profile_definition(load_connector_payload(path), source=str(path))
+
+
+def load_provider_preset_definition(path: Path) -> ProviderPresetDefinition:
+    return parse_provider_preset_definition(load_connector_payload(path), source=str(path))
 
 
 def load_node_adapter_definition(path: Path) -> NodeAdapterDefinition:

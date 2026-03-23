@@ -169,6 +169,45 @@ class TodoTool(Tool):
         _todo_audit_payload.set(None)
         return payload
 
+    def get_audit_call_payload(
+        self,
+        arguments: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        action = str(arguments.get("action", "") or "").strip().lower()
+        sanitized_action = action or "unknown"
+        sanitized_arguments = self.get_audit_arguments(arguments)
+        if sanitized_action in {"set", "add"}:
+            return (
+                f"Calling tool: todo(action={sanitized_action}, item_count={sanitized_arguments['item_count']})",
+                {"arguments": sanitized_arguments},
+            )
+        if sanitized_action in {"complete", "reopen", "remove"}:
+            return (
+                f"Calling tool: todo(action={sanitized_action}, item_ref={sanitized_arguments['item_ref_kind']})",
+                {"arguments": sanitized_arguments},
+            )
+        return (
+            f"Calling tool: todo(action={sanitized_action})",
+            {"arguments": sanitized_arguments},
+        )
+
+    def get_audit_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        action = str(arguments.get("action", "") or "").strip().lower() or "unknown"
+        if action in {"set", "add"}:
+            return {
+                "action": action,
+                "item_count": len(_parse_items(str(arguments.get("items", "") or ""))),
+                "items_redacted": True,
+            }
+        if action in {"complete", "reopen", "remove"}:
+            item_ref = str(arguments.get("item_id", "") or "")
+            return {
+                "action": action,
+                "item_ref_kind": "index" if item_ref.isdigit() else "id",
+                "item_ref_redacted": True,
+            }
+        return {"action": action}
+
 
 def _run(coro):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

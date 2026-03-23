@@ -245,6 +245,24 @@ class TestSearchSessions:
         assert [item["session_id"] for item in results[:2]] == ["s2", "s1"]
 
 
+class TestRecentSessionSummary:
+    async def test_orders_by_conversation_recency_not_todo_mutation(self, async_db, sm):
+        await sm.get_or_create("stale")
+        await sm.update_title("stale", "Older thread")
+        await sm.add_message("stale", "assistant", "Older conversation")
+
+        await sm.get_or_create("fresh")
+        await sm.update_title("fresh", "Newer thread")
+        await sm.add_message("fresh", "assistant", "Newer conversation")
+
+        await sm.replace_todos("stale", [{"content": "Unrelated checklist", "completed": False}])
+
+        summary = await sm.get_recent_sessions_summary(limit_sessions=2)
+
+        assert summary.splitlines()[0].startswith("- Newer thread:")
+        assert summary.splitlines()[1].startswith("- Older thread:")
+
+
 class TestUpdateTitle:
     async def test_success(self, async_db, sm):
         await sm.get_or_create("s1")

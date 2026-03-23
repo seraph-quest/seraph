@@ -134,12 +134,28 @@ class SessionManager:
             stmt = select(Session)
             if exclude_session_id:
                 stmt = stmt.where(Session.id != exclude_session_id)
-            result = await db.execute(
-                stmt.order_by(col(Session.updated_at).desc()).limit(limit_sessions)
-            )
-            sessions = result.scalars().all()
+            session_result = await db.execute(stmt)
+            sessions = session_result.scalars().all()
             if not sessions:
                 return ""
+
+            recency_stmt = (
+                select(Message.session_id, func.max(Message.created_at))
+                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                .group_by(Message.session_id)
+            )
+            if exclude_session_id:
+                recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
+            recency_rows = await db.execute(recency_stmt)
+            conversation_recency = {
+                session_id: latest_at
+                for session_id, latest_at in recency_rows.all()
+            }
+            sessions = sorted(
+                sessions,
+                key=lambda session: conversation_recency.get(session.id) or session.created_at,
+                reverse=True,
+            )[:limit_sessions]
 
             lines: list[str] = []
             for session in sessions:

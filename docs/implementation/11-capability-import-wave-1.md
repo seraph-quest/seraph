@@ -84,6 +84,7 @@ Wave 1 covers the runtime-parity slices from the capability import program:
   - `git diff --check`
 - subagent review:
   - reviewer: `Raman`
+  - follow-up reviewer: `Plato`
   - findings:
     - invalid `remove` refs originally fell through as successful clears instead of returning a not-found error
     - numeric todo refs accepted `0` and `00` even though the public contract is 1-based indexing
@@ -96,6 +97,7 @@ Wave 1 covers the runtime-parity slices from the capability import program:
     - `TodoTool` now stores audit payload in a per-call `ContextVar` instead of a shared instance attribute, and the payload is consumed after logging so cross-session races cannot reuse it
     - audit details now keep only ids and completion state for todo items, never raw content, and direct tool plus agent regressions pin that contract
     - nullable inputs are normalized to empty strings before parsing, and a direct tool regression covers the `None` case
+    - follow-up review caught a second leak through the generic audited-wrapper argument path, so `TodoTool` now publishes sanitized audit arguments for `tool_call`, `tool_result`, and `tool_failed` events and no longer echoes raw `item_id` values either
 
 ### 5. hermes-session-search-v1
 
@@ -124,6 +126,7 @@ Wave 1 covers the runtime-parity slices from the capability import program:
   - `git diff --check`
 - subagent review:
   - reviewer: `Arendt`
+  - follow-up reviewer: `Plato`
   - findings:
     - bounded recall needed to land inside `build_guardian_state()` so chat, websocket, and strategist paths all shared the same deterministic layer
     - the slice should keep bounded recall separate from vector-memory `memory_context` instead of silently overloading semantic memory semantics
@@ -133,6 +136,7 @@ Wave 1 covers the runtime-parity slices from the capability import program:
     - `GuardianState` now carries a dedicated `bounded_memory_context` block rendered ahead of semantic memory inside the guardian-state prompt surface
     - `build_guardian_state()` now synthesizes bounded recall deterministically from the existing guardian record plus persisted session todos, so chat and strategist share the same cheap recall layer automatically
     - the implementation uses the existing soul file as the human-authored profile source and session todos as the active-work signal, without adding a parallel writable memory store
+    - follow-up review caught that guardian recency still depended on `Session.updated_at`, so recent-session summaries now rank by the latest user/assistant message timestamp instead of todo-only mutations
 
 ### 7. hermes-user-cron-runtime-v1
 

@@ -61,6 +61,18 @@ class SecretRefResolvingTool(Tool):
             return hook(arguments, result)
         return None
 
+    def get_audit_call_payload(self, arguments):
+        hook = getattr(self.wrapped_tool, "get_audit_call_payload", None)
+        if callable(hook):
+            return hook(arguments)
+        return None
+
+    def get_audit_arguments(self, arguments):
+        hook = getattr(self.wrapped_tool, "get_audit_arguments", None)
+        if callable(hook):
+            return hook(arguments)
+        return None
+
 
 def wrap_tools_for_secret_refs(tools: list[Tool]) -> list[Tool]:
     """Wrap tools so secret refs are resolved just before invocation."""

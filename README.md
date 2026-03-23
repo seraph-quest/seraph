@@ -235,4 +235,5 @@ Start with:
 
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR
 - Use [SUPPORT.md](SUPPORT.md) for questions, setup help, and roadmap pointers
+- Join [GitHub Discussions](https://github.com/seraph-quest/seraph/discussions) for setup help, product feedback, and demos
 - Report security issues through [SECURITY.md](SECURITY.md)

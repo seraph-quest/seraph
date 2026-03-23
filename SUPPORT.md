@@ -20,7 +20,7 @@ cp env.dev.example .env.dev
 ## Where to Ask What
 
 - Setup problem or runtime regression: open a bug report
-- Product or roadmap question: open a feature request or discussion if enabled
+- Product, usage, or roadmap question: use [GitHub Discussions](https://github.com/seraph-quest/seraph/discussions)
 - Security-sensitive issue: follow [`SECURITY.md`](SECURITY.md)
 - Contribution/process question: read [`CONTRIBUTING.md`](CONTRIBUTING.md)
 

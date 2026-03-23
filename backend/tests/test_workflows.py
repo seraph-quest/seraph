@@ -255,8 +255,15 @@ class TestWorkflowManager:
         execute_code = DummyTool("execute_code", lambda code: f"ran {code}")
         workflow_tool = WorkflowTool(workflow, {"execute_code": execute_code})
 
-        assert "ran print('hello')" in workflow_tool()
+        result = workflow_tool()
+        assert "ran print('hello')" in result
+        assert "shell_execute" not in result
+        assert "execute_code" in result
         assert execute_code.calls == [{"code": "print('hello')"}]
+        audit_payload = workflow_tool.get_audit_result_payload({}, "ignored")
+        assert audit_payload is not None
+        assert audit_payload[1]["step_tools"] == ["execute_code"]
+        assert audit_payload[1]["step_records"][0]["tool"] == "execute_code"
 
         mgr = WorkflowManager()
         mgr._workflows = [workflow]

@@ -78,6 +78,41 @@ def test_run_command_rejects_grep_file_argument_outside_workspace():
     assert result == "Error: path argument must stay within the workspace."
 
 
+def test_run_command_rejects_grep_exclude_from_outside_workspace():
+    result = run_command(command="grep", args_json='["--exclude-from","/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: --exclude-from path must stay within the workspace."
+
+
+def test_run_command_rejects_rg_ignore_file_outside_workspace():
+    result = run_command(command="rg", args_json='["--ignore-file","/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: --ignore-file path must stay within the workspace."
+
+
+def test_run_command_rejects_grep_attached_file_flag_outside_workspace():
+    result = run_command(command="grep", args_json='["-f/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_rg_attached_file_flag_outside_workspace():
+    result = run_command(command="rg", args_json='["-f/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_sed_attached_file_flag_outside_workspace():
+    result = run_command(command="sed", args_json='["-f/etc/hosts","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_grep_clustered_file_flag_outside_workspace():
+    result = run_command(command="grep", args_json='["-rf/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_sed_clustered_file_flag_outside_workspace():
+    result = run_command(command="sed", args_json='["-nf/etc/hosts","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
 def test_start_process_rejects_absolute_script_path_outside_workspace():
     result = start_process(command="python3", args_json='["/tmp/outside.py"]')
     assert result == "Error: script path must stay within the workspace."

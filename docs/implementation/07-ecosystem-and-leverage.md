@@ -9,6 +9,7 @@
 - primary design doc: [08. Ecosystem And Delegation](/research/ecosystem-and-delegation)
 - detailed strategy: [12. Extension Platform And MCP Strategy](/research/plugin-system-and-mcp-strategy)
 - trusted-code decision: [13. Trusted Code Plugins RFC](/research/trusted-code-plugins-rfc)
+- capability import plan: [13. Hermes And OpenClaw Capability Import Plan](/research/hermes-and-openclaw-capability-import-plan)
 
 ## Shipped On `develop`
 

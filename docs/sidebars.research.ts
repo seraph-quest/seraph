@@ -11,6 +11,8 @@ const sidebars: SidebarsConfig = {
     'presence-and-reach',
     'embodied-interface',
     'ecosystem-and-delegation',
+    'plugin-system-and-mcp-strategy',
+    'hermes-and-openclaw-capability-import-plan',
     'reference-systems-and-evidence',
     'competitive-benchmark',
     'superiority-program',

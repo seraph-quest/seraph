@@ -4,7 +4,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'Seraph',
-  tagline: 'A proactive guardian intelligence dedicated to elevating its human counterpart',
+  tagline: 'An AI guardian that remembers, watches, and acts.',
   favicon: 'img/favicon.ico',
 
   future: {
@@ -67,7 +67,7 @@ const config: Config = {
   themeConfig: {
     colorMode: {
       defaultMode: 'dark',
-      respectPrefersColorScheme: true,
+      respectPrefersColorScheme: false,
     },
     navbar: {
       title: 'Seraph',

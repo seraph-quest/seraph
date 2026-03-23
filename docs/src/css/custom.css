@@ -1,30 +1,385 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap');
+
 /**
- * Any CSS included here will be global. The classic template
- * bundles Infima by default. Infima is a CSS framework designed to
- * work well for content-centric websites.
+ * Seraph docs theme synced to the cockpit UI surface.
+ * The docs keep the app's dark panel system, cyan/teal accents,
+ * mono body copy, and condensed display headings.
  */
 
-/* You can override the default Infima variables here. */
 :root {
-  --ifm-color-primary: #7c5cbf;
-  --ifm-color-primary-dark: #6c4ab3;
-  --ifm-color-primary-darker: #6444aa;
-  --ifm-color-primary-darkest: #52378c;
-  --ifm-color-primary-light: #8c6ecb;
-  --ifm-color-primary-lighter: #9478cf;
-  --ifm-color-primary-lightest: #ac96db;
-  --ifm-code-font-size: 95%;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --seraph-bg: #071019;
+  --seraph-bg-deep: #05101a;
+  --seraph-bg-soft: #091722;
+  --seraph-panel: rgba(9, 25, 39, 0.92);
+  --seraph-panel-soft: rgba(13, 33, 52, 0.82);
+  --seraph-panel-strong: rgba(11, 29, 45, 0.97);
+  --seraph-border: rgba(110, 177, 214, 0.22);
+  --seraph-border-strong: rgba(129, 213, 255, 0.46);
+  --seraph-text: #d7e7f5;
+  --seraph-muted: #7e9ab0;
+  --seraph-accent: #8de2ff;
+  --seraph-accent-strong: #6ef4c3;
+  --seraph-warning: #ffcf70;
+  --seraph-danger: #ff7d79;
+
+  --ifm-color-primary: #8de2ff;
+  --ifm-color-primary-dark: #71dafd;
+  --ifm-color-primary-darker: #61d5fd;
+  --ifm-color-primary-darkest: #36c8fc;
+  --ifm-color-primary-light: #a9eaff;
+  --ifm-color-primary-lighter: #b9eeff;
+  --ifm-color-primary-lightest: #e4f9ff;
+  --ifm-color-success: #6ef4c3;
+  --ifm-color-warning: #ffcf70;
+  --ifm-color-danger: #ff7d79;
+  --ifm-background-color: var(--seraph-bg);
+  --ifm-background-surface-color: var(--seraph-panel);
+  --ifm-navbar-background-color: rgba(7, 18, 27, 0.94);
+  --ifm-footer-background-color: rgba(7, 18, 27, 0.98);
+  --ifm-font-family-base:
+    "IBM Plex Mono", "Iosevka", "SFMono-Regular", Menlo, Consolas, monospace;
+  --ifm-heading-font-family:
+    "Space Grotesk", "Avenir Next Condensed", "Arial Narrow", sans-serif;
+  --ifm-code-font-size: 0.92rem;
+  --ifm-font-color-base: var(--seraph-text);
+  --ifm-font-color-secondary: var(--seraph-muted);
+  --ifm-heading-color: #f2fbff;
+  --ifm-link-color: var(--seraph-accent);
+  --ifm-link-hover-color: #c4f4ff;
+  --ifm-menu-color: var(--seraph-muted);
+  --ifm-menu-color-active: var(--seraph-text);
+  --ifm-menu-color-background-active: rgba(141, 226, 255, 0.12);
+  --ifm-menu-color-background-hover: rgba(141, 226, 255, 0.08);
+  --ifm-breadcrumb-color-active: var(--seraph-text);
+  --ifm-breadcrumb-item-background-active: rgba(141, 226, 255, 0.12);
+  --ifm-toc-border-color: var(--seraph-border);
+  --ifm-global-radius: 18px;
+  --ifm-card-border-radius: 18px;
+  --ifm-button-border-radius: 999px;
+  --ifm-table-border-color: rgba(126, 154, 176, 0.22);
+  --ifm-table-head-background: rgba(141, 226, 255, 0.08);
+  --ifm-hover-overlay: rgba(141, 226, 255, 0.05);
+  --ifm-code-background: rgba(110, 177, 214, 0.08);
+  --ifm-pre-background: rgba(4, 13, 20, 0.92);
+  --ifm-pre-color: var(--seraph-text);
+  --ifm-blockquote-color: #c7dceb;
+  --ifm-blockquote-border-color: var(--seraph-accent-strong);
+  --ifm-hr-border-color: rgba(126, 154, 176, 0.18);
+  --ifm-color-emphasis-100: rgba(141, 226, 255, 0.04);
+  --ifm-color-emphasis-200: rgba(141, 226, 255, 0.08);
+  --ifm-color-emphasis-300: rgba(141, 226, 255, 0.14);
+  --ifm-color-emphasis-600: rgba(215, 231, 245, 0.72);
+  --ifm-color-emphasis-700: rgba(215, 231, 245, 0.82);
+  --ifm-color-emphasis-800: rgba(230, 242, 250, 0.92);
+  --ifm-color-emphasis-900: #f2fbff;
+  --docusaurus-highlighted-code-line-bg: rgba(141, 226, 255, 0.12);
+  --docsearch-text-color: var(--seraph-text);
+  --docsearch-muted-color: var(--seraph-muted);
 }
 
-/* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
-  --ifm-color-primary: #9b7fd4;
-  --ifm-color-primary-dark: #8d6dcc;
-  --ifm-color-primary-darker: #8664c8;
-  --ifm-color-primary-darkest: #7050b5;
-  --ifm-color-primary-light: #a991dc;
-  --ifm-color-primary-lighter: #b09ae0;
-  --ifm-color-primary-lightest: #c5b5e8;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  --ifm-background-color: var(--seraph-bg);
+  --ifm-background-surface-color: var(--seraph-panel);
+  --ifm-navbar-background-color: rgba(7, 18, 27, 0.94);
+  --ifm-footer-background-color: rgba(7, 18, 27, 0.98);
+  --docusaurus-highlighted-code-line-bg: rgba(141, 226, 255, 0.12);
+}
+
+html {
+  background: linear-gradient(180deg, #05101a 0%, #07131d 42%, #091722 100%);
+}
+
+body {
+  color: var(--seraph-text);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 24%),
+    linear-gradient(180deg, #05101a 0%, #07131d 42%, #091722 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(141, 226, 255, 0.028) 0,
+      rgba(141, 226, 255, 0.028) 1px,
+      transparent 1px,
+      transparent 28px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(141, 226, 255, 0.022) 0,
+      rgba(141, 226, 255, 0.022) 1px,
+      transparent 1px,
+      transparent 28px
+    );
+  opacity: 0.48;
+}
+
+#__docusaurus,
+.main-wrapper,
+.theme-doc-page,
+.container {
+  position: relative;
+  z-index: 1;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.hero__title,
+.navbar__title {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: 0.04em;
+}
+
+h1 {
+  font-size: clamp(2.4rem, 4vw, 3.6rem);
+  line-height: 0.96;
+}
+
+h2 {
+  font-size: clamp(1.65rem, 2.6vw, 2.2rem);
+}
+
+h2,
+h3 {
+  color: #f2fbff;
+}
+
+.navbar {
+  border-bottom: 1px solid rgba(138, 207, 255, 0.18);
+  background:
+    linear-gradient(180deg, rgba(7, 18, 27, 0.98), rgba(7, 18, 27, 0.94)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(141, 226, 255, 0.026) 0,
+      rgba(141, 226, 255, 0.026) 1px,
+      transparent 1px,
+      transparent 14px
+    );
+  box-shadow:
+    inset 0 -1px 0 rgba(255, 255, 255, 0.02),
+    0 18px 60px rgba(2, 8, 14, 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.navbar__title {
+  color: var(--seraph-text);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.navbar__link,
+.footer__link-item {
+  color: var(--seraph-muted);
+}
+
+.navbar__link:hover,
+.navbar__link--active,
+.footer__link-item:hover {
+  color: var(--seraph-accent);
+}
+
+.navbar__brand:hover {
+  color: var(--seraph-text);
+}
+
+.theme-doc-sidebar-container,
+.table-of-contents,
+.pagination-nav__link,
+.card,
+.theme-admonition,
+.theme-code-block,
+.menu,
+.footer {
+  background: var(--seraph-panel);
+  border: 1px solid var(--seraph-border);
+  box-shadow:
+    0 24px 80px rgba(1, 8, 13, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(18px);
+}
+
+.theme-doc-sidebar-container {
+  border-left: 0;
+  border-right: 1px solid var(--seraph-border);
+}
+
+.menu {
+  padding: 0.5rem;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.menu__link,
+.table-of-contents__link {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--seraph-muted);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.menu__link:hover,
+.table-of-contents__link:hover {
+  color: var(--seraph-text);
+  border-color: rgba(141, 226, 255, 0.18);
+  background: rgba(141, 226, 255, 0.08);
+}
+
+.menu__link--active,
+.table-of-contents__link--active {
+  color: var(--seraph-text);
+  border-color: var(--seraph-border-strong);
+  background: rgba(141, 226, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.table-of-contents {
+  padding: 1rem;
+}
+
+.theme-doc-markdown,
+.theme-doc-markdown article {
+  color: var(--seraph-text);
+}
+
+.theme-doc-markdown a:not(.pagination-nav__link):not(.menu__link) {
+  text-decoration-color: rgba(141, 226, 255, 0.4);
+  text-underline-offset: 0.22em;
+}
+
+.theme-doc-markdown a:hover {
+  text-decoration-color: rgba(141, 226, 255, 0.82);
+}
+
+.theme-doc-breadcrumbs {
+  margin-bottom: 1rem;
+}
+
+.breadcrumbs__item--active .breadcrumbs__link {
+  border: 1px solid rgba(141, 226, 255, 0.18);
+  background: rgba(141, 226, 255, 0.08);
+}
+
+.breadcrumbs__link {
+  border-radius: 999px;
+}
+
+.pagination-nav__link {
+  border-radius: 18px;
+}
+
+.pagination-nav__label {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: 0.03em;
+}
+
+pre,
+code,
+kbd,
+samp {
+  font-family: var(--ifm-font-family-base);
+}
+
+pre {
+  border: 1px solid rgba(141, 226, 255, 0.16);
+}
+
+code {
+  border: 1px solid rgba(141, 226, 255, 0.1);
+  border-radius: 10px;
+}
+
+.theme-code-block-highlighted-line {
+  border-left: 2px solid var(--seraph-accent-strong);
+}
+
+blockquote {
+  background: rgba(110, 244, 195, 0.06);
+  border-radius: 0 16px 16px 0;
+}
+
+table {
+  overflow: hidden;
+  border-radius: 16px;
+}
+
+thead tr {
+  background: rgba(141, 226, 255, 0.08);
+}
+
+.alert {
+  border: 1px solid var(--seraph-border);
+  border-radius: 18px;
+}
+
+.button {
+  border-color: rgba(141, 226, 255, 0.28);
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.button--primary {
+  background: linear-gradient(135deg, #8de2ff, #6ef4c3);
+  color: #041019;
+  box-shadow: 0 14px 40px rgba(110, 244, 195, 0.18);
+}
+
+.button--secondary {
+  background: rgba(141, 226, 255, 0.08);
+  color: var(--seraph-text);
+}
+
+.footer {
+  margin-top: 4rem;
+  border-bottom: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.footer__title {
+  color: #f2fbff;
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.footer__copyright {
+  color: var(--seraph-muted);
+}
+
+.theme-doc-toc-mobile {
+  border: 1px solid var(--seraph-border);
+  border-radius: 18px;
+  background: var(--seraph-panel);
+}
+
+@media (max-width: 996px) {
+  body::before {
+    opacity: 0.32;
+  }
+
+  h1 {
+    font-size: clamp(2rem, 9vw, 2.8rem);
+  }
+
+  .table-of-contents,
+  .theme-doc-sidebar-container,
+  .footer {
+    backdrop-filter: blur(14px);
+  }
 }

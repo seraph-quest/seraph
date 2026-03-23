@@ -7,9 +7,11 @@ title: Master Plan
 
 > Legacy note: this page now lives under `/legacy`. The canonical roadmap is `docs/implementation/00-master-roadmap.md`, and the canonical shipped-status ledger is `docs/implementation/STATUS.md`.
 
+Seraph is an AI guardian that remembers, watches, and acts. This page is preserved only as historical planning context.
+
 ## Summary
 
-Seraph now uses a `maas`-style live planning structure:
+Current docs split:
 
 - `docs/implementation/` for shipped state and delivery tracking
 - `docs/research/` for design and product thesis

@@ -5,6 +5,8 @@ title: Seraph Development Status
 
 # Seraph Development Status
 
+Seraph is an AI guardian that remembers, watches, and acts. This page is the fastest answer to what is real on `develop` right now.
+
 ## Legend
 
 - `[x]` shipped on `develop`
@@ -15,7 +17,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ## Current Snapshot
 
-- [x] Seraph is usable today as a local guardian prototype with a real UI, memory, observer loop, and action layer.
+- [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
 - [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian workspace, not a village-first shell.
@@ -189,7 +191,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ## Practical Summary
 
-- [x] Seraph already has a serious local guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
+- [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
 - [ ] The biggest gaps against the reference systems are versioned capability distribution, deeper extension-studio ergonomics, visual workflow branch debugging, deeper execution hardening, stronger intervention learning beyond the new world-model plus timing/suppression/thread layer, and broader native reach.
 - [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.

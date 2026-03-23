@@ -11,6 +11,7 @@ This archive captures older planning, research, and implementation notes that no
 
 Current product reality:
 
+- Seraph is an AI guardian that remembers, watches, and acts
 - Seraph is cockpit-only
 - the village/editor line is retired
 - old phase docs and old roadmap docs are frozen history, not the live plan

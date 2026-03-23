@@ -5,13 +5,15 @@ title: Seraph Master Roadmap
 
 # Seraph Master Roadmap
 
+Seraph is an AI guardian that remembers, watches, and acts. Today that means a browser cockpit with persistent memory, screen awareness, proactive workflows, tool use, and MCP integration.
+
 ## Summary
 
-Seraph uses the same high-level documentation split as `maas`:
+Use this page when you want the delivery-side truth:
 
-- `docs/research/` is the design, benchmark, and product-thesis surface
 - `docs/implementation/` is the shipped-state and delivery surface
-- `docs/implementation/STATUS.md` is the live status ledger
+- `docs/implementation/STATUS.md` is the fastest current snapshot
+- `docs/research/` is the design, benchmark, and product-thesis surface
 
 This implementation tree is the canonical delivery-side answer to four questions:
 
@@ -55,7 +57,7 @@ Legend for the checklist column:
 
 ## Progress Summary
 
-- [x] Seraph is already a real local guardian prototype with observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
+- [x] Seraph is already a real guardian workspace with a browser cockpit, observer, memory, goals, tools, approvals, MCP, and proactive scheduling.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability are the strongest shipped foundations on `develop`.
 - [x] The research tree now defines Seraph as a power-user guardian workspace, not a village-first product.
 - [x] The guardian workspace is now the only supported interface contract; the village/editor line is removed from the active repo path and should not be revived.

@@ -5,6 +5,7 @@ from smolagents import tool
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
+from src.security.site_policy import evaluate_site_access
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,25 @@ def _search_details(query: str, max_results: int, **extra: object) -> dict[str, 
         "max_results": max_results,
         **extra,
     }
+
+
+def _filter_search_results(results: list[dict[str, object]]) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    allowed: list[dict[str, object]] = []
+    blocked: list[dict[str, str]] = []
+    for result in results:
+        href = str(result.get("href") or "").strip()
+        decision = evaluate_site_access(href)
+        if decision.allowed:
+            allowed.append(result)
+            continue
+        blocked.append(
+            {
+                "hostname": decision.hostname,
+                "reason": decision.reason or "",
+                "rule": decision.matched_rule or "",
+            }
+        )
+    return allowed, blocked
 
 
 @tool
@@ -45,6 +65,27 @@ def web_search(query: str, max_results: int = 5) -> str:
             )
             return f"No results found for: {query}"
 
+        filtered_results, blocked_results = _filter_search_results(results)
+        filtered_count = len(blocked_results)
+        blocked_hostnames = sorted({item["hostname"] for item in blocked_results if item["hostname"]})
+        block_reasons = sorted({item["reason"] for item in blocked_results if item["reason"]})
+
+        if not filtered_results:
+            log_integration_event_sync(
+                integration_type="web_search",
+                name="duckduckgo",
+                outcome="blocked",
+                details=_search_details(
+                    query,
+                    max_results,
+                    result_count=len(results),
+                    filtered_result_count=filtered_count,
+                    blocked_hostnames=blocked_hostnames[:5],
+                    blocked_reasons=block_reasons,
+                ),
+            )
+            return f"No allowed results found for: {query}"
+
         log_integration_event_sync(
             integration_type="web_search",
             name="duckduckgo",
@@ -52,12 +93,15 @@ def web_search(query: str, max_results: int = 5) -> str:
             details=_search_details(
                 query,
                 max_results,
-                result_count=len(results),
+                result_count=len(filtered_results),
+                filtered_result_count=filtered_count,
+                blocked_hostnames=blocked_hostnames[:5],
+                blocked_reasons=block_reasons,
             ),
         )
 
         formatted = []
-        for i, r in enumerate(results, 1):
+        for i, r in enumerate(filtered_results, 1):
             title = r.get("title", "No title")
             href = r.get("href", "No URL")
             body = r.get("body", "No description")

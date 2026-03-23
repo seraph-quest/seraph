@@ -121,6 +121,8 @@ These control execution timeouts for agent and tool operations:
 | `AGENT_BRIEFING_TIMEOUT` | `60` | Seconds before daily briefing / evening review times out |
 | `CONSOLIDATION_LLM_TIMEOUT` | `30` | Seconds before memory consolidation LLM call times out |
 | `WEB_SEARCH_TIMEOUT` | `15` | Seconds before web search times out |
+| `BROWSER_SITE_ALLOWLIST` | empty | Comma-separated domain allowlist applied to `browse_webpage` and `web_search`; when set, only matching domains and subdomains are allowed |
+| `BROWSER_SITE_BLOCKLIST` | empty | Comma-separated domain blocklist applied to `browse_webpage` and `web_search` in addition to internal/private network blocking |
 
 ### Optional context window settings
 
@@ -606,6 +608,7 @@ Skills can be managed via:
 - **Settings UI**: Toggle skills on/off in the Settings panel
 - **REST API**: `GET /api/skills`, `PUT /api/skills/{name}`, `POST /api/skills/reload`
 - **Tool gating**: Skills with `requires.tools` only activate when required tools are available
+- **Extension doctor security scan**: packaged skills, workflows, and prompt packs are rejected if they contain instruction-override, prompt/secret exfiltration, or approval-bypass phrases that look like executable prompt injection rather than documentation/examples
 
 Eight bundled skills: `daily-standup`, `code-review`, `goal-reflection`, `weekly-planner`, `morning-intention`, `evening-journal`, `moltbook` (requires `http_request`), `web-briefing` (requires `http_request` + `web_search`).
 

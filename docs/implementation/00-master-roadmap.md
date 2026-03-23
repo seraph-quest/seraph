@@ -349,23 +349,23 @@ It is intentionally organized by **waves** rather than one flat queue because ea
 
 ### Wave 1: Hermes Runtime Parity
 
-1. [ ] `hermes-execute-code-runtime-v1`:
+1. [x] `hermes-execute-code-runtime-v1`:
    add approval-gated multi-step code execution as a first-class core runtime tool so Seraph can execute structured code tasks with better token efficiency than chat-only reasoning
-2. [ ] `hermes-delegate-task-runtime-v1`:
+2. [x] `hermes-delegate-task-runtime-v1`:
    turn delegation into a first-class runtime primitive with bounded worker context, structured outputs, and clearer parent-child execution visibility instead of leaving it as a partial foundation
-3. [ ] `hermes-clarify-runtime-v1`:
+3. [x] `hermes-clarify-runtime-v1`:
    add a structured clarify tool so Seraph can pause for missing inputs or ambiguity explicitly instead of relying only on prompt-level phrasing
-4. [ ] `hermes-todo-runtime-v1`:
+4. [x] `hermes-todo-runtime-v1`:
    add a first-class runtime task-list tool and state model so multi-step planning stops living only in prompt text or ad hoc workflow metadata
-5. [ ] `hermes-session-search-v1`:
+5. [x] `hermes-session-search-v1`:
    ship real session search over prior threads with bounded recall summaries so Seraph can retrieve prior operator context more like Hermes
-6. [ ] `hermes-bounded-memory-layer-v1`:
+6. [x] `hermes-bounded-memory-layer-v1`:
    add a fast bounded recall layer for profile and recent working memory on top of Seraph’s deeper guardian memory so retrieval for active work becomes cheaper and more predictable
-7. [ ] `hermes-user-cron-runtime-v1`:
+7. [x] `hermes-user-cron-runtime-v1`:
    let users create, inspect, update, and remove arbitrary scheduled jobs instead of relying only on fixed built-in scheduler tasks
-8. [ ] `hermes-shell-process-runtime-v1`:
+8. [x] `hermes-shell-process-runtime-v1`:
    deepen shell and process capability beyond the current narrow execution path with safer background-process and interactive-task support
-9. [ ] `hermes-security-controls-v1`:
+9. [x] `hermes-security-controls-v1`:
    import Hermes-style allowlists, pairing-style trust controls, site blocklists, and context-file scanning where they fit Seraph’s trust model so runtime breadth does not outrun safety
 
 ### Wave 2: Extension Capability Types

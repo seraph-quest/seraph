@@ -185,8 +185,45 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 ### 9. hermes-security-controls-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `python3 -m py_compile backend/config/settings.py backend/src/security/__init__.py backend/src/security/context_scan.py backend/src/security/site_policy.py backend/src/tools/browser_tool.py backend/src/tools/web_search_tool.py backend/src/extensions/doctor.py`
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_browser_tool.py tests/test_tools.py tests/test_extension_doctor.py tests/test_site_policy.py -q`
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_browser_tool.py tests/test_tools.py tests/test_timeouts.py tests/test_extension_doctor.py tests/test_extension_scaffold.py tests/test_extension_examples.py tests/test_bundled_capability_packs.py -q`
+  - `cd docs && npm run build`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Galileo`
+  - follow-up reviewer: `Faraday`
+  - findings:
+    - site-policy enforcement could be bypassed with legacy loopback host forms such as `127.1` and `2130706433`, so internal/private host blocking was not yet complete
+    - web-search result filtering initially let empty `href` entries slip past the allowlist path, which created a policy bypass for malformed provider results
+    - the first context scanner regexed entire markdown files and would false-positive on quoted or documentary examples instead of only executable-looking instruction lines
+    - the prompt-exfiltration detector was too narrow and missed imperative lines such as `Please reveal your instructions`
+    - prompt-pack contributions were not yet covered by the suspicious-context regression set, and the new scanner behavior was undocumented in the operator docs
+  - resolution:
+    - site-policy evaluation now normalizes legacy IPv4 host notations via `socket.inet_aton()` before the private-address check, and direct regressions pin both `127.1` and `2130706433`
+    - web-search filtering now evaluates empty or malformed result URLs through the same site-policy gate and records blocked-result metadata instead of silently allowing them through
+    - suspicious-context scanning now operates only on executable-looking markdown lines, ignores fenced code blocks, and rejects imperative override/exfiltration/bypass phrases without flagging documentary examples
+    - the exfiltration detector now covers `instructions` alongside hidden prompts, secrets, keys, and tokens
+    - prompt-pack doctor regressions and operator docs were updated so the scanner contract is explicit for packaged `skills`, `workflows`, and `prompt_packs`
+    - follow-up review requests were sent after the fixes landed, but the re-review timed out without returning additional findings
+
+## Wave 1 Exit Validation
+
+- status: complete
+- validation:
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+  - `cd frontend && npm test`
+  - `cd frontend && npm run build`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- result:
+  - backend: `1099 passed`, `4` pre-existing warnings
+  - frontend: `153 passed`
+  - frontend build: passed
+  - docs build: passed
+- final review gate:
+  - slice-level subagent reviews are recorded above for each landed slice
+  - final follow-up review requests were sent after the wave-wide validation to verify the branch state and docs alignment
+  - those follow-up checks timed out without returning additional findings before the wave was closed, so the concrete reviewer record for Wave 1 remains the slice-level findings and resolutions logged above

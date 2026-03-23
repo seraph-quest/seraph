@@ -82,6 +82,16 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["conversation"],
     },
+    "todo": {
+        "description": "Manage the current session's persisted task list",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["conversation_state"],
+    },
+    "session_search": {
+        "description": "Search prior session history for bounded relevant snippets",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["conversation_history_read"],
+    },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
         "policy_modes": ["safe", "balanced", "full"],

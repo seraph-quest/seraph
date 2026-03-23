@@ -58,6 +58,13 @@ class TestDelete:
         msgs = await sm.get_messages("s1")
         assert msgs == []
 
+    async def test_deletes_todos(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.replace_todos("s1", [{"content": "Ship Wave 1", "completed": False}])
+        await sm.delete("s1")
+        todos = await sm.get_todos("s1")
+        assert todos == []
+
 
 class TestAddMessage:
     async def test_basic(self, async_db, sm):
@@ -108,6 +115,49 @@ class TestGetMessages:
         assert page[0]["content"] == "msg-1"
 
 
+class TestTodos:
+    async def test_replace_and_list(self, async_db, sm):
+        await sm.get_or_create("s1")
+        todos = await sm.replace_todos(
+            "s1",
+            [
+                {"content": "Clarify missing input", "completed": False},
+                {"content": "Run validation", "completed": True},
+            ],
+        )
+        assert [todo["content"] for todo in todos] == ["Clarify missing input", "Run validation"]
+        assert todos[1]["completed"] is True
+
+    async def test_append_and_complete_by_index(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.replace_todos("s1", [{"content": "First", "completed": False}])
+        todos = await sm.append_todos("s1", [{"content": "Second", "completed": False}])
+        assert [todo["content"] for todo in todos] == ["First", "Second"]
+
+        updated = await sm.update_todo_completion("s1", "2", completed=True)
+        assert updated[1]["completed"] is True
+
+    async def test_remove_reorders(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.replace_todos(
+            "s1",
+            [
+                {"content": "One", "completed": False},
+                {"content": "Two", "completed": False},
+                {"content": "Three", "completed": False},
+            ],
+        )
+        remaining = await sm.remove_todo("s1", "2")
+        assert [todo["content"] for todo in remaining] == ["One", "Three"]
+        assert [todo["sort_order"] for todo in remaining] == [0, 1]
+
+    async def test_invalid_todo_index_returns_none(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.replace_todos("s1", [{"content": "One", "completed": False}])
+        assert await sm.update_todo_completion("s1", "0", completed=True) is None
+        assert await sm.remove_todo("s1", "3") is None
+
+
 class TestListSessions:
     async def test_empty(self, async_db, sm):
         result = await sm.list_sessions()
@@ -126,6 +176,43 @@ class TestListSessions:
         await sm.add_message("s1", "user", "Hello world")
         result = await sm.list_sessions()
         assert result[0]["last_message"] == "Hello world"
+
+
+class TestSearchSessions:
+    async def test_matches_message_content(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Need a weather briefing for Wroclaw")
+        await sm.get_or_create("s2")
+        await sm.add_message("s2", "assistant", "We reviewed the roadmap")
+
+        results = await sm.search_sessions("weather")
+        assert len(results) == 1
+        assert results[0]["session_id"] == "s1"
+        assert results[0]["source"] == "message"
+
+    async def test_matches_titles_and_excludes_current(self, async_db, sm):
+        await sm.get_or_create("weather-thread")
+        await sm.update_title("weather-thread", "Weather planning")
+        await sm.get_or_create("active-thread")
+        await sm.update_title("active-thread", "Weather follow-up")
+
+        results = await sm.search_sessions("weather", exclude_session_id="active-thread")
+        assert [item["session_id"] for item in results] == ["weather-thread"]
+        assert results[0]["source"] == "title"
+
+    async def test_treats_percent_and_underscore_as_literal_text(self, async_db, sm):
+        await sm.get_or_create("percent")
+        await sm.add_message("percent", "assistant", "Budget hit 100% yesterday")
+        await sm.get_or_create("underscore")
+        await sm.add_message("underscore", "assistant", "Follow up on foo_bar details")
+        await sm.get_or_create("plain")
+        await sm.add_message("plain", "assistant", "No wildcard markers here")
+
+        percent_results = await sm.search_sessions("100%")
+        underscore_results = await sm.search_sessions("foo_bar")
+
+        assert [item["session_id"] for item in percent_results] == ["percent"]
+        assert [item["session_id"] for item in underscore_results] == ["underscore"]
 
 
 class TestUpdateTitle:

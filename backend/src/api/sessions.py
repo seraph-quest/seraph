@@ -20,6 +20,20 @@ async def list_sessions():
     return await session_manager.list_sessions()
 
 
+@router.get("/sessions/search")
+async def search_sessions(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(default=5, ge=1, le=20),
+    exclude_session_id: str | None = Query(default=None),
+):
+    """Search prior sessions by title and message content."""
+    return await session_manager.search_sessions(
+        q,
+        limit=limit,
+        exclude_session_id=exclude_session_id,
+    )
+
+
 @router.get("/sessions/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
@@ -31,6 +45,15 @@ async def get_session_messages(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return await session_manager.get_messages(session_id, limit=limit, offset=offset)
+
+
+@router.get("/sessions/{session_id}/todos")
+async def get_session_todos(session_id: str):
+    """Get the persisted todo list for a session."""
+    session = await session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return await session_manager.get_todos(session_id)
 
 
 @router.patch("/sessions/{session_id}")

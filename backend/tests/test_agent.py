@@ -22,7 +22,7 @@ class TestAgentFactory:
         assert len(tools) >= 10
         tool_names = [t.name for t in tools]
         for expected in ["read_file", "write_file", "web_search", "fill_template",
-                         "view_soul", "update_soul", "create_goal", "execute_code", "clarify"]:
+                         "view_soul", "update_soul", "create_goal", "execute_code", "clarify", "todo", "session_search"]:
             assert expected in tool_names
         assert "delegate_task" not in tool_names
 
@@ -102,6 +102,31 @@ class TestAgentFactory:
         event_types = {event["event_type"] for event in events}
         assert "tool_call" in event_types
         assert "tool_result" in event_types
+
+    @patch("src.agent.factory.mcp_manager")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_todo_invalid_action_does_not_reuse_stale_audit_payload(self, _mock_context, mock_mcp, async_db):
+        mock_mcp.get_tools.return_value = []
+        tools = {tool.name: tool for tool in get_tools()}
+        tokens = set_runtime_context("s1", "off")
+        try:
+            tools["todo"](action="set", items="First")
+            error = tools["todo"](action="bogus")
+        finally:
+            reset_runtime_context(tokens)
+
+        assert error == "Error: Unsupported todo action. Use list, set, add, complete, reopen, remove, or clear."
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=10)
+            return [event for event in events if event["tool_name"] == "todo" and event["event_type"] == "tool_result"]
+
+        results = asyncio.run(_fetch())
+        assert len(results) == 2
+        assert any(result["details"].get("action") == "set" for result in results)
+        latest = results[0]
+        assert latest["summary"].startswith("todo returned")
+        assert "action" not in latest["details"]
 
     @patch("src.agent.factory.ToolCallingAgent")
     @patch("src.agent.factory.get_model")

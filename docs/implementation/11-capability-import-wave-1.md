@@ -78,19 +78,37 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 ### 4. hermes-todo-runtime-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_todo_tool.py tests/test_session.py tests/test_sessions_api.py tests/test_tools_api.py tests/test_agent.py -q`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Galileo`
+  - findings:
+    - invalid `remove` refs originally fell through as successful clears instead of returning a not-found error
+    - numeric todo refs accepted `0` and `00` even though the public contract is 1-based indexing
+    - stale audit payload from a previous successful call could leak into a later error-path `tool_result`
+    - nullable `items` or `item_id` inputs could be coerced into the literal string `"None"` and pollute persisted todo content
+  - resolution:
+    - missing todo refs now return `None` from the session layer and surface explicit not-found errors in the tool
+    - numeric ref resolution now rejects non-positive indices before any lookup
+    - `TodoTool` clears its cached audit payload on every early-error path, and a direct agent audit regression now proves the stale payload cannot leak
+    - nullable inputs are normalized to empty strings before parsing, and a direct tool regression covers the `None` case
 
 ### 5. hermes-session-search-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_session_search_tool.py tests/test_session.py tests/test_sessions_api.py tests/test_tools_api.py tests/test_agent.py -q`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Zeno`
+  - findings:
+    - the first SQL title/message search draft treated `%` and `_` as live wildcard characters, so literal user queries containing those characters matched unrelated threads
+    - session-search coverage was missing a direct API regression for excluding the current session from the bounded recall list
+  - resolution:
+    - session search now escapes `LIKE` metacharacters and uses `escape='\\'` so `%` and `_` are treated literally unless the query actually contains them
+    - API and session-layer regressions now cover current-session exclusion and literal wildcard searches
 
 ### 6. hermes-bounded-memory-layer-v1
 

@@ -80,6 +80,20 @@ class Message(SQLModel, table=True):
     session: Optional[Session] = Relationship(back_populates="messages")
 
 
+# ─── Session Todo ───────────────────────────────────────
+
+class SessionTodo(SQLModel, table=True):
+    __tablename__ = "session_todos"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: str = Field(foreign_key="sessions.id", index=True)
+    content: str = Field(default="")
+    completed: bool = Field(default=False, index=True)
+    sort_order: int = Field(default=0, index=True)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 # ─── Memory ──────────────────────────────────────────────
 
 class Memory(SQLModel, table=True):

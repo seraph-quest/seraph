@@ -129,6 +129,17 @@ def _normalize_cwd(raw_cwd: str | None) -> Path:
     return resolved
 
 
+def _ensure_workspace_scoped_path(raw_path: str, cwd: Path, *, label: str) -> None:
+    candidate = (raw_path or "").strip()
+    if not candidate:
+        raise ValueError(f"{label} is required.")
+    resolved = (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).resolve()
+    try:
+        resolved.relative_to(_workspace_root())
+    except ValueError as exc:
+        raise ValueError(f"{label} must stay within the workspace.") from exc
+
+
 def _normalize_command(command: str) -> str:
     normalized = (command or "").strip()
     if not normalized:
@@ -185,6 +196,111 @@ def _validate_interpreter_args(executable: str, args: list[str]) -> None:
         raise ValueError("uv run -m is not allowed in the process runtime.")
 
 
+def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
+    command_name = Path(executable).name
+
+    if command_name == "git":
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in {"-C", "--git-dir", "--work-tree"}:
+                if index + 1 >= len(args):
+                    raise ValueError(f"{arg} requires a path argument.")
+                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                index += 2
+                continue
+            if arg.startswith("--git-dir="):
+                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--git-dir path")
+            elif arg.startswith("--work-tree="):
+                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--work-tree path")
+            index += 1
+        return
+
+    if command_name in {"python", "python3", "node"}:
+        for arg in args:
+            if arg == "--":
+                break
+            if arg.startswith("-"):
+                continue
+            _ensure_workspace_scoped_path(arg, cwd, label="script path")
+            break
+        return
+
+    if command_name == "find":
+        for arg in args:
+            if arg.startswith("-") or arg in {"!", "(", ")"}:
+                break
+            _ensure_workspace_scoped_path(arg, cwd, label="search path")
+        return
+
+    if command_name in {"cat", "ls"}:
+        for arg in args:
+            if arg.startswith("-"):
+                continue
+            _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+        return
+
+    if command_name in {"head", "tail"}:
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in {"-n", "--lines", "-c", "--bytes"}:
+                index += 2
+                continue
+            if arg.startswith("-"):
+                index += 1
+                continue
+            _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+            index += 1
+        return
+
+    if command_name == "wc":
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in {"-L", "--max-line-length"}:
+                index += 1
+                continue
+            if arg.startswith("-"):
+                index += 1
+                continue
+            _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+            index += 1
+        return
+
+    if command_name in {"grep", "rg", "sed"}:
+        pattern_consumed = False
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in {"-e", "--regexp"}:
+                if index + 1 >= len(args):
+                    raise ValueError(f"{arg} requires a value.")
+                pattern_consumed = True
+                index += 2
+                continue
+            if arg in {"-f", "--file"}:
+                if index + 1 >= len(args):
+                    raise ValueError(f"{arg} requires a path argument.")
+                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                pattern_consumed = True
+                index += 2
+                continue
+            if arg.startswith("--file="):
+                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--file path")
+                pattern_consumed = True
+                index += 1
+                continue
+            if arg.startswith("-"):
+                index += 1
+                continue
+            if not pattern_consumed and command_name in {"grep", "rg", "sed"}:
+                pattern_consumed = True
+            else:
+                _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+            index += 1
+
+
 def _normalize_timeout_seconds(raw_timeout: int | None) -> int:
     timeout = 30 if raw_timeout is None else int(raw_timeout)
     return max(1, min(timeout, _COMMAND_TIMEOUT_MAX))
@@ -238,8 +354,9 @@ def _normalize_command_invocation(
 ) -> tuple[str, list[str], Path]:
     executable = _normalize_command(command)
     args = _parse_args_json(args_json)
-    _validate_interpreter_args(executable, args)
     resolved_cwd = _normalize_cwd(cwd)
+    _validate_interpreter_args(executable, args)
+    _validate_workspace_scoped_args(executable, args, resolved_cwd)
     return executable, args, resolved_cwd
 
 

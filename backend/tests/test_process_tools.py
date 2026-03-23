@@ -63,6 +63,26 @@ def test_run_command_rejects_workspace_escape():
     assert result == "Error: cwd must stay within the workspace."
 
 
+def test_run_command_rejects_workspace_escape_via_git_path_flag():
+    result = run_command(command="git", args_json='["-C","/","status"]')
+    assert result == "Error: -C path must stay within the workspace."
+
+
+def test_run_command_rejects_absolute_file_argument_outside_workspace():
+    result = run_command(command="cat", args_json='["/etc/passwd"]')
+    assert result == "Error: path argument must stay within the workspace."
+
+
+def test_run_command_rejects_grep_file_argument_outside_workspace():
+    result = run_command(command="grep", args_json='["localhost","/etc/hosts"]')
+    assert result == "Error: path argument must stay within the workspace."
+
+
+def test_start_process_rejects_absolute_script_path_outside_workspace():
+    result = start_process(command="python3", args_json='["/tmp/outside.py"]')
+    assert result == "Error: script path must stay within the workspace."
+
+
 @pytest.mark.asyncio
 async def test_run_command_audit_redacts_command_output(async_db):
     await session_manager.get_or_create("s1")

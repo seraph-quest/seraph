@@ -116,4 +116,15 @@ describe("clarification transport helpers", () => {
     expect(message.clarificationReason).toBe("Weather depends on location.");
     expect(message.clarificationOptions).toEqual(["Wroclaw", "Warsaw"]);
   });
+
+  it("falls back to websocket content when message is absent", () => {
+    const message = buildClarificationMessage({
+      content: "Which city should I check?",
+      question: "Which city should I check?",
+      reason: "Weather depends on location.",
+    }, "session-clarify");
+
+    expect(message.content).toBe("Which city should I check?");
+    expect(message.clarificationQuestion).toBe("Which city should I check?");
+  });
 });

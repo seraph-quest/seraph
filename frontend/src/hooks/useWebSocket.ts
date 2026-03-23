@@ -13,6 +13,7 @@ function makeId(): string {
 const WS_BACKOFF_MAX_MS = 30_000;
 
 type ClarificationPayload = {
+  content?: string;
   message?: string;
   question?: string;
   reason?: string;
@@ -33,7 +34,7 @@ export function buildClarificationMessage(
   return {
     id: makeId(),
     role: "clarification",
-    content: detail.message ?? "I need one more detail before I can continue.",
+    content: detail.message ?? detail.content ?? "I need one more detail before I can continue.",
     timestamp: Date.now(),
     sessionId,
     clarificationQuestion: detail.question,

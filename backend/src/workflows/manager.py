@@ -118,6 +118,10 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _canonicalize_tool_names(tool_names: list[str]) -> list[str]:
+    return list(dict.fromkeys(canonical_tool_name(tool_name) for tool_name in tool_names))
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -159,6 +163,8 @@ class WorkflowTool(Tool):
 
         for step in self.workflow.steps:
             tool = self.tools_by_name.get(step.tool)
+            if tool is None:
+                tool = self.tools_by_name.get(canonical_tool_name(step.tool))
             if tool is None:
                 raise RuntimeError(
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
@@ -504,7 +510,7 @@ class WorkflowManager:
                 "tool_name": workflow.tool_name,
                 "description": workflow.description,
                 "inputs": workflow.inputs,
-                "requires_tools": workflow.requires_tools,
+                "requires_tools": _canonicalize_tool_names(workflow.requires_tools),
                 "requires_skills": workflow.requires_skills,
                 "user_invocable": workflow.user_invocable,
                 "enabled": workflow.enabled,
@@ -636,7 +642,7 @@ class WorkflowManager:
             "description": workflow.description,
             "inputs": workflow.inputs,
             "policy_modes": policy_modes,
-            "requires_tools": workflow.requires_tools,
+            "requires_tools": _canonicalize_tool_names(workflow.requires_tools),
             "requires_skills": workflow.requires_skills,
             "step_count": len(workflow.steps),
             "execution_boundaries": self._infer_execution_boundaries(workflow),
@@ -655,7 +661,7 @@ class WorkflowManager:
         tool_set = {canonical_tool_name(name) for name in available_tool_names}
         skill_set = set(active_skill_names)
         missing_tools = [
-            tool_name for tool_name in workflow.requires_tools
+            canonical_tool_name(tool_name) for tool_name in workflow.requires_tools
             if canonical_tool_name(tool_name) not in tool_set
         ]
         missing_skills = [

@@ -6,6 +6,7 @@ import pytest
 
 from src.agent.session import SessionManager
 from src.audit.repository import audit_repository
+from src.scheduler.scheduled_jobs import scheduled_job_repository
 
 
 @pytest.fixture
@@ -64,6 +65,25 @@ class TestDelete:
         await sm.delete("s1")
         todos = await sm.get_todos("s1")
         assert todos == []
+
+    async def test_deletes_scheduled_jobs(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await scheduled_job_repository.create_job(
+            name="Morning check",
+            cron="0 9 * * *",
+            timezone_name="UTC",
+            target_type="message",
+            content="Stand up and review priorities.",
+            intervention_type="advisory",
+            urgency=3,
+            workflow_name="",
+            workflow_args_json="",
+            session_id="s1",
+            created_by_session_id="s1",
+        )
+        await sm.delete("s1")
+        jobs = await scheduled_job_repository.list_jobs(limit=20)
+        assert jobs == []
 
 
 class TestAddMessage:

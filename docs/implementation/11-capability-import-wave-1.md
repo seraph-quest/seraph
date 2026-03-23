@@ -140,11 +140,28 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 ### 7. hermes-user-cron-runtime-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_scheduled_jobs.py tests/test_scheduled_job_tools.py tests/test_scheduler.py tests/test_tools_api.py tests/test_session.py -q`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Descartes`
+  - follow-up reviewer: `Hooke`
+  - findings:
+    - the first implementation exposed scheduled jobs globally, so one session could list, pause, resume, update, or delete another session's persisted cron jobs
+    - dynamic scheduler sync originally loaded only 200 rows and used that limited set to remove stale APScheduler jobs, which would eventually unschedule older persisted jobs once the database crossed that threshold
+    - `deliver_message` runs initially persisted `result.audit_decision`, which could report `delivered` even when the delivery layer had already marked the intervention outcome as `failed`
+    - startup sync could abort the whole app on one malformed persisted row because `build_cron_trigger()` / `_scheduler.add_job()` exceptions were not isolated per job
+    - scheduled jobs survived session deletion, leaving orphaned cron jobs pointing at dead session ids
+    - follow-up review also found a no-session impersonation path through explicit `session_id`, sync failures bubbling after a successful DB write, raw runtime error text leaking back through `last_error`, and malformed `urgency` strings crashing before the tool's normal validation path
+  - resolution:
+    - scheduled job tools are now scoped to the active runtime session, reject cross-session targeting, and filter list/update/delete/pause/resume operations through ownership-aware repository queries
+    - scheduler sync now loads the full persisted job set, skips malformed rows instead of aborting startup, and keeps APScheduler state aligned without truncating older jobs
+    - scheduled delivery runs now prefer the persisted guardian intervention outcome when one exists, so failed transport is recorded as `failed` instead of a synthetic `delivered`
+    - session deletion now removes scheduled jobs bound to or created by that session, preventing orphaned cron routines from firing after thread removal
+    - scheduler resync failures after DB mutation now degrade into an explicit warning message instead of raising through the tool surface
+    - persisted/public scheduler errors are reduced to safe exception labels, and invalid `urgency` input now returns a normal tool error instead of crashing the tool
+    - post-fix re-review requests were sent to `Descartes`, `Hooke`, and `Zeno`; those follow-up checks timed out before the slice was committed, so the recorded findings above are the last concrete reviewer feedback on this slice
 
 ### 8. hermes-shell-process-runtime-v1
 

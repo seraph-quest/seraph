@@ -94,6 +94,28 @@ class SessionTodo(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+# ─── Scheduled Job ─────────────────────────────────────
+
+class ScheduledJob(SQLModel, table=True):
+    __tablename__ = "scheduled_jobs"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    name: str = Field(default="")
+    enabled: bool = Field(default=True, index=True)
+    trigger_type: str = Field(default="cron", index=True)
+    trigger_spec_json: str = Field(default="{}")
+    action_type: str = Field(default="deliver_message", index=True)
+    action_spec_json: str = Field(default="{}")
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    created_by_session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    last_run_at: Optional[datetime] = Field(default=None, index=True)
+    last_outcome: Optional[str] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None)
+    last_approval_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
 # ─── Memory ──────────────────────────────────────────────
 
 class Memory(SQLModel, table=True):

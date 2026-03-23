@@ -47,6 +47,16 @@ async def test_tools_api_safe_mode_keeps_session_search_available(client):
 
 
 @pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_get_scheduled_jobs_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "get_scheduled_jobs" in names
+
+
+@pytest.mark.asyncio
 async def test_tools_api_balanced_mode_keeps_delegate_task_available(client):
     ctx = CurrentContext(tool_policy_mode="balanced")
     with (
@@ -57,6 +67,16 @@ async def test_tools_api_balanced_mode_keeps_delegate_task_available(client):
     assert resp.status_code == 200
     names = {tool["name"] for tool in resp.json()}
     assert "delegate_task" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_balanced_mode_keeps_manage_scheduled_job_available(client):
+    ctx = CurrentContext(tool_policy_mode="balanced")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "manage_scheduled_job" in names
 
 
 @pytest.mark.asyncio

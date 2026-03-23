@@ -12,7 +12,7 @@ from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
-from src.db.models import Session, Message, SessionTodo
+from src.db.models import Message, ScheduledJob, Session, SessionTodo
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,14 @@ class SessionManager:
             )
             for todo in todos.scalars().all():
                 await db.delete(todo)
+            scheduled_jobs = await db.execute(
+                select(ScheduledJob).where(
+                    (ScheduledJob.session_id == session_id)
+                    | (ScheduledJob.created_by_session_id == session_id)
+                )
+            )
+            for scheduled_job in scheduled_jobs.scalars().all():
+                await db.delete(scheduled_job)
             await db.delete(session)
             return True
 

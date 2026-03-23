@@ -92,6 +92,16 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["conversation_history_read"],
     },
+    "get_scheduled_jobs": {
+        "description": "List persisted scheduled jobs and their runtime status",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["automation_state"],
+    },
+    "manage_scheduled_job": {
+        "description": "Create, update, pause, resume, or delete persisted scheduled jobs",
+        "policy_modes": ["balanced", "full"],
+        "execution_boundaries": ["automation_state"],
+    },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
         "policy_modes": ["safe", "balanced", "full"],

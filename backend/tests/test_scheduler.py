@@ -139,6 +139,51 @@ class TestSchedulerEngine:
         # Should not raise even if nothing is running
         shutdown_scheduler()
 
+    @pytest.mark.asyncio
+    async def test_sync_scheduled_jobs_registers_and_removes_dynamic_jobs(self, async_db):
+        from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
+        from src.scheduler.scheduled_jobs import scheduled_job_repository
+
+        with patch("src.scheduler.engine.settings") as mock_settings:
+            mock_settings.scheduler_enabled = True
+            mock_settings.memory_consolidation_interval_min = 30
+            mock_settings.goal_check_interval_hours = 4
+            mock_settings.calendar_scan_interval_min = 15
+            mock_settings.strategist_interval_min = 15
+            mock_settings.morning_briefing_hour = 8
+            mock_settings.evening_review_hour = 21
+            mock_settings.activity_digest_hour = 20
+            mock_settings.weekly_review_hour = 18
+            mock_settings.user_timezone = "UTC"
+
+            scheduler = init_scheduler()
+            assert scheduler is not None
+            try:
+                job = await scheduled_job_repository.create_job(
+                    name="Morning check",
+                    cron="0 9 * * *",
+                    timezone_name="UTC",
+                    target_type="message",
+                    content="Stand up and review priorities.",
+                    intervention_type="advisory",
+                    urgency=3,
+                    workflow_name="",
+                    workflow_args_json="",
+                    session_id="s1",
+                    created_by_session_id="s1",
+                )
+                await sync_scheduled_jobs()
+
+                dynamic_ids = {job.id for job in scheduler.get_jobs() if job.id.startswith("user_cron:")}
+                assert dynamic_ids == {f"user_cron:{job['id']}"}
+
+                await scheduled_job_repository.delete_job(job["id"])
+                await sync_scheduled_jobs()
+                dynamic_ids = {job.id for job in scheduler.get_jobs() if job.id.startswith("user_cron:")}
+                assert dynamic_ids == set()
+            finally:
+                shutdown_scheduler()
+
 
 # ── Memory consolidation job ───────────────────────────────
 

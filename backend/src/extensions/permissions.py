@@ -108,6 +108,55 @@ def _runtime_approval_behavior(*, boundaries: list[str], risk_level: str) -> tup
     return "never", False
 
 
+def _merge_explicit_boundaries_into_profile(
+    profile: dict[str, Any],
+    *,
+    explicit_boundaries: list[str],
+) -> dict[str, Any]:
+    required_boundaries = _dedupe_strings(
+        list(profile.get("required_execution_boundaries", [])) + explicit_boundaries
+    )
+    declared_boundaries = _dedupe_strings(profile.get("declared_execution_boundaries"))
+    missing_boundaries = [
+        boundary
+        for boundary in required_boundaries
+        if declared_boundaries and boundary not in declared_boundaries
+    ]
+    requires_network = any(boundary in NETWORK_BOUNDARIES for boundary in required_boundaries)
+    network_declared = profile.get("network")
+    missing_network = bool(network_declared is False and requires_network)
+    lifecycle_boundaries = [
+        boundary
+        for boundary in required_boundaries
+        if boundary in LIFECYCLE_APPROVAL_BOUNDARIES
+    ]
+    risk_level = str(profile.get("risk_level") or "low")
+    if lifecycle_boundaries and _risk_rank(risk_level) < _risk_rank("high"):
+        risk_level = "high"
+    approval_behavior, runtime_requires_approval = _runtime_approval_behavior(
+        boundaries=required_boundaries,
+        risk_level=risk_level,
+    )
+    requires_approval = runtime_requires_approval or bool(lifecycle_boundaries)
+    if not runtime_requires_approval and lifecycle_boundaries:
+        approval_behavior = "lifecycle"
+    profile.update(
+        {
+            "required_execution_boundaries": required_boundaries,
+            "missing_execution_boundaries": missing_boundaries,
+            "requires_network": requires_network,
+            "missing_network": missing_network,
+            "risk_level": risk_level,
+            "approval_behavior": approval_behavior,
+            "requires_approval": requires_approval,
+            "lifecycle_approval_boundaries": lifecycle_boundaries,
+        }
+    )
+    profile["ok"] = not profile["missing_tools"] and not missing_boundaries and not missing_network
+    profile["status"] = "granted" if profile["ok"] else "insufficient"
+    return profile
+
+
 def evaluate_tool_permissions(
     extension: ExtensionRecord | None,
     *,
@@ -199,6 +248,16 @@ def evaluate_contribution_permissions(
         if not step_tools:
             step_tools = _dedupe_strings(metadata.get("requires_tools"))
         return evaluate_tool_permissions(extension, tool_names=step_tools)
+
+    if contribution_type == "toolset_presets":
+        profile = evaluate_tool_permissions(
+            extension,
+            tool_names=_dedupe_strings(metadata.get("include_tools")),
+        )
+        return _merge_explicit_boundaries_into_profile(
+            profile,
+            explicit_boundaries=_dedupe_strings(metadata.get("execution_boundaries")),
+        )
 
     if contribution_type == "mcp_servers":
         tool_profile = evaluate_tool_permissions(extension, tool_names=["mcp_extension_connector"])

@@ -35,18 +35,25 @@ The current manifest contract supports two package kinds:
 - `capability-pack`
 - `connector-pack`
 
-Current author tooling is intentionally narrower:
+Current author tooling supports both package kinds:
 
-- scaffolding today targets `capability-pack`
-- connector packaging and install UX are delivered in later slices
+- scaffolding now supports `capability-pack` and `connector-pack`
 - current `new_pack.py --with ...` support covers:
   - `skills`
   - `workflows`
   - `runbooks`
   - `starter_packs`
   - `provider_presets`
+  - `toolset_presets`
   - `prompt_packs`
+  - `context_packs`
   - `scheduled_routines`
+  - `managed_connectors`
+  - `automation_triggers`
+  - `browser_providers`
+  - `messaging_connectors`
+  - `speech_profiles`
+  - `node_adapters`
 
 ## Trust model
 
@@ -78,12 +85,18 @@ Each contribution type has a canonical package root:
 - `starter-packs/`
 - `presets/provider/`
 - `prompts/`
+- `context/`
 - `routines/`
 - `mcp/`
 - `connectors/managed/`
+- `automation/`
+- `connectors/browser/`
+- `connectors/messaging/`
 - `observers/definitions/`
 - `observers/connectors/`
 - `channels/`
+- `speech/`
+- `connectors/nodes/`
 - `workspace/`
 
 Current scaffolding focuses on the capability-pack surfaces that are already in scope for authoring.
@@ -134,6 +147,7 @@ backend/.venv/bin/python scripts/extensions/validate_pack.py ./tmp/my-pack
 Current validation depth:
 
 - `skills` and `workflows` get semantic parser checks
+- `toolset_presets` get tool and execution-boundary permission checks
 - connector payloads get payload and network-permission checks when present
 - the remaining canonical contribution types currently get manifest/layout/file
   validation first, with deeper semantic validators landing in later slices
@@ -145,6 +159,8 @@ Current connector-runtime visibility:
 - `POST /api/extensions/{id}/connectors/enabled` now owns packaged MCP enable and disable changes, while raw `/api/mcp` update/remove/test/token flows reject extension-managed servers so package-owned connectors stay inside the extension lifecycle
 - the standalone MCP config editor is now a manual-server path only; packaged MCP definitions stay read-only in Extension Studio until package-backed MCP source editing lands
 - packaged managed connectors now use the same lifecycle state model: they ship disabled until configured, keep operator-supplied config in extension runtime state, support connector-level enable/disable through `POST /api/extensions/{id}/connectors/enabled`, and participate in package-level enable/disable through the normal extension lifecycle endpoints
+- packaged `automation_triggers`, `browser_providers`, `messaging_connectors`, and `node_adapters` now also show up through the shared lifecycle and connector payload paths as planned connector surfaces, including package-bound config fields, config validation, enable/disable state, and normalized health/status summaries even before their concrete runtime integrations land in later waves
+- packaged `toolset_presets`, `context_packs`, and `speech_profiles` now also appear as typed contribution metadata in extension payloads instead of generic manifest entries, so packages can carry operator-visible presets and future reach metadata through the shared registry today
 - packaged observer definitions now also use shared lifecycle state: connector-level and package-level enable/disable both feed the observer runtime selector, disabling a higher-priority observer lets the next enabled packaged definition of the same `source_type` take over, disabling every packaged definition for that `source_type` leaves the selector empty instead of silently reviving hardcoded fallbacks, and observer health now distinguishes `active`, `disabled`, `invalid`, and `overridden`
 - packaged channel adapters now use the same lifecycle state path: connector-level and package-level enable/disable both feed the delivery transport selector, disabling a higher-priority transport lets the next enabled packaged adapter take over, disabling every packaged adapter for that transport leaves delivery with no active adapter instead of reviving hardcoded fallbacks, and channel health now distinguishes `active`, `degraded`, `disabled`, `invalid`, and `overridden`
 - the first shipped health contract now covers packaged MCP connectors, managed connectors, observer definitions, and channel adapters, with connector-level enable/disable available across every runtime-backed connector surface

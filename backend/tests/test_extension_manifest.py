@@ -43,6 +43,69 @@ permissions:
     assert manifest.is_compatible_with("2027.1.0") is False
 
 
+def test_parse_manifest_accepts_wave2_capability_types():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.guardian-reach
+version: 2026.3.23
+display_name: Guardian Reach
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  toolset_presets:
+    - presets/toolset/research.yaml
+  context_packs:
+    - context/research.yaml
+  speech_profiles:
+    - speech/voice.yaml
+permissions:
+  tools:
+    - read_file
+  network: false
+"""
+    )
+
+    assert manifest.contributed_types() == {"toolset_presets", "context_packs", "speech_profiles"}
+
+
+def test_parse_manifest_accepts_wave2_connector_types():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.reach-connectors
+version: 2026.3.23
+display_name: Reach Connectors
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  automation_triggers:
+    - automation/daily-brief.yaml
+  browser_providers:
+    - connectors/browser/browserbase.yaml
+  messaging_connectors:
+    - connectors/messaging/telegram.yaml
+  node_adapters:
+    - connectors/nodes/companion.yaml
+permissions:
+  network: true
+"""
+    )
+
+    assert manifest.contributed_types() == {
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "node_adapters",
+    }
+
+
 def test_parse_rejects_absolute_or_traversing_contribution_paths():
     with pytest.raises(ExtensionManifestError) as exc_info:
         parse_extension_manifest(

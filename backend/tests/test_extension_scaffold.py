@@ -24,18 +24,50 @@ def test_scaffold_capability_pack_creates_valid_manifest_and_files(tmp_path: Pat
     assert [result.extension_id for result in report.results] == ["seraph.research-pack"]
 
 
-def test_scaffold_rejects_connector_pack_until_connector_slices(tmp_path: Path):
-    package_dir = tmp_path / "github-pack"
+def test_scaffold_connector_pack_creates_wave2_connector_placeholders(tmp_path: Path):
+    package = scaffold_extension_package(
+        tmp_path / "reach-pack",
+        extension_id="seraph.reach-pack",
+        display_name="Reach Pack",
+        kind="connector-pack",
+        contributions=["browser_providers", "messaging_connectors", "node_adapters"],
+    )
+
+    assert package.manifest_path.exists()
+    assert (package.package_root / "connectors" / "browser" / "reach-pack.yaml").exists()
+    assert (package.package_root / "connectors" / "messaging" / "reach-pack.yaml").exists()
+    assert (package.package_root / "connectors" / "nodes" / "reach-pack.yaml").exists()
+
+    report = validate_extension_package(package.package_root)
+
+    assert report.ok is True
+    assert [result.extension_id for result in report.results] == ["seraph.reach-pack"]
+
+
+def test_scaffold_supports_wave2_capability_placeholders(tmp_path: Path):
+    package = scaffold_extension_package(
+        tmp_path / "guardian-pack",
+        extension_id="seraph.guardian-pack",
+        display_name="Guardian Pack",
+        contributions=["toolset_presets", "context_packs", "speech_profiles"],
+    )
+
+    assert (package.package_root / "presets" / "toolset" / "guardian-pack.yaml").exists()
+    assert (package.package_root / "context" / "guardian-pack.yaml").exists()
+    assert (package.package_root / "speech" / "guardian-pack.yaml").exists()
+
+
+def test_scaffold_rejects_connector_pack_without_connector_contributions(tmp_path: Path):
     with pytest.raises(ValueError) as exc_info:
         scaffold_extension_package(
-            package_dir,
-            extension_id="seraph.github-pack",
-            display_name="GitHub Pack",
+            tmp_path / "invalid-connector-pack",
+            extension_id="seraph.invalid-connector-pack",
+            display_name="Invalid Connector Pack",
             kind="connector-pack",
+            contributions=["toolset_presets"],
         )
 
-    assert "deferred" in str(exc_info.value)
-    assert package_dir.exists() is False
+    assert "connector-pack scaffolds must include at least one connector contribution" in str(exc_info.value)
 
 
 def test_validate_extension_package_reports_missing_scaffolded_files(tmp_path: Path):

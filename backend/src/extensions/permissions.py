@@ -200,6 +200,32 @@ def evaluate_contribution_permissions(
             step_tools = _dedupe_strings(metadata.get("requires_tools"))
         return evaluate_tool_permissions(extension, tool_names=step_tools)
 
+    if contribution_type == "toolset_presets":
+        profile = evaluate_tool_permissions(
+            extension,
+            tool_names=_dedupe_strings(metadata.get("include_tools")),
+        )
+        declared_boundaries = profile["declared_execution_boundaries"]
+        required_boundaries = profile["required_execution_boundaries"]
+        explicit_boundaries = _dedupe_strings(metadata.get("execution_boundaries"))
+        missing_boundaries = list(profile["missing_execution_boundaries"])
+        for boundary in explicit_boundaries:
+            if boundary not in required_boundaries:
+                required_boundaries.append(boundary)
+            if (
+                extension is not None
+                and extension.manifest is not None
+                and declared_boundaries
+                and boundary not in declared_boundaries
+                and boundary not in missing_boundaries
+            ):
+                missing_boundaries.append(boundary)
+        profile["required_execution_boundaries"] = required_boundaries
+        profile["missing_execution_boundaries"] = missing_boundaries
+        profile["ok"] = not profile["missing_tools"] and not profile["missing_execution_boundaries"] and not profile["missing_network"]
+        profile["status"] = "granted" if profile["ok"] else "insufficient"
+        return profile
+
     if contribution_type == "mcp_servers":
         tool_profile = evaluate_tool_permissions(extension, tool_names=["mcp_extension_connector"])
         tool_profile.update(

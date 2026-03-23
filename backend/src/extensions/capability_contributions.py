@@ -1,0 +1,509 @@
+"""Typed Wave 2 capability contribution helpers for extension packages."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from src.extensions.connectors import ConnectorDefinitionError, load_connector_payload
+
+
+def _parse_string_list(payload: Any, *, source: str, field_name: str) -> tuple[str, ...]:
+    if payload is None:
+        return ()
+    if not isinstance(payload, list):
+        raise ConnectorDefinitionError(f"{source}: {field_name} must be a list")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in payload:
+        if not isinstance(value, str) or not value.strip():
+            raise ConnectorDefinitionError(f"{source}: {field_name} entries must be non-empty strings")
+        item = value.strip()
+        if item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return tuple(normalized)
+
+
+def _parse_optional_bool(payload: Any, *, source: str, field_name: str) -> bool | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, bool):
+        raise ConnectorDefinitionError(f"{source}: {field_name} must be a boolean")
+    return payload
+
+
+@dataclass(frozen=True)
+class ContributionConfigField:
+    key: str
+    label: str
+    required: bool = True
+    input: str = "text"
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "required": self.required,
+            "input": self.input,
+        }
+
+
+def _parse_config_fields(payload: Any, *, source: str, field_name: str = "config_fields") -> tuple[ContributionConfigField, ...]:
+    if payload is None:
+        return ()
+    if not isinstance(payload, list):
+        raise ConnectorDefinitionError(f"{source}: {field_name} must be a list")
+    fields: list[ContributionConfigField] = []
+    seen: set[str] = set()
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise ConnectorDefinitionError(f"{source}: {field_name} entries must be objects")
+        raw_key = entry.get("key")
+        raw_label = entry.get("label")
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            raise ConnectorDefinitionError(f"{source}: {field_name} entry must include a non-empty key")
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise ConnectorDefinitionError(
+                f"{source}: {field_name} entry '{raw_key}' must include a non-empty label"
+            )
+        key = raw_key.strip()
+        if key in seen:
+            raise ConnectorDefinitionError(f"{source}: duplicate {field_name} key '{key}'")
+        seen.add(key)
+        raw_required = entry.get("required")
+        if raw_required is not None and not isinstance(raw_required, bool):
+            raise ConnectorDefinitionError(f"{source}: {field_name} entry '{key}' required must be a boolean")
+        raw_input = entry.get("input")
+        if raw_input is not None and not isinstance(raw_input, str):
+            raise ConnectorDefinitionError(f"{source}: {field_name} entry '{key}' input must be a string")
+        input_kind = raw_input.strip() if isinstance(raw_input, str) and raw_input.strip() else "text"
+        if input_kind not in {"text", "password", "url", "select"}:
+            raise ConnectorDefinitionError(
+                f"{source}: {field_name} entry '{key}' input '{input_kind}' is not supported"
+            )
+        fields.append(
+            ContributionConfigField(
+                key=key,
+                label=raw_label.strip(),
+                required=True if raw_required is None else raw_required,
+                input=input_kind,
+            )
+        )
+    return tuple(fields)
+
+
+@dataclass(frozen=True)
+class ToolsetPresetDefinition:
+    name: str
+    description: str = ""
+    mode: str = ""
+    include_tools: tuple[str, ...] = ()
+    exclude_tools: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
+    execution_boundaries: tuple[str, ...] = ()
+    enabled: bool = True
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "mode": self.mode,
+            "include_tools": list(self.include_tools),
+            "exclude_tools": list(self.exclude_tools),
+            "capabilities": list(self.capabilities),
+            "execution_boundaries": list(self.execution_boundaries),
+            "default_enabled": self.enabled,
+        }
+
+
+@dataclass(frozen=True)
+class ContextPackDefinition:
+    name: str
+    description: str = ""
+    instructions: str = ""
+    memory_tags: tuple[str, ...] = ()
+    profile_fields: tuple[str, ...] = ()
+    prompt_refs: tuple[str, ...] = ()
+    domains: tuple[str, ...] = ()
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "instructions": self.instructions,
+            "memory_tags": list(self.memory_tags),
+            "profile_fields": list(self.profile_fields),
+            "prompt_refs": list(self.prompt_refs),
+            "domains": list(self.domains),
+        }
+
+
+@dataclass(frozen=True)
+class AutomationTriggerDefinition:
+    name: str
+    trigger_type: str
+    description: str = ""
+    enabled: bool = False
+    schedule: str = ""
+    endpoint: str = ""
+    topic: str = ""
+    capabilities: tuple[str, ...] = ()
+    config_fields: tuple[ContributionConfigField, ...] = ()
+    requires_network: bool = False
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "trigger_type": self.trigger_type,
+            "description": self.description,
+            "default_enabled": self.enabled,
+            "schedule": self.schedule,
+            "endpoint": self.endpoint,
+            "topic": self.topic,
+            "capabilities": list(self.capabilities),
+            "config_fields": [field.as_metadata() for field in self.config_fields],
+            "requires_network": self.requires_network,
+        }
+
+
+@dataclass(frozen=True)
+class BrowserProviderDefinition:
+    name: str
+    provider_kind: str
+    description: str = ""
+    enabled: bool = False
+    capabilities: tuple[str, ...] = ()
+    config_fields: tuple[ContributionConfigField, ...] = ()
+    requires_network: bool = True
+    requires_daemon: bool = False
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "provider_kind": self.provider_kind,
+            "description": self.description,
+            "default_enabled": self.enabled,
+            "capabilities": list(self.capabilities),
+            "config_fields": [field.as_metadata() for field in self.config_fields],
+            "requires_network": self.requires_network,
+            "requires_daemon": self.requires_daemon,
+        }
+
+
+@dataclass(frozen=True)
+class MessagingConnectorDefinition:
+    name: str
+    platform: str
+    description: str = ""
+    enabled: bool = False
+    delivery_modes: tuple[str, ...] = ()
+    config_fields: tuple[ContributionConfigField, ...] = ()
+    requires_network: bool = True
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "platform": self.platform,
+            "description": self.description,
+            "default_enabled": self.enabled,
+            "delivery_modes": list(self.delivery_modes),
+            "config_fields": [field.as_metadata() for field in self.config_fields],
+            "requires_network": self.requires_network,
+        }
+
+
+@dataclass(frozen=True)
+class SpeechProfileDefinition:
+    name: str
+    provider: str
+    description: str = ""
+    voice: str = ""
+    supports_tts: bool = False
+    supports_stt: bool = False
+    wake_word: str = ""
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "provider": self.provider,
+            "description": self.description,
+            "voice": self.voice,
+            "supports_tts": self.supports_tts,
+            "supports_stt": self.supports_stt,
+            "wake_word": self.wake_word,
+        }
+
+
+@dataclass(frozen=True)
+class NodeAdapterDefinition:
+    name: str
+    adapter_kind: str
+    description: str = ""
+    enabled: bool = False
+    capabilities: tuple[str, ...] = ()
+    config_fields: tuple[ContributionConfigField, ...] = ()
+    requires_network: bool = False
+    requires_daemon: bool = True
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "adapter_kind": self.adapter_kind,
+            "description": self.description,
+            "default_enabled": self.enabled,
+            "capabilities": list(self.capabilities),
+            "config_fields": [field.as_metadata() for field in self.config_fields],
+            "requires_network": self.requires_network,
+            "requires_daemon": self.requires_daemon,
+        }
+
+
+def _parse_named_object(payload: Any, *, source: str, noun: str) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: {noun} definition must be an object")
+    raw_name = payload.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ConnectorDefinitionError(f"{source}: {noun} definition must include a non-empty name")
+    raw_description = payload.get("description")
+    if raw_description is not None and not isinstance(raw_description, str):
+        raise ConnectorDefinitionError(f"{source}: {noun} description must be a string")
+    return raw_name.strip(), raw_description.strip() if isinstance(raw_description, str) else ""
+
+
+def parse_toolset_preset_definition(payload: Any, *, source: str) -> ToolsetPresetDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="toolset preset")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: toolset preset definition must be an object")
+    raw_mode = payload.get("mode")
+    if raw_mode is not None and not isinstance(raw_mode, str):
+        raise ConnectorDefinitionError(f"{source}: toolset preset mode must be a string")
+    include_tools = _parse_string_list(payload.get("include_tools"), source=source, field_name="include_tools")
+    exclude_tools = _parse_string_list(payload.get("exclude_tools"), source=source, field_name="exclude_tools")
+    capabilities = _parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities")
+    execution_boundaries = _parse_string_list(
+        payload.get("execution_boundaries"),
+        source=source,
+        field_name="execution_boundaries",
+    )
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: toolset preset enabled must be a boolean")
+    if not any((include_tools, exclude_tools, capabilities, execution_boundaries)):
+        raise ConnectorDefinitionError(
+            f"{source}: toolset preset must declare tools, capabilities, or execution boundaries"
+        )
+    return ToolsetPresetDefinition(
+        name=name,
+        description=description,
+        mode=raw_mode.strip() if isinstance(raw_mode, str) and raw_mode.strip() else "",
+        include_tools=include_tools,
+        exclude_tools=exclude_tools,
+        capabilities=capabilities,
+        execution_boundaries=execution_boundaries,
+        enabled=True if raw_enabled is None else raw_enabled,
+    )
+
+
+def parse_context_pack_definition(payload: Any, *, source: str) -> ContextPackDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="context pack")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: context pack definition must be an object")
+    raw_instructions = payload.get("instructions")
+    if raw_instructions is not None and not isinstance(raw_instructions, str):
+        raise ConnectorDefinitionError(f"{source}: context pack instructions must be a string")
+    memory_tags = _parse_string_list(payload.get("memory_tags"), source=source, field_name="memory_tags")
+    profile_fields = _parse_string_list(payload.get("profile_fields"), source=source, field_name="profile_fields")
+    prompt_refs = _parse_string_list(payload.get("prompt_refs"), source=source, field_name="prompt_refs")
+    domains = _parse_string_list(payload.get("domains"), source=source, field_name="domains")
+    instructions = raw_instructions.strip() if isinstance(raw_instructions, str) else ""
+    if not any((instructions, memory_tags, profile_fields, prompt_refs, domains)):
+        raise ConnectorDefinitionError(
+            f"{source}: context pack must declare instructions, tags, profile fields, prompt refs, or domains"
+        )
+    return ContextPackDefinition(
+        name=name,
+        description=description,
+        instructions=instructions,
+        memory_tags=memory_tags,
+        profile_fields=profile_fields,
+        prompt_refs=prompt_refs,
+        domains=domains,
+    )
+
+
+def parse_automation_trigger_definition(payload: Any, *, source: str) -> AutomationTriggerDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="automation trigger")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: automation trigger definition must be an object")
+    raw_trigger_type = payload.get("trigger_type")
+    if not isinstance(raw_trigger_type, str) or not raw_trigger_type.strip():
+        raise ConnectorDefinitionError(f"{source}: automation trigger must include a non-empty trigger_type")
+    trigger_type = raw_trigger_type.strip()
+    if trigger_type not in {"cron", "webhook", "poll", "pubsub"}:
+        raise ConnectorDefinitionError(f"{source}: automation trigger_type '{trigger_type}' is not supported")
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: automation trigger enabled must be a boolean")
+    raw_schedule = payload.get("schedule")
+    raw_endpoint = payload.get("endpoint")
+    raw_topic = payload.get("topic")
+    for field_name, value in {"schedule": raw_schedule, "endpoint": raw_endpoint, "topic": raw_topic}.items():
+        if value is not None and not isinstance(value, str):
+            raise ConnectorDefinitionError(f"{source}: automation {field_name} must be a string")
+    requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    return AutomationTriggerDefinition(
+        name=name,
+        trigger_type=trigger_type,
+        description=description,
+        enabled=False if raw_enabled is None else raw_enabled,
+        schedule=raw_schedule.strip() if isinstance(raw_schedule, str) else "",
+        endpoint=raw_endpoint.strip() if isinstance(raw_endpoint, str) else "",
+        topic=raw_topic.strip() if isinstance(raw_topic, str) else "",
+        capabilities=_parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities"),
+        config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
+        requires_network=(trigger_type in {"webhook", "poll", "pubsub"}) if requires_network is None else requires_network,
+    )
+
+
+def parse_browser_provider_definition(payload: Any, *, source: str) -> BrowserProviderDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="browser provider")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: browser provider definition must be an object")
+    raw_provider_kind = payload.get("provider_kind")
+    if not isinstance(raw_provider_kind, str) or not raw_provider_kind.strip():
+        raise ConnectorDefinitionError(f"{source}: browser provider must include a non-empty provider_kind")
+    provider_kind = raw_provider_kind.strip()
+    if provider_kind not in {"browserbase", "local", "remote_cdp", "extension_relay"}:
+        raise ConnectorDefinitionError(f"{source}: browser provider_kind '{provider_kind}' is not supported")
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: browser provider enabled must be a boolean")
+    requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    requires_daemon = _parse_optional_bool(payload.get("requires_daemon"), source=source, field_name="requires_daemon")
+    return BrowserProviderDefinition(
+        name=name,
+        provider_kind=provider_kind,
+        description=description,
+        enabled=False if raw_enabled is None else raw_enabled,
+        capabilities=_parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities"),
+        config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
+        requires_network=(provider_kind != "local") if requires_network is None else requires_network,
+        requires_daemon=(provider_kind == "extension_relay") if requires_daemon is None else requires_daemon,
+    )
+
+
+def parse_messaging_connector_definition(payload: Any, *, source: str) -> MessagingConnectorDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="messaging connector")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: messaging connector definition must be an object")
+    raw_platform = payload.get("platform")
+    if not isinstance(raw_platform, str) or not raw_platform.strip():
+        raise ConnectorDefinitionError(f"{source}: messaging connector must include a non-empty platform")
+    platform = raw_platform.strip()
+    if platform not in {"telegram", "discord", "slack", "email", "matrix", "sms", "webhook"}:
+        raise ConnectorDefinitionError(f"{source}: messaging platform '{platform}' is not supported")
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: messaging connector enabled must be a boolean")
+    requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    return MessagingConnectorDefinition(
+        name=name,
+        platform=platform,
+        description=description,
+        enabled=False if raw_enabled is None else raw_enabled,
+        delivery_modes=_parse_string_list(payload.get("delivery_modes"), source=source, field_name="delivery_modes"),
+        config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
+        requires_network=True if requires_network is None else requires_network,
+    )
+
+
+def parse_speech_profile_definition(payload: Any, *, source: str) -> SpeechProfileDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="speech profile")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: speech profile definition must be an object")
+    raw_provider = payload.get("provider")
+    if not isinstance(raw_provider, str) or not raw_provider.strip():
+        raise ConnectorDefinitionError(f"{source}: speech profile must include a non-empty provider")
+    raw_voice = payload.get("voice")
+    raw_wake_word = payload.get("wake_word")
+    for field_name, value in {"voice": raw_voice, "wake_word": raw_wake_word}.items():
+        if value is not None and not isinstance(value, str):
+            raise ConnectorDefinitionError(f"{source}: speech profile {field_name} must be a string")
+    raw_supports_tts = payload.get("supports_tts")
+    raw_supports_stt = payload.get("supports_stt")
+    if raw_supports_tts is not None and not isinstance(raw_supports_tts, bool):
+        raise ConnectorDefinitionError(f"{source}: speech profile supports_tts must be a boolean")
+    if raw_supports_stt is not None and not isinstance(raw_supports_stt, bool):
+        raise ConnectorDefinitionError(f"{source}: speech profile supports_stt must be a boolean")
+    supports_tts = bool(raw_supports_tts)
+    supports_stt = bool(raw_supports_stt)
+    if not supports_tts and not supports_stt:
+        raise ConnectorDefinitionError(
+            f"{source}: speech profile must support at least one of TTS or STT"
+        )
+    return SpeechProfileDefinition(
+        name=name,
+        provider=raw_provider.strip(),
+        description=description,
+        voice=raw_voice.strip() if isinstance(raw_voice, str) else "",
+        supports_tts=supports_tts,
+        supports_stt=supports_stt,
+        wake_word=raw_wake_word.strip() if isinstance(raw_wake_word, str) else "",
+    )
+
+
+def parse_node_adapter_definition(payload: Any, *, source: str) -> NodeAdapterDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="node adapter")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: node adapter definition must be an object")
+    raw_adapter_kind = payload.get("adapter_kind")
+    if not isinstance(raw_adapter_kind, str) or not raw_adapter_kind.strip():
+        raise ConnectorDefinitionError(f"{source}: node adapter must include a non-empty adapter_kind")
+    adapter_kind = raw_adapter_kind.strip()
+    if adapter_kind not in {"companion", "canvas", "device", "camera", "notification"}:
+        raise ConnectorDefinitionError(f"{source}: node adapter_kind '{adapter_kind}' is not supported")
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: node adapter enabled must be a boolean")
+    requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    requires_daemon = _parse_optional_bool(payload.get("requires_daemon"), source=source, field_name="requires_daemon")
+    return NodeAdapterDefinition(
+        name=name,
+        adapter_kind=adapter_kind,
+        description=description,
+        enabled=False if raw_enabled is None else raw_enabled,
+        capabilities=_parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities"),
+        config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
+        requires_network=False if requires_network is None else requires_network,
+        requires_daemon=(adapter_kind != "canvas") if requires_daemon is None else requires_daemon,
+    )
+
+
+def load_toolset_preset_definition(path: Path) -> ToolsetPresetDefinition:
+    return parse_toolset_preset_definition(load_connector_payload(path), source=str(path))
+
+
+def load_context_pack_definition(path: Path) -> ContextPackDefinition:
+    return parse_context_pack_definition(load_connector_payload(path), source=str(path))
+
+
+def load_automation_trigger_definition(path: Path) -> AutomationTriggerDefinition:
+    return parse_automation_trigger_definition(load_connector_payload(path), source=str(path))
+
+
+def load_browser_provider_definition(path: Path) -> BrowserProviderDefinition:
+    return parse_browser_provider_definition(load_connector_payload(path), source=str(path))
+
+
+def load_messaging_connector_definition(path: Path) -> MessagingConnectorDefinition:
+    return parse_messaging_connector_definition(load_connector_payload(path), source=str(path))
+
+
+def load_speech_profile_definition(path: Path) -> SpeechProfileDefinition:
+    return parse_speech_profile_definition(load_connector_payload(path), source=str(path))
+
+
+def load_node_adapter_definition(path: Path) -> NodeAdapterDefinition:
+    return parse_node_adapter_definition(load_connector_payload(path), source=str(path))

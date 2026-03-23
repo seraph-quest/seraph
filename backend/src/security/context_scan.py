@@ -50,7 +50,7 @@ def _compact_excerpt(text: str) -> str:
     return " ".join(text.split())[:120]
 
 
-def _candidate_segments(text: str) -> list[str]:
+def _candidate_segments(text: str, *, include_fenced_blocks: bool = False) -> list[str]:
     segments: list[str] = []
     in_fence = False
     for raw_line in text.splitlines():
@@ -58,17 +58,17 @@ def _candidate_segments(text: str) -> list[str]:
         if stripped.startswith("```"):
             in_fence = not in_fence
             continue
-        if in_fence or not stripped:
+        if (in_fence and not include_fenced_blocks) or not stripped:
             continue
         normalized = re.sub(r"^(?:[-*+]\s+|\d+\.\s+|>\s+)", "", stripped)
         segments.append(normalized)
     return segments
 
 
-def scan_text_for_suspicious_context(text: str) -> list[ContextScanFinding]:
+def scan_text_for_suspicious_context(text: str, *, include_fenced_blocks: bool = False) -> list[ContextScanFinding]:
     """Return suspicious prompt-bearing patterns that should block extension content."""
     findings: list[ContextScanFinding] = []
-    for segment in _candidate_segments(text):
+    for segment in _candidate_segments(text, include_fenced_blocks=include_fenced_blocks):
         for code, description, pattern in _SUSPICIOUS_CONTEXT_PATTERNS:
             match = pattern.search(segment)
             if match is None:

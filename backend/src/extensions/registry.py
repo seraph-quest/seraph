@@ -12,6 +12,15 @@ import tomllib
 from typing import Any
 
 from config.settings import settings
+from src.extensions.capability_contributions import (
+    load_automation_trigger_definition,
+    load_browser_provider_definition,
+    load_context_pack_definition,
+    load_messaging_connector_definition,
+    load_node_adapter_definition,
+    load_speech_profile_definition,
+    load_toolset_preset_definition,
+)
 from src.extensions.channels import load_channel_adapter_definition
 from src.extensions.connectors import load_managed_connector_definition, load_mcp_server_definition
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
@@ -303,6 +312,31 @@ class ExtensionRegistry:
                         metadata.update(load_managed_connector_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
+                if contribution_type == "toolset_presets":
+                    try:
+                        metadata.update(load_toolset_preset_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "context_packs":
+                    try:
+                        metadata.update(load_context_pack_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "automation_triggers":
+                    try:
+                        metadata.update(load_automation_trigger_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "browser_providers":
+                    try:
+                        metadata.update(load_browser_provider_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "messaging_connectors":
+                    try:
+                        metadata.update(load_messaging_connector_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
                 if contribution_type == "observer_definitions":
                     try:
                         metadata.update(load_observer_definition(resolved_path).as_metadata())
@@ -311,6 +345,16 @@ class ExtensionRegistry:
                 if contribution_type == "channel_adapters":
                     try:
                         metadata.update(load_channel_adapter_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "speech_profiles":
+                    try:
+                        metadata.update(load_speech_profile_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "node_adapters":
+                    try:
+                        metadata.update(load_node_adapter_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
                 contributions.append(
@@ -336,6 +380,7 @@ class ExtensionRegistry:
                 "publisher": manifest.publisher.name,
                 "version": manifest.version,
                 "compatibility": manifest.compatibility.seraph,
+                "manifest_root_index": manifest_root_index,
             },
         )
 
@@ -541,13 +586,17 @@ extension_registry = ExtensionRegistry()
 
 
 def _extension_priority(extension: ExtensionRecord) -> tuple[int, int, str]:
+    if extension.source == "manifest":
+        root_index = extension.metadata.get("manifest_root_index")
+        if isinstance(root_index, int):
+            return (0, root_index, extension.display_name.lower())
     workspace_root = Path(settings.workspace_dir).resolve() / "extensions"
     bundled_root = Path(bundled_manifest_root()).resolve()
     root_path = Path(extension.root_path).resolve() if extension.root_path else None
     if root_path is not None and (root_path == workspace_root or workspace_root in root_path.parents):
-        return (0, 0, extension.display_name.lower())
-    if root_path is not None and (root_path == bundled_root or bundled_root in root_path.parents):
         return (1, 0, extension.display_name.lower())
-    if extension.source == "manifest":
+    if root_path is not None and (root_path == bundled_root or bundled_root in root_path.parents):
         return (2, 0, extension.display_name.lower())
-    return (3, 0, extension.display_name.lower())
+    if extension.source == "manifest":
+        return (3, 0, extension.display_name.lower())
+    return (4, 0, extension.display_name.lower())

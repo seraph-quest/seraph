@@ -372,19 +372,21 @@ It is intentionally organized by **waves** rather than one flat queue because ea
 
 ### Wave 2: Extension Capability Types
 
-10. [ ] `extension-toolset-presets-v1`:
+See [Capability Import Wave 2](./12-capability-import-wave-2.md) for the implementation log, validation, and subagent-review record for this wave.
+
+10. [x] `extension-toolset-presets-v1`:
     add `toolset_presets` as an extension contribution type so operator-facing capability bundles and policy-aware presets become packageable instead of hardcoded
-11. [ ] `extension-context-packs-v1`:
+11. [x] `extension-context-packs-v1`:
     add `context_packs` for reusable memory, profile, prompt, and guardian-context bundles so imported capability families can ship with coherent context defaults
-12. [ ] `extension-automation-triggers-v1`:
+12. [x] `extension-automation-triggers-v1`:
     add `automation_triggers` for webhook, poll, and pub-sub style trigger surfaces so later automation imports do not become special-case scheduler code
-13. [ ] `extension-browser-providers-v1`:
+13. [x] `extension-browser-providers-v1`:
     add `browser_providers` as a packageable contract for Browserbase, CDP, relay, and future managed browser surfaces
-14. [ ] `extension-messaging-connectors-v1`:
+14. [x] `extension-messaging-connectors-v1`:
     add a first-class messaging connector contribution type so multi-channel reach lands through the same lifecycle model as other integrations
-15. [ ] `extension-speech-profiles-v1`:
+15. [x] `extension-speech-profiles-v1`:
     add `speech_profiles` for later TTS, STT, wake-word, and talk-mode imports without forcing voice primitives directly into core too early
-16. [ ] `extension-node-adapters-v1`:
+16. [x] `extension-node-adapters-v1`:
     add `node_adapters` for device, canvas, and companion-node surfaces so OpenClaw-style embodied reach can land through typed extensions rather than raw plugins
 
 ### Wave 3: Hermes Packaged Reach And Capability Parity

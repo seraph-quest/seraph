@@ -12,13 +12,20 @@ CONTRIBUTION_LAYOUTS: dict[str, tuple[str, ...]] = {
     "runbooks": ("runbooks/",),
     "starter_packs": ("starter-packs/",),
     "provider_presets": ("presets/provider/",),
+    "toolset_presets": ("presets/toolset/",),
     "prompt_packs": ("prompts/",),
+    "context_packs": ("context/",),
     "scheduled_routines": ("routines/",),
     "mcp_servers": ("mcp/",),
     "managed_connectors": ("connectors/managed/",),
+    "automation_triggers": ("automation/",),
+    "browser_providers": ("connectors/browser/",),
+    "messaging_connectors": ("connectors/messaging/",),
     "observer_definitions": ("observers/definitions/",),
     "observer_connectors": ("observers/connectors/",),
     "channel_adapters": ("channels/",),
+    "speech_profiles": ("speech/",),
+    "node_adapters": ("connectors/nodes/",),
     "workspace_adapters": ("workspace/",),
 }
 
@@ -62,8 +69,12 @@ def is_package_manifest_path(manifest_path: Path, search_root: Path) -> bool:
         return False
 
     for prefix_parts in _CONTRIBUTION_LAYOUT_PARTS:
-        if len(relative_parent) > len(prefix_parts) and relative_parent[-len(prefix_parts):] == prefix_parts:
-            return False
+        prefix_length = len(prefix_parts)
+        if prefix_length == 0 or len(relative_parent) < prefix_length:
+            continue
+        for start in range(0, len(relative_parent) - prefix_length + 1):
+            if relative_parent[start : start + prefix_length] == prefix_parts:
+                return False
     return True
 
 

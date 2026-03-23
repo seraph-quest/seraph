@@ -11,13 +11,20 @@ Each manifest contribution list maps to a canonical on-disk root.
 | `runbooks` | `runbooks/` |
 | `starter_packs` | `starter-packs/` |
 | `provider_presets` | `presets/provider/` |
+| `toolset_presets` | `presets/toolset/` |
 | `prompt_packs` | `prompts/` |
+| `context_packs` | `context/` |
 | `scheduled_routines` | `routines/` |
 | `mcp_servers` | `mcp/` |
 | `managed_connectors` | `connectors/managed/` |
+| `automation_triggers` | `automation/` |
+| `browser_providers` | `connectors/browser/` |
+| `messaging_connectors` | `connectors/messaging/` |
 | `observer_definitions` | `observers/definitions/` |
 | `observer_connectors` | `observers/connectors/` |
 | `channel_adapters` | `channels/` |
+| `speech_profiles` | `speech/` |
+| `node_adapters` | `connectors/nodes/` |
 | `workspace_adapters` | `workspace/` |
 
 ## Notes by surface
@@ -30,8 +37,16 @@ Today `new_pack.py --with ...` supports:
 - `runbooks`
 - `starter_packs`
 - `provider_presets`
+- `toolset_presets`
 - `prompt_packs`
+- `context_packs`
 - `scheduled_routines`
+- `managed_connectors`
+- `automation_triggers`
+- `browser_providers`
+- `messaging_connectors`
+- `speech_profiles`
+- `node_adapters`
 
 ### `skills`
 
@@ -56,6 +71,14 @@ Today `new_pack.py --with ...` supports:
 
 - packaged provider/model routing defaults
 
+### `toolset_presets`
+
+- packaged operator-facing tool bundles and policy-aware capability presets
+
+### `context_packs`
+
+- packaged guardian context bundles such as prompt instructions, profile fields, and memory tags
+
 ### `prompt_packs`
 
 - packaged prompt sets or prompt scaffolding assets
@@ -66,21 +89,34 @@ Today `new_pack.py --with ...` supports:
 
 ### Connector and reach surfaces
 
-These roots are now canonical in the layout contract, but some lifecycle and authoring paths land later:
+These roots are now canonical in the layout contract. Runtime depth still
+varies by surface:
 
 - `mcp_servers`
 - `managed_connectors`
+- `automation_triggers`
+- `browser_providers`
+- `messaging_connectors`
 - `observer_definitions`
 - `observer_connectors`
 - `channel_adapters`
+- `node_adapters`
 - `workspace_adapters`
+- `speech_profiles`
 
-That means the on-disk location is already fixed, even where the full install/configure lifecycle is not yet shipped.
+That means the on-disk location is fixed for every surface, while runtime
+adoption still ranges from passive typed metadata up through full
+connector-aware lifecycle handling.
+
+Kind note:
+
+- `observer_definitions` are shared-lifecycle reach surfaces, but they are still treated as capability-pack content rather than connector-pack-only surfaces
+- connector-pack manifests must currently use true connector contributions such as `mcp_servers`, `managed_connectors`, `automation_triggers`, `browser_providers`, `messaging_connectors`, `channel_adapters`, or `node_adapters`
 
 Current content-validation depth is also uneven by design:
 
 - `skills` and `workflows` get parser-level validation today
-- connector definitions can get payload and network-permission checks
+- connector and reach definitions can get payload and network-permission checks
 - the remaining contribution types currently rely on manifest, layout, and file
   existence checks until later slices add deeper validators
 

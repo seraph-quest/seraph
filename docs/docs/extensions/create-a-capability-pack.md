@@ -29,16 +29,23 @@ If you want a canonical in-repo reference, compare your package against:
 
 Current scope:
 
-- the scaffold targets `capability-pack`
-- connector scaffolding is intentionally deferred to later connector slices
-- current `--with` support is limited to:
+- the scaffold supports both `capability-pack` and `connector-pack`
+- current `--with` support includes:
   - `skills`
   - `workflows`
   - `runbooks`
   - `starter_packs`
   - `provider_presets`
+  - `toolset_presets`
   - `prompt_packs`
+  - `context_packs`
   - `scheduled_routines`
+  - `managed_connectors`
+  - `automation_triggers`
+  - `browser_providers`
+  - `messaging_connectors`
+  - `speech_profiles`
+  - `node_adapters`
 
 ## 2. Inspect the generated layout
 

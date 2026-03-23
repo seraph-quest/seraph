@@ -310,6 +310,76 @@ def _write_observer_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_wave2_extension(root: Path) -> Path:
+    package_dir = root / "wave2-pack"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    (package_dir / "context").mkdir()
+    (package_dir / "speech").mkdir()
+    (package_dir / "automation").mkdir()
+    (package_dir / "connectors" / "browser").mkdir(parents=True)
+    (package_dir / "connectors" / "messaging").mkdir()
+    (package_dir / "connectors" / "nodes").mkdir()
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.wave2-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: Wave 2 Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "permissions:\n"
+        "  tools: [read_file]\n"
+        "  network: true\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/research.yaml\n"
+        "  context_packs:\n"
+        "    - context/research.yaml\n"
+        "  speech_profiles:\n"
+        "    - speech/voice.yaml\n"
+        "  automation_triggers:\n"
+        "    - automation/daily-brief.yaml\n"
+        "  browser_providers:\n"
+        "    - connectors/browser/browserbase.yaml\n"
+        "  messaging_connectors:\n"
+        "    - connectors/messaging/telegram.yaml\n"
+        "  node_adapters:\n"
+        "    - connectors/nodes/companion.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "research.yaml").write_text(
+        "name: research\ninclude_tools:\n  - read_file\ncapabilities:\n  - analysis\n",
+        encoding="utf-8",
+    )
+    (package_dir / "context" / "research.yaml").write_text(
+        "name: research\ninstructions: Keep context tight.\ndomains:\n  - research\n",
+        encoding="utf-8",
+    )
+    (package_dir / "speech" / "voice.yaml").write_text(
+        "name: narrator\nprovider: openai\nsupports_tts: true\nvoice: alloy\n",
+        encoding="utf-8",
+    )
+    (package_dir / "automation" / "daily-brief.yaml").write_text(
+        "name: daily-brief\ntrigger_type: webhook\nendpoint: https://example.test/hooks/daily\nconfig_fields:\n  - key: signing_secret\n    label: Signing Secret\n    input: password\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
+        "name: browserbase\nprovider_kind: browserbase\nconfig_fields:\n  - key: api_key\n    label: API Key\n    input: password\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "messaging" / "telegram.yaml").write_text(
+        "name: telegram\nplatform: telegram\ndelivery_modes:\n  - dm\nconfig_fields:\n  - key: bot_token\n    label: Bot Token\n    input: password\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "nodes" / "companion.yaml").write_text(
+        "name: companion\nadapter_kind: companion\nconfig_fields:\n  - key: node_url\n    label: Node URL\n    input: url\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_invalid_observer_extension(root: Path) -> Path:
     package_dir = root / "invalid-observer-pack"
     (package_dir / "observers" / "definitions").mkdir(parents=True)
@@ -1175,6 +1245,104 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
         remove_response = await client.delete("/api/extensions/seraph.managed-github")
         assert remove_response.status_code == 200
         assert not (extension_runtime / "extensions" / "seraph-managed-github").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, extension_runtime, tmp_path):
+    package_dir = _write_wave2_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+        assert installed["id"] == "seraph.wave2-pack"
+        assert installed["configurable"] is True
+        assert installed["config_scope"] == "metadata_and_connector_configs"
+        assert installed["toggleable_contribution_types"] == [
+            "automation_triggers",
+            "browser_providers",
+            "messaging_connectors",
+            "node_adapters",
+        ]
+        assert installed["passive_contribution_types"] == [
+            "toolset_presets",
+            "context_packs",
+            "speech_profiles",
+        ]
+
+        toolset = next(item for item in installed["contributions"] if item["type"] == "toolset_presets")
+        context_pack = next(item for item in installed["contributions"] if item["type"] == "context_packs")
+        speech_profile = next(item for item in installed["contributions"] if item["type"] == "speech_profiles")
+        assert toolset["include_tools"] == ["read_file"]
+        assert context_pack["domains"] == ["research"]
+        assert speech_profile["supports_tts"] is True
+
+        connectors_response = await client.get("/api/extensions/seraph.wave2-pack/connectors")
+        assert connectors_response.status_code == 200
+        connectors = {item["type"]: item for item in connectors_response.json()["connectors"]}
+        assert connectors["browser_providers"]["status"] == "requires_config"
+        assert connectors["automation_triggers"]["status"] == "requires_config"
+        assert connectors["messaging_connectors"]["status"] == "requires_config"
+        assert connectors["node_adapters"]["status"] == "requires_config"
+
+        enable_before_config = await client.post(
+            "/api/extensions/seraph.wave2-pack/connectors/enabled",
+            json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},
+        )
+        assert enable_before_config.status_code == 422
+        assert "requires valid configuration" in enable_before_config.json()["detail"]
+
+        configure_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    "browser_providers": {"browserbase": {"api_key": "secret"}},
+                    "messaging_connectors": {"telegram": {"bot_token": "secret"}},
+                    "automation_triggers": {"daily-brief": {"signing_secret": "secret"}},
+                    "node_adapters": {"companion": {"node_url": "https://nodes.example.test"}},
+                }
+            },
+        )
+        assert configure_response.status_code == 200
+        configured = configure_response.json()["extension"]
+        configured_connectors = {
+            item["type"]: item
+            for item in configured["contributions"]
+            if item["type"] in connectors
+        }
+        assert configured_connectors["browser_providers"]["configured"] is True
+        assert configured_connectors["browser_providers"]["status"] == "disabled"
+        assert configured_connectors["messaging_connectors"]["config_keys"] == ["bot_token"]
+        assert configured_connectors["automation_triggers"]["config_keys"] == ["signing_secret"]
+        assert configured_connectors["node_adapters"]["config_keys"] == ["node_url"]
+
+        enable_browser = await client.post(
+            "/api/extensions/seraph.wave2-pack/connectors/enabled",
+            json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},
+        )
+        assert enable_browser.status_code == 200
+        browser_connector = enable_browser.json()["connector"]
+        assert browser_connector["status"] == "planned"
+        assert browser_connector["health"]["supports_configure"] is True
+        assert browser_connector["health"]["supports_enable"] is True
+
+        enable_extension = await client.post("/api/extensions/seraph.wave2-pack/enable")
+        assert enable_extension.status_code == 200
+        enabled_extension = enable_extension.json()["extension"]
+        enabled_connectors = {
+            item["type"]: item
+            for item in enabled_extension["contributions"]
+            if item["type"] in connectors
+        }
+        assert all(enabled_connectors[item]["enabled"] is True for item in enabled_connectors)
+        assert enabled_connectors["automation_triggers"]["status"] == "planned"
+        assert enabled_connectors["node_adapters"]["status"] == "planned"
 
 
 @pytest.mark.asyncio

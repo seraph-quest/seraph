@@ -19,21 +19,32 @@ _CONTRIBUTION_FIELDS = (
     "runbooks",
     "starter_packs",
     "provider_presets",
+    "toolset_presets",
     "prompt_packs",
+    "context_packs",
     "scheduled_routines",
     "mcp_servers",
     "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_definitions",
     "observer_connectors",
     "channel_adapters",
+    "speech_profiles",
+    "node_adapters",
     "workspace_adapters",
 )
 
 _CONNECTOR_FIELDS = {
     "mcp_servers",
     "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_connectors",
     "channel_adapters",
+    "node_adapters",
     "workspace_adapters",
 }
 
@@ -150,13 +161,20 @@ class ExtensionContributionPaths(BaseModel):
     runbooks: list[str] = Field(default_factory=list)
     starter_packs: list[str] = Field(default_factory=list)
     provider_presets: list[str] = Field(default_factory=list)
+    toolset_presets: list[str] = Field(default_factory=list)
     prompt_packs: list[str] = Field(default_factory=list)
+    context_packs: list[str] = Field(default_factory=list)
     scheduled_routines: list[str] = Field(default_factory=list)
     mcp_servers: list[str] = Field(default_factory=list)
     managed_connectors: list[str] = Field(default_factory=list)
+    automation_triggers: list[str] = Field(default_factory=list)
+    browser_providers: list[str] = Field(default_factory=list)
+    messaging_connectors: list[str] = Field(default_factory=list)
     observer_definitions: list[str] = Field(default_factory=list)
     observer_connectors: list[str] = Field(default_factory=list)
     channel_adapters: list[str] = Field(default_factory=list)
+    speech_profiles: list[str] = Field(default_factory=list)
+    node_adapters: list[str] = Field(default_factory=list)
     workspace_adapters: list[str] = Field(default_factory=list)
 
     @field_validator(*_CONTRIBUTION_FIELDS)
@@ -297,6 +315,8 @@ def load_extension_manifest(path: str | Path) -> ExtensionManifest:
     manifest_path = Path(path)
     try:
         content = manifest_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExtensionManifestError(str(manifest_path), "manifest is not valid UTF-8 text") from exc
     except OSError as exc:
         raise ExtensionManifestError(str(manifest_path), f"failed to read manifest: {exc}") from exc
     return parse_extension_manifest(content, source=str(manifest_path))

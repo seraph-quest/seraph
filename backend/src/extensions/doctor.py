@@ -6,6 +6,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.extensions.capability_contributions import (
+    parse_automation_trigger_definition,
+    parse_browser_provider_definition,
+    parse_context_pack_definition,
+    parse_messaging_connector_definition,
+    parse_node_adapter_definition,
+    parse_speech_profile_definition,
+    parse_toolset_preset_definition,
+)
 from src.extensions.connectors import (
     ConnectorDefinitionError,
     parse_managed_connector_definition,
@@ -13,7 +22,7 @@ from src.extensions.connectors import (
 )
 from src.extensions.channels import parse_channel_adapter_definition
 from src.extensions.observers import parse_observer_definition
-from src.extensions.permissions import evaluate_tool_permissions
+from src.extensions.permissions import evaluate_contribution_permissions, evaluate_tool_permissions
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
@@ -27,11 +36,25 @@ import yaml
 _CONNECTOR_CONTRIBUTIONS = {
     "mcp_servers",
     "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_connectors",
     "channel_adapters",
+    "node_adapters",
     "workspace_adapters",
 }
-_CONTEXT_SCANNED_CONTRIBUTIONS = {"skills", "workflows", "prompt_packs"}
+_CONTEXT_SCANNED_CONTRIBUTIONS = {"skills", "workflows", "prompt_packs", "context_packs"}
+
+_DEFINITION_PARSERS = {
+    "toolset_presets": ("invalid_toolset_preset", "toolset preset", parse_toolset_preset_definition),
+    "context_packs": ("invalid_context_pack", "context pack", parse_context_pack_definition),
+    "automation_triggers": ("invalid_automation_trigger", "automation trigger", parse_automation_trigger_definition),
+    "browser_providers": ("invalid_browser_provider", "browser provider", parse_browser_provider_definition),
+    "messaging_connectors": ("invalid_messaging_connector", "messaging connector", parse_messaging_connector_definition),
+    "speech_profiles": ("invalid_speech_profile", "speech profile", parse_speech_profile_definition),
+    "node_adapters": ("invalid_node_adapter", "node adapter", parse_node_adapter_definition),
+}
 
 
 @dataclass(frozen=True)
@@ -190,7 +213,10 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
         assert content is not None
 
         if contribution.contribution_type in _CONTEXT_SCANNED_CONTRIBUTIONS:
-            for finding in scan_text_for_suspicious_context(content):
+            for finding in scan_text_for_suspicious_context(
+                content,
+                include_fenced_blocks=contribution.contribution_type == "context_packs",
+            ):
                 issues.append(
                     ExtensionDoctorIssue(
                         code="suspicious_context_content",
@@ -324,6 +350,107 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                         contribution_type="workflows",
                         reference=contribution.reference,
                         suggested_fix="set manifest.permissions.network to true for networked workflows",
+                    )
+                )
+            continue
+
+        if contribution.contribution_type in _DEFINITION_PARSERS:
+            issue_code, label, parser = _DEFINITION_PARSERS[contribution.contribution_type]
+            payload, connector_issue = _load_connector_payload(
+                content,
+                contribution_type=contribution.contribution_type,
+                reference=contribution.reference,
+            )
+            if connector_issue is not None:
+                issues.append(connector_issue)
+                continue
+            assert payload is not None
+            try:
+                definition = parser(payload, source=str(resolved))
+            except ConnectorDefinitionError as exc:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code=issue_code,
+                        severity="error",
+                        message=str(exc),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix=f"fix the {label} definition fields so the typed parser accepts the file",
+                    )
+                )
+                continue
+            if contribution.contribution_type == "toolset_presets":
+                permission_profile = evaluate_tool_permissions(
+                    extension,
+                    tool_names=list(definition.include_tools),
+                )
+                if permission_profile["missing_tools"]:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="permission_mismatch",
+                            severity="error",
+                            message=(
+                                "Manifest permissions are missing required toolset tools: "
+                                f"{', '.join(permission_profile['missing_tools'])}"
+                            ),
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="add the missing tools to manifest.permissions.tools",
+                        )
+                    )
+                declared_boundaries = (
+                    list(extension.manifest.permissions.execution_boundaries)
+                    if extension.manifest is not None
+                    else []
+                )
+                missing_boundaries = [
+                    boundary
+                    for boundary in definition.execution_boundaries
+                    if declared_boundaries and boundary not in declared_boundaries
+                ]
+                if missing_boundaries:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="permission_mismatch",
+                            severity="error",
+                            message=(
+                                "Manifest permissions are missing required toolset execution boundaries: "
+                                f"{', '.join(missing_boundaries)}"
+                            ),
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="add the missing boundaries to manifest.permissions.execution_boundaries",
+                        )
+                    )
+                if permission_profile["missing_network"]:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="permission_mismatch",
+                            severity="error",
+                            message="Toolset preset requires network access but manifest.permissions.network is false",
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="set manifest.permissions.network to true for networked toolsets",
+                        )
+                    )
+                continue
+            permission_profile = evaluate_contribution_permissions(
+                extension,
+                contribution_type=contribution.contribution_type,
+                metadata=definition.as_metadata(),
+            )
+            if permission_profile["missing_network"]:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            f"{label.capitalize()} requires network access but "
+                            "manifest.permissions.network is false"
+                        ),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix="set manifest.permissions.network to true for networked connector surfaces",
                     )
                 )
             continue

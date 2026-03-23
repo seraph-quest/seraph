@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 from typing import Any
 
 from smolagents import Tool
 
 from src.approval.runtime import get_current_session_id
 from src.agent.session import session_manager
+
+_todo_audit_payload: contextvars.ContextVar[tuple[str, dict[str, Any]] | None] = contextvars.ContextVar(
+    "todo_audit_payload",
+    default=None,
+)
 
 
 def _parse_items(items: str) -> list[dict[str, Any]]:
@@ -78,7 +84,6 @@ class TodoTool(Tool):
             },
         }
         self.output_type = "string"
-        self._last_audit_payload: tuple[str, dict[str, Any]] | None = None
         self.is_initialized = True
 
     def forward(self, action: str, items: str = "", item_id: str = "") -> str:
@@ -100,7 +105,7 @@ class TodoTool(Tool):
 
         session_id = get_current_session_id()
         if not session_id:
-            self._last_audit_payload = None
+            _todo_audit_payload.set(None)
             return "Error: Todo list is only available inside a conversation session."
 
         normalized = action.strip().lower()
@@ -116,28 +121,28 @@ class TodoTool(Tool):
         elif normalized == "complete":
             result_items = _run(session_manager.update_todo_completion(session_id, item_id, completed=True))
             if result_items is None:
-                self._last_audit_payload = None
+                _todo_audit_payload.set(None)
                 return f"Error: Todo '{item_id}' was not found."
         elif normalized == "reopen":
             result_items = _run(session_manager.update_todo_completion(session_id, item_id, completed=False))
             if result_items is None:
-                self._last_audit_payload = None
+                _todo_audit_payload.set(None)
                 return f"Error: Todo '{item_id}' was not found."
         elif normalized == "remove":
             result_items = _run(session_manager.remove_todo(session_id, item_id))
             if result_items is None:
-                self._last_audit_payload = None
+                _todo_audit_payload.set(None)
                 return f"Error: Todo '{item_id}' was not found."
         elif normalized == "clear":
             _run(session_manager.clear_todos(session_id))
             result_items = []
         else:
-            self._last_audit_payload = None
+            _todo_audit_payload.set(None)
             return "Error: Unsupported todo action. Use list, set, add, complete, reopen, remove, or clear."
 
         open_count = sum(1 for item in result_items if not item.get("completed"))
         completed_count = sum(1 for item in result_items if item.get("completed"))
-        self._last_audit_payload = (
+        _todo_audit_payload.set((
             f"todo {normalized} — {open_count} open, {completed_count} completed",
             {
                 "action": normalized,
@@ -147,13 +152,12 @@ class TodoTool(Tool):
                 "items": [
                     {
                         "id": item.get("id"),
-                        "content": item.get("content"),
                         "completed": bool(item.get("completed")),
                     }
                     for item in result_items
                 ],
             },
-        )
+        ))
         return _render_todos(result_items)
 
     def get_audit_result_payload(
@@ -161,7 +165,9 @@ class TodoTool(Tool):
         _arguments: dict[str, Any],
         _result: Any,
     ) -> tuple[str, dict[str, Any]] | None:
-        return self._last_audit_payload
+        payload = _todo_audit_payload.get()
+        _todo_audit_payload.set(None)
+        return payload
 
 
 def _run(coro):

@@ -123,7 +123,9 @@ class TestAgentFactory:
 
         results = asyncio.run(_fetch())
         assert len(results) == 2
-        assert any(result["details"].get("action") == "set" for result in results)
+        set_result = next(result for result in results if result["details"].get("action") == "set")
+        assert set_result["details"]["items"][0]["completed"] is False
+        assert "content" not in set_result["details"]["items"][0]
         latest = results[0]
         assert latest["summary"].startswith("todo returned")
         assert "action" not in latest["details"]

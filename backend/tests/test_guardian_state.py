@@ -45,6 +45,7 @@ def _make_guardian_state() -> GuardianState:
             recurring_obligations=("Weekly roadmap review",),
             project_timeline=("Guardian cockpit", "Workflow brief-sync degraded at write_file"),
         ),
+        bounded_memory_context="- Identity: Builder\n- Open todos: Ship guardian state",
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
@@ -67,6 +68,13 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     await sm.get_or_create("current")
     await sm.add_message("current", "user", "What should Seraph improve next?")
     await sm.add_message("current", "assistant", "Build explicit guardian state.")
+    await sm.replace_todos(
+        "current",
+        [
+            {"content": "Clarify missing requirement", "completed": False},
+            {"content": "Review prior thread", "completed": True},
+        ],
+    )
     await sm.get_or_create("prior")
     await sm.update_title("prior", "Prior roadmap")
     await sm.add_message("prior", "assistant", "Land guardian-state synthesis next.")
@@ -141,6 +149,8 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert state.world_model.intervention_receptivity == "high"
     assert "Build explicit guardian state." in state.current_session_history
     assert "Prior roadmap" in state.recent_sessions_summary
+    assert "Clarify missing requirement" in state.bounded_memory_context
+    assert "Review prior thread" in state.bounded_memory_context
     assert "Ship guardian state" in state.memory_context
     assert "feedback=helpful" in state.recent_intervention_feedback
     assert "brief-sync degraded" in state.recent_execution_summary
@@ -207,6 +217,7 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Project timeline:" in block
     assert "Observer model: confidence=grounded | salience=high (active_goals) | interruption_cost=low" in block
     assert "Observer snapshot:" in block
+    assert "Bounded recall:" in block
     assert "Relevant memories:" in block
     assert "Recent sessions:" in block
     assert "Recent intervention feedback:" in block
@@ -258,6 +269,7 @@ def test_create_agent_injects_guardian_state(mock_get_model, mock_agent_cls):
     assert "Overall confidence: grounded" in instructions
     assert "Current focus: Ship guardian state while in VS Code" in instructions
     assert "Intervention receptivity: high" in instructions
+    assert "Bounded recall:" in instructions
     assert "USER IDENTITY" in instructions
     assert "RELEVANT MEMORIES" in instructions
     assert "CONVERSATION HISTORY" in instructions
@@ -273,5 +285,6 @@ def test_create_strategist_agent_accepts_guardian_state(mock_model_cls):
     assert "Overall confidence: grounded" in agent.instructions
     assert "Current focus: Ship guardian state while in VS Code" in agent.instructions
     assert "Focus alignment: medium" in agent.instructions
+    assert "Bounded recall:" in agent.instructions
     assert "Recent sessions:" in agent.instructions
     assert "Recent intervention feedback:" in agent.instructions

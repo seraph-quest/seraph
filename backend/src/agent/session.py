@@ -21,6 +21,29 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _matching_snippet(text: str, query: str, *, snippet_chars: int) -> str:
+    flattened = text.replace("\n", " ").strip()
+    if len(flattened) <= snippet_chars:
+        return flattened
+
+    normalized_text = flattened.lower()
+    normalized_query = query.strip().lower()
+    match_index = normalized_text.find(normalized_query)
+    if match_index < 0:
+        return flattened[:snippet_chars] + "..."
+
+    match_end = match_index + len(normalized_query)
+    padding = max(20, (snippet_chars - len(normalized_query)) // 2)
+    start = max(0, match_index - padding)
+    end = min(len(flattened), match_end + padding)
+    snippet = flattened[start:end].strip()
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(flattened):
+        snippet = snippet + "..."
+    return snippet
+
+
 class SessionManager:
     """DB-backed session manager replacing the old in-memory dict."""
 
@@ -162,12 +185,21 @@ class SessionManager:
 
             session_map = {session.id: session for session in sessions}
             pattern = f"%{_escape_like(normalized_query)}%"
+            recency_rows = await db.execute(
+                select(Message.session_id, func.max(Message.created_at))
+                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                .group_by(Message.session_id)
+            )
+            message_recency = {
+                session_id: latest_at
+                for session_id, latest_at in recency_rows.all()
+            }
 
             title_hits = {
                 session.id: {
                     "session_id": session.id,
                     "title": session.title or "Untitled session",
-                    "matched_at": session.updated_at,
+                    "matched_at": message_recency.get(session.id) or session.created_at,
                     "snippet": session.title or "Untitled session",
                     "source": "title",
                 }
@@ -192,14 +224,15 @@ class SessionManager:
                     continue
                 if message.session_id in combined:
                     continue
-                snippet = message.content.replace("\n", " ").strip()
-                if len(snippet) > snippet_chars:
-                    snippet = snippet[:snippet_chars] + "..."
                 combined[message.session_id] = {
                     "session_id": message.session_id,
                     "title": session.title or "Untitled session",
                     "matched_at": message.created_at,
-                    "snippet": snippet,
+                    "snippet": _matching_snippet(
+                        message.content,
+                        normalized_query,
+                        snippet_chars=snippet_chars,
+                    ),
                     "source": "message",
                 }
 

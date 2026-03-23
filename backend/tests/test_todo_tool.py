@@ -67,3 +67,22 @@ async def test_todo_tool_treats_null_optional_fields_as_absent(async_db):
         assert listed == "Todo list is empty."
     finally:
         reset_runtime_context(tokens)
+
+
+@pytest.mark.asyncio
+async def test_todo_tool_audit_payload_is_consumable_and_omits_raw_content(async_db):
+    await session_manager.get_or_create("s1")
+    tokens = set_runtime_context("s1", "off")
+    try:
+        todo(action="set", items="alpha-secret-value")
+        payload = todo.get_audit_result_payload({}, "")
+        consumed = todo.get_audit_result_payload({}, "")
+    finally:
+        reset_runtime_context(tokens)
+
+    assert payload is not None
+    _, details = payload
+    assert details["action"] == "set"
+    assert details["items"][0]["completed"] is False
+    assert "content" not in details["items"][0]
+    assert consumed is None

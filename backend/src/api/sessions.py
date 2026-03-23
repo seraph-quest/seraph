@@ -27,8 +27,11 @@ async def search_sessions(
     exclude_session_id: str | None = Query(default=None),
 ):
     """Search prior sessions by title and message content."""
+    normalized_query = q.strip()
+    if not normalized_query:
+        raise HTTPException(status_code=422, detail="Search query must not be empty.")
     return await session_manager.search_sessions(
-        q,
+        normalized_query,
         limit=limit,
         exclude_session_id=exclude_session_id,
     )

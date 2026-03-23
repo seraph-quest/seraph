@@ -83,16 +83,18 @@ Wave 1 covers the runtime-parity slices from the capability import program:
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_todo_tool.py tests/test_session.py tests/test_sessions_api.py tests/test_tools_api.py tests/test_agent.py -q`
   - `git diff --check`
 - subagent review:
-  - reviewer: `Galileo`
+  - reviewer: `Raman`
   - findings:
     - invalid `remove` refs originally fell through as successful clears instead of returning a not-found error
     - numeric todo refs accepted `0` and `00` even though the public contract is 1-based indexing
-    - stale audit payload from a previous successful call could leak into a later error-path `tool_result`
+    - cached audit payload on the shared tool instance could race across sessions and leak stale summary/details into later `tool_result` events
+    - raw todo contents were being copied into audit details, which would persist sensitive text typed into a checklist item
     - nullable `items` or `item_id` inputs could be coerced into the literal string `"None"` and pollute persisted todo content
   - resolution:
     - missing todo refs now return `None` from the session layer and surface explicit not-found errors in the tool
     - numeric ref resolution now rejects non-positive indices before any lookup
-    - `TodoTool` clears its cached audit payload on every early-error path, and a direct agent audit regression now proves the stale payload cannot leak
+    - `TodoTool` now stores audit payload in a per-call `ContextVar` instead of a shared instance attribute, and the payload is consumed after logging so cross-session races cannot reuse it
+    - audit details now keep only ids and completion state for todo items, never raw content, and direct tool plus agent regressions pin that contract
     - nullable inputs are normalized to empty strings before parsing, and a direct tool regression covers the `None` case
 
 ### 5. hermes-session-search-v1
@@ -102,21 +104,35 @@ Wave 1 covers the runtime-parity slices from the capability import program:
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_session_search_tool.py tests/test_session.py tests/test_sessions_api.py tests/test_tools_api.py tests/test_agent.py -q`
   - `git diff --check`
 - subagent review:
-  - reviewer: `Zeno`
+  - reviewer: `Sagan`
   - findings:
     - the first SQL title/message search draft treated `%` and `_` as live wildcard characters, so literal user queries containing those characters matched unrelated threads
-    - session-search coverage was missing a direct API regression for excluding the current session from the bounded recall list
+    - snippets were truncated from the start of the message, so a late match could be reported without showing the actual matching context
+    - title-only hits ranked by `Session.updated_at`, which was also mutated by unrelated todo edits and could distort recall order
+    - the REST API accepted whitespace-only search input while the tool rejected the same input as invalid
   - resolution:
     - session search now escapes `LIKE` metacharacters and uses `escape='\\'` so `%` and `_` are treated literally unless the query actually contains them
-    - API and session-layer regressions now cover current-session exclusion and literal wildcard searches
+    - message snippets now center the bounded excerpt around the first match instead of blindly truncating from the start
+    - title hits now rank by conversation recency instead of todo-driven `updated_at` mutations
+    - API and session-layer regressions now cover current-session exclusion, literal wildcard searches, late-match snippets, todo-safe ordering, and whitespace-only query rejection
 
 ### 6. hermes-bounded-memory-layer-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_guardian_state.py tests/test_strategist_tick.py tests/test_todo_tool.py -q`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Arendt`
+  - findings:
+    - bounded recall needed to land inside `build_guardian_state()` so chat, websocket, and strategist paths all shared the same deterministic layer
+    - the slice should keep bounded recall separate from vector-memory `memory_context` instead of silently overloading semantic memory semantics
+    - session todos were the strongest existing low-cost working-memory signal and should be favored over history summarization
+    - the slice should avoid introducing a second writable soul/profile store just to support fast recall
+  - resolution:
+    - `GuardianState` now carries a dedicated `bounded_memory_context` block rendered ahead of semantic memory inside the guardian-state prompt surface
+    - `build_guardian_state()` now synthesizes bounded recall deterministically from the existing guardian record plus persisted session todos, so chat and strategist share the same cheap recall layer automatically
+    - the implementation uses the existing soul file as the human-authored profile source and session todos as the active-work signal, without adding a parallel writable memory store
 
 ### 7. hermes-user-cron-runtime-v1
 

@@ -51,6 +51,11 @@ class TestSearchSessions:
         payload = res.json()
         assert [item["session_id"] for item in payload] == ["s1"]
 
+    async def test_search_rejects_whitespace_only_query(self, client, async_db):
+        res = await client.get("/api/sessions/search", params={"q": "   "})
+
+        assert res.status_code == 422
+
 
 class TestGetMessages:
     async def test_success(self, client, async_db):

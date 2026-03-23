@@ -214,6 +214,36 @@ class TestSearchSessions:
         assert [item["session_id"] for item in percent_results] == ["percent"]
         assert [item["session_id"] for item in underscore_results] == ["underscore"]
 
+    async def test_snippet_includes_late_match_context(self, async_db, sm):
+        await sm.get_or_create("late-match")
+        prefix = "x" * 220
+        await sm.add_message(
+            "late-match",
+            "assistant",
+            f"{prefix} Weather signal appears near the end of this message.",
+        )
+
+        results = await sm.search_sessions("weather")
+
+        assert results[0]["session_id"] == "late-match"
+        assert "Weather signal" in results[0]["snippet"]
+        assert results[0]["snippet"].startswith("...")
+
+    async def test_title_hits_rank_by_conversation_recency_not_todo_mutation(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.update_title("s1", "Weather planning")
+        await sm.add_message("s1", "assistant", "Older weather thread")
+
+        await sm.get_or_create("s2")
+        await sm.update_title("s2", "Weather review")
+        await sm.add_message("s2", "assistant", "Newer weather thread")
+
+        await sm.replace_todos("s1", [{"content": "Unrelated checklist", "completed": False}])
+
+        results = await sm.search_sessions("weather")
+
+        assert [item["session_id"] for item in results[:2]] == ["s2", "s1"]
+
 
 class TestUpdateTitle:
     async def test_success(self, async_db, sm):

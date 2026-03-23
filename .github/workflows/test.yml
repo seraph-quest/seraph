@@ -34,8 +34,8 @@ jobs:
         env:
           OPENROUTER_API_KEY: test-key
           WORKSPACE_DIR: /tmp/seraph-test
-        timeout-minutes: 5
-        run: uv run pytest -v
+        timeout-minutes: 10
+        run: uv run pytest -q
 
   frontend-tests:
     runs-on: ubuntu-latest

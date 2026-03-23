@@ -28,7 +28,7 @@ class TestToolDomainMapping:
             "store_secret", "get_secret", "get_secret_ref", "list_secrets", "delete_secret",
             "create_goal", "update_goal", "get_goals", "get_goal_progress",
             "web_search", "browse_webpage",
-            "read_file", "write_file", "fill_template", "shell_execute",
+            "read_file", "write_file", "fill_template", "execute_code",
         }
         assert set(TOOL_DOMAINS.keys()) == expected_tools
 
@@ -187,7 +187,7 @@ class TestNamedFactories:
         create_file_worker(tools_by_name)
         agent_kwargs = mock_agent_cls.call_args[1]
         tool_names = {t.name for t in agent_kwargs["tools"]}
-        assert tool_names == {"read_file", "write_file", "fill_template", "shell_execute"}
+        assert tool_names == {"read_file", "write_file", "fill_template", "execute_code"}
 
     def test_factory_returns_none_with_no_tools(self):
         agent = create_memory_keeper({})

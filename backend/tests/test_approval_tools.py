@@ -8,9 +8,9 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
 
 
-class DummyShellTool(Tool):
-    name = "shell_execute"
-    description = "Dummy high-risk shell tool"
+class DummyExecuteCodeTool(Tool):
+    name = "execute_code"
+    description = "Dummy high-risk execute-code tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
 
@@ -19,7 +19,7 @@ class DummyShellTool(Tool):
 
 
 def test_high_risk_tool_requires_approval_before_execution(async_db):
-    tool = wrap_tools_for_approval([DummyShellTool()])[0]
+    tool = wrap_tools_for_approval([DummyExecuteCodeTool()])[0]
     tokens = set_runtime_context("s1", "high_risk")
     try:
         with pytest.raises(ApprovalRequired):
@@ -29,7 +29,7 @@ def test_high_risk_tool_requires_approval_before_execution(async_db):
 
 
 def test_high_risk_tool_runs_without_approval_mode(async_db):
-    tool = wrap_tools_for_approval([DummyShellTool()])[0]
+    tool = wrap_tools_for_approval([DummyExecuteCodeTool()])[0]
     tokens = set_runtime_context("s1", "off")
     try:
         assert tool(code="print('hi')") == "ran:print('hi')"
@@ -38,7 +38,7 @@ def test_high_risk_tool_runs_without_approval_mode(async_db):
 
 
 def test_forced_approval_tool_requires_confirmation_even_when_global_mode_off(async_db):
-    tool = wrap_tools_with_forced_approval([DummyShellTool()])[0]
+    tool = wrap_tools_with_forced_approval([DummyExecuteCodeTool()])[0]
     tokens = set_runtime_context("s1", "off")
     try:
         with pytest.raises(ApprovalRequired):

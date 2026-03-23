@@ -4,6 +4,16 @@ Native tools have static entries here. Workflow metadata remains dynamic and is
 resolved through the workflow manager when requested.
 """
 
+TOOL_NAME_ALIASES: dict[str, str] = {
+    "shell_execute": "execute_code",
+}
+
+
+def canonical_tool_name(tool_name: str) -> str:
+    """Return the canonical runtime tool name for a tool or legacy alias."""
+    return TOOL_NAME_ALIASES.get(tool_name, tool_name)
+
+
 TOOL_METADATA: dict[str, dict] = {
     # Phase 1 tools
     "web_search": {
@@ -57,8 +67,8 @@ TOOL_METADATA: dict[str, dict] = {
         "execution_boundaries": ["guardian_state_read"],
     },
     # Phase 2 tools
-    "shell_execute": {
-        "description": "Execute code in a sandboxed environment",
+    "execute_code": {
+        "description": "Execute bounded code in a sandboxed environment",
         "policy_modes": ["full"],
         "execution_boundaries": ["sandbox_execution"],
     },
@@ -98,7 +108,7 @@ TOOL_METADATA: dict[str, dict] = {
 
 def get_tool_metadata(tool_name: str) -> dict | None:
     """Get metadata for a bundled native tool or a derived workflow tool."""
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = TOOL_METADATA.get(canonical_tool_name(tool_name))
     if metadata is not None:
         return metadata
     try:

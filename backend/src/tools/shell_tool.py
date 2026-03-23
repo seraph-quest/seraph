@@ -1,9 +1,8 @@
-"""Shell execution tool — runs code in a sandboxed snekbox container."""
+"""Legacy shell execution alias backed by the sandboxed code runner."""
 
 import logging
 
 import httpx
-from smolagents import tool
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
@@ -11,8 +10,7 @@ from src.audit.runtime import log_integration_event_sync
 logger = logging.getLogger(__name__)
 
 
-@tool
-def shell_execute(code: str, language: str = "python") -> str:
+def run_sandboxed_code(code: str, language: str = "python") -> str:
     """Execute code in a secure sandboxed environment and return the output.
 
     Use this tool to run Python code, perform calculations, process data,
@@ -100,3 +98,19 @@ def shell_execute(code: str, language: str = "python") -> str:
         )
         logger.exception("Shell execution failed")
         return f"Error: {e}"
+
+
+def shell_execute(code: str, language: str = "python") -> str:
+    """Legacy alias for sandboxed code execution.
+
+    `execute_code` is the preferred runtime surface. Keep this alias until
+    existing skills, workflows, and user-authored packages finish migrating.
+
+    Args:
+        code: The code to execute inside the sandbox.
+        language: The execution language. Only `python` is supported in v1.
+
+    Returns:
+        The stdout output or a formatted error string from the sandbox.
+    """
+    return run_sandboxed_code(code, language=language)

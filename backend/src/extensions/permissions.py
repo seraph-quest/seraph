@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.extensions.registry import ExtensionRecord
+from src.native_tools.registry import canonical_tool_name
 from src.tools.policy import (
     get_tool_execution_boundaries,
     get_tool_risk_level,
@@ -38,6 +39,18 @@ def _dedupe_strings(values: list[str] | tuple[str, ...] | set[str] | None) -> li
     return normalized
 
 
+def _canonicalize_tools(tool_names: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tool_name in tool_names:
+        canonical_name = canonical_tool_name(tool_name)
+        if not canonical_name or canonical_name in seen:
+            continue
+        normalized.append(canonical_name)
+        seen.add(canonical_name)
+    return normalized
+
+
 def _risk_rank(risk_level: str) -> int:
     if risk_level == "high":
         return 3
@@ -59,8 +72,9 @@ def _tool_boundaries(tool_names: list[str]) -> list[str]:
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        is_mcp = tool_name.startswith("mcp_")
-        for boundary in get_tool_execution_boundaries(tool_name, is_mcp=is_mcp):
+        canonical_name = canonical_tool_name(tool_name)
+        is_mcp = canonical_name.startswith("mcp_")
+        for boundary in get_tool_execution_boundaries(canonical_name, is_mcp=is_mcp):
             if boundary not in boundaries:
                 boundaries.append(boundary)
     return boundaries
@@ -71,7 +85,8 @@ def _tool_risk_level(tool_names: list[str]) -> str:
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        levels.append(get_tool_risk_level(tool_name, is_mcp=tool_name.startswith("mcp_")))
+        canonical_name = canonical_tool_name(tool_name)
+        levels.append(get_tool_risk_level(canonical_name, is_mcp=canonical_name.startswith("mcp_")))
     return _max_risk_level(levels)
 
 
@@ -79,7 +94,8 @@ def _tools_accept_secret_refs(tool_names: list[str]) -> bool:
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        if tool_accepts_secret_refs(tool_name, is_mcp=tool_name.startswith("mcp_")):
+        canonical_name = canonical_tool_name(tool_name)
+        if tool_accepts_secret_refs(canonical_name, is_mcp=canonical_name.startswith("mcp_")):
             return True
     return False
 
@@ -97,7 +113,7 @@ def evaluate_tool_permissions(
     *,
     tool_names: list[str],
 ) -> dict[str, Any]:
-    required_tools = _dedupe_strings(tool_names)
+    required_tools = _canonicalize_tools(_dedupe_strings(tool_names))
     required_boundaries = _tool_boundaries(required_tools)
     requires_network = any(boundary in NETWORK_BOUNDARIES for boundary in required_boundaries)
     risk_level = _tool_risk_level(required_tools)

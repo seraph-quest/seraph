@@ -13,7 +13,7 @@ from src.tools.audit import AuditedTool, wrap_tools_for_audit
 
 
 class DummyEchoTool(Tool):
-    name = "shell_execute"
+    name = "execute_code"
     description = "Dummy echo tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
@@ -23,7 +23,7 @@ class DummyEchoTool(Tool):
 
 
 class DummyFailTool(Tool):
-    name = "shell_execute"
+    name = "execute_code"
     description = "Dummy failing tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
@@ -80,7 +80,7 @@ def test_audited_tool_logs_call_and_result(async_db):
     tool_results = [e for e in events if e["event_type"] == "tool_result"]
     assert len(tool_calls) == 1
     assert len(tool_results) == 1
-    assert tool_calls[0]["tool_name"] == "shell_execute"
+    assert tool_calls[0]["tool_name"] == "execute_code"
     assert tool_results[0]["details"]["content_redacted"] is True
 
 
@@ -104,7 +104,7 @@ def test_audited_tool_logs_failure(async_db):
     tool_failures = [e for e in events if e["event_type"] == "tool_failed"]
     assert len(tool_calls) == 1
     assert len(tool_failures) == 1
-    assert tool_failures[0]["tool_name"] == "shell_execute"
+    assert tool_failures[0]["tool_name"] == "execute_code"
     assert tool_failures[0]["details"]["error"] == "failed:print('hi')"
 
 

@@ -42,7 +42,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "read_file": "files",
     "write_file": "files",
     "fill_template": "files",
-    "shell_execute": "files",
+    "execute_code": "files",
 }
 
 # Reverse index: domain → list of tool names

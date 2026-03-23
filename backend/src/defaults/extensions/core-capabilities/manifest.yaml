@@ -11,11 +11,11 @@ summary: Bundled default skills, workflows, starter packs, and runbooks.
 permissions:
   tools:
     - create_goal
+    - execute_code
     - get_goal_progress
     - get_goals
     - http_request
     - read_file
-    - shell_execute
     - view_soul
     - web_search
     - write_file

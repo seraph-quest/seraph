@@ -333,6 +333,107 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
 - each internal slice must close with a subagent review pass against bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete or rolled into a final GitHub PR
 - the result of that subagent review must be recorded in the eventual GitHub PR `Validation` section before any slice is marked complete in these docs
 
+## Next Capability Import Program
+
+This is the next major execution program after the extension-platform transition.
+It is intentionally organized by **waves** rather than one flat queue because each wave should land, stabilize, and rerank before the next wave begins.
+
+- the capability-import program is grounded in [13. Hermes And OpenClaw Capability Import Plan](/research/hermes-and-openclaw-capability-import-plan)
+- Hermes is the primary parity target for runtime breadth and operator-grade capability scaffolding
+- OpenClaw is the selective import target for browser modes, routing breadth, automation triggers, and device reach
+- imported runtime primitives stay core-owned
+- imported reusable capability surfaces land through the extension platform
+- imported reach and integration surfaces land as connectors, channel adapters, observer sources, or new extension contribution types
+- each numbered item below is a PR-sized slice
+- each wave should be executed as its own delivery batch, with reranking between waves if benchmark or product evidence changes materially
+
+### Wave 1: Hermes Runtime Parity
+
+1. [ ] `hermes-execute-code-runtime-v1`:
+   add approval-gated multi-step code execution as a first-class core runtime tool so Seraph can execute structured code tasks with better token efficiency than chat-only reasoning
+2. [ ] `hermes-delegate-task-runtime-v1`:
+   turn delegation into a first-class runtime primitive with bounded worker context, structured outputs, and clearer parent-child execution visibility instead of leaving it as a partial foundation
+3. [ ] `hermes-clarify-runtime-v1`:
+   add a structured clarify tool so Seraph can pause for missing inputs or ambiguity explicitly instead of relying only on prompt-level phrasing
+4. [ ] `hermes-todo-runtime-v1`:
+   add a first-class runtime task-list tool and state model so multi-step planning stops living only in prompt text or ad hoc workflow metadata
+5. [ ] `hermes-session-search-v1`:
+   ship real session search over prior threads with bounded recall summaries so Seraph can retrieve prior operator context more like Hermes
+6. [ ] `hermes-bounded-memory-layer-v1`:
+   add a fast bounded recall layer for profile and recent working memory on top of Seraph’s deeper guardian memory so retrieval for active work becomes cheaper and more predictable
+7. [ ] `hermes-user-cron-runtime-v1`:
+   let users create, inspect, update, and remove arbitrary scheduled jobs instead of relying only on fixed built-in scheduler tasks
+8. [ ] `hermes-shell-process-runtime-v1`:
+   deepen shell and process capability beyond the current narrow execution path with safer background-process and interactive-task support
+9. [ ] `hermes-security-controls-v1`:
+   import Hermes-style allowlists, pairing-style trust controls, site blocklists, and context-file scanning where they fit Seraph’s trust model so runtime breadth does not outrun safety
+
+### Wave 2: Extension Capability Types
+
+10. [ ] `extension-toolset-presets-v1`:
+    add `toolset_presets` as an extension contribution type so operator-facing capability bundles and policy-aware presets become packageable instead of hardcoded
+11. [ ] `extension-context-packs-v1`:
+    add `context_packs` for reusable memory, profile, prompt, and guardian-context bundles so imported capability families can ship with coherent context defaults
+12. [ ] `extension-automation-triggers-v1`:
+    add `automation_triggers` for webhook, poll, and pub-sub style trigger surfaces so later automation imports do not become special-case scheduler code
+13. [ ] `extension-browser-providers-v1`:
+    add `browser_providers` as a packageable contract for Browserbase, CDP, relay, and future managed browser surfaces
+14. [ ] `extension-messaging-connectors-v1`:
+    add a first-class messaging connector contribution type so multi-channel reach lands through the same lifecycle model as other integrations
+15. [ ] `extension-speech-profiles-v1`:
+    add `speech_profiles` for later TTS, STT, wake-word, and talk-mode imports without forcing voice primitives directly into core too early
+16. [ ] `extension-node-adapters-v1`:
+    add `node_adapters` for device, canvas, and companion-node surfaces so OpenClaw-style embodied reach can land through typed extensions rather than raw plugins
+
+### Wave 3: Hermes Packaged Reach And Capability Parity
+
+17. [ ] `hermes-skill-registry-v1`:
+    build the first real install, search, update, and trust-scanned registry loop for skill packs so Seraph’s extension ecosystem compounds more like Hermes
+18. [ ] `hermes-optional-skill-packs-v1`:
+    add optional installable skill packs instead of only bundled defaults so operators can grow capability breadth without repo edits
+19. [ ] `hermes-mcp-toolset-bridge-v1`:
+    make MCP servers publish cleaner toolset and preset surfaces with stronger per-server filtering, visibility, and activation ergonomics
+20. [ ] `hermes-browserbase-connector-v1`:
+    add a managed Browserbase-style browser provider package so Seraph gains a stronger isolated browser lane without overloading generic web tools
+21. [ ] `hermes-browser-session-ops-v1`:
+    add stronger browser session primitives such as page refs, snapshots, and more structured browser actions so browsing can support real multi-step operator work
+22. [ ] `hermes-messaging-connectors-wave1-v1`:
+    ship the first high-value messaging connectors such as Telegram, Discord, and Slack through the new messaging-connector contribution type
+23. [ ] `hermes-vision-image-speech-v1`:
+    import the most valuable Hermes multimodal surfaces, including vision, image generation, and TTS or STT paths where they fit Seraph’s operator product
+24. [ ] `hermes-skill-authoring-loop-v1`:
+    let Seraph create, patch, validate, and install skill packs more directly so the extension platform compounds through agent-assisted authoring
+
+### Wave 4: Selective OpenClaw Imports
+
+25. [ ] `openclaw-browser-mode-matrix-v1`:
+    add the browser mode matrix of managed browser, browser-extension relay, and remote CDP so Seraph can choose the right browser surface per task and trust boundary
+26. [ ] `openclaw-channel-routing-bindings-v1`:
+    add per-channel routing, bindings, and delivery rules so multi-channel reach behaves predictably instead of as independent connector silos
+27. [ ] `openclaw-webhook-poll-pubsub-v1`:
+    import higher-value automation breadth through typed trigger surfaces instead of one-off cron-only automation
+28. [ ] `openclaw-node-device-adapters-v1`:
+    add device and node companion surfaces through adapters so Seraph can reach phones, desktops, or later embodied surfaces without adopting OpenClaw’s raw plugin model
+29. [ ] `openclaw-canvas-output-v1`:
+    add richer structured output or canvas surfaces for operator-visible results, generated UIs, and tool-produced artifacts where text-only panes are too limiting
+30. [ ] `openclaw-workflow-engine-imports-v1`:
+    selectively reinterpret OpenClaw runtime ideas such as OpenProse, Lobster, or LLM-task style typed runtimes into Seraph’s workflow and execution architecture
+
+### Wave 5: Operator Surface, Proof, And Hardening
+
+31. [ ] `capability-operator-surface-v1`:
+    expose all imported runtime tools, presets, connectors, browser modes, and automation surfaces clearly in the cockpit so new breadth stays operable
+32. [ ] `capability-budget-and-cost-attribution-v1`:
+    show which imported capability used model budget, why it ran, and what it cost so added capability breadth does not become opaque spend
+33. [ ] `capability-approval-and-policy-integration-v1`:
+    map all imported capability families cleanly into approvals, policy, and trust boundaries so no new surface bypasses the guardian safety model
+34. [ ] `capability-benchmark-refresh-v1`:
+    refresh the benchmark and capability-gap docs after the major parity waves so the roadmap continues to reflect evidence instead of stale aspirations
+35. [ ] `capability-evals-v1`:
+    add deterministic eval contracts for new runtime primitives, connector families, browser modes, and automation triggers so imported breadth is provable
+36. [ ] `capability-cleanup-and-legacy-path-removal-v1`:
+    remove transitional seams and legacy compatibility paths once the imported capability families are first-class, stable parts of Seraph’s architecture
+
 ## Delivery Order
 
 1. Trust Boundaries

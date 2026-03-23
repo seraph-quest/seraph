@@ -1,0 +1,4 @@
+name: time
+source_type: time
+description: Built-in time and work-hours observer.
+enabled: true

@@ -8,9 +8,6 @@ const sidebars: SidebarsConfig = {
       items: [
         'master-roadmap',
         'STATUS',
-        'docs-contract',
-        'benchmark-status',
-        'superiority-delivery',
       ],
     },
     {
@@ -24,6 +21,16 @@ const sidebars: SidebarsConfig = {
         'guardian-intelligence',
         'embodied-ux',
         'ecosystem-and-leverage',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Maintainer Mirrors',
+      collapsed: true,
+      items: [
+        'docs-contract',
+        'benchmark-status',
+        'superiority-delivery',
       ],
     },
   ],

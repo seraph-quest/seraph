@@ -24,13 +24,6 @@ const edgeStyles: Record<ResizeEdge, CSSProperties> = {
 const corners: ResizeEdge[] = ["nw", "ne", "sw", "se"];
 const edges: ResizeEdge[] = ["n", "s", "e", "w"];
 
-const cornerDotPositions: Record<string, CSSProperties> = {
-  nw: { position: "absolute", top: -3, left: -3 },
-  ne: { position: "absolute", top: -3, right: -3 },
-  sw: { position: "absolute", bottom: -3, left: -3 },
-  se: { position: "absolute", bottom: -3, right: -3 },
-};
-
 export function ResizeHandles({ resizeHandleProps }: ResizeHandlesProps) {
   return (
     <>
@@ -49,20 +42,10 @@ export function ResizeHandles({ resizeHandleProps }: ResizeHandlesProps) {
         return (
           <div
             key={corner}
-            className="group"
             onPointerDown={props.onPointerDown}
             style={{ ...edgeStyles[corner], ...props.style, zIndex: 20 }}
           >
-            <div
-              className="opacity-0 group-hover:opacity-100 transition-opacity"
-              style={{
-                ...cornerDotPositions[corner],
-                width: 6,
-                height: 6,
-                background: "#e2b714",
-                pointerEvents: "none",
-              }}
-            />
+            {corner === "se" ? <div className="cockpit-window-corner-grip" /> : null}
           </div>
         );
       })}

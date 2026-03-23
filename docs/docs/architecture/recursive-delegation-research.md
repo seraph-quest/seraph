@@ -243,7 +243,7 @@ The `toolParser.ts` regex patterns would need updating to detect delegation patt
 | `agent/factory.py` | `create_agent()` returns single agent with all tools | `create_orchestrator()` returns agent with managed specialists |
 | `api/ws.py` | Streams flat steps from one agent | Streams orchestrator steps (delegations + final) |
 | `api/chat.py` | Same as ws.py but blocking | Same change |
-| `plugins/loader.py` | `discover_tools()` returns flat list | Also needs `discover_tools_by_domain()` for specialist grouping |
+| `native_tools/loader.py` | `discover_tools()` returns flat list | Also needs `discover_tools_by_domain()` for specialist grouping |
 | `config/settings.py` | Agent settings (max_steps, timeout) | Per-specialist settings or specialist config |
 
 ### May Change

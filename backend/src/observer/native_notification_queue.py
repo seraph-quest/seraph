@@ -18,6 +18,9 @@ class NativeNotification:
     urgency: int | None
     surface: str
     session_id: str | None
+    thread_id: str | None
+    thread_source: str
+    continuation_mode: str
     resume_message: str | None
     created_at: str
 
@@ -42,6 +45,9 @@ class NativeNotificationQueue:
         urgency: int | None,
         surface: str = "notification",
         session_id: str | None = None,
+        thread_id: str | None = None,
+        thread_source: str = "ambient",
+        continuation_mode: str = "open_thread",
         resume_message: str | None = None,
     ) -> NativeNotification:
         notification = NativeNotification(
@@ -53,6 +59,9 @@ class NativeNotificationQueue:
             urgency=urgency,
             surface=surface,
             session_id=session_id,
+            thread_id=thread_id or session_id,
+            thread_source=thread_source,
+            continuation_mode=continuation_mode,
             resume_message=resume_message,
             created_at=datetime.now(timezone.utc).isoformat(),
         )

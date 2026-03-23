@@ -21,18 +21,29 @@ async def list_pending_approvals(
         for session in await session_manager.list_sessions()
         if isinstance(session, dict) and session.get("id")
     }
-    return [
-        {
-            **approval,
-            "thread_id": approval.get("session_id"),
-            "thread_label": (
-                session_titles.get(str(approval["session_id"]))
-                if approval.get("session_id")
-                else None
-            ),
-        }
-        for approval in approvals
-    ]
+    items = []
+    for approval in approvals:
+        approval_profile = approval.get("approval_profile")
+        if not isinstance(approval_profile, dict):
+            approval_profile = {}
+        items.append(
+            {
+                **approval,
+                "thread_id": approval.get("session_id"),
+                "thread_label": (
+                    session_titles.get(str(approval["session_id"]))
+                    if approval.get("session_id")
+                    else None
+                ),
+                "extension_id": approval.get("extension_id"),
+                "extension_display_name": approval.get("extension_display_name"),
+                "extension_action": approval.get("action"),
+                "package_path": approval.get("package_path"),
+                "lifecycle_boundaries": approval_profile.get("lifecycle_boundaries"),
+                "permissions": approval.get("permissions"),
+            }
+        )
+    return items
 
 
 @router.post("/approvals/{approval_id}/approve")

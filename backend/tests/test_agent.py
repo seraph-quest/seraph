@@ -54,6 +54,10 @@ class TestAgentFactory:
         agent = create_agent()
         mock_get_model.assert_called_once_with(runtime_path="chat_agent")
         mock_agent_cls.assert_called_once()
+        instructions = mock_agent_cls.call_args[1]["instructions"]
+        assert "productivity, performance, health, influence, and growth" in instructions
+        assert "relationships, and growth" not in instructions
+        assert "Treat relationship or collaboration priorities as influence" in instructions
         assert agent is not None
 
     @patch("src.agent.factory.ToolCallingAgent")

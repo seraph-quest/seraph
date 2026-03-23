@@ -1,4 +1,10 @@
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 
 class Settings(BaseSettings):
@@ -94,7 +100,7 @@ class Settings(BaseSettings):
     llm_log_max_bytes: int = 52_428_800    # 50 MB per file
     llm_log_backup_count: int = 5          # keep 5 rotated files
 
-    model_config = {"env_file": ".env.dev", "env_file_encoding": "utf-8"}
+    model_config = SettingsConfigDict(env_file=DEFAULT_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

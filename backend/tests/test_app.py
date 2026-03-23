@@ -1,5 +1,7 @@
 import pytest
 
+from config.settings import settings
+
 
 @pytest.mark.asyncio
 async def test_cors_allows_loopback_dev_origin(client):
@@ -13,3 +15,16 @@ async def test_cors_allows_loopback_dev_origin(client):
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3000"
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_exposes_release_and_model(client):
+    response = await client.get("/api/runtime/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["version"] == "2026.3.19"
+    assert payload["build_id"] == "SERAPH_PRIME_v2026.3.19"
+    assert payload["provider"] == "openrouter"
+    assert payload["model"] == settings.default_model
+    assert payload["model_label"] == settings.default_model.split("/")[-1]

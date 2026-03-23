@@ -1,0 +1,4 @@
+name: calendar
+source_type: calendar
+description: Built-in calendar observer for current and upcoming events.
+enabled: true

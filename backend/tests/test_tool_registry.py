@@ -1,6 +1,8 @@
-"""Tests for tool metadata registry (src/plugins/registry.py)."""
+"""Tests for bundled native tool metadata registry and legacy aliases."""
 
-from src.plugins.registry import get_tool_metadata, get_all_metadata
+import src.native_tools.registry as native_registry
+import src.plugins.registry as legacy_registry
+from src.native_tools.registry import get_tool_metadata, get_all_metadata
 
 
 class TestToolRegistry:
@@ -23,3 +25,7 @@ class TestToolRegistry:
         m1 = get_all_metadata()
         m2 = get_all_metadata()
         assert m1 is not m2
+
+    def test_legacy_registry_alias_uses_same_module(self):
+        assert legacy_registry is native_registry
+        assert legacy_registry.get_tool_metadata("web_search") == native_registry.get_tool_metadata("web_search")

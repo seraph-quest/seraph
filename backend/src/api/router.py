@@ -1,10 +1,12 @@
 from fastapi import APIRouter
 
+from src.api.activity import router as activity_router
 from src.api.audit import router as audit_router
 from src.api.approvals import router as approvals_router
 from src.api.catalog import router as catalog_router
 from src.api.capabilities import router as capabilities_router
 from src.api.chat import router as chat_router
+from src.api.extensions import router as extensions_router
 from src.api.goals import router as goals_router
 from src.api.mcp import router as mcp_router
 from src.api.operator import router as operator_router
@@ -20,11 +22,13 @@ from src.api.ws import router as ws_router
 
 api_router = APIRouter()
 
+api_router.include_router(activity_router, prefix="/api", tags=["activity"])
 api_router.include_router(audit_router, prefix="/api", tags=["audit"])
 api_router.include_router(approvals_router, prefix="/api", tags=["approvals"])
 api_router.include_router(catalog_router, prefix="/api", tags=["catalog"])
 api_router.include_router(capabilities_router, prefix="/api", tags=["capabilities"])
 api_router.include_router(chat_router, prefix="/api", tags=["chat"])
+api_router.include_router(extensions_router, prefix="/api", tags=["extensions"])
 api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])

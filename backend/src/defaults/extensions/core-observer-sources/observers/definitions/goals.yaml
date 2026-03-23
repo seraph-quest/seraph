@@ -1,0 +1,4 @@
+name: goals
+source_type: goals
+description: Built-in priorities observer for active goal context.
+enabled: true

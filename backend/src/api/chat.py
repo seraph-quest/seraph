@@ -105,6 +105,7 @@ async def chat(request: ChatRequest):
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "message_length": len(request.message),
                 "timeout_seconds": settings.agent_chat_timeout,
+                "request_id": llm_request_id,
             },
         )
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
@@ -121,6 +122,7 @@ async def chat(request: ChatRequest):
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "message_length": len(request.message),
                 "error": safe_detail,
+                "request_id": llm_request_id,
             },
         )
         raise HTTPException(status_code=500, detail=safe_detail)
@@ -139,6 +141,7 @@ async def chat(request: ChatRequest):
             "duration_ms": int((perf_counter() - started_at) * 1000),
             "message_length": len(request.message),
             "response_length": len(response_text),
+            "request_id": llm_request_id,
         },
     )
 

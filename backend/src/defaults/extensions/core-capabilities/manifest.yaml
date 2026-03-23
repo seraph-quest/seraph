@@ -1,0 +1,43 @@
+id: seraph.core-capabilities
+version: 2026.3.21
+display_name: Core Capabilities
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Bundled default skills, workflows, starter packs, and runbooks.
+permissions:
+  tools:
+    - create_goal
+    - get_goal_progress
+    - get_goals
+    - http_request
+    - read_file
+    - shell_execute
+    - view_soul
+    - web_search
+    - write_file
+  network: true
+contributes:
+  skills:
+    - skills/code-review.md
+    - skills/daily-standup.md
+    - skills/evening-journal.md
+    - skills/goal-reflection.md
+    - skills/moltbook.md
+    - skills/morning-intention.md
+    - skills/web-briefing.md
+    - skills/weekly-planner.md
+  workflows:
+    - workflows/goal-snapshot-to-file.md
+    - workflows/web-brief-to-file.md
+  runbooks:
+    - runbooks/daily-operator-rhythm.yaml
+    - runbooks/research-briefing.yaml
+    - runbooks/weekly-alignment.yaml
+  starter_packs:
+    - starter-packs/daily-operator-rhythm.json
+    - starter-packs/research-briefing.json
+    - starter-packs/weekly-alignment.json

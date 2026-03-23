@@ -1,0 +1,8 @@
+{
+  "name": "weekly-alignment",
+  "label": "Weekly Alignment",
+  "description": "Enable weekly review and planning routines grounded in goals and soul context.",
+  "skills": ["goal-reflection", "weekly-planner"],
+  "workflows": ["goal-snapshot-to-file"],
+  "sample_prompt": "Reflect on my goals and prepare a weekly plan from the current priorities."
+}

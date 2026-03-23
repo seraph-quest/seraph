@@ -1,6 +1,7 @@
 """Persistence helpers for structured audit events."""
 
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlmodel import select, col
@@ -43,12 +44,15 @@ class AuditRepository:
         *,
         limit: int = 20,
         session_id: str | None = None,
+        since: datetime | None = None,
     ) -> list[dict]:
-        limit = min(max(limit, 1), 100)
+        limit = min(max(limit, 1), 500)
         async with get_session() as db:
             stmt = select(AuditEvent).order_by(col(AuditEvent.created_at).desc()).limit(limit)
             if session_id:
                 stmt = stmt.where(AuditEvent.session_id == session_id)
+            if since:
+                stmt = stmt.where(AuditEvent.created_at >= since)
 
             result = await db.execute(stmt)
             events = result.scalars().all()

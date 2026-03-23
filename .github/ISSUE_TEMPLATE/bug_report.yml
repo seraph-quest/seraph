@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a broken behavior, regression, or setup/runtime issue in Seraph
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include enough detail to reproduce the issue and tell us whether the problem is in the local runtime, Docker path, browser cockpit, or macOS daemon flow.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly and directly.
+      placeholder: The backend starts, but the cockpit never connects to the WebSocket...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest reliable set of steps.
+      placeholder: |
+        1. Run ./manage.sh -e dev local up
+        2. Open http://localhost:3001
+        3. Start a workflow
+        4. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: The workflow should complete and appear in the activity ledger.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - Local runtime
+        - Docker runtime
+        - Browser cockpit
+        - Backend API
+        - Workflow or tool execution
+        - MCP integration
+        - macOS daemon
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: branch
+    attributes:
+      label: Branch or commit
+      placeholder: develop or a commit SHA
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or extra context
+      render: shell

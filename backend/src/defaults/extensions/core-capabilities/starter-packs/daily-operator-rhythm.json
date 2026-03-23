@@ -1,0 +1,8 @@
+{
+  "name": "daily-operator-rhythm",
+  "label": "Daily Operator Rhythm",
+  "description": "Turn on the core daily planning and reflection skills plus a reusable goal snapshot workflow.",
+  "skills": ["morning-intention", "daily-standup", "evening-journal"],
+  "workflows": ["goal-snapshot-to-file"],
+  "sample_prompt": "Run a morning intention and save a goal snapshot for today."
+}

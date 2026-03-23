@@ -1,0 +1,4 @@
+name: browser-websocket
+transport: websocket
+description: Browser WebSocket delivery adapter for live workspace sessions.
+enabled: true

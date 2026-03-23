@@ -69,6 +69,7 @@ async def get_operator_timeline(
             "continue_message": (
                 run.get("thread_continue_message")
                 or run.get("approval_recovery_message")
+                or run.get("retry_from_step_draft")
                 or run.get("replay_draft")
             ),
             "replay_draft": run.get("replay_draft"),
@@ -77,11 +78,24 @@ async def get_operator_timeline(
             "recommended_actions": run.get("replay_recommended_actions", []),
             "source": "workflow",
             "metadata": {
+                "run_identity": run.get("run_identity"),
+                "run_fingerprint": run.get("run_fingerprint"),
                 "risk_level": run.get("risk_level"),
                 "execution_boundaries": run.get("execution_boundaries", []),
+                "step_count": len(run.get("step_records", []) or []),
+                "failed_step_ids": list(run.get("continued_error_steps", []) or []),
+                "failed_step_tool": run.get("failed_step_tool"),
                 "pending_approval_count": run.get("pending_approval_count", 0),
                 "resume_from_step": run.get("resume_from_step"),
                 "resume_checkpoint_label": run.get("resume_checkpoint_label"),
+                "last_completed_step_id": run.get("last_completed_step_id"),
+                "checkpoint_step_ids": list(run.get("checkpoint_step_ids", []) or []),
+                "checkpoint_candidates": run.get("checkpoint_candidates", []),
+                "branch_kind": run.get("branch_kind"),
+                "branch_depth": run.get("branch_depth"),
+                "parent_run_identity": run.get("parent_run_identity"),
+                "root_run_identity": run.get("root_run_identity"),
+                "resume_plan": run.get("resume_plan"),
                 "availability": run.get("availability"),
             },
         })
@@ -117,6 +131,9 @@ async def get_operator_timeline(
         session_ref = notification.session_id
         if session_id and session_ref != session_id:
             continue
+        thread_id = getattr(notification, "thread_id", None) or session_ref
+        continuation_mode = getattr(notification, "continuation_mode", None)
+        thread_source = getattr(notification, "thread_source", None)
         items.append({
             "id": f"notification:{notification.id}",
             "kind": "notification",
@@ -125,8 +142,8 @@ async def get_operator_timeline(
             "status": "queued",
             "created_at": _timeline_timestamp(notification.created_at),
             "updated_at": _timeline_timestamp(notification.created_at),
-            "thread_id": session_ref,
-            "thread_label": session_titles.get(session_ref) if session_ref else None,
+            "thread_id": thread_id,
+            "thread_label": session_titles.get(thread_id) if thread_id else None,
             "continue_message": notification.resume_message or notification.body,
             "replay_draft": None,
             "replay_allowed": False,
@@ -137,10 +154,14 @@ async def get_operator_timeline(
                 "surface": "notification",
                 "intervention_type": notification.intervention_type,
                 "urgency": notification.urgency,
+                "thread_source": thread_source,
+                "continuation_mode": continuation_mode,
             },
         })
 
     for insight in queued_insights:
+        if session_id and getattr(insight, "session_id", None) not in {None, session_id}:
+            continue
         if session_id:
             match = next(
                 (
@@ -149,7 +170,7 @@ async def get_operator_timeline(
                 ),
                 None,
             )
-            if insight.intervention_id and match is None:
+            if insight.intervention_id and getattr(insight, "session_id", None) is None and match is None:
                 continue
         thread_id = next(
             (
@@ -157,7 +178,7 @@ async def get_operator_timeline(
                 if item.id == insight.intervention_id
             ),
             None,
-        )
+        ) or getattr(insight, "session_id", None)
         items.append({
             "id": f"queued:{insight.id}",
             "kind": "queued_insight",
@@ -213,6 +234,51 @@ async def get_operator_timeline(
 
     for event in audit_events:
         event_type = str(event.get("event_type") or "")
+        if event_type in {"llm_routing_decision", "llm_target_rerouted"}:
+            details = event.get("details") if isinstance(event.get("details"), dict) else {}
+            summary = str(event.get("summary") or event_type)
+            metadata = {
+                "event_type": event_type,
+                "runtime_path": details.get("runtime_path"),
+                "runtime_profile": details.get("runtime_profile"),
+                "selected_model": details.get("selected_model"),
+                "selected_profile": details.get("selected_profile"),
+                "selected_source": details.get("selected_source"),
+                "selected_reason_codes": details.get("selected_reason_codes", []),
+                "selected_policy_score": details.get("selected_policy_score"),
+                "required_policy_intents": details.get("required_policy_intents", []),
+                "max_cost_tier": details.get("max_cost_tier"),
+                "max_latency_tier": details.get("max_latency_tier"),
+                "required_task_class": details.get("required_task_class"),
+                "max_budget_class": details.get("max_budget_class"),
+                "attempt_order": details.get("attempt_order", []),
+                "reroute_cause": details.get("reroute_cause"),
+                "rerouted_from_unhealthy_primary": details.get("rerouted_from_unhealthy_primary"),
+                "rerouted_from_policy_guardrails": details.get("rerouted_from_policy_guardrails"),
+                "guardrail_compliant_targets_present": details.get("guardrail_compliant_targets_present"),
+                "rejected_target_count": details.get("rejected_target_count"),
+                "candidate_targets": details.get("candidate_targets", []),
+                "rejected_targets": details.get("rejected_targets", []),
+            }
+            items.append({
+                "id": f"audit:{event['id']}",
+                "kind": "routing",
+                "title": str(event.get("tool_name") or "llm routing"),
+                "summary": summary,
+                "status": "rerouted" if event_type == "llm_target_rerouted" else "selected",
+                "created_at": str(event.get("created_at") or ""),
+                "updated_at": str(event.get("created_at") or ""),
+                "thread_id": event.get("session_id"),
+                "thread_label": session_titles.get(str(event.get("session_id"))) if event.get("session_id") else None,
+                "continue_message": None,
+                "replay_draft": None,
+                "replay_allowed": False,
+                "replay_block_reason": None,
+                "recommended_actions": [],
+                "source": "routing",
+                "metadata": metadata,
+            })
+            continue
         if event_type not in {"tool_failed", "integration_failed", "llm_primary_failure", "llm_fallback_failure"}:
             continue
         items.append({

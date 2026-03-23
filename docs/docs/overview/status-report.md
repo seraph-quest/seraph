@@ -6,7 +6,7 @@ title: Development Status
 
 > Legacy note: this page now lives under `/legacy`. The canonical shipped-status ledger is now `docs/implementation/STATUS.md`.
 >
-> Historical note: older lines on this page may still refer to pre-cockpit planning language. Current Seraph is cockpit-only; the village/editor line is retired and pending removal from the repo.
+> Historical note: older lines on this page may still refer to pre-cockpit planning language. Current Seraph is cockpit-only; the village/editor line is retired and removed from the active repo path.
 
 ## Legend
 
@@ -42,7 +42,7 @@ title: Development Status
 - [x] Shell execution foundation
 - [x] Browser automation foundation
 - [x] MCP integration and runtime-managed server configuration
-- [x] Auto-discovered built-in tools and plugin loading
+- [x] Auto-discovered built-in native tools and `SKILL.md` skill loading
 - [x] Visible tool-execution streaming in chat
 
 ### Runtime and observability

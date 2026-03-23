@@ -1,0 +1,20 @@
+id: seraph.research-pack
+version: 2026.3.21
+display_name: Research Pack
+kind: capability-pack
+compatibility:
+  seraph: '>=2026.3.19'
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+  - skills/research-pack.md
+  workflows:
+  - workflows/research-pack.md
+  runbooks:
+  - runbooks/research-pack.yaml
+permissions:
+  tools:
+  - read_file
+  network: false

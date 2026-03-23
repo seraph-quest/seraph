@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
-import { EventBus } from "../game/EventBus";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
 import { CaptureModeToggle } from "./settings/CaptureModeToggle";
@@ -394,11 +393,11 @@ function AddServerForm({ onAdd }: { onAdd: () => void }) {
 export function SettingsPanel() {
   const settingsPanelOpen = useChatStore((s) => s.settingsPanelOpen);
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
+  const cockpitHintsEnabled = useChatStore((s) => s.cockpitHintsEnabled);
+  const setCockpitHintsEnabled = useChatStore((s) => s.setCockpitHintsEnabled);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restartOnboarding = useChatStore((s) => s.restartOnboarding);
   const loadSessions = useChatStore((s) => s.loadSessions);
-  const debugWalkability = useChatStore((s) => s.debugWalkability);
-  const setDebugWalkability = useChatStore((s) => s.setDebugWalkability);
 
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -554,9 +553,11 @@ export function SettingsPanel() {
           <button
             type="button"
             className="cockpit-modal-close"
+            aria-label="Close settings"
+            title="Close settings"
             onClick={() => setSettingsPanelOpen(false)}
           >
-            Close
+            x
           </button>
         </div>
         <div className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
@@ -576,6 +577,21 @@ export function SettingsPanel() {
                 Restart intro
               </button>
             )}
+            <div className="cockpit-settings-inline-row">
+              <div className="cockpit-settings-copy">
+                <div className="cockpit-settings-label">Workspace hints</div>
+                <div className="cockpit-settings-note">
+                  Show workspace and window guidance across the live workspace.
+                </div>
+              </div>
+              <button
+                type="button"
+                className={`cockpit-settings-toggle ${cockpitHintsEnabled ? "is-active" : ""}`}
+                onClick={() => setCockpitHintsEnabled(!cockpitHintsEnabled)}
+              >
+                {cockpitHintsEnabled ? "On" : "Off"}
+              </button>
+            </div>
           </div>
 
           <InterruptionModeToggle />
@@ -638,24 +654,6 @@ export function SettingsPanel() {
               <div className="text-[9px] text-retro-text/30 mb-1 px-1">No catalog items available</div>
             )}
           </div>
-
-          {import.meta.env.DEV && (
-            <div className="px-1">
-              <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
-                Debug
-              </div>
-              <button
-                onClick={() => {
-                  const next = !debugWalkability;
-                  setDebugWalkability(next);
-                  EventBus.emit("toggle-debug-walkability", next);
-                }}
-                className="text-[10px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
-              >
-                {debugWalkability ? "\u2611" : "\u2610"} Show walkability grid
-              </button>
-            </div>
-          )}
 
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">

@@ -1,0 +1,14 @@
+id: seraph.core-channel-adapters
+version: 2026.3.21
+display_name: Core Channel Adapters
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Bundled delivery adapters for browser and native notification transports.
+contributes:
+  channel_adapters:
+    - channels/websocket.yaml
+    - channels/native-notification.yaml

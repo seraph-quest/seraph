@@ -74,7 +74,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                   <button
                     onClick={() => onEdit(goal)}
                     className="text-[9px] text-retro-text/30 hover:text-retro-highlight px-0.5"
-                    title="Edit quest"
+                    title="Edit priority"
                   >
                     /
                   </button>
@@ -86,7 +86,7 @@ export function GoalTree({ goals, depth, onEdit }: Props) {
                     }
                   }}
                   className="text-[9px] text-retro-text/30 hover:text-red-400 px-0.5"
-                  title="Delete quest"
+                  title="Delete priority"
                 >
                   x
                 </button>

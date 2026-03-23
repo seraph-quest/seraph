@@ -1,7 +1,7 @@
 <h1 align="center">Seraph</h1>
 
 <p align="center">
-  <strong>A proactive AI guardian with persistent memory, observation, and real-world action</strong>
+  <strong>An AI guardian that remembers, watches, and acts</strong>
 </p>
 
 <p align="center">
@@ -12,28 +12,87 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a guardian cockpit browser shell, persistent identity, long-term memory, hierarchical goals, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is cockpit-only: legacy village/editor code is retired and slated for removal rather than future productization.
+  Seraph is a proactive AI system for people who want an agent that can keep state, watch what is happening on the desktop, use tools, run workflows, and surface useful actions instead of waiting for one-off prompts.
+</p>
+
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24" width="900" controls></video>
+</div>
+
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24"><strong>Watch the 20-second workspace demo</strong></a>
 </p>
 
 ---
 
+## What Seraph Is
+
+Seraph is a workspace-first AI agent with:
+
+- persistent identity and long-term memory
+- proactive scheduling, briefings, reviews, and intervention policy
+- tool use, reusable workflows, and plug-and-play MCP server integration
+- a browser cockpit for live operation and inspection
+- an optional macOS daemon for window tracking and OCR-backed screen awareness
+
+This repository is for builders and power users who want to run, inspect, and extend a serious guardian prototype rather than a chat-only assistant shell.
+
+## Current State
+
+Shipped today on `develop`:
+
+- browser workspace UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations
+- 17 built-in tool capabilities plus workflow, starter-pack, skill, and MCP integration surfaces
+- runtime routing, fallback, approval, audit, and policy foundations
+- a dense operator cockpit with activity history, approvals, interventions, and workflow inspection
+
+Still in progress:
+
+- broader native reach beyond the current browser + macOS path
+- stronger long-horizon guardian intelligence and intervention learning
+- deeper execution hardening and richer extension ergonomics
+- a fully complete end-state product; Seraph is usable now, but still under active development
+
+Start with:
+
+- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
+- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
+
 ## Quick Start
+
+### Recommended: Local Direct Dev Stack
 
 ```bash
 # 1. Configure
-cp .env.dev.example .env.dev
+cp env.dev.example .env.dev
 # Edit .env.dev and set OPENROUTER_API_KEY=your-key-here
 
 # 2. Launch
-./manage.sh -e dev up -d
+./manage.sh -e dev local up
 
 # 3. Open
-open http://localhost:3000        # Current shipped browser UI
+open http://localhost:3001        # Current shipped browser UI
 open http://localhost:8004/docs   # Swagger API docs
 
-# 4. (Optional) Screen awareness daemon
+# 4. Inspect / stop
+./manage.sh -e dev local status
+./manage.sh -e dev local logs backend
+./manage.sh -e dev local down
+
+# 5. (Optional) Screen awareness daemon
 ./daemon/run.sh                   # Window tracking
 ./daemon/run.sh --ocr             # + OCR via Apple Vision
+```
+
+`./manage.sh -e dev local up` is the canonical direct browser-development path. It explicitly loads the repo-root `.env.dev`, starts the backend on `8004`, starts the frontend on `3001`, and avoids the cwd-sensitive env drift that can otherwise change the active model/provider.
+
+### Docker Dev Stack
+
+```bash
+./manage.sh -e dev up -d
+open http://localhost:3000
+open http://localhost:8004/docs
 ```
 
 ---
@@ -56,11 +115,11 @@ open http://localhost:8004/docs   # Swagger API docs
 
 ```
 frontend/src/
-  components/cockpit/ Guardian cockpit shell, state rails, intervention feed
-  components/        React overlays — chat, quest panel, settings
+  components/cockpit/ Guardian workspace operator surface, state rails, intervention feed
+  components/        React overlays — chat, priorities panel, settings
   hooks/             useWebSocket, keyboard and operator interaction hooks
-  stores/            Zustand stores — chat, quest
-  lib/               Tool parser and cockpit helpers
+  stores/            Zustand stores — chat, priorities
+  lib/               Tool parser and workspace helpers
   config/            Frontend constants
 
 backend/src/
@@ -68,7 +127,7 @@ backend/src/
   agent/             smolagents factory, onboarding, strategist, session manager
   tools/             @tool implementations + MCP manager
   workflows/         Reusable multi-step workflow loader, runtime, and gating
-  memory/            Soul file, LanceDB vector store, embedder, consolidator
+  memory/            Guardian record, LanceDB vector store, embedder, consolidator
   goals/             Hierarchical goal CRUD
   plugins/           Tool auto-discovery + registry
   scheduler/         APScheduler engine, connection manager, 9 background jobs
@@ -82,7 +141,7 @@ docs/                Docusaurus docs site
 
 ## Retired Surfaces
 
-Legacy village/editor code still exists in the repo for the moment, but it is no longer part of the product contract, documentation truth, or roadmap direction. Seraph is being built as a cockpit-first guardian system, not a game-shell assistant.
+The retired village/editor line has been removed from the active repo path. Seraph is being built as a workspace-first guardian system, not a game-shell assistant.
 
 ---
 
@@ -115,6 +174,29 @@ Config: `data/mcp-servers.json` | Example: `data/mcp-servers.example.json`
 ./manage.sh -e dev build        # Rebuild
 ```
 
+## Local Direct Runtime
+
+```bash
+./manage.sh -e dev local up
+./manage.sh -e dev local status
+./manage.sh -e dev local logs frontend
+./manage.sh -e dev local logs backend
+./manage.sh -e dev local down
+```
+
+Defaults for the local runtime:
+
+- frontend: `http://localhost:3001`
+- backend: `http://localhost:8004`
+- workspace dir: `/tmp/seraph-dev-data`
+- llm logs: `/tmp/seraph-dev-logs`
+
+Override ports or local paths with env vars before launch if needed:
+
+```bash
+LOCAL_FRONTEND_PORT=3100 LOCAL_BACKEND_PORT=8100 ./manage.sh -e dev local up
+```
+
 ---
 
 ## Development Status
@@ -130,7 +212,7 @@ Current truth:
 
 - [x] browser UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations are shipped
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`
-- [x] the source-of-truth docs now target a power-user guardian cockpit and the browser app now defaults to that shell
+- [x] the source-of-truth docs now target a power-user guardian workspace and the browser app now defaults to that shell
 - [ ] no workstream is complete yet
 - [ ] Seraph still has substantial work left in presence, guardian intelligence, embodied UX, and ecosystem leverage
 
@@ -144,3 +226,12 @@ Start with:
 - [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 - [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
 - [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)
+
+---
+
+## Get Involved
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR
+- Use [SUPPORT.md](SUPPORT.md) for questions, setup help, and roadmap pointers
+- Join [GitHub Discussions](https://github.com/seraph-quest/seraph/discussions) for setup help, product feedback, and demos
+- Report security issues through [SECURITY.md](SECURITY.md)

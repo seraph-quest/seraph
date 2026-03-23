@@ -1,7 +1,7 @@
 <h1 align="center">Seraph</h1>
 
 <p align="center">
-  <strong>A proactive AI guardian with persistent memory, observation, and real-world action</strong>
+  <strong>An AI guardian that remembers, watches, and acts</strong>
 </p>
 
 <p align="center">
@@ -12,10 +12,54 @@
 </p>
 
 <p align="center">
-  Seraph ships today with a guardian workspace browser interface, persistent identity, long-term memory, priorities tracked in a hierarchical goal system, proactive scheduling, screen awareness, and plug-and-play MCP server integration. The product direction is workspace-first.
+  Seraph is a proactive AI system for people who want an agent that can keep state, watch what is happening on the desktop, use tools, run workflows, and surface useful actions instead of waiting for one-off prompts.
+</p>
+
+<p align="center">
+  <a href="assets/github/seraph-demo.mp4">
+    <img src="assets/github/seraph-demo-poster.jpg" alt="Seraph workspace demo" width="900" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/github/seraph-demo.mp4"><strong>Watch the 20-second workspace demo</strong></a>
 </p>
 
 ---
+
+## What Seraph Is
+
+Seraph is a workspace-first AI agent with:
+
+- persistent identity and long-term memory
+- proactive scheduling, briefings, reviews, and intervention policy
+- tool use, reusable workflows, and plug-and-play MCP server integration
+- a browser cockpit for live operation and inspection
+- an optional macOS daemon for window tracking and OCR-backed screen awareness
+
+This repository is for builders and power users who want to run, inspect, and extend a serious guardian prototype rather than a chat-only assistant shell.
+
+## Current State
+
+Shipped today on `develop`:
+
+- browser workspace UI, backend APIs, observer daemon, memory, goals, and proactive scheduler foundations
+- 17 built-in tool capabilities plus workflow, starter-pack, skill, and MCP integration surfaces
+- runtime routing, fallback, approval, audit, and policy foundations
+- a dense operator cockpit with activity history, approvals, interventions, and workflow inspection
+
+Still in progress:
+
+- broader native reach beyond the current browser + macOS path
+- stronger long-horizon guardian intelligence and intervention learning
+- deeper execution hardening and richer extension ergonomics
+- a fully complete end-state product; Seraph is usable now, but still under active development
+
+Start with:
+
+- [docs/implementation/STATUS.md](docs/implementation/STATUS.md)
+- [docs/implementation/00-master-roadmap.md](docs/implementation/00-master-roadmap.md)
+- [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 
 ## Quick Start
 
@@ -23,7 +67,7 @@
 
 ```bash
 # 1. Configure
-cp .env.dev.example .env.dev
+cp env.dev.example .env.dev
 # Edit .env.dev and set OPENROUTER_API_KEY=your-key-here
 
 # 2. Launch
@@ -184,3 +228,12 @@ Start with:
 - [docs/research/00-synthesis.md](docs/research/00-synthesis.md)
 - [docs/research/10-competitive-benchmark.md](docs/research/10-competitive-benchmark.md)
 - [docs/research/11-superiority-program.md](docs/research/11-superiority-program.md)
+
+---
+
+## Get Involved
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR
+- Use [SUPPORT.md](SUPPORT.md) for questions, setup help, and roadmap pointers
+- Join [GitHub Discussions](https://github.com/seraph-quest/seraph/discussions) for setup help, product feedback, and demos
+- Report security issues through [SECURITY.md](SECURITY.md)

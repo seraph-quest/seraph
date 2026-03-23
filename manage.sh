@@ -434,7 +434,7 @@ COMPOSE_FILES=(
 )
 
 if [ ! -f "$ENV_FILE" ]; then
-    error_exit "$ENV_FILE not found. Please create it by copying from $SCRIPT_DIR/.env.$ENV.example and filling in the values."
+    error_exit "$ENV_FILE not found. Please create it by copying from $SCRIPT_DIR/env.$ENV.example and filling in the values."
 fi
 
 # Source env file for daemon config

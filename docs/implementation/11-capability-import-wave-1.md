@@ -165,11 +165,23 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 ### 8. hermes-shell-process-runtime-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_process_tools.py tests/test_tools_api.py tests/test_agent.py -q`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Faraday`
+  - findings:
+    - the shell/process slice should stay separate from `execute_code` so the Python sandbox remains the only inline-code path
+    - v1 should ship only a narrow process surface: `run_command`, `start_process`, `list_processes`, `read_process_output`, and `stop_process`
+    - commands should run with `shell=False`, keep `cwd` inside the workspace, and reject shell-style inline execution paths such as `python -c` or full PTY/session semantics
+    - the slice should rely on Seraph's existing approval/policy/audit wrappers instead of inventing a parallel terminal runtime
+  - resolution:
+    - slice 8 shipped as a separate `process_tools` module and left `execute_code` unchanged as the sandboxed inline-code runtime
+    - the process runtime is limited to one-shot command execution plus background-process start/list/read/stop, with no PTY, stdin streaming, or interactive shell session layer
+    - command execution is container-scoped, uses `shell=False`, keeps `cwd` within the workspace, blocks shell executables and inline interpreter code flags, and exposes the tools only in `full` mode
+    - process-tool audit payloads now summarize command/process metadata without persisting raw command output
+    - post-implementation review requests were sent on the existing reviewer threads, but the responses either timed out or returned unrelated slice-7 feedback, so the concrete reviewer record for this slice remains the scoped Faraday review above
 
 ### 9. hermes-security-controls-v1
 

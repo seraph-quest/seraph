@@ -22,7 +22,7 @@ class TestAgentFactory:
         assert len(tools) >= 10
         tool_names = [t.name for t in tools]
         for expected in ["read_file", "write_file", "web_search", "fill_template",
-                         "view_soul", "update_soul", "create_goal", "execute_code", "clarify", "todo", "session_search"]:
+                         "view_soul", "update_soul", "create_goal", "execute_code", "clarify", "todo", "session_search", "run_command", "start_process"]:
             assert expected in tool_names
         assert "delegate_task" not in tool_names
 
@@ -71,6 +71,18 @@ class TestAgentFactory:
         try:
             with pytest.raises(ApprovalRequired):
                 tools["execute_code"](code="print('hi')")
+        finally:
+            reset_runtime_context(tokens)
+
+    @patch("src.agent.factory.mcp_manager")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_wraps_run_command_for_approval(self, _mock_context, mock_mcp, async_db):
+        mock_mcp.get_tools.return_value = []
+        tools = {tool.name: tool for tool in get_tools()}
+        tokens = set_runtime_context("s1", "high_risk")
+        try:
+            with pytest.raises(ApprovalRequired):
+                tools["run_command"](command="pwd")
         finally:
             reset_runtime_context(tokens)
 

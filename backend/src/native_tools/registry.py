@@ -102,6 +102,31 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["balanced", "full"],
         "execution_boundaries": ["automation_state"],
     },
+    "run_command": {
+        "description": "Run an approved workspace-scoped command inside the runtime container",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_execution"],
+    },
+    "start_process": {
+        "description": "Start an approved workspace-scoped background process inside the runtime container",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_management"],
+    },
+    "list_processes": {
+        "description": "List background processes started through the runtime process manager",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_read"],
+    },
+    "read_process_output": {
+        "description": "Read recent stdout/stderr output for a managed background process",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_read"],
+    },
+    "stop_process": {
+        "description": "Stop a managed background process inside the runtime container",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["container_process_management"],
+    },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
         "policy_modes": ["safe", "balanced", "full"],

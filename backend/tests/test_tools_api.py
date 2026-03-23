@@ -14,6 +14,11 @@ async def test_tools_api_full_mode_includes_execute_code(client):
     assert resp.status_code == 200
     names = {tool["name"] for tool in resp.json()}
     assert "execute_code" in names
+    assert "run_command" in names
+    assert "start_process" in names
+    assert "list_processes" in names
+    assert "read_process_output" in names
+    assert "stop_process" in names
 
 
 @pytest.mark.asyncio
@@ -101,6 +106,7 @@ async def test_tools_api_balanced_mode_hides_full_only_tools(client):
     names = {tool["name"] for tool in resp.json()}
     assert "write_file" in names
     assert "execute_code" not in names
+    assert "run_command" not in names
     assert "get_secret" not in names
 
 

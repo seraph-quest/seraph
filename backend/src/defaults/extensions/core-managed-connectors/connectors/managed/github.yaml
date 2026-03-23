@@ -1,0 +1,21 @@
+name: github-managed
+provider: github
+description: Curated GitHub connector for repository, issue, and pull-request workflows.
+auth_kind: oauth
+capabilities:
+  - pull_requests.read
+  - pull_requests.write
+  - issues.read
+  - issues.write
+  - repositories.read
+setup_steps:
+  - Authorize GitHub access for Seraph.
+  - Select the installation or organization scope to use.
+config_fields:
+  - key: installation_id
+    label: Installation ID
+    required: true
+  - key: api_base_url
+    label: API Base URL
+    required: false
+    input: url

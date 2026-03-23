@@ -1614,7 +1614,7 @@ async def _eval_soul_runtime_audit() -> dict[str, Any]:
             read_success = next(call for call in success_calls if call["details"]["operation"] == "read")
             return {
                 "default_used": empty["details"]["used_default"],
-                "default_contains_title": "# Soul of the Traveler" in default_text,
+                "default_contains_title": "# Guardian Record" in default_text,
                 "write_length": write_success["details"]["length"],
                 "read_length": read_success["details"]["length"],
                 "ensure_created": skipped["details"]["created"],
@@ -3234,11 +3234,11 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
 async def _eval_session_consolidation_behavior() -> dict[str, Any]:
     mock_log_event = AsyncMock()
     llm_response = _make_litellm_response(json.dumps({
-        "facts": ["User is building a guardian cockpit"],
+        "facts": ["User is building a guardian workspace"],
         "patterns": [],
         "goals": ["Ship behavioral guardian evals"],
         "reflections": [],
-        "soul_updates": {"Goals": "- Ship the guardian cockpit pivot"},
+        "soul_updates": {"Goals": "- Ship the guardian workspace direction"},
     }))
 
     with (
@@ -3246,7 +3246,7 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
             session_manager,
             "get_history_text",
             AsyncMock(return_value=(
-                "User: I want Seraph to become a dense guardian cockpit.\n"
+                "User: I want Seraph to become a dense guardian workspace.\n"
                 "Assistant: Then we need behavioral evals, stronger state, and better operator UX."
             )),
         ),
@@ -3269,7 +3269,7 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
         "memory_categories": [call.kwargs["category"] for call in mock_add_memory.call_args_list],
         "stored_texts": [call.kwargs["text"] for call in mock_add_memory.call_args_list],
         "updated_soul_section": mock_update_soul.call_args.args[0],
-        "updated_soul_mentions_cockpit": "guardian cockpit" in mock_update_soul.call_args.args[1].lower(),
+        "updated_soul_mentions_workspace": "guardian workspace" in mock_update_soul.call_args.args[1].lower(),
     }
 
 
@@ -3444,6 +3444,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "current_focus": state.world_model.current_focus,
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
+            "active_blockers": list(state.world_model.active_blockers),
+            "next_up": list(state.world_model.next_up),
+            "dominant_thread": state.world_model.dominant_thread,
             "active_commitments_count": len(state.world_model.active_commitments),
             "active_projects_count": len(state.world_model.active_projects),
             "includes_investor_sync": "Investor sync" in state.world_model.active_commitments,
@@ -3467,6 +3470,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
             "agent_instructions_include_projects": "Active projects:" in instructions,
+            "agent_instructions_include_active_blockers": "Active blockers:" in instructions,
+            "agent_instructions_include_next_up": "Next up:" in instructions,
+            "agent_instructions_include_dominant_thread": "Dominant thread:" in instructions,
             "agent_instructions_include_memory_signals": "Memory signals:" in instructions,
             "strategist_instructions_include_receptivity": (
                 "Intervention receptivity: low" in strategist_agent.instructions
@@ -4342,6 +4348,13 @@ async def _eval_workflow_approval_threading_behavior() -> dict[str, Any]:
         ],
         "resume_from_step": run["resume_from_step"],
         "resume_checkpoint_label": run["resume_checkpoint_label"],
+        "branch_kind": run["branch_kind"],
+        "root_run_identity_matches_source": run["root_run_identity"] == run["run_identity"],
+        "checkpoint_candidate_kinds": [
+            checkpoint["kind"] for checkpoint in run["checkpoint_candidates"]
+        ],
+        "resume_plan_branch_kind": run["resume_plan"]["branch_kind"],
+        "resume_plan_requires_manual_execution": run["resume_plan"]["requires_manual_execution"],
         "thread_continue_message": run["thread_continue_message"],
         "approval_recovery_message": run["approval_recovery_message"],
     }
@@ -4394,7 +4407,7 @@ def _eval_capability_repair_behavior() -> dict[str, Any]:
             ],
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
-        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch(
             "src.api.capabilities._load_starter_packs",
             return_value=[
@@ -4443,9 +4456,50 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
         "pending_approval_count": 0,
         "resume_from_step": "write_step",
         "resume_checkpoint_label": "Retry failed step",
+        "retry_from_step_draft": (
+            'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md". '
+            'Resume from step "write_step".'
+        ),
+        "run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+        "run_fingerprint": "web-brief",
+        "continued_error_steps": ["write_step"],
+        "failed_step_tool": "write_file",
+        "checkpoint_step_ids": ["search_step", "write_step"],
+        "last_completed_step_id": "write_step",
+        "checkpoint_candidates": [
+            {
+                "step_id": "search_step",
+                "label": "search_step (web_search)",
+                "kind": "branch_from_checkpoint",
+                "status": "succeeded",
+            },
+            {
+                "step_id": "write_step",
+                "label": "write_step (write_file)",
+                "kind": "retry_failed_step",
+                "status": "continued_error",
+            },
+        ],
+        "branch_kind": "retry_failed_step",
+        "branch_depth": 0,
+        "parent_run_identity": None,
+        "root_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+        "resume_plan": {
+            "source_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+            "parent_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+            "root_run_identity": "thread-1:workflow_web_brief_to_file:web-brief",
+            "branch_kind": "retry_failed_step",
+            "resume_from_step": "write_step",
+            "resume_checkpoint_label": "write_step (write_file)",
+            "requires_manual_execution": True,
+        },
         "availability": "ready",
         "thread_continue_message": None,
         "approval_recovery_message": None,
+        "step_records": [
+            {"id": "search_step", "tool": "web_search", "status": "succeeded"},
+            {"id": "write_step", "tool": "write_file", "status": "continued_error"},
+        ],
     }
     approval = {
         "id": "approval-1",
@@ -4550,12 +4604,17 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
         "item_kinds": [item["kind"] for item in items],
         "latest_kind": items[0]["kind"],
         "workflow_thread_id": workflow_item["thread_id"],
-        "workflow_continue_message_matches_replay": (
-            workflow_item["continue_message"] == workflow_item["replay_draft"]
+        "workflow_continue_message_matches_retry_plan": (
+            workflow_item["continue_message"] == workflow_run["retry_from_step_draft"]
         ),
         "workflow_replay_allowed": workflow_item["replay_allowed"],
         "workflow_resume_from_step": workflow_item["metadata"]["resume_from_step"],
         "workflow_resume_checkpoint_label": workflow_item["metadata"]["resume_checkpoint_label"],
+        "workflow_run_identity": workflow_item["metadata"]["run_identity"],
+        "workflow_branch_kind": workflow_item["metadata"]["branch_kind"],
+        "workflow_resume_plan_kind": workflow_item["metadata"]["resume_plan"]["branch_kind"],
+        "workflow_failed_step_tool": workflow_item["metadata"]["failed_step_tool"],
+        "workflow_checkpoint_candidate_count": len(workflow_item["metadata"]["checkpoint_candidates"]),
         "approval_thread_matches": approval_item["thread_id"] == "thread-1",
         "approval_continue_message": approval_item["continue_message"],
         "notification_thread_matches": notification_item["thread_id"] == "thread-1",
@@ -4618,7 +4677,7 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
             ],
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
-        patch("src.api.capabilities._load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
+        patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch(
             "src.api.capabilities._load_starter_packs",
             return_value=[
@@ -4681,15 +4740,24 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
         "workflow_recommended_action_types": [
             action["type"] for action in workflow_preflight["recommended_actions"]
         ],
+        "workflow_autorepair_action_types": [
+            action["type"] for action in workflow_preflight["autorepair_actions"]
+        ],
         "starter_pack_can_autorepair": starter_pack_preflight["can_autorepair"],
         "starter_pack_blocking_reasons": starter_pack_preflight["blocking_reasons"],
         "starter_pack_command_present": starter_pack_preflight["command"] is not None,
+        "starter_pack_autorepair_action_types": [
+            action["type"] for action in starter_pack_preflight["autorepair_actions"]
+        ],
         "runbook_ready": runbook_preflight["ready"],
         "runbook_can_autorepair": runbook_preflight["can_autorepair"],
         "runbook_parameter_schema_keys": sorted(runbook_preflight["parameter_schema"].keys()),
         "runbook_risk_level": runbook_preflight["risk_level"],
         "runbook_execution_boundaries": runbook_preflight["execution_boundaries"],
         "runbook_blocking_reasons": runbook_preflight["blocking_reasons"],
+        "runbook_autorepair_action_types": [
+            action["type"] for action in runbook_preflight["autorepair_actions"]
+        ],
     }
 
 

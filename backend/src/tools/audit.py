@@ -11,6 +11,7 @@ from smolagents import Tool
 from src.approval.runtime import get_current_session_id
 from src.audit.formatting import format_tool_call_summary, redact_for_audit, summarize_tool_result
 from src.audit.repository import audit_repository
+from src.llm_runtime import get_current_llm_request_id
 from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ class AuditedTool(Tool):
         summary: str,
         details: dict[str, Any],
     ) -> None:
+        request_id = get_current_llm_request_id()
         try:
             _run_async(
                 audit_repository.log_event(
@@ -132,7 +134,10 @@ class AuditedTool(Tool):
                     risk_level=get_tool_risk_level(self.name, is_mcp=self.is_mcp),
                     policy_mode=get_current_tool_policy_mode(),
                     summary=summary,
-                    details=details,
+                    details={
+                        **details,
+                        **({"request_id": request_id} if request_id else {}),
+                    },
                 )
             )
         except Exception:

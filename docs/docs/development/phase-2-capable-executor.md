@@ -12,17 +12,17 @@ sidebar_position: 2
 
 ---
 
-## 2.1 Plugin System
+## 2.1 Native Tool Discovery
 
 **Files**:
 ```
-backend/src/plugins/
+backend/src/native_tools/
   __init__.py
   loader.py          # Auto-discovery from tools/ directory
-  registry.py        # Tool metadata registry (name, village_position, animation)
+  registry.py        # Tool metadata registry
 ```
 
-**Plugin loader** (`loader.py`):
+**Native tool loader** (`loader.py`):
 - Scans `src/tools/*.py` for `@tool` decorated functions and `Tool` subclasses
 - Auto-discovers tools — no more hardcoded list in `factory.py`
 - Supports hot-reload via `reload_tools()`
@@ -33,7 +33,7 @@ backend/src/plugins/
 **API endpoint**: `GET /api/tools` — returns available tools with metadata
 
 **Modified**: `backend/src/agent/factory.py`
-- `get_tools()` now calls `discover_tools()` from plugin loader + `mcp_manager.get_tools()` for MCP tools
+- `get_tools()` now calls `discover_tools()` from the native tool loader + `mcp_manager.get_tools()` for MCP tools
 - No manual imports — all tools auto-discovered
 - MCP tools (e.g. Things3) are merged in at runtime if configured
 
@@ -115,7 +115,7 @@ RUN uv run playwright install chromium
 
 ## Implementation Order (as executed)
 
-1. Plugin system (loader, registry) — all tools benefit from auto-discovery
+1. Native tool discovery (loader, registry) — all bundled tools benefit from auto-discovery
 2. Shell execution tool + snekbox sidecar — easiest to verify
 3. Browser automation tool (Playwright) — high capability unlock
 4. Village expansion (buildings, animations) — visual polish
@@ -127,7 +127,7 @@ RUN uv run playwright install chromium
 - [x] `browse_webpage("https://example.com")` returns page content
 - [x] Drop a new `.py` tool file in `src/tools/`, verify auto-discovered
 - [x] New tools trigger correct village casting animations
-- [x] 16 tools auto-discovered by plugin loader
+- [x] 16 tools auto-discovered by the native tool loader
 - [x] 35 routes registered (including `GET /api/tools`)
 - [x] TypeScript compiles clean
 - [x] Lock file updated

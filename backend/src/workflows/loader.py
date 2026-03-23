@@ -25,6 +25,17 @@ def workflow_tool_name(name: str) -> str:
     return f"workflow_{sanitize_workflow_name(name)}"
 
 
+def _record_workflow_error(
+    errors: list[dict[str, str]] | None,
+    *,
+    path: str,
+    message: str,
+) -> None:
+    logger.warning(message)
+    if errors is not None:
+        errors.append({"file_path": path, "message": message})
+
+
 @dataclass
 class WorkflowStep:
     tool: str
@@ -46,6 +57,8 @@ class Workflow:
     file_path: str = ""
     body: str = ""
     result_template: str = ""
+    source: str = "legacy"
+    extension_id: str | None = None
 
     @property
     def tool_name(self) -> str:
@@ -56,22 +69,20 @@ class Workflow:
         return list(dict.fromkeys(step.tool for step in self.steps))
 
 
-def _parse_workflow_file(path: str) -> Workflow | None:
-    """Parse a single markdown workflow file."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError as exc:
-        logger.warning("Failed to read workflow file %s: %s", path, exc)
-        return None
-
+def parse_workflow_content(
+    content: str,
+    *,
+    path: str = "<draft>",
+    errors: list[dict[str, str]] | None = None,
+) -> Workflow | None:
+    """Parse workflow markdown content into a workflow model."""
     if not content.startswith("---"):
-        logger.warning("Workflow file %s missing YAML frontmatter", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} missing YAML frontmatter")
         return None
 
     parts = content.split("---", 2)
     if len(parts) < 3:
-        logger.warning("Workflow file %s has malformed frontmatter", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has malformed frontmatter")
         return None
 
     frontmatter_str = parts[1].strip()
@@ -80,24 +91,24 @@ def _parse_workflow_file(path: str) -> Workflow | None:
     try:
         frontmatter = yaml.safe_load(frontmatter_str)
     except yaml.YAMLError as exc:
-        logger.warning("Workflow file %s has invalid YAML: %s", path, exc)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid YAML: {exc}")
         return None
 
     if not isinstance(frontmatter, dict):
-        logger.warning("Workflow file %s frontmatter is not a mapping", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} frontmatter is not a mapping")
         return None
 
     name = frontmatter.get("name")
     description = frontmatter.get("description")
     steps_raw = frontmatter.get("steps")
     if not name or not isinstance(name, str):
-        logger.warning("Workflow file %s missing required 'name' field", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} missing required 'name' field")
         return None
     if not description or not isinstance(description, str):
-        logger.warning("Workflow file %s missing required 'description' field", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} missing required 'description' field")
         return None
     if not isinstance(steps_raw, list) or not steps_raw:
-        logger.warning("Workflow file %s missing required non-empty 'steps' list", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} missing required non-empty 'steps' list")
         return None
 
     requires = frontmatter.get("requires", {})
@@ -106,33 +117,33 @@ def _parse_workflow_file(path: str) -> Workflow | None:
     if not isinstance(requires, dict):
         requires = {}
     if not isinstance(inputs, dict):
-        logger.warning("Workflow file %s has invalid 'inputs' field", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid 'inputs' field")
         return None
     if result_template and not isinstance(result_template, str):
-        logger.warning("Workflow file %s has invalid 'result' field", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid 'result' field")
         return None
 
     parsed_steps: list[WorkflowStep] = []
     seen_ids: set[str] = set()
     for idx, step_raw in enumerate(steps_raw, start=1):
         if not isinstance(step_raw, dict):
-            logger.warning("Workflow file %s step %d is not a mapping", path, idx)
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} step {idx} is not a mapping")
             return None
         tool = step_raw.get("tool")
         if not tool or not isinstance(tool, str):
-            logger.warning("Workflow file %s step %d missing 'tool'", path, idx)
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} step {idx} missing 'tool'")
             return None
         step_id = step_raw.get("id") or f"step_{idx}"
         if not isinstance(step_id, str):
-            logger.warning("Workflow file %s step %d has invalid 'id'", path, idx)
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} step {idx} has invalid 'id'")
             return None
         if step_id in seen_ids:
-            logger.warning("Workflow file %s has duplicate step id '%s'", path, step_id)
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} has duplicate step id '{step_id}'")
             return None
         seen_ids.add(step_id)
         arguments = step_raw.get("arguments", {})
         if not isinstance(arguments, dict):
-            logger.warning("Workflow file %s step %d has invalid 'arguments'", path, idx)
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} step {idx} has invalid 'arguments'")
             return None
         parsed_steps.append(
             WorkflowStep(
@@ -146,16 +157,16 @@ def _parse_workflow_file(path: str) -> Workflow | None:
     requires_tools = requires.get("tools", []) if isinstance(requires, dict) else []
     requires_skills = requires.get("skills", []) if isinstance(requires, dict) else []
     if not isinstance(requires_tools, list) or not all(isinstance(item, str) for item in requires_tools):
-        logger.warning("Workflow file %s has invalid requires.tools", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid requires.tools")
         return None
     if not isinstance(requires_skills, list) or not all(isinstance(item, str) for item in requires_skills):
-        logger.warning("Workflow file %s has invalid requires.skills", path)
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid requires.skills")
         return None
 
     normalized_inputs: dict[str, dict[str, Any]] = {}
     for input_name, input_spec in inputs.items():
         if not isinstance(input_name, str) or not isinstance(input_spec, dict):
-            logger.warning("Workflow file %s has invalid input definition", path)
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid input definition")
             return None
         normalized_inputs[input_name] = {
             "type": input_spec.get("type", "string"),
@@ -170,10 +181,13 @@ def _parse_workflow_file(path: str) -> Workflow | None:
         if tool_name not in requires_tools
     ]
     if missing_required_tools:
-        logger.warning(
-            "Workflow file %s has undeclared step tools: %s",
-            path,
-            ", ".join(missing_required_tools),
+        _record_workflow_error(
+            errors,
+            path=path,
+            message=(
+                f"Workflow file {path} has undeclared step tools: "
+                f"{', '.join(missing_required_tools)}"
+            ),
         )
         return None
 
@@ -192,20 +206,44 @@ def _parse_workflow_file(path: str) -> Workflow | None:
     )
 
 
-def load_workflows(workflows_dir: str) -> list[Workflow]:
+def _parse_workflow_file(path: str, *, errors: list[dict[str, str]] | None = None) -> Workflow | None:
+    """Parse a single markdown workflow file."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as exc:
+        _record_workflow_error(errors, path=path, message=f"Failed to read workflow file {path}: {exc}")
+        return None
+
+    return parse_workflow_content(content, path=path, errors=errors)
+
+
+def scan_workflow_paths(workflow_paths: list[str]) -> tuple[list[Workflow], list[dict[str, str]]]:
+    """Parse an explicit set of workflow file paths with structured errors."""
+    workflows: list[Workflow] = []
+    errors: list[dict[str, str]] = []
+    for path in sorted(workflow_paths):
+        workflow = _parse_workflow_file(path, errors=errors)
+        if workflow is not None:
+            workflows.append(workflow)
+            logger.info("Loaded workflow: %s from %s", workflow.name, os.path.basename(path))
+    return workflows, errors
+
+
+def scan_workflows(workflows_dir: str) -> tuple[list[Workflow], list[dict[str, str]]]:
     """Scan directory for markdown workflows and parse them."""
     if not os.path.isdir(workflows_dir):
         logger.info("Workflows directory %s does not exist, skipping", workflows_dir)
-        return []
+        return [], []
 
-    workflows: list[Workflow] = []
-    for filename in sorted(os.listdir(workflows_dir)):
-        if not filename.endswith(".md"):
-            continue
-        path = os.path.join(workflows_dir, filename)
-        workflow = _parse_workflow_file(path)
-        if workflow is not None:
-            workflows.append(workflow)
-            logger.info("Loaded workflow: %s from %s", workflow.name, filename)
+    workflow_paths = [
+        os.path.join(workflows_dir, filename)
+        for filename in sorted(os.listdir(workflows_dir))
+        if filename.endswith(".md")
+    ]
+    return scan_workflow_paths(workflow_paths)
 
+
+def load_workflows(workflows_dir: str) -> list[Workflow]:
+    workflows, _ = scan_workflows(workflows_dir)
     return workflows

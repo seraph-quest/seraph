@@ -5,7 +5,7 @@ sidebar_position: 2
 # OpenClaw vs Seraph — Feature Gap Analysis
 
 > This document is a historical comparison snapshot, not the live product-status source of truth. For current status, use `docs/implementation/00-master-roadmap.md`, `docs/implementation/STATUS.md`, and the numbered workstream files under `docs/implementation/`.
-> Historical note: the Seraph side of this comparison predates the cockpit-only pivot and still describes the retired village/editor line.
+> Historical note: the Seraph side of this comparison predates the guardian-workspace pivot. Any remaining village/avatar references should be treated as archived context, not live product guidance.
 
 > **Date**: 2026-02-09 (updated)
 > **OpenClaw version context**: v2026.1.x (145k+ GitHub stars, formerly Clawdbot/Moltbot)
@@ -15,7 +15,7 @@ sidebar_position: 2
 
 **OpenClaw** is a self-hosted gateway connecting messaging platforms (WhatsApp, Telegram, Discord, etc.) to AI agents. It's headless — text-in/text-out with no visual UI.
 
-**Seraph** in this historical snapshot is described through the old village-first shell. That is no longer the active product direction; current Seraph is cockpit-first.
+**Seraph** in this historical snapshot is partly described through the old village-first shell. That is no longer the active product direction; current Seraph is a guardian workspace.
 
 Different philosophies, but many of OpenClaw's features are worth adopting.
 
@@ -24,19 +24,19 @@ Different philosophies, but many of OpenClaw's features are worth adopting.
 ## What Seraph Has In The Current Repo
 
 - Real-time chat with AI agent (WebSocket streaming with step/final/error/proactive/ambient types)
-- Tool execution with visual feedback (animated RPG avatar casts magic effects in village)
-- **17 auto-discovered tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md plugins
+- Tool execution with visible feedback in the guardian workspace
+- **17 auto-discovered native tools + MCP integrations**: web search, file I/O, template fill, soul view/update, goal CRUD, shell execute (snekbox sandbox), browser automation (Playwright) + SKILL.md skills
 - **Persistent sessions** — SQLite-backed, survive restarts, session list UI with switch/delete
 - **Persistent memory** — Soul file (soul.md) + LanceDB vector store with sentence-transformer embeddings
 - **Memory consolidation** — Background extraction of facts/preferences/decisions after each conversation
-- **Hierarchical goal system** — Vision → Annual → Quarterly → Monthly → Weekly → Daily, with quest log UI
+- **Hierarchical priorities/goals system** — Vision → Annual → Quarterly → Monthly → Weekly → Daily, with a priorities UI
 - **Onboarding flow** — Specialized agent for first-time users, skip/restart controls, welcome message
-- **Plugin system** — Auto-discovery of tools from `src/tools/`, tool registry with village metadata
+- **Extension surfaces** — Auto-discovery of bundled native tools from `src/tools/`, tool registry, SKILL.md skills, and workspace-facing capability surfaces
 - **Sandboxed execution** — snekbox Docker sidecar for shell commands, Playwright for browser
-- Phaser 3 village scene with dynamically loaded buildings from Tiled JSON, day/night cycle, idle wandering, 12 waypoints, speech bubbles
+- Guardian workspace with draggable panes, approvals, activity ledger, live trace, and operator surfaces
 - Multi-model support via OpenRouter/LiteLLM
 - Docker Compose dev environment (3 services: backend, frontend, sandbox)
-- React 19 + Vite 6 + TypeScript + Tailwind + Zustand + Phaser 3 frontend
+- React 19 + Vite 6 + TypeScript + Tailwind + Zustand frontend
 
 ---
 
@@ -96,7 +96,7 @@ These were gaps in the original analysis that have since been implemented:
 | **Sandboxed execution** | No sandboxing | snekbox Docker sidecar (Phase 2) |
 | **Browser automation** | DuckDuckGo text search only | Playwright with headless Chromium (Phase 2) |
 | **Shell command execution** | No shell tool | snekbox-based sandboxed execution (Phase 2) |
-| **Plugin/skill system** | 4 hardcoded tools | Auto-discovery from `src/tools/` (17 built-in tool capabilities) + MCP integrations + SKILL.md plugins |
+| **Extension surfaces** | 4 hardcoded tools | Auto-discovery from `src/tools/` (17 built-in native tool capabilities) + MCP integrations + SKILL.md skills |
 | **Proactive heartbeat** | No scheduler or reasoning engine | APScheduler with 9 jobs: strategist tick, daily briefing, evening review, memory consolidation, goal check, calendar scan, activity digest, weekly activity review, screen cleanup |
 | **Multi-agent / subagents** | Single agent (+ onboarding agent) | Recursive delegation with orchestrator + domain specialists behind feature flag (Phase 4) |
 | **Configuration UI** | No settings UI | Settings panel with interruption mode toggle, SKILL.md management, MCP server management (Phase 3.5) |
@@ -117,7 +117,7 @@ These were gaps in the original analysis that have since been implemented:
 5. ~~**Shell execution tool** — With sandboxing/allowlists~~
 6. ~~**Browser automation tool** — Playwright-based, huge capability unlock~~
 7. **Media support** — Image send/receive in chat
-8. ~~**Plugin/skill system** — User-installable tools without backend code changes~~
+8. ~~**Extension surfaces** — Built-in native tools plus installable MCP servers and SKILL.md skills~~
 
 ### Phase 3 — Operational Maturity
 
@@ -130,23 +130,21 @@ These were gaps in the original analysis that have since been implemented:
 
 13. **Telegram/Discord bot** — Alternative frontends leveraging existing backend
 14. **Scheduled/proactive tasks** — Heartbeat system for autonomous workflows
-15. **TTS** — Fits the RPG theme (avatar "speaking" with voice)
+15. **TTS** — Could deepen guardian presence if routed through the current workspace and native surfaces
 16. **Structured logging** — Redaction, multiple output formats
 
 ---
 
 ## Seraph's Unique Advantage
 
-OpenClaw is headless. Seraph's **visual RPG experience** has no equivalent:
+OpenClaw is headless. Seraph's differentiator is a **guardian workspace with live state and action visibility**:
 
-- Phaser 3 village scene with dynamically loaded buildings and magic effect animations
-- Animated pixel-art avatar with casting effects on tool use
-- Day/night cycle based on system time
-- Idle wandering between 12 waypoints
-- Speech bubbles with step content
-- Quest log UI with hierarchical goals and domain progress
-- Persistent identity and onboarding that builds a relationship
-- CRT scanline/vignette retro effects
+- dense multi-pane workspace for sessions, approvals, activity, workflows, trace, and memory-linked state
+- visible tool, workflow, and routing activity instead of text-only opaque execution
+- separate Activity Ledger with grouped request history, LLM spend, and thread continuity
+- persistent identity, onboarding, memory, and priorities tied into one operator surface
+- native observer, proactive delivery, and desktop continuity beyond the browser tab
+- stronger visual presence and instrumentation than a headless messaging gateway
 
 ---
 

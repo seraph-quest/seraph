@@ -38,6 +38,9 @@ class GuardianLearningSignal:
     blocked_state_bias: str
     suppression_bias: str
     thread_preference_bias: str
+    blocked_direct_failure_count: int
+    blocked_native_success_count: int
+    available_direct_success_count: int
 
     @classmethod
     def neutral(cls, intervention_type: str) -> "GuardianLearningSignal":
@@ -56,6 +59,9 @@ class GuardianLearningSignal:
             blocked_state_bias="neutral",
             suppression_bias="neutral",
             thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
         )
 
 
@@ -222,8 +228,16 @@ class GuardianFeedbackRepository:
             for item in interventions
             if item.user_state in {"deep_work", "in_meeting", "away"}
         ]
-        blocked_state_negative = sum(
-            1 for item in blocked_state_interventions if item.feedback_type == "not_helpful"
+        blocked_direct_failures = sum(
+            1
+            for item in blocked_state_interventions
+            if (
+                item.transport != "native_notification"
+                and (
+                    item.feedback_type == "not_helpful"
+                    or item.latest_outcome == "failed"
+                )
+            )
         )
         blocked_state_positive_native = sum(
             1
@@ -235,6 +249,7 @@ class GuardianFeedbackRepository:
             1
             for item in interventions
             if item.user_state == "available"
+            and item.transport != "native_notification"
             and item.feedback_type in {"helpful", "acknowledged"}
         )
 
@@ -243,7 +258,7 @@ class GuardianFeedbackRepository:
             not_helpful_count >= 1 and helpful_count == 0 and failed_count >= 1
         ):
             bias = "reduce_interruptions"
-        elif helpful_count >= 2 and not_helpful_count == 0:
+        elif available_window_positive >= 2 and not_helpful_count == 0:
             bias = "prefer_direct_delivery"
 
         phrasing_bias = "neutral"
@@ -267,15 +282,15 @@ class GuardianFeedbackRepository:
             escalation_bias = "prefer_async_native"
 
         timing_bias = "neutral"
-        if blocked_state_negative >= 2:
+        if blocked_direct_failures >= 2:
             timing_bias = "avoid_focus_windows"
         elif available_window_positive >= 2 and not_helpful_count == 0:
             timing_bias = "prefer_available_windows"
 
         blocked_state_bias = "neutral"
-        if blocked_state_negative >= 2:
+        if blocked_direct_failures >= 2:
             blocked_state_bias = "avoid_blocked_state_interruptions"
-        elif blocked_state_positive_native >= 2 and not_helpful_count == 0:
+        elif blocked_state_positive_native >= 2 and blocked_direct_failures == 0:
             blocked_state_bias = "prefer_async_for_blocked_state"
 
         suppression_bias = "neutral"
@@ -305,6 +320,9 @@ class GuardianFeedbackRepository:
             blocked_state_bias=blocked_state_bias,
             suppression_bias=suppression_bias,
             thread_preference_bias=thread_preference_bias,
+            blocked_direct_failure_count=blocked_direct_failures,
+            blocked_native_success_count=blocked_state_positive_native,
+            available_direct_success_count=available_window_positive,
         )
 
 

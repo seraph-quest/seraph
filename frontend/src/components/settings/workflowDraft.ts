@@ -36,6 +36,8 @@ export interface WorkflowInfo {
   enabled: boolean;
   step_count: number;
   file_path: string;
+  source?: string;
+  extension_id?: string | null;
   policy_modes: string[];
   execution_boundaries: string[];
   risk_level: string;
@@ -78,6 +80,20 @@ export function buildWorkflowDraft(workflow: WorkflowInfo, artifactPath?: string
       ? `This workflow may require approval (${workflow.approval_behavior}).`
       : "This workflow should run without approval in the current policy mode.",
   ];
+
+  if (workflow.is_available === false) {
+    const blockers = [
+      workflow.missing_tools?.length
+        ? `missing tools: ${workflow.missing_tools.join(", ")}`
+        : "",
+      workflow.missing_skills?.length
+        ? `missing skills: ${workflow.missing_skills.join(", ")}`
+        : "",
+    ].filter(Boolean);
+    if (blockers.length > 0) {
+      notes.push(`Current blockers: ${blockers.join(" · ")}.`);
+    }
+  }
 
   return [header, ...notes].join("\n");
 }

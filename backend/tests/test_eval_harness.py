@@ -352,6 +352,19 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["current_focus"] == "Prepare investor brief while in Arc"
     assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
     assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
+    assert details_by_name["guardian_world_model_behavior"]["active_blockers"] == [
+        "Recent intervention friction is present",
+    ]
+    assert details_by_name["guardian_world_model_behavior"]["next_up"][:2] == [
+        "Investor brief",
+        "Prepare investor brief",
+    ]
+    assert (
+        details_by_name["guardian_world_model_behavior"]["next_up"][2].startswith("Investor follow-up")
+    )
+    assert (
+        details_by_name["guardian_world_model_behavior"]["dominant_thread"].startswith("Investor follow-up")
+    )
     assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
     assert details_by_name["guardian_world_model_behavior"]["active_projects_count"] >= 1
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
@@ -363,6 +376,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_active_blockers"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_next_up"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_dominant_thread"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_memory_signals"] is True
     assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
@@ -578,6 +594,21 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["workflow_approval_threading_behavior"]["resume_from_step"] == "approval_gate"
     assert details_by_name["workflow_approval_threading_behavior"]["resume_checkpoint_label"] == "Approval gate"
+    assert details_by_name["workflow_approval_threading_behavior"]["branch_kind"] == "approval_resume"
+    assert (
+        details_by_name["workflow_approval_threading_behavior"]["root_run_identity_matches_source"]
+        is True
+    )
+    assert details_by_name["workflow_approval_threading_behavior"]["checkpoint_candidate_kinds"] == [
+        "approval_gate",
+    ]
+    assert details_by_name["workflow_approval_threading_behavior"]["resume_plan_branch_kind"] == (
+        "approval_resume"
+    )
+    assert (
+        details_by_name["workflow_approval_threading_behavior"]["resume_plan_requires_manual_execution"]
+        is True
+    )
     assert (
         details_by_name["workflow_approval_threading_behavior"]["thread_continue_message"]
         == "Continue once the web brief is approved"
@@ -597,7 +628,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["threaded_operator_timeline_behavior"]["latest_kind"] == "notification"
     assert details_by_name["threaded_operator_timeline_behavior"]["workflow_thread_id"] == "thread-1"
     assert (
-        details_by_name["threaded_operator_timeline_behavior"]["workflow_continue_message_matches_replay"]
+        details_by_name["threaded_operator_timeline_behavior"]["workflow_continue_message_matches_retry_plan"]
         is True
     )
     assert details_by_name["threaded_operator_timeline_behavior"]["workflow_replay_allowed"] is True
@@ -605,6 +636,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert (
         details_by_name["threaded_operator_timeline_behavior"]["workflow_resume_checkpoint_label"]
         == "Retry failed step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_run_identity"] == (
+        "thread-1:workflow_web_brief_to_file:web-brief"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_branch_kind"] == (
+        "retry_failed_step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_resume_plan_kind"] == (
+        "retry_failed_step"
+    )
+    assert details_by_name["threaded_operator_timeline_behavior"]["workflow_failed_step_tool"] == (
+        "write_file"
+    )
+    assert (
+        details_by_name["threaded_operator_timeline_behavior"]["workflow_checkpoint_candidate_count"]
+        == 2
     )
     assert details_by_name["threaded_operator_timeline_behavior"]["approval_thread_matches"] is True
     assert (
@@ -643,11 +690,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["capability_preflight_behavior"]["workflow_recommended_action_types"] == [
         "set_tool_policy",
     ]
+    assert details_by_name["capability_preflight_behavior"]["workflow_autorepair_action_types"] == [
+        "set_tool_policy",
+    ]
     assert details_by_name["capability_preflight_behavior"]["starter_pack_can_autorepair"] is True
     assert "skill web-briefing missing tool: write_file" in (
         details_by_name["capability_preflight_behavior"]["starter_pack_blocking_reasons"]
     )
     assert details_by_name["capability_preflight_behavior"]["starter_pack_command_present"] is True
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_autorepair_action_types"] == [
+        "set_tool_policy",
+    ]
     assert details_by_name["capability_preflight_behavior"]["runbook_ready"] is False
     assert details_by_name["capability_preflight_behavior"]["runbook_can_autorepair"] is True
     assert details_by_name["capability_preflight_behavior"]["runbook_parameter_schema_keys"] == [
@@ -661,6 +714,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["capability_preflight_behavior"]["runbook_blocking_reasons"] == [
         "missing tool: write_file",
+    ]
+    assert details_by_name["capability_preflight_behavior"]["runbook_autorepair_action_types"] == [
+        "set_tool_policy",
     ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
@@ -826,11 +882,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["session_consolidation_behavior"]["soul_update_count"] == 1
     assert details_by_name["session_consolidation_behavior"]["memory_categories"] == ["fact", "goal"]
     assert details_by_name["session_consolidation_behavior"]["stored_texts"] == [
-        "User is building a guardian cockpit",
+        "User is building a guardian workspace",
         "Ship behavioral guardian evals",
     ]
     assert details_by_name["session_consolidation_behavior"]["updated_soul_section"] == "Goals"
-    assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_cockpit"] is True
+    assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_workspace"] is True
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",

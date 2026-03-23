@@ -98,10 +98,10 @@ async def websocket_chat(websocket: WebSocket):
                 WSResponse(
                     type="proactive",
                     content=(
-                        "Greetings, traveler! I am Seraph, your guide through these lands. "
-                        "Before we embark on our full journey together, let me get to know you a bit. "
-                        "I'll ask a few questions to tailor our adventure. "
-                        "If you'd prefer to skip ahead, just say the word!"
+                        "Seraph online. Before I begin acting on your behalf, I need a clearer read on who you are, "
+                        "what matters most, and how you want this workspace to operate. "
+                        "I'll ask a few short onboarding questions to establish that baseline. "
+                        "If you want the full workspace immediately, just say the word and I'll skip ahead."
                     ),
                     intervention_type="advisory",
                     seq=_next_seq(),
@@ -134,8 +134,8 @@ async def websocket_chat(websocket: WebSocket):
                     WSResponse(
                         type="final",
                         content=(
-                            "No worries! Onboarding skipped. "
-                            "You now have access to all my abilities. How can I help you?"
+                            "Onboarding skipped. "
+                            "The full workspace is now available. What do you want me to help you do?"
                         ),
                         seq=_next_seq(),
                     ).model_dump_json()
@@ -231,6 +231,7 @@ async def websocket_chat(websocket: WebSocket):
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
                         "timeout_seconds": settings.agent_chat_timeout,
+                        "request_id": llm_request_id,
                     },
                 )
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
@@ -280,6 +281,7 @@ async def websocket_chat(websocket: WebSocket):
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
                         "error": safe_error,
+                        "request_id": llm_request_id,
                     },
                 )
                 await websocket.send_text(
@@ -309,6 +311,7 @@ async def websocket_chat(websocket: WebSocket):
                         "response_length": len(final_result),
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
+                        "request_id": llm_request_id,
                     },
                 )
             await websocket.send_text(

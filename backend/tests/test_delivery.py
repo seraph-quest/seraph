@@ -4,11 +4,13 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
+from config.settings import settings
+from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
-from src.observer.delivery import deliver_or_queue, deliver_queued_bundle
+from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
 from src.observer.intervention_policy import InterventionAction
 from src.observer.native_notification_queue import native_notification_queue
 from src.scheduler.connection_manager import BroadcastResult
@@ -67,6 +69,82 @@ async def test_deliver_broadcasts():
     finally:
         for p in patches:
             p.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_channel_adapter_can_deliver_without_websocket():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Native path", intervention_type="alert", urgency=4)
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.act
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Native path"
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocket():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_iq.peek_all = AsyncMock(
+        return_value=[
+            MagicMock(id="queued-1", content="Queued update", intervention_id="intervention-1"),
+        ]
+    )
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
+            delivered = await deliver_queued_bundle()
+
+        assert delivered == 1
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.delete_many.assert_called_once_with(["queued-1"])
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert "Queued update" in notification.body
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+def test_active_channel_adapters_can_disable_all_packaged_transports(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    original_workspace_dir = settings.workspace_dir
+    settings.workspace_dir = str(workspace_dir)
+    try:
+        save_extension_state_payload(
+            {
+                "extensions": {
+                    "seraph.core-channel-adapters": {
+                        "connector_state": {
+                            "channels/websocket.yaml": {"enabled": False},
+                            "channels/native-notification.yaml": {"enabled": False},
+                        }
+                    }
+                }
+            }
+        )
+        assert _active_channel_adapters() == set()
+    finally:
+        settings.workspace_dir = original_workspace_dir
 
 
 @pytest.mark.asyncio
@@ -153,6 +231,7 @@ async def test_queue_when_blocked():
             urgency=3,
             reasoning="",
             intervention_id=msg.intervention_id,
+            session_id=None,
         )
     finally:
         for p in patches:
@@ -810,5 +889,38 @@ async def test_deliver_queued_bundle_logs_transport_failure(async_db):
         and event["details"]["bundle_item_count"] == 1
         and event["details"]["error"] == "all_connections_failed"
         and event["details"]["queue_retained"] is True
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_deliver_queued_bundle_with_no_active_channel_adapters_retains_queue(async_db):
+    mock_item = MagicMock(id="one", content="Bundle update")
+    mock_item.intervention_id = None
+    mock_iq = MagicMock()
+    mock_iq.peek_all = AsyncMock(return_value=[mock_item])
+    mock_iq.delete_many = AsyncMock(return_value=0)
+    mock_ws = MagicMock()
+    mock_ws.broadcast = AsyncMock()
+
+    with (
+        patch("src.observer.insight_queue.insight_queue", mock_iq),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws),
+        patch("src.observer.delivery._active_channel_adapters", return_value=set()),
+    ):
+        count = await deliver_queued_bundle()
+
+    assert count == 0
+    mock_ws.broadcast.assert_not_called()
+    mock_iq.delete_many.assert_not_called()
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "observer_delivery_failed"
+        and event["tool_name"] == "observer_delivery_gate"
+        and event["details"]["intervention_type"] == "proactive_bundle"
+        and event["details"]["bundle_item_count"] == 1
+        and event["details"]["error"] == "websocket_adapter_disabled"
+        and event["details"]["queue_retained"] is True
+        and event["details"]["active_channel_adapters"] == []
         for event in events
     )

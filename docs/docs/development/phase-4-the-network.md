@@ -14,7 +14,7 @@ sidebar_position: 5
 
 ---
 
-## 4.1 SKILL.md Plugin Ecosystem
+## 4.1 SKILL.md Skill Ecosystem
 
 Phase 2's `@tool` auto-discovery requires Python code. OpenClaw's SKILL.md approach is text-based — skills are markdown files that teach the LLM how to use tools, requiring zero compiled code.
 

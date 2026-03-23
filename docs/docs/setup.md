@@ -156,7 +156,43 @@ These control per-call observability logging for all LiteLLM calls (direct and v
 
 All settings with their defaults are defined in `backend/config/settings.py`.
 
-## Start the stack
+## Start the local direct stack
+
+This is the recommended path for browser development because it always loads the repo-root `.env.dev` before starting services.
+
+```bash
+./manage.sh -e dev local up
+```
+
+This starts:
+- **backend** (`localhost:8004`) — FastAPI + uvicorn reload
+- **frontend** (`localhost:3001`) — Vite dev server
+
+Useful local commands:
+
+```bash
+./manage.sh -e dev local status
+./manage.sh -e dev local logs backend
+./manage.sh -e dev local logs frontend
+./manage.sh -e dev local down
+```
+
+Defaults for the local direct stack:
+
+| Setting | Default |
+|---|---|
+| Frontend port | `3001` |
+| Backend port | `8004` |
+| Workspace dir | `/tmp/seraph-dev-data` |
+| LLM log dir | `/tmp/seraph-dev-logs` |
+
+Override them when needed:
+
+```bash
+LOCAL_FRONTEND_PORT=3100 LOCAL_BACKEND_PORT=8100 ./manage.sh -e dev local up
+```
+
+## Start the Docker stack
 
 ```bash
 ./manage.sh -e dev up -d
@@ -191,7 +227,7 @@ normal Seraph app runtime.
 Use the normal app stack when you want to run Seraph locally:
 
 ```bash
-./manage.sh -e dev up -d
+./manage.sh -e dev local up
 ```
 
 Use Symphony when you want Linear tickets to be worked automatically.
@@ -546,9 +582,9 @@ Two options are available:
 - **Stdio proxy**: Use the stdio proxy (`mcp-servers/stdio-proxy/`) to wrap `github-mcp-server` as an HTTP endpoint. Add it to `data/stdio-proxies.json`, start with `./manage.sh -e dev proxy start`, then register with `./mcp.sh add github http://host.docker.internal:<port>/mcp`.
 - **GitHub's hosted MCP endpoint**: `https://api.githubcopilot.com/mcp/` — register directly with `./mcp.sh add github https://api.githubcopilot.com/mcp/` and configure a GitHub token via the Settings UI.
 
-## Optional: SKILL.md Plugins
+## Optional: SKILL.md Skills
 
-Skills are zero-code markdown plugins that extend the agent's behavior. Drop a `.md` file in `data/skills/` with YAML frontmatter and the agent gains new capabilities via prompt injection.
+Skills are zero-code markdown capability contributions that extend the agent's behavior. Drop a `.md` file in `data/skills/` with YAML frontmatter and the agent gains new capabilities via prompt injection.
 
 ```yaml
 ---
@@ -575,7 +611,7 @@ Eight bundled skills: `daily-standup`, `code-review`, `goal-reflection`, `weekly
 
 ## Retired: Village Map Editor
 
-The standalone village map editor is retired and no longer part of the supported Seraph product surface. The `editor/` folder remains only as historical code pending removal.
+The standalone village map editor is retired and no longer part of the supported Seraph product surface. The active repo no longer ships the `editor/` app.
 
 ## Resetting everything
 

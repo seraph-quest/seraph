@@ -1,0 +1,15 @@
+id: seraph.core-managed-connectors
+version: 2026.3.21
+display_name: Core Managed Connectors
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Bundled curated connector definitions for high-trust integrations that need package-managed auth and rollout controls.
+permissions:
+  network: true
+contributes:
+  managed_connectors:
+    - connectors/managed/github.yaml

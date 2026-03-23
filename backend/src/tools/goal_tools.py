@@ -26,7 +26,7 @@ def create_goal(
     description: str = "",
     due_date: str = "",
 ) -> str:
-    """Create a new goal in the user's quest log.
+    """Create a new goal in the user's goal hierarchy.
 
     Use this when the user mentions a goal, objective, or task they want to achieve.
     Decompose large goals into smaller sub-goals by setting parent_id.

@@ -180,7 +180,7 @@ class GoalRepository:
         return roots
 
     async def get_dashboard(self) -> dict:
-        """Return summary stats for the quest log UI."""
+        """Return summary stats for the goals UI."""
         async with get_session() as db:
             result = await db.execute(select(Goal))
             all_goals = result.scalars().all()

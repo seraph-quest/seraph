@@ -18,7 +18,7 @@ Expand Seraph's ability to do real work so the guardian thesis is backed by a se
 - [x] shell execution foundation exists
 - [x] browser automation foundation exists
 - [x] MCP integration exists
-- [x] plugin and tool discovery foundations exist
+- [x] native tool discovery and `SKILL.md` skill-loading foundations exist
 - [x] step streaming exists for visible tool execution in chat
 
 ## Working On Now

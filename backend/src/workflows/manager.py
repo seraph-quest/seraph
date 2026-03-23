@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from smolagents import Tool
 
-from src.plugins.registry import TOOL_METADATA
-from src.workflows.loader import Workflow, load_workflows
+from src.extensions.permissions import evaluate_tool_permissions
+from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
+from src.approval.repository import fingerprint_tool_call
+from src.native_tools.registry import TOOL_METADATA
+from src.workflows.loader import Workflow, scan_workflow_paths
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +97,27 @@ def _collect_artifact_paths(value: Any) -> list[str]:
     return paths
 
 
+def _summarize_value_shape(value: Any) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "empty text"
+        return f"text ({len(stripped)} chars)"
+    if isinstance(value, dict):
+        return f"object ({len(value)} keys)"
+    if isinstance(value, list):
+        return f"list ({len(value)} items)"
+    if isinstance(value, tuple):
+        return f"tuple ({len(value)} items)"
+    return type(value).__name__
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -120,6 +146,7 @@ class WorkflowTool(Tool):
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         workflow_inputs = self._normalize_inputs(args, kwargs)
+        run_fingerprint = fingerprint_tool_call(self.name, workflow_inputs)
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -128,6 +155,7 @@ class WorkflowTool(Tool):
         context.update(workflow_inputs)
         continued_error_steps: list[str] = []
         artifact_paths = _collect_artifact_paths(workflow_inputs)
+        step_records: list[dict[str, Any]] = []
 
         for step in self.workflow.steps:
             tool = self.tools_by_name.get(step.tool)
@@ -136,6 +164,12 @@ class WorkflowTool(Tool):
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
                 )
             rendered_arguments = _render_value(step.arguments, context)
+            step_artifact_paths = _collect_artifact_paths(rendered_arguments)
+            step_status = "succeeded"
+            error_kind: str | None = None
+            error_summary: str | None = None
+            step_started_at = _utc_now_iso()
+            started = time.perf_counter()
             try:
                 result = tool(
                     **rendered_arguments,
@@ -146,15 +180,38 @@ class WorkflowTool(Tool):
                     raise
                 result = f"Error: {exc}"
                 continued_error_steps.append(step.id)
+                step_status = "continued_error"
+                error_kind = type(exc).__name__
+                error_summary = str(exc).strip()[:160] or error_kind
+            step_completed_at = _utc_now_iso()
+            duration_ms = int((time.perf_counter() - started) * 1000)
             context["steps"][step.id] = {
                 "tool": step.tool,
                 "arguments": rendered_arguments,
                 "result": result,
             }
             context["last_result"] = result
-            for path in _collect_artifact_paths(rendered_arguments):
+            for path in step_artifact_paths:
                 if path not in artifact_paths:
                     artifact_paths.append(path)
+            step_records.append({
+                "id": step.id,
+                "index": len(step_records) + 1,
+                "tool": step.tool,
+                "status": step_status,
+                "argument_keys": (
+                    sorted(str(key) for key in rendered_arguments.keys())
+                    if isinstance(rendered_arguments, dict)
+                    else []
+                ),
+                "artifact_paths": step_artifact_paths,
+                "result_summary": _summarize_value_shape(result),
+                "error_kind": error_kind,
+                "error_summary": error_summary,
+                "started_at": step_started_at,
+                "completed_at": step_completed_at,
+                "duration_ms": duration_ms,
+            })
 
         result_text = ""
         if self.workflow.result_template:
@@ -173,10 +230,24 @@ class WorkflowTool(Tool):
             summary,
             {
                 "workflow_name": self.workflow.name,
+                "run_fingerprint": run_fingerprint,
                 "step_count": len(self.workflow.steps),
                 "step_tools": [step.tool for step in self.workflow.steps],
+                "step_records": step_records,
+                "checkpoint_step_ids": [str(step["id"]) for step in step_records if step.get("id")],
+                "last_completed_step_id": (
+                    next(
+                        (
+                            str(step["id"])
+                            for step in reversed(step_records)
+                            if step.get("id") and str(step.get("status") or "") not in {"failed", "continued_error"}
+                        ),
+                        None,
+                    )
+                ),
                 "artifact_paths": artifact_paths,
                 "continued_error_steps": continued_error_steps,
+                "failed_step_ids": continued_error_steps,
                 "content_redacted": True,
             },
         )
@@ -220,23 +291,174 @@ class WorkflowTool(Tool):
 class WorkflowManager:
     def __init__(self) -> None:
         self._workflows: list[Workflow] = []
+        self._load_errors: list[dict[str, str]] = []
+        self._shared_manifest_errors: list[dict[str, str]] = []
         self._workflows_dir: str = ""
+        self._manifest_roots: list[str] = []
         self._config_path: str = ""
         self._disabled: set[str] = set()
+        self._registry: ExtensionRegistry | None = None
 
-    def init(self, workflows_dir: str) -> None:
+    def init(self, workflows_dir: str, *, manifest_roots: list[str] | None = None) -> None:
         self._workflows_dir = workflows_dir
+        self._manifest_roots = list(manifest_roots or [os.path.join(os.path.dirname(workflows_dir), "extensions")])
         self._config_path = os.path.join(
             os.path.dirname(workflows_dir),
             "workflows-config.json",
         )
+        self._registry = ExtensionRegistry(
+            manifest_roots=self._manifest_roots,
+            skill_dirs=[],
+            workflow_dirs=[workflows_dir],
+            mcp_runtime=None,
+        )
         self._load_config()
-        self._workflows = load_workflows(workflows_dir)
+        self._reload_from_registry()
         self._apply_disabled()
         logger.info(
             "WorkflowManager initialized: %d workflows loaded",
             len(self._workflows),
         )
+
+    def _reload_from_registry(self) -> None:
+        snapshot = self._snapshot()
+        contribution_paths: list[str] = []
+        contribution_index: dict[str, tuple[str, str | None, int]] = {}
+        for contribution in snapshot.list_contributions("workflows"):
+            resolved_path = contribution.metadata.get("resolved_path")
+            path = str(resolved_path) if isinstance(resolved_path, str) and resolved_path else contribution.reference
+            normalized_path = os.path.abspath(path)
+            contribution_paths.append(path)
+            contribution_index[normalized_path] = (
+                contribution.source,
+                contribution.extension_id,
+                int(contribution.metadata.get("manifest_root_index", len(self._manifest_roots))),
+            )
+
+        workflows, parse_errors = scan_workflow_paths(contribution_paths)
+        manifest_priority_by_path: dict[str, int] = {}
+        for workflow in workflows:
+            source, extension_id, manifest_root_index = contribution_index.get(
+                os.path.abspath(workflow.file_path),
+                ("legacy", None, len(self._manifest_roots)),
+            )
+            workflow.source = source
+            workflow.extension_id = extension_id
+            manifest_priority_by_path[os.path.abspath(workflow.file_path)] = manifest_root_index
+
+        load_errors: list[dict[str, str]] = []
+        shared_manifest_errors: list[dict[str, str]] = []
+        for error in snapshot.load_errors:
+            payload = {
+                "file_path": error.source,
+                "message": error.message,
+                "phase": error.phase,
+            }
+            if self._error_affects_workflows(error.source, error.phase, error.details):
+                load_errors.append(payload)
+                continue
+            if error.phase in {"manifest", "compatibility", "layout"}:
+                shared_manifest_errors.append(payload)
+        for error in parse_errors:
+            path = str(error.get("file_path") or "")
+            source = contribution_index.get(
+                os.path.abspath(path),
+                ("legacy", None, len(self._manifest_roots)),
+            )[0]
+            load_errors.append(
+                {
+                    "file_path": path,
+                    "message": str(error.get("message") or "workflow parse error"),
+                    "phase": "manifest-workflows" if source == "manifest" else "legacy-workflows",
+                }
+            )
+
+        deduped_workflows: list[Workflow] = []
+        by_name: dict[str, Workflow] = {}
+        by_tool_name: dict[str, Workflow] = {}
+        for workflow in sorted(
+            workflows,
+            key=lambda item: (
+                0 if item.source == "manifest" else 1,
+                manifest_priority_by_path.get(os.path.abspath(item.file_path), len(self._manifest_roots)),
+                item.file_path,
+            ),
+        ):
+            existing_name = by_name.get(workflow.name)
+            if existing_name is not None:
+                load_errors.append(
+                    {
+                        "file_path": workflow.file_path,
+                        "message": (
+                            f"Duplicate workflow name '{workflow.name}' from {workflow.file_path}; "
+                            f"keeping {existing_name.file_path}"
+                        ),
+                        "phase": "duplicate-workflow-name",
+                    }
+                )
+                continue
+            existing_tool = by_tool_name.get(workflow.tool_name)
+            if existing_tool is not None:
+                load_errors.append(
+                    {
+                        "file_path": workflow.file_path,
+                        "message": (
+                            f"Duplicate workflow tool '{workflow.tool_name}' from {workflow.file_path}; "
+                            f"keeping {existing_tool.file_path}"
+                        ),
+                        "phase": "duplicate-workflow-tool-name",
+                    }
+                )
+                continue
+            by_name[workflow.name] = workflow
+            by_tool_name[workflow.tool_name] = workflow
+            deduped_workflows.append(workflow)
+
+        self._workflows = deduped_workflows
+        self._load_errors = load_errors
+        self._shared_manifest_errors = shared_manifest_errors
+
+    def _snapshot(self) -> ExtensionRegistrySnapshot:
+        if self._registry is None:
+            self._registry = ExtensionRegistry(
+                manifest_roots=self._manifest_roots,
+                skill_dirs=[],
+                workflow_dirs=[self._workflows_dir] if self._workflows_dir else [],
+                mcp_runtime=None,
+            )
+        return self._registry.snapshot()
+
+    def _error_affects_workflows(
+        self,
+        source: str,
+        phase: str,
+        details: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        if phase == "legacy-workflows":
+            return True
+        if phase == "manifest":
+            if details:
+                for detail in details:
+                    loc = detail.get("loc")
+                    if (
+                        isinstance(loc, list)
+                        and len(loc) >= 2
+                        and str(loc[0]) == "contributes"
+                        and str(loc[1]) == "workflows"
+                    ):
+                        return True
+                return False
+        if phase in {"compatibility", "layout"}:
+            for detail in details or []:
+                contributed_types = detail.get("contributed_types")
+                if isinstance(contributed_types, list) and "workflows" in contributed_types:
+                    return True
+        if phase not in {"manifest", "compatibility", "layout"}:
+            return False
+        package_root = source
+        if os.path.basename(source) in {"manifest.yaml", "manifest.yml"}:
+            package_root = os.path.dirname(source)
+        return os.path.isdir(os.path.join(package_root, "workflows"))
 
     def _load_config(self) -> None:
         if os.path.isfile(self._config_path):
@@ -269,8 +491,14 @@ class WorkflowManager:
         available_tool_names: list[str] | None = None,
         active_skill_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        snapshot = self._snapshot()
+        extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
         workflows: list[dict[str, Any]] = []
         for workflow in self._workflows:
+            permission_profile = evaluate_tool_permissions(
+                extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
+                tool_names=workflow.step_tools,
+            )
             item = {
                 "name": workflow.name,
                 "tool_name": workflow.tool_name,
@@ -282,10 +510,19 @@ class WorkflowManager:
                 "enabled": workflow.enabled,
                 "step_count": len(workflow.steps),
                 "file_path": workflow.file_path,
+                "source": workflow.source,
+                "extension_id": workflow.extension_id,
                 "policy_modes": self._infer_policy_modes(workflow),
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
                 "accepts_secret_refs": self._accepts_secret_refs(workflow),
+                "permission_status": permission_profile["status"],
+                "missing_manifest_tools": list(permission_profile["missing_tools"]),
+                "missing_manifest_execution_boundaries": list(permission_profile["missing_execution_boundaries"]),
+                "requires_network": bool(permission_profile["requires_network"]),
+                "missing_manifest_network": bool(permission_profile["missing_network"]),
+                "approval_behavior": permission_profile["approval_behavior"],
+                "requires_approval": bool(permission_profile["requires_approval"]),
             }
             if available_tool_names is not None and active_skill_names is not None:
                 item.update(
@@ -293,6 +530,7 @@ class WorkflowManager:
                         workflow,
                         available_tool_names,
                         active_skill_names,
+                        permission_profile=permission_profile,
                     )
                 )
             workflows.append(item)
@@ -330,9 +568,19 @@ class WorkflowManager:
 
     def reload(self) -> list[dict[str, Any]]:
         if self._workflows_dir:
-            self._workflows = load_workflows(self._workflows_dir)
+            self._reload_from_registry()
             self._apply_disabled()
         return self.list_workflows()
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        return {
+            "workflows": self.list_workflows(),
+            "load_errors": list(self._load_errors),
+            "shared_manifest_errors": list(self._shared_manifest_errors),
+            "loaded_count": len(self._workflows),
+            "error_count": len(self._load_errors),
+            "shared_error_count": len(self._shared_manifest_errors),
+        }
 
     def get_active_workflows(
         self,
@@ -341,9 +589,17 @@ class WorkflowManager:
     ) -> list[Workflow]:
         tool_set = set(available_tool_names)
         skill_set = set(active_skill_names)
+        snapshot = self._snapshot()
+        extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
         result: list[Workflow] = []
         for workflow in self._workflows:
             if not workflow.enabled:
+                continue
+            permission_profile = evaluate_tool_permissions(
+                extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
+                tool_names=workflow.step_tools,
+            )
+            if not permission_profile["ok"]:
                 continue
             if workflow.step_tools and not all(
                 tool_name in tool_set for tool_name in workflow.step_tools
@@ -393,6 +649,8 @@ class WorkflowManager:
         workflow: Workflow,
         available_tool_names: list[str],
         active_skill_names: list[str],
+        *,
+        permission_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tool_set = set(available_tool_names)
         skill_set = set(active_skill_names)
@@ -404,10 +662,24 @@ class WorkflowManager:
             skill_name for skill_name in workflow.requires_skills
             if skill_name not in skill_set
         ]
+        missing_manifest_tools = list((permission_profile or {}).get("missing_tools", []))
+        missing_manifest_execution_boundaries = list(
+            (permission_profile or {}).get("missing_execution_boundaries", [])
+        )
+        missing_manifest_network = bool((permission_profile or {}).get("missing_network", False))
         return {
-            "is_available": not missing_tools and not missing_skills,
+            "is_available": (
+                not missing_tools
+                and not missing_skills
+                and not missing_manifest_tools
+                and not missing_manifest_execution_boundaries
+                and not missing_manifest_network
+            ),
             "missing_tools": missing_tools,
             "missing_skills": missing_skills,
+            "missing_manifest_tools": missing_manifest_tools,
+            "missing_manifest_execution_boundaries": missing_manifest_execution_boundaries,
+            "missing_manifest_network": missing_manifest_network,
         }
 
     def _infer_policy_modes(self, workflow: Workflow) -> list[str]:

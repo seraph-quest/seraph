@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a product, UX, workflow, tooling, or platform improvement for Seraph
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are most useful when they connect to the current guardian workspace direction and explain the user problem, not just the implementation idea.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What should Seraph help with better?
+      placeholder: The current workflow history is hard to skim when multiple interventions happen in parallel...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the improvement you want.
+      placeholder: Add a compact thread filter across the activity ledger and workflow timeline...
+    validations:
+      required: true
+  - type: textarea
+    id: value
+    attributes:
+      label: Why this matters
+      description: Explain the expected operator or developer impact.
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Related docs, issues, or screenshots
+      description: Link any roadmap docs, research docs, or examples that support the request.

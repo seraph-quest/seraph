@@ -9,6 +9,7 @@ class TestGetOrCreateProfile:
     async def test_creates_new(self, async_db):
         profile = await get_or_create_profile()
         assert profile.id == "singleton"
+        assert profile.name == "Unknown"
         assert profile.onboarding_completed is False
 
     async def test_returns_existing(self, async_db):
@@ -37,6 +38,7 @@ class TestProfileEndpoints:
         res = await client.get("/api/user/profile")
         assert res.status_code == 200
         data = res.json()
+        assert data["name"] == "Unknown"
         assert "onboarding_completed" in data
 
     async def test_skip_onboarding(self, client):

@@ -8,7 +8,7 @@ from src.agent.factory import create_agent
 from src.agent.session import SessionManager
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import GuardianState, GuardianStateConfidence, build_guardian_state
-from src.guardian.world_model import GuardianWorldModel
+from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
 from src.observer.context import CurrentContext
 
 
@@ -34,6 +34,9 @@ def _make_guardian_state() -> GuardianState:
             open_loops_or_pressure=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
             focus_alignment="medium",
             intervention_receptivity="high",
+            active_blockers=("Need workflow write access",),
+            next_up=("Close the roadmap review",),
+            dominant_thread="Ship guardian state",
             active_projects=("Guardian cockpit",),
             execution_pressure=("Workflow brief-sync degraded at write_file",),
             memory_signals=("Ship guardian state", "Prefers dense dashboards"),
@@ -125,6 +128,9 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert "Ship guardian state" in state.world_model.active_commitments
     assert "Guardian cockpit" in state.world_model.active_projects
     assert "Ship guardian state" in state.world_model.memory_signals
+    assert state.world_model.active_blockers
+    assert state.world_model.next_up
+    assert state.world_model.dominant_thread
     assert "Prior roadmap" in state.world_model.continuity_threads[0]
     assert "Guardian cockpit" in state.world_model.project_timeline[0]
     assert any(
@@ -190,6 +196,9 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Current focus: Ship guardian state while in VS Code" in block
     assert "Intervention receptivity: high" in block
     assert "Active projects:" in block
+    assert "Active blockers:" in block
+    assert "Next up:" in block
+    assert "Dominant thread: Ship guardian state" in block
     assert "Memory signals:" in block
     assert "Continuity threads:" in block
     assert "Recent execution pressure:" in block
@@ -206,6 +215,34 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Prior roadmap" in block
     assert "feedback=helpful" in block
     assert "brief-sync degraded" in block
+
+
+def test_world_model_does_not_count_session_fallback_focus_as_observer_corroboration():
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="",
+        active_window="",
+        screen_context="",
+        data_quality="good",
+        observer_confidence="partial",
+        salience_level="medium",
+        salience_reason="none",
+        interruption_cost="low",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=ctx,
+        memory_context="",
+        current_session_history="User: Continue the deployment review.",
+        recent_sessions_summary='- Prior thread: Continue the deployment review.',
+        recent_intervention_feedback="",
+    )
+
+    assert model.current_focus == "User: Continue the deployment review."
+    assert "observer" not in model.corroboration_sources
+    assert set(model.corroboration_sources) == {"current_session", "recent_sessions"}
 
 
 @patch("src.agent.factory.ToolCallingAgent")

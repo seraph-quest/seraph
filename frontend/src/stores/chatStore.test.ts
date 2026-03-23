@@ -32,11 +32,9 @@ function resetStore() {
     chatMaximized: false,
     questPanelOpen: false,
     settingsPanelOpen: false,
-    interfaceMode: "cockpit",
+    cockpitHintsEnabled: true,
     onboardingCompleted: null,
     toolRegistry: [],
-    magicEffectPoolSize: 0,
-    debugWalkability: false,
   });
 }
 
@@ -60,10 +58,10 @@ describe("chatStore sync actions", () => {
     expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_last_session_id", "abc123");
   });
 
-  it("setInterfaceMode writes to localStorage", () => {
-    useChatStore.getState().setInterfaceMode("village");
-    expect(useChatStore.getState().interfaceMode).toBe("village");
-    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_interface_mode", "village");
+  it("setCockpitHintsEnabled persists the hint preference", () => {
+    useChatStore.getState().setCockpitHintsEnabled(false);
+    expect(useChatStore.getState().cockpitHintsEnabled).toBe(false);
+    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_cockpit_hints_enabled", "0");
   });
 
   it("setAgentVisual merges partial state", () => {

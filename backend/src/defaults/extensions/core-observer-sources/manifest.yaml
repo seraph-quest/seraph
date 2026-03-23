@@ -1,0 +1,18 @@
+id: seraph.core-observer-sources
+version: 2026.3.21
+display_name: Core Observer Sources
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Bundled observer source definitions for time, calendar, git, and priorities.
+permissions:
+  network: true
+contributes:
+  observer_definitions:
+    - observers/definitions/time.yaml
+    - observers/definitions/calendar.yaml
+    - observers/definitions/git.yaml
+    - observers/definitions/goals.yaml

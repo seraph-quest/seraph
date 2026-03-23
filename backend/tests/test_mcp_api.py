@@ -8,6 +8,52 @@ from src.audit.repository import audit_repository
 
 
 @pytest.mark.asyncio
+async def test_validate_server_returns_missing_env_var_warnings(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._check_unresolved_vars.return_value = ["API_TOKEN"]
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "http-request",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${API_TOKEN}"},
+                "enabled": True,
+                "description": "HTTP tools",
+                "auth_hint": "Set API_TOKEN",
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is True
+    assert data["status"] == "auth_required"
+    assert data["missing_env_vars"] == ["API_TOKEN"]
+    assert data["warnings"]
+    assert data["existing"] is False
+
+
+@pytest.mark.asyncio
+async def test_validate_server_rejects_invalid_url(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._check_unresolved_vars.return_value = []
+        mock_mgr._config = {"gh": {"url": "https://api.github.com/mcp"}}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={"name": "gh", "url": "ftp://bad", "enabled": True},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "Server URL must use http or https" in data["issues"]
+    assert data["existing"] is True
+
+
+@pytest.mark.asyncio
 async def test_set_token_happy_path(client):
     """POST /api/mcp/servers/{name}/token should set token and return updated entry."""
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
@@ -50,6 +96,81 @@ async def test_set_token_unknown_server(client):
             json={"token": "tok"},
         )
         assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_token_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.post(
+            "/api/mcp/servers/github-packaged/token",
+            json={"token": "secret"},
+        )
+
+    assert resp.status_code == 409
+    assert "token updates" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_server_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.put("/api/mcp/servers/github-packaged", json={"enabled": False})
+
+    assert resp.status_code == 409
+    assert "managed by Test Connector" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_remove_server_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.delete("/api/mcp/servers/github-packaged")
+
+    assert resp.status_code == 409
+    assert "extension connector lifecycle" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_test_server_rejects_extension_managed_entry(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "github-packaged": {
+                "url": "https://example.test/mcp",
+                "source": "extension",
+                "extension_id": "seraph.test-connector",
+                "extension_display_name": "Test Connector",
+            }
+        }
+
+        resp = await client.post("/api/mcp/servers/github-packaged/test")
+
+    assert resp.status_code == 409
+    assert "raw MCP tests" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

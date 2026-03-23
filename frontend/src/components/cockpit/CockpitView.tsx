@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { EventBus } from "../../game/EventBus";
+import { appEventBus } from "../../lib/appEventBus";
 import { API_URL } from "../../config/constants";
+import { SERAPH_BUILD_ID } from "../../config/release";
 import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
-import { usePanelLayoutStore } from "../../stores/panelLayoutStore";
+import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
 import { buildWorkflowDraft, type WorkflowInfo } from "../settings/workflowDraft";
 import { useDragResize } from "../../hooks/useDragResize";
@@ -16,8 +17,18 @@ import {
   type ArtifactRecord,
   type CockpitAuditEvent,
   type WorkflowRunRecord,
+  type WorkflowStepRecord,
+  type WorkflowTimelineEntry,
 } from "./inspector";
-import { COCKPIT_LAYOUTS, getCockpitLayout } from "./layouts";
+import {
+  COCKPIT_PANES,
+  COCKPIT_LAYOUTS,
+  CORE_PANE_IDS,
+  getCockpitLayout,
+  getDefaultPaneVisibility,
+  type CockpitPaneId,
+} from "./layouts";
+import { SeraphPresencePane } from "./SeraphPresencePane";
 
 interface CockpitViewProps {
   onSend: (message: string) => boolean | void | Promise<boolean | void>;
@@ -38,6 +49,17 @@ interface ObserverState {
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
+interface RuntimeStatus {
+  version: string;
+  build_id: string;
+  provider: string;
+  model: string;
+  model_label: string;
+  api_base?: string;
+  timezone?: string;
+  llm_logging_enabled?: boolean;
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -49,6 +71,12 @@ interface PendingApproval {
   summary: string;
   created_at: string;
   resume_message?: string | null;
+  extension_id?: string | null;
+  extension_display_name?: string | null;
+  extension_action?: string | null;
+  package_path?: string | null;
+  lifecycle_boundaries?: string[] | null;
+  permissions?: Record<string, unknown> | null;
 }
 
 interface DaemonPresenceState {
@@ -90,6 +118,8 @@ interface ObserverContinuitySnapshot {
     session_id?: string | null;
     thread_id?: string | null;
     thread_label?: string | null;
+    thread_source?: string | null;
+    continuation_mode?: string | null;
     resume_message?: string | null;
   }>;
   queued_insights: Array<{
@@ -111,6 +141,9 @@ interface SkillInfo {
   name: string;
   enabled: boolean;
   description?: string;
+  file_path?: string;
+  source?: string;
+  extension_id?: string | null;
   requires_tools?: string[];
   user_invocable?: boolean;
   availability?: "ready" | "blocked" | "disabled";
@@ -123,12 +156,17 @@ interface McpServerInfo {
   enabled: boolean;
   url?: string;
   description?: string;
+  headers?: Record<string, string> | null;
   connected?: boolean;
   tool_count?: number;
   status?: "disconnected" | "connected" | "auth_required" | "error";
   status_message?: string | null;
   has_headers?: boolean;
   auth_hint?: string;
+  source?: string;
+  extension_id?: string | null;
+  extension_reference?: string | null;
+  extension_display_name?: string | null;
   availability?: "ready" | "blocked" | "disabled";
   blocked_reason?: string | null;
   recommended_actions?: CapabilityAction[];
@@ -146,7 +184,14 @@ interface ToolInfo {
 }
 
 interface OperatorEntity {
-  entityType: "tool" | "skill" | "mcp" | "starter_pack" | "workflow_definition";
+  entityType:
+    | "tool"
+    | "skill"
+    | "mcp"
+    | "starter_pack"
+    | "workflow_definition"
+    | "extension_manifest"
+    | "activity_item";
   name: string;
   meta: string;
   summary: string;
@@ -177,6 +222,7 @@ interface CapabilityAction {
   type:
     | "toggle_skill"
     | "toggle_workflow"
+    | "enable_extension"
     | "toggle_mcp_server"
     | "test_mcp_server"
     | "test_native_notification"
@@ -191,7 +237,189 @@ interface CapabilityAction {
   mode?: string;
   enabled?: boolean;
   target?: string;
+  status?: string;
+  detail?: string;
+  [key: string]: unknown;
 }
+
+interface CapabilityBootstrapResponse {
+  target_type: string;
+  name: string;
+  label: string;
+  status: string;
+  ready: boolean;
+  availability: string;
+  blocking_reasons: string[];
+  applied_actions: Array<Record<string, unknown>>;
+  manual_actions: CapabilityAction[];
+  command?: string | null;
+  parameter_schema?: Record<string, unknown>;
+  risk_level?: string | null;
+  execution_boundaries?: string[];
+  overview?: CapabilityOverview;
+}
+
+interface CapabilityPreflightResponse {
+  target_type: string;
+  name: string;
+  label: string;
+  description: string;
+  availability: string;
+  blocking_reasons: string[];
+  recommended_actions: CapabilityAction[];
+  autorepair_actions: CapabilityAction[];
+  command?: string | null;
+  parameter_schema?: Record<string, unknown>;
+  risk_level?: string | null;
+  execution_boundaries?: string[];
+  can_autorepair: boolean;
+  ready: boolean;
+}
+
+interface WorkflowDiagnosticsPayload {
+  loaded_count: number;
+  error_count: number;
+  workflows: Array<Record<string, unknown>>;
+  load_errors: Array<{ file_path: string; message: string }>;
+}
+
+interface DoctorPlanRecord {
+  id: string;
+  label: string;
+  source: string;
+  createdAt: string;
+  availability: string;
+  blockingReasons: string[];
+  autorepairActions: CapabilityAction[];
+  recommendedActions: CapabilityAction[];
+  manualActions: CapabilityAction[];
+  appliedActions: string[];
+  command?: string | null;
+  riskLevel?: string | null;
+  executionBoundaries?: string[];
+}
+
+interface ExtensionStudioEntry {
+  id: string;
+  entityType: "workflow_definition" | "skill" | "mcp" | "extension_manifest";
+  name: string;
+  summary: string;
+  availability: string;
+  meta: string;
+  entity: OperatorEntity;
+  extensionId?: string | null;
+  packageReference?: string | null;
+  packageDisplayName?: string | null;
+  packageVersion?: string | null;
+  packageLocation?: string | null;
+  packageTrust?: string | null;
+  studioFormat?: string | null;
+  saveSupported?: boolean;
+  validationSupported?: boolean;
+}
+
+interface ExtensionStudioFileInfo {
+  key: string;
+  role: "manifest" | "contribution";
+  reference: string;
+  resolved_path?: string | null;
+  label: string;
+  display_type: string;
+  contribution_type?: string | null;
+  format: string;
+  editable: boolean;
+  save_supported: boolean;
+  validation_supported: boolean;
+  loaded: boolean;
+  name?: string | null;
+  status?: string | null;
+  source?: string | null;
+}
+
+interface ExtensionIssueInfo {
+  code: string;
+  severity: string;
+  message: string;
+  contribution_type?: string | null;
+  reference?: string | null;
+  suggested_fix?: string | null;
+}
+
+interface ExtensionLoadErrorInfo {
+  source: string;
+  message: string;
+  phase: string;
+  details: Array<Record<string, unknown>>;
+}
+
+interface ExtensionToggleTargetInfo {
+  type: string;
+  name: string;
+}
+
+interface ExtensionPackageInfo {
+  id: string;
+  display_name: string;
+  version?: string | null;
+  kind: string;
+  trust: string;
+  source: string;
+  location: string;
+  status: string;
+  summary?: string | null;
+  description?: string | null;
+  compatibility?: { seraph: string } | null;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  issues: ExtensionIssueInfo[];
+  load_errors: ExtensionLoadErrorInfo[];
+  toggle_targets: ExtensionToggleTargetInfo[];
+  toggleable_contribution_types: string[];
+  passive_contribution_types: string[];
+  enable_supported: boolean;
+  disable_supported: boolean;
+  removable: boolean;
+  enabled_scope: string;
+  configurable: boolean;
+  metadata_supported: boolean;
+  config_scope: string;
+  enabled?: boolean | null;
+  config: Record<string, unknown>;
+  studio_files: ExtensionStudioFileInfo[];
+}
+
+interface ExtensionLifecyclePlan {
+  mode: string;
+  recommended_action: "install" | "update" | "none";
+  install_allowed: boolean;
+  update_supported: boolean;
+  current_location?: string | null;
+  current_version?: string | null;
+  current_source?: string | null;
+  candidate_version?: string | null;
+  version_relation?: string | null;
+  package_changed: boolean;
+}
+
+interface ExtensionPathPreview {
+  path: string;
+  extension_id: string;
+  display_name: string;
+  version?: string | null;
+  ok: boolean;
+  results: Array<{ issues?: unknown[] }>;
+  load_errors?: Array<Record<string, unknown>>;
+  lifecycle_plan?: ExtensionLifecyclePlan | null;
+}
+
+interface ExtensionLifecycleApprovalDetail {
+  type: "approval_required";
+  approval_id: string;
+  tool_name: string;
+  risk_level: string;
+  message: string;
+}
+
+type LoggedOperatorError = Error & { operatorLogged?: boolean };
 
 interface CatalogItemInfo {
   name: string;
@@ -253,16 +481,33 @@ interface CapabilityOverview {
   runbooks: RunbookInfo[];
 }
 
-interface OperatorFeedEntry {
-  id: string;
-  summary: string;
-  status: "info" | "success" | "failed";
-  createdAt: string;
+interface ActivityLedgerSummary {
+  window_hours: number;
+  started_at: string;
+  total_items: number;
+  visible_items?: number;
+  visible_groups?: number;
+  is_partial?: boolean;
+  partial_sources?: string[];
+  pending_approvals: number;
+  failure_count: number;
+  llm_call_count: number;
+  llm_cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  user_triggered_llm_calls: number;
+  autonomous_llm_calls: number;
+  categories: Record<string, number>;
 }
 
-interface OperatorTimelineEntry {
+type ActivityLedgerCategory = "llm" | "workflow" | "approval" | "guardian" | "agent" | "system";
+type ActivityLedgerFilter = "all" | ActivityLedgerCategory;
+
+interface ActivityLedgerEntry {
   id: string;
-  kind: "workflow_run" | "approval" | "notification" | "queued_insight" | "intervention" | "audit";
+  kind: string;
+  category: ActivityLedgerCategory;
+  group_key?: string | null;
   title: string;
   summary: string;
   status: string;
@@ -276,7 +521,36 @@ interface OperatorTimelineEntry {
   replay_block_reason?: string | null;
   recommended_actions?: CapabilityAction[];
   source: string;
+  model?: string | null;
+  provider?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  cost_usd?: number | null;
+  duration_ms?: number | null;
   metadata?: Record<string, unknown>;
+}
+
+interface ActivityLedgerGroupChild {
+  key: string;
+  icon: string;
+  label: string;
+  summary: string;
+  meta: string;
+  status: string;
+  item?: ActivityLedgerEntry;
+}
+
+interface ActivityLedgerGroup {
+  key: string;
+  lead: ActivityLedgerEntry;
+  icon: string;
+  title: string;
+  summary: string;
+  detail?: string | null;
+  meta: string;
+  footer: string | null;
+  updatedAt: string;
+  children: ActivityLedgerGroupChild[];
 }
 
 type ToolPolicyMode = "safe" | "balanced" | "full";
@@ -317,10 +591,429 @@ function formatOperatorMode(value: string): string {
   return value.replace(/_/g, " ");
 }
 
-function formatFeedStatus(value: OperatorFeedEntry["status"]): string {
-  if (value === "success") return "ok";
-  if (value === "failed") return "failed";
-  return "info";
+function formatCapabilityAction(action: Record<string, unknown>): string {
+  const type = typeof action.type === "string" ? action.type : "action";
+  const name = typeof action.name === "string" ? action.name : null;
+  const mode = typeof action.mode === "string" ? action.mode : null;
+  const status = typeof action.status === "string" ? action.status : null;
+  const detail = typeof action.detail === "string" ? action.detail : null;
+  const target = (typeof action.target === "string" ? action.target : null) ?? name ?? mode ?? detail ?? "";
+  return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
+}
+
+function readActionList(value: unknown): CapabilityAction[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.type !== "string" || typeof record.label !== "string") return [];
+    return [{
+      ...record,
+      type: record.type,
+      label: record.label,
+    } as CapabilityAction];
+  });
+}
+
+function shortIdentifier(value: string | null | undefined, size = 8): string | null {
+  if (!value) return null;
+  return value.length > size ? value.slice(0, size) : value;
+}
+
+function managedFileName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const segments = trimmed.split(/[\\/]/).filter(Boolean);
+  const candidate = segments[segments.length - 1];
+  return candidate && candidate.trim() ? candidate.trim() : null;
+}
+
+function normalizeExtensionStudioFile(value: Record<string, unknown>): ExtensionStudioFileInfo | null {
+  if (typeof value.key !== "string" || typeof value.reference !== "string" || typeof value.label !== "string") {
+    return null;
+  }
+  const role = value.role === "manifest" ? "manifest" : "contribution";
+  return {
+    key: value.key,
+    role,
+    reference: value.reference,
+    resolved_path: typeof value.resolved_path === "string" ? value.resolved_path : null,
+    label: value.label,
+    display_type: typeof value.display_type === "string" ? value.display_type : "file",
+    contribution_type: typeof value.contribution_type === "string" ? value.contribution_type : null,
+    format: typeof value.format === "string" ? value.format : "text",
+    editable: Boolean(value.editable),
+    save_supported: Boolean(value.save_supported),
+    validation_supported: Boolean(value.validation_supported),
+    loaded: value.loaded !== false,
+    name: typeof value.name === "string" ? value.name : null,
+    status: typeof value.status === "string" ? value.status : null,
+    source: typeof value.source === "string" ? value.source : null,
+  };
+}
+
+function normalizeExtensionIssue(value: Record<string, unknown>): ExtensionIssueInfo | null {
+  if (
+    typeof value.code !== "string"
+    || typeof value.severity !== "string"
+    || typeof value.message !== "string"
+  ) {
+    return null;
+  }
+  return {
+    code: value.code,
+    severity: value.severity,
+    message: value.message,
+    contribution_type: typeof value.contribution_type === "string" ? value.contribution_type : null,
+    reference: typeof value.reference === "string" ? value.reference : null,
+    suggested_fix: typeof value.suggested_fix === "string" ? value.suggested_fix : null,
+  };
+}
+
+function normalizeExtensionLoadError(value: Record<string, unknown>): ExtensionLoadErrorInfo | null {
+  if (
+    typeof value.source !== "string"
+    || typeof value.message !== "string"
+    || typeof value.phase !== "string"
+  ) {
+    return null;
+  }
+  return {
+    source: value.source,
+    message: value.message,
+    phase: value.phase,
+    details: Array.isArray(value.details)
+      ? value.details.flatMap((entry) => (
+        entry && typeof entry === "object" && !Array.isArray(entry)
+          ? [entry as Record<string, unknown>]
+          : []
+      ))
+      : [],
+  };
+}
+
+function normalizeExtensionToggleTarget(value: Record<string, unknown>): ExtensionToggleTargetInfo | null {
+  if (typeof value.type !== "string" || typeof value.name !== "string") {
+    return null;
+  }
+  return {
+    type: value.type,
+    name: value.name,
+  };
+}
+
+function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPackageInfo | null {
+  if (
+    typeof value.id !== "string"
+    || typeof value.display_name !== "string"
+    || typeof value.kind !== "string"
+    || typeof value.trust !== "string"
+    || typeof value.source !== "string"
+    || typeof value.location !== "string"
+    || typeof value.status !== "string"
+  ) {
+    return null;
+  }
+  const studioFiles = Array.isArray(value.studio_files)
+    ? value.studio_files.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionStudioFile(entry as Record<string, unknown>)].filter(Boolean) as ExtensionStudioFileInfo[]
+        : []
+    ))
+    : [];
+  const issues = Array.isArray(value.issues)
+    ? value.issues.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionIssue(entry as Record<string, unknown>)].filter(Boolean) as ExtensionIssueInfo[]
+        : []
+    ))
+    : [];
+  const loadErrors = Array.isArray(value.load_errors)
+    ? value.load_errors.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionLoadError(entry as Record<string, unknown>)].filter(Boolean) as ExtensionLoadErrorInfo[]
+        : []
+    ))
+    : [];
+  const toggleTargets = Array.isArray(value.toggle_targets)
+    ? value.toggle_targets.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionToggleTarget(entry as Record<string, unknown>)].filter(Boolean) as ExtensionToggleTargetInfo[]
+        : []
+    ))
+    : [];
+  return {
+    id: value.id,
+    display_name: value.display_name,
+    version: typeof value.version === "string" ? value.version : null,
+    kind: value.kind,
+    trust: value.trust,
+    source: value.source,
+    location: value.location,
+    status: value.status,
+    summary: typeof value.summary === "string" ? value.summary : null,
+    description: typeof value.description === "string" ? value.description : null,
+    compatibility:
+      value.compatibility && typeof value.compatibility === "object" && !Array.isArray(value.compatibility)
+        ? { seraph: String((value.compatibility as Record<string, unknown>).seraph ?? "") }
+        : null,
+    publisher:
+      value.publisher && typeof value.publisher === "object" && !Array.isArray(value.publisher)
+        ? {
+          name: String((value.publisher as Record<string, unknown>).name ?? ""),
+          homepage:
+            typeof (value.publisher as Record<string, unknown>).homepage === "string"
+              ? String((value.publisher as Record<string, unknown>).homepage)
+              : null,
+          support:
+            typeof (value.publisher as Record<string, unknown>).support === "string"
+              ? String((value.publisher as Record<string, unknown>).support)
+              : null,
+        }
+        : null,
+    issues,
+    load_errors: loadErrors,
+    toggle_targets: toggleTargets,
+    toggleable_contribution_types: Array.isArray(value.toggleable_contribution_types)
+      ? value.toggleable_contribution_types.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    passive_contribution_types: Array.isArray(value.passive_contribution_types)
+      ? value.passive_contribution_types.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    enable_supported: Boolean(value.enable_supported),
+    disable_supported: Boolean(value.disable_supported),
+    removable: Boolean(value.removable),
+    enabled_scope: typeof value.enabled_scope === "string" ? value.enabled_scope : "none",
+    configurable: Boolean(value.configurable),
+    metadata_supported: Boolean(value.metadata_supported),
+    config_scope: typeof value.config_scope === "string" ? value.config_scope : "none",
+    enabled:
+      typeof value.enabled === "boolean"
+        ? value.enabled
+        : value.enabled === null
+          ? null
+          : undefined,
+    config:
+      value.config && typeof value.config === "object" && !Array.isArray(value.config)
+        ? value.config as Record<string, unknown>
+        : {},
+    studio_files: studioFiles,
+  };
+}
+
+function normalizeExtensionPackagesPayload(payload: unknown): ExtensionPackageInfo[] {
+  if (
+    !payload
+    || typeof payload !== "object"
+    || !Array.isArray((payload as { extensions?: unknown }).extensions)
+  ) {
+    return [];
+  }
+  return ((payload as { extensions?: unknown }).extensions as unknown[]).flatMap((entry) => (
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? [normalizeExtensionPackage(entry as Record<string, unknown>)].filter(Boolean) as ExtensionPackageInfo[]
+      : []
+  ));
+}
+
+function normalizeExtensionLifecycleApprovalDetail(payload: unknown): ExtensionLifecycleApprovalDetail | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const detail = (payload as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return null;
+  }
+  const detailRecord = detail as Record<string, unknown>;
+  const type = typeof detailRecord.type === "string" ? detailRecord.type : "";
+  if (type !== "approval_required") {
+    return null;
+  }
+  const approvalId = typeof detailRecord.approval_id === "string" ? detailRecord.approval_id : "";
+  const toolName = typeof detailRecord.tool_name === "string" ? detailRecord.tool_name : "extension_lifecycle";
+  const riskLevel = typeof detailRecord.risk_level === "string" ? detailRecord.risk_level : "high";
+  const message = typeof detailRecord.message === "string" ? detailRecord.message : "Approval required before retrying the extension action.";
+  return {
+    type: "approval_required",
+    approval_id: approvalId,
+    tool_name: toolName,
+    risk_level: riskLevel,
+    message,
+  };
+}
+
+function buildWorkflowDefinitionEntity(workflow: WorkflowInfo): OperatorEntity {
+  return {
+    entityType: "workflow_definition",
+    name: workflow.name,
+    meta: `${workflow.risk_level} risk · ${workflow.availability ?? (workflow.is_available === false ? "blocked" : "ready")}`,
+    summary: workflow.description,
+    details: {
+      file_path: workflow.file_path,
+      source: workflow.source,
+      extension_id: workflow.extension_id ?? null,
+      tool_name: workflow.tool_name,
+      enabled: workflow.enabled,
+      user_invocable: workflow.user_invocable,
+      inputs: workflow.inputs,
+      requires_tools: workflow.requires_tools,
+      requires_skills: workflow.requires_skills,
+      missing_tools: workflow.missing_tools ?? [],
+      missing_skills: workflow.missing_skills ?? [],
+      execution_boundaries: workflow.execution_boundaries,
+      approval_behavior: workflow.approval_behavior,
+      risk_level: workflow.risk_level,
+      availability: workflow.availability ?? (workflow.is_available === false ? "blocked" : "ready"),
+      recommended_actions: workflow.recommended_actions ?? [],
+    },
+  };
+}
+
+function buildSkillEntity(skill: SkillInfo): OperatorEntity {
+  return {
+    entityType: "skill",
+    name: skill.name,
+    meta: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
+    summary: skill.description ?? "Skill capability",
+    details: {
+      enabled: skill.enabled,
+      user_invocable: skill.user_invocable ?? false,
+      file_path: skill.file_path ?? "",
+      source: skill.source,
+      extension_id: skill.extension_id ?? null,
+      requires_tools: skill.requires_tools ?? [],
+      missing_tools: skill.missing_tools ?? [],
+      recommended_actions: skill.recommended_actions ?? [],
+      availability: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
+    },
+  };
+}
+
+function buildMcpEntity(server: McpServerInfo): OperatorEntity {
+  return {
+    entityType: "mcp",
+    name: server.name,
+    meta: server.status ?? "unknown",
+    summary: server.description || server.url || "MCP server",
+    details: {
+      availability: server.availability ?? "unknown",
+      blocked_reason: server.blocked_reason ?? "none",
+      tool_count: server.tool_count ?? 0,
+      url: server.url ?? "",
+      description: server.description ?? "",
+      headers: server.headers ?? null,
+      auth_hint: server.auth_hint ?? "",
+      status_message: server.status_message ?? "",
+      enabled: server.enabled,
+      source: server.source ?? "manual",
+      extension_id: server.extension_id ?? null,
+      extension_reference: server.extension_reference ?? null,
+      extension_display_name: server.extension_display_name ?? null,
+      has_headers: server.has_headers ?? false,
+      recommended_actions: server.recommended_actions ?? [],
+    },
+  };
+}
+
+function buildExtensionManifestEntity(extension: ExtensionPackageInfo): OperatorEntity {
+  return {
+    entityType: "extension_manifest",
+    name: extension.display_name,
+    meta: `${extension.location} · ${extension.trust} · ${extension.version ?? "unknown version"}`,
+    summary: extension.summary || extension.description || "Extension package manifest",
+    details: {
+      extension_id: extension.id,
+      kind: extension.kind,
+      trust: extension.trust,
+      location: extension.location,
+      status: extension.status,
+      version: extension.version ?? "",
+      compatibility: extension.compatibility ?? null,
+      publisher: extension.publisher ?? null,
+      file_path: "manifest.yaml",
+      studio_reference: "manifest.yaml",
+      save_supported: extension.location === "workspace",
+      validation_supported: true,
+      issues: extension.issues,
+      load_errors: extension.load_errors,
+      toggle_targets: extension.toggle_targets,
+      toggleable_contribution_types: extension.toggleable_contribution_types,
+      passive_contribution_types: extension.passive_contribution_types,
+      enable_supported: extension.enable_supported,
+      disable_supported: extension.disable_supported,
+      removable: extension.removable,
+      enabled_scope: extension.enabled_scope,
+      configurable: extension.configurable,
+      metadata_supported: extension.metadata_supported,
+      config_scope: extension.config_scope,
+      enabled: extension.enabled ?? null,
+      config: extension.config,
+    },
+  };
+}
+
+function buildExtensionStudioDraft(entity: OperatorEntity): string {
+  const filePath = typeof entity.details.file_path === "string" ? entity.details.file_path : "";
+  const requiresTools = Array.isArray(entity.details.requires_tools)
+    ? entity.details.requires_tools.filter((item): item is string => typeof item === "string")
+    : [];
+  const missingTools = Array.isArray(entity.details.missing_tools)
+    ? entity.details.missing_tools.filter((item): item is string => typeof item === "string")
+    : [];
+  const missingSkills = Array.isArray(entity.details.missing_skills)
+    ? entity.details.missing_skills.filter((item): item is string => typeof item === "string")
+    : [];
+
+  if (entity.entityType === "workflow_definition") {
+    return [
+      filePath
+        ? `Open "${filePath}" and update workflow "${entity.name}".`
+        : `Update workflow "${entity.name}".`,
+      "Validation focus: keep requires.tools aligned with every step tool, preserve input schema clarity, and keep execution boundaries/risk truthful.",
+      missingTools.length || missingSkills.length
+        ? `Current blockers: ${[
+          missingTools.length ? `tools ${missingTools.join(", ")}` : "",
+          missingSkills.length ? `skills ${missingSkills.join(", ")}` : "",
+        ].filter(Boolean).join(" · ")}.`
+        : "Current runtime blockers: none detected from the latest workspace snapshot.",
+      "After editing, reload workflows and review diagnostics plus capability preflight before rerunning.",
+    ].join("\n");
+  }
+
+  if (entity.entityType === "skill") {
+    return [
+      filePath
+        ? `Open "${filePath}" and update skill "${entity.name}".`
+        : `Update skill "${entity.name}".`,
+      requiresTools.length
+        ? `Keep tool assumptions aligned with runtime availability: ${requiresTools.join(", ")}.`
+        : "This skill has no declared tool requirements today.",
+      "After editing, reload skills and verify the skill remains available in the live capability surface.",
+    ].join("\n");
+  }
+
+  const url = typeof entity.details.url === "string" ? entity.details.url : "";
+  const description = typeof entity.details.description === "string" ? entity.details.description : "";
+  return [
+    `Review MCP server "${entity.name}" configuration.`,
+    url ? `Current URL: ${url}` : "No URL configured.",
+    description ? `Description: ${description}` : "No description configured.",
+    "Validate auth hints, headers, and connectivity before enabling or rerunning dependent workflows.",
+  ].join("\n");
+}
+
+function workflowResumeDetails(workflow: WorkflowRunRecord): string[] {
+  const details: string[] = [];
+  if (workflow.runIdentity) details.push(`run ${shortIdentifier(workflow.runIdentity)}`);
+  if (workflow.branchKind) details.push(workflow.branchKind.replace(/_/g, " "));
+  if (typeof workflow.branchDepth === "number" && workflow.branchDepth > 0) details.push(`depth ${workflow.branchDepth}`);
+  if (workflow.runFingerprint) details.push(`fingerprint ${shortIdentifier(workflow.runFingerprint)}`);
+  if (workflow.resumeCheckpointLabel) details.push(`checkpoint ${workflow.resumeCheckpointLabel}`);
+  if (workflow.resumeFromStep) details.push(`resume ${workflow.resumeFromStep}`);
+  if (workflow.threadContinueMessage) details.push("thread continue ready");
+  if (workflow.approvalRecoveryMessage) details.push("approval recovery ready");
+  return details;
 }
 
 const RUNBOOK_MACROS_KEY = "seraph_operator_runbook_macros";
@@ -357,6 +1050,69 @@ function writeRunbookMacros(items: RunbookInfo[]) {
 }
 
 function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord {
+  const normalizedStepRecords: WorkflowStepRecord[] | undefined = Array.isArray(value.step_records)
+    ? value.step_records.reduce<WorkflowStepRecord[]>((records, entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return records;
+      const record = entry as Record<string, unknown>;
+      if (
+        typeof record.id !== "string"
+        || typeof record.index !== "number"
+        || typeof record.tool !== "string"
+        || typeof record.status !== "string"
+      ) {
+        return records;
+      }
+      records.push({
+        id: record.id,
+        index: record.index,
+        tool: record.tool,
+        status: record.status,
+        argumentKeys: Array.isArray(record.argument_keys)
+          ? record.argument_keys.filter((item): item is string => typeof item === "string")
+          : [],
+        artifactPaths: Array.isArray(record.artifact_paths)
+          ? record.artifact_paths.filter((item): item is string => typeof item === "string")
+          : [],
+        resultSummary: typeof record.result_summary === "string" ? record.result_summary : null,
+        errorKind: typeof record.error_kind === "string" ? record.error_kind : null,
+        errorSummary: typeof record.error_summary === "string" ? record.error_summary : null,
+        startedAt: typeof record.started_at === "string" ? record.started_at : null,
+        completedAt: typeof record.completed_at === "string" ? record.completed_at : null,
+        durationMs: typeof record.duration_ms === "number" ? record.duration_ms : null,
+        recoveryActions: Array.isArray(record.recovery_actions)
+          ? record.recovery_actions.filter(
+              (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+            )
+          : undefined,
+        recoveryHint: typeof record.recovery_hint === "string" ? record.recovery_hint : null,
+        isRecoverable: typeof record.is_recoverable === "boolean" ? record.is_recoverable : undefined,
+      });
+      return records;
+    }, [])
+    : undefined;
+
+  const normalizedTimeline: WorkflowTimelineEntry[] | undefined = Array.isArray(value.timeline)
+    ? value.timeline.reduce<WorkflowTimelineEntry[]>((entries, entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entries;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.kind !== "string" || typeof record.at !== "string" || typeof record.summary !== "string") {
+        return entries;
+      }
+      entries.push({
+        kind: record.kind,
+        at: record.at,
+        summary: record.summary,
+        stepId: typeof record.step_id === "string" ? record.step_id : null,
+        stepTool: typeof record.step_tool === "string" ? record.step_tool : null,
+        resultSummary: typeof record.result_summary === "string" ? record.result_summary : null,
+        errorKind: typeof record.error_kind === "string" ? record.error_kind : null,
+        errorSummary: typeof record.error_summary === "string" ? record.error_summary : null,
+        durationMs: typeof record.duration_ms === "number" ? record.duration_ms : null,
+      });
+      return entries;
+    }, [])
+    : undefined;
+
   return {
     id: String(value.id ?? ""),
     toolName: String(value.tool_name ?? ""),
@@ -367,6 +1123,7 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     updatedAt: String(value.updated_at ?? value.started_at ?? ""),
     summary: String(value.summary ?? ""),
     stepTools: Array.isArray(value.step_tools) ? value.step_tools.filter((item): item is string => typeof item === "string") : [],
+    stepRecords: normalizedStepRecords,
     artifactPaths: Array.isArray(value.artifact_paths) ? value.artifact_paths.filter((item): item is string => typeof item === "string") : [],
     continuedErrorSteps: Array.isArray(value.continued_error_steps)
       ? value.continued_error_steps.filter((item): item is string => typeof item === "string")
@@ -436,18 +1193,27 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
       typeof value.approval_recovery_message === "string"
         ? value.approval_recovery_message
         : null,
-    timeline: Array.isArray(value.timeline)
-      ? value.timeline
-        .map((entry) => {
-          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
-          const record = entry as Record<string, unknown>;
-          if (typeof record.kind !== "string" || typeof record.at !== "string" || typeof record.summary !== "string") {
-            return null;
-          }
-          return { kind: record.kind, at: record.at, summary: record.summary };
-        })
-        .filter((entry): entry is { kind: string; at: string; summary: string } => entry != null)
+    runFingerprint: typeof value.run_fingerprint === "string" ? value.run_fingerprint : null,
+    runIdentity: typeof value.run_identity === "string" ? value.run_identity : null,
+    parentRunIdentity:
+      typeof value.parent_run_identity === "string" ? value.parent_run_identity : null,
+    rootRunIdentity:
+      typeof value.root_run_identity === "string" ? value.root_run_identity : null,
+    branchKind: typeof value.branch_kind === "string" ? value.branch_kind : null,
+    branchDepth: typeof value.branch_depth === "number" ? value.branch_depth : null,
+    isBranchRun: typeof value.is_branch_run === "boolean" ? value.is_branch_run : undefined,
+    retryFromStepDraft:
+      typeof value.retry_from_step_draft === "string" ? value.retry_from_step_draft : null,
+    checkpointCandidates: Array.isArray(value.checkpoint_candidates)
+      ? value.checkpoint_candidates.filter(
+          (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+        )
       : undefined,
+    resumePlan:
+      value.resume_plan && typeof value.resume_plan === "object" && !Array.isArray(value.resume_plan)
+        ? (value.resume_plan as Record<string, unknown>)
+        : null,
+    timeline: normalizedTimeline,
   };
 }
 
@@ -467,6 +1233,9 @@ function collectGoalTitles(goals: GoalInfo[], limit: number): string[] {
 }
 
 function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
+  if (workflow.retryFromStepDraft) {
+    return workflow.retryFromStepDraft;
+  }
   if (workflow.replayDraft) {
     return workflow.replayDraft;
   }
@@ -511,49 +1280,499 @@ function replayBlockCopy(reason: string | null | undefined): string {
   }
 }
 
-function timelineStatusLabel(value: OperatorTimelineEntry): string {
+function activityStatusLabel(value: ActivityLedgerEntry): string {
   return `${value.kind.replace(/_/g, " ")} · ${value.status.replace(/_/g, " ")}`;
+}
+
+function activityCategoryLabel(value: ActivityLedgerFilter): string {
+  return value === "all" ? "All" : value.replace(/_/g, " ");
+}
+
+function formatUsd(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return null;
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function _modelLabelForRow(model: string): string {
+  return model.replace(/^openrouter\//, "").replace(/^anthropic\//, "").replace(/[_/-]+/g, " ");
+}
+
+function formatDuration(valueMs: number | null | undefined): string | null {
+  if (typeof valueMs !== "number" || Number.isNaN(valueMs) || valueMs <= 0) return null;
+  if (valueMs >= 60_000) return `${(valueMs / 60_000).toFixed(1)}m`;
+  if (valueMs >= 1000) return `${(valueMs / 1000).toFixed(1)}s`;
+  return `${Math.round(valueMs)}ms`;
+}
+
+function activityEmoji(value: ActivityLedgerEntry): string {
+  if (value.kind === "llm_call") return "🤖";
+  if (value.kind === "workflow_run") return "⚙️";
+  if (value.kind === "approval") return "⏳";
+  if (value.kind === "extension") return "🧩";
+  if (value.kind === "notification" || value.kind === "queued_insight" || value.kind === "intervention") return "📣";
+  if (value.kind === "routing") return "🧭";
+  if (value.kind === "tool_call" || value.kind === "tool_result" || value.kind === "tool_failed") return "🔧";
+  if (value.kind === "agent_run") return "✨";
+  if (value.kind === "scheduler_job") return "🗓️";
+  if (value.kind === "background_task") {
+    const title = value.title.toLowerCase();
+    if (title.includes("memory")) return "🧠";
+    if (title.includes("skill")) return "📚";
+    return "💤";
+  }
+  if (value.kind === "delivery") return "📨";
+  if (value.kind === "integration") return "🔌";
+  if (value.status === "failed" || value.status === "timed_out") return "⛔";
+  return "•";
+}
+
+function activityGroupKey(value: ActivityLedgerEntry): string {
+  if (value.group_key) return value.group_key;
+  const requestId = typeof value.metadata?.request_id === "string" ? value.metadata.request_id : null;
+  if (requestId) return `request:${requestId}`;
+  if (value.kind === "workflow_run") return `workflow:${value.id}`;
+  if (value.kind === "approval") return `approval:${value.id}`;
+  if (value.kind === "notification" || value.kind === "queued_insight" || value.kind === "intervention") {
+    return `guardian:${value.id}`;
+  }
+  return `${value.kind}:${value.thread_id ?? "ambient"}:${value.updated_at}`;
+}
+
+function activityLeadPriority(value: ActivityLedgerEntry): number {
+  switch (value.kind) {
+    case "approval":
+      return 0;
+    case "workflow_run":
+      return 1;
+    case "extension":
+      return 2;
+    case "intervention":
+    case "notification":
+    case "queued_insight":
+      return 3;
+    case "agent_run":
+      return 4;
+    case "llm_call":
+      return 5;
+    case "routing":
+      return 6;
+    case "tool_call":
+    case "tool_result":
+    case "tool_failed":
+      return 7;
+    default:
+      return 8;
+  }
+}
+
+function chooseActivityLead(items: ActivityLedgerEntry[]): ActivityLedgerEntry {
+  return [...items].sort((left, right) => {
+    const priorityDelta = activityLeadPriority(left) - activityLeadPriority(right);
+    if (priorityDelta !== 0) return priorityDelta;
+    return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+  })[0];
+}
+
+function activityRowMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "extension") {
+    const parts: string[] = [activityStatusLabel(value)];
+    if (typeof value.metadata?.action === "string" && value.metadata.action.trim()) {
+      parts.push(value.metadata.action.replace(/_/g, " "));
+    }
+    if (typeof value.metadata?.location === "string" && value.metadata.location.trim()) {
+      parts.push(value.metadata.location);
+    }
+    if (typeof value.metadata?.kind === "string" && value.metadata.kind.trim()) {
+      parts.push(value.metadata.kind);
+    }
+    if (typeof value.metadata?.version === "string" && value.metadata.version.trim()) {
+      parts.push(value.metadata.version);
+    }
+    return parts.join(" · ");
+  }
+  const parts: string[] = [activityStatusLabel(value)];
+  if (value.thread_label) parts.push(value.thread_label);
+  if (value.model) parts.push(_modelLabelForRow(value.model));
+  if (value.provider) parts.push(value.provider);
+  const duration = formatDuration(value.duration_ms);
+  if (duration) parts.push(duration);
+  const usd = formatUsd(value.cost_usd);
+  if (usd) parts.push(usd);
+  if (typeof value.prompt_tokens === "number" && typeof value.completion_tokens === "number") {
+    const total = value.prompt_tokens + value.completion_tokens;
+    if (total > 0) parts.push(`${total} tok`);
+  }
+  return parts.join(" · ");
+}
+
+function activityRoutingSummary(value: ActivityLedgerEntry): string {
+  if (value.kind !== "routing") return value.summary;
+  return [
+    `model ${String(value.metadata?.selected_model ?? value.model ?? "unknown")}`,
+    typeof value.metadata?.selected_source === "string" ? String(value.metadata.selected_source) : null,
+    typeof value.metadata?.reroute_cause === "string" ? String(value.metadata.reroute_cause) : null,
+    value.metadata?.max_budget_class ? `budget ${String(value.metadata.max_budget_class)}` : null,
+    value.metadata?.required_task_class ? `task ${String(value.metadata.required_task_class)}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function activityLeadDetail(value: ActivityLedgerEntry): string | null {
+  if (value.kind === "routing") return activityRoutingSummary(value);
+  if (value.kind === "extension" && typeof value.metadata?.error === "string" && value.metadata.error.trim()) {
+    return value.metadata.error;
+  }
+  return null;
+}
+
+function activityChildMeta(value: ActivityLedgerEntry): string {
+  if (value.kind !== "routing") return activityRowMeta(value);
+  return [
+    Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
+      ? `intents ${value.metadata.required_policy_intents.join(", ")}`
+      : null,
+    value.metadata?.max_cost_tier ? `cost ${String(value.metadata.max_cost_tier)}` : null,
+    value.metadata?.max_latency_tier ? `latency ${String(value.metadata.max_latency_tier)}` : null,
+    typeof value.metadata?.rejected_target_count === "number"
+      && value.metadata.rejected_target_count > 0
+      ? `rejected ${String(value.metadata.rejected_target_count)}`
+      : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function activityLeadMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "routing") return activityChildMeta(value);
+  return activityRowMeta(value);
+}
+
+function activityInspectorEntity(value: ActivityLedgerEntry): OperatorEntity {
+  return {
+    entityType: "activity_item",
+    name: value.title,
+    meta: activityStatusLabel(value),
+    summary: value.summary,
+    details: {
+      category: value.category,
+      source: value.source,
+      thread: value.thread_label ?? value.thread_id ?? "ambient",
+      status: value.status,
+      continue_message: value.continue_message ?? "",
+      replay_allowed: value.replay_allowed ?? false,
+      replay_block_reason: value.replay_block_reason ?? "none",
+      model: value.model ?? "n/a",
+      provider: value.provider ?? "n/a",
+      prompt_tokens: value.prompt_tokens ?? 0,
+      completion_tokens: value.completion_tokens ?? 0,
+      cost_usd: value.cost_usd ?? 0,
+      duration_ms: value.duration_ms ?? 0,
+      metadata: value.metadata ?? {},
+      recommended_actions: value.recommended_actions ?? [],
+    },
+  };
+}
+
+function workflowStepChildren(value: ActivityLedgerEntry): ActivityLedgerGroupChild[] {
+  const stepRecords = Array.isArray(value.metadata?.step_records)
+    ? value.metadata.step_records as Array<Record<string, unknown>>
+    : [];
+  return stepRecords.flatMap((record, index) => {
+    const tool = typeof record.tool === "string" ? record.tool : "step";
+    const status = typeof record.status === "string" ? record.status : "recorded";
+    const duration = typeof record.duration_ms === "number" ? formatDuration(record.duration_ms) : null;
+    const summary = typeof record.summary === "string"
+      ? record.summary
+      : typeof record.result_summary === "string"
+        ? record.result_summary
+        : typeof record.error_summary === "string"
+          ? record.error_summary
+          : "No step summary recorded.";
+    return [{
+      key: `${value.id}:step:${typeof record.id === "string" ? record.id : index}`,
+      icon: "🔧",
+      label: tool.replace(/_/g, " "),
+      summary,
+      meta: [status.replace(/_/g, " "), duration].filter(Boolean).join(" · "),
+      status,
+    }];
+  });
+}
+
+function activityGroupFooter(items: ActivityLedgerEntry[], lead: ActivityLedgerEntry): string | null {
+  const toolCount = items.filter((item) => ["tool_call", "tool_result", "tool_failed"].includes(item.kind)).length;
+  const llmCount = items.filter((item) => item.kind === "llm_call").length;
+  const approvalCount = items.filter((item) => item.kind === "approval").length;
+  const failureCount = items.filter((item) => item.status === "failed" || item.status === "timed_out").length;
+  const workflowStepCount = Array.isArray(lead.metadata?.step_records) ? lead.metadata.step_records.length : 0;
+  const totalDurationMs = items.reduce((sum, item) => sum + (item.duration_ms ?? 0), 0)
+    + (Array.isArray(lead.metadata?.step_records)
+      ? (lead.metadata.step_records as Array<Record<string, unknown>>).reduce(
+        (sum, record) => sum + (typeof record.duration_ms === "number" ? record.duration_ms : 0),
+        0,
+      )
+      : 0);
+
+  const parts: string[] = [];
+  if (workflowStepCount > 0) {
+    parts.push(`${workflowStepCount} step${workflowStepCount === 1 ? "" : "s"} recorded`);
+  } else if (toolCount > 0) {
+    parts.push(`${toolCount} tool${toolCount === 1 ? "" : "s"}`);
+  }
+  if (llmCount > 0) parts.push(`${llmCount} model call${llmCount === 1 ? "" : "s"}`);
+  if (approvalCount > 0) parts.push(`${approvalCount} pending`);
+  if (parts.length === 0) return null;
+  const duration = formatDuration(totalDurationMs);
+  const prefix = failureCount > 0 ? "⛔" : "⚡";
+  return `${prefix} ${parts.join(" · ")}${duration ? ` in ${duration} total` : ""}`;
+}
+
+function buildActivityLedgerGroups(items: ActivityLedgerEntry[]): ActivityLedgerGroup[] {
+  const groups = new Map<string, ActivityLedgerEntry[]>();
+  items.forEach((item) => {
+    const key = activityGroupKey(item);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  });
+
+  return [...groups.entries()]
+    .map(([key, groupItems]) => {
+      const lead = chooseActivityLead(groupItems);
+      const groupChildren = groupItems
+        .filter((item) => item.id !== lead.id)
+        .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+        .map((item) => ({
+          key: item.id,
+          icon: activityEmoji(item),
+          label: item.title,
+          summary: activityRoutingSummary(item),
+          meta: activityChildMeta(item),
+          status: item.status,
+          item,
+        }));
+      const stepChildren = lead.kind === "workflow_run" ? workflowStepChildren(lead) : [];
+      const children = [...stepChildren, ...groupChildren];
+      return {
+        key,
+        lead,
+        icon: activityEmoji(lead),
+        title: lead.title,
+        summary: lead.summary,
+        detail: activityLeadDetail(lead),
+        meta: activityLeadMeta(lead),
+        footer: activityGroupFooter(groupItems, lead),
+        updatedAt: groupItems.reduce(
+          (latest, item) => (new Date(item.updated_at).getTime() > new Date(latest).getTime() ? item.updated_at : latest),
+          lead.updated_at,
+        ),
+        children,
+      };
+    })
+    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+}
+
+function activityEntryHasRowAction(value: ActivityLedgerEntry): boolean {
+  return Boolean(
+    value.continue_message
+      || (value.replay_draft && value.replay_allowed !== false)
+      || (value.recommended_actions && value.recommended_actions.length > 0),
+  );
+}
+
+function activityGroupActionTarget(group: ActivityLedgerGroup): ActivityLedgerEntry {
+  if (activityEntryHasRowAction(group.lead)) return group.lead;
+  for (const child of group.children) {
+    if (child.item && activityEntryHasRowAction(child.item)) return child.item;
+  }
+  return group.lead;
+}
+
+function canOpenLedgerThread(
+  threadId: string | null | undefined,
+  activeSessionId: string | null,
+  knownSessionIds: Set<string>,
+): boolean {
+  if (!threadId) return false;
+  if (activeSessionId === threadId) return false;
+  return knownSessionIds.has(threadId);
+}
+
+function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSummary {
+  const llmItems = items.filter((item) => item.kind === "llm_call");
+  return {
+    window_hours: 24,
+    started_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    total_items: items.length,
+    visible_items: items.length,
+    is_partial: false,
+    partial_sources: [],
+    pending_approvals: items.filter((item) => item.kind === "approval").length,
+    failure_count: items.filter((item) => ["failed", "timed_out"].includes(item.status)).length,
+    llm_call_count: llmItems.length,
+    llm_cost_usd: llmItems.reduce((sum, item) => sum + (item.cost_usd ?? 0), 0),
+    input_tokens: llmItems.reduce((sum, item) => sum + (item.prompt_tokens ?? 0), 0),
+    output_tokens: llmItems.reduce((sum, item) => sum + (item.completion_tokens ?? 0), 0),
+    user_triggered_llm_calls: llmItems.filter((item) => ["rest_chat", "websocket_chat"].includes(item.source)).length,
+    autonomous_llm_calls: llmItems.filter((item) => !["rest_chat", "websocket_chat"].includes(item.source)).length,
+    categories: {
+      llm: items.filter((item) => item.category === "llm").length,
+      workflow: items.filter((item) => item.category === "workflow").length,
+      approval: items.filter((item) => item.category === "approval").length,
+      guardian: items.filter((item) => item.category === "guardian").length,
+      agent: items.filter((item) => item.category === "agent").length,
+      system: items.filter((item) => item.category === "system").length,
+    },
+  };
+}
+
+function normalizeActivityLedgerEntry(raw: Record<string, unknown>): ActivityLedgerEntry {
+  const kind = typeof raw.kind === "string" ? raw.kind : "system";
+  const category = (typeof raw.category === "string" ? raw.category : (
+    kind === "llm_call" || kind === "routing"
+      ? "llm"
+      : kind === "workflow_run"
+        ? "workflow"
+        : kind === "approval"
+          ? "approval"
+          : ["notification", "queued_insight", "intervention"].includes(kind)
+            ? "guardian"
+            : ["agent_run", "tool_call", "tool_result", "tool_failed"].includes(kind)
+              ? "agent"
+              : "system"
+  )) as ActivityLedgerCategory;
+
+  return {
+    id: typeof raw.id === "string" ? raw.id : crypto.randomUUID(),
+    kind,
+    category,
+    group_key: typeof raw.group_key === "string" ? raw.group_key : null,
+    title: typeof raw.title === "string" ? raw.title : kind.replace(/_/g, " "),
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    status: typeof raw.status === "string" ? raw.status : "unknown",
+    created_at: typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString(),
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : (typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString()),
+    thread_id: typeof raw.thread_id === "string" ? raw.thread_id : null,
+    thread_label: typeof raw.thread_label === "string" ? raw.thread_label : null,
+    continue_message: typeof raw.continue_message === "string" ? raw.continue_message : null,
+    replay_draft: typeof raw.replay_draft === "string" ? raw.replay_draft : null,
+    replay_allowed: typeof raw.replay_allowed === "boolean" ? raw.replay_allowed : false,
+    replay_block_reason: typeof raw.replay_block_reason === "string" ? raw.replay_block_reason : null,
+    recommended_actions: readActionList(raw.recommended_actions),
+    source: typeof raw.source === "string" ? raw.source : "activity",
+    model: typeof raw.model === "string" ? raw.model : null,
+    provider: typeof raw.provider === "string" ? raw.provider : null,
+    prompt_tokens: typeof raw.prompt_tokens === "number" ? raw.prompt_tokens : null,
+    completion_tokens: typeof raw.completion_tokens === "number" ? raw.completion_tokens : null,
+    cost_usd: typeof raw.cost_usd === "number" ? raw.cost_usd : null,
+    duration_ms: typeof raw.duration_ms === "number" ? raw.duration_ms : null,
+    metadata: (raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata))
+      ? raw.metadata as Record<string, unknown>
+      : {},
+  };
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
   return Object.prototype.hasOwnProperty.call(workflow.inputs, "file_path");
 }
 
+const COCKPIT_GLOBAL_HINTS = [
+  "Shift+1/2/3 switch layouts",
+  "Shift+K or Ctrl+K opens the capability palette",
+  "Drag headers to move panes",
+  "Reset view repacks the current workspace",
+];
+
+const COCKPIT_WINDOW_HINTS = {
+  sessions: "Thread control, saved conversations, and continuity markers for the active thread.",
+  goals: "Keep current priorities visible here; Seraph tracks them as structured goals for planning and review.",
+  outputs: "Recent workspace artifacts produced in the current audit window.",
+  approvals: "Pending approvals block workflow and tool execution until you inspect or approve them.",
+  guardianState: "The live synthesis Seraph is using for timing, confidence, and next actions.",
+  operatorTimeline: "Browse what Seraph did, why it did it, and what spent budget across user, guardian, workflow, and system activity.",
+  interventions: "Recent proactive nudges, delivery outcomes, and feedback signal.",
+  workflowTimeline: "Inspect runs, branch from failures, and resume repaired steps.",
+  audit: "Durable tool, memory, workflow, and integration events for the current window.",
+  trace: "In-flight routing, tool, and error activity while work is happening.",
+  inspector: "Select a run, approval, intervention, or event to inspect details and recovery actions.",
+  presence: "Live guardian state mirror.",
+  conversation: "Latest replies, pending drafts, and quick thread context for the current session.",
+  desktopShell: "Native continuity, queued notifications, and browser-closed follow-up state.",
+  operatorTerminal: "Run packs, workflows, macros, and repair actions from one dense control surface.",
+} as const;
+
+const ACTIVITY_LEDGER_FILTERS: ActivityLedgerFilter[] = [
+  "all",
+  "llm",
+  "workflow",
+  "approval",
+  "guardian",
+  "agent",
+  "system",
+];
+
 function CockpitWorkspaceWindow({
   panelId,
   title,
   meta,
+  hint,
+  showHint,
   minWidth,
   minHeight,
+  onClose,
   children,
 }: {
-  panelId: string;
+  panelId: CockpitPaneId;
   title: string;
   meta: string;
-  minWidth: number;
-  minHeight: number;
+  hint?: string | null;
+  showHint?: boolean;
+  minWidth?: number;
+  minHeight?: number;
+  onClose?: () => void;
   children: ReactNode;
 }) {
-  const { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront } = useDragResize(panelId, {
-    minWidth,
-    minHeight,
+  const resolvedMinWidth = PANEL_MIN_SIZES[panelId]?.width ?? minWidth ?? 240;
+  const resolvedMinHeight = PANEL_MIN_SIZES[panelId]?.height ?? minHeight ?? 160;
+  const { panelRef, dragHandleProps, resizeHandleProps, style, isFront, bringToFront } = useDragResize(panelId, {
+    minWidth: resolvedMinWidth,
+    minHeight: resolvedMinHeight,
   });
 
   return (
     <section
       ref={panelRef}
-      className="cockpit-window"
+      className={`cockpit-window ${isFront ? "cockpit-window--active" : ""}`}
       style={style}
       onPointerDown={bringToFront}
     >
       <ResizeHandles resizeHandleProps={resizeHandleProps} />
       <div className="cockpit-window-header" {...dragHandleProps}>
-        <div>
+        <div className="cockpit-window-header-main">
           <div className="cockpit-window-title">{title}</div>
           <div className="cockpit-window-meta">{meta}</div>
         </div>
-        <div className="cockpit-window-grip">drag / resize</div>
+        <div className="cockpit-window-controls">
+          {onClose ? (
+            <button
+              type="button"
+              className="cockpit-window-control cockpit-window-control--close"
+              title={`Hide ${title}`}
+              aria-label={`Hide ${title}`}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onClose();
+              }}
+            >
+              x
+            </button>
+          ) : null}
+        </div>
       </div>
+      {showHint && hint ? <div className="cockpit-window-hint">{hint}</div> : null}
       <div className="cockpit-window-body">{children}</div>
     </section>
   );
@@ -562,6 +1781,7 @@ function CockpitWorkspaceWindow({
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -582,21 +1802,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [catalogItems, setCatalogItems] = useState<CatalogItemInfo[]>([]);
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
+  const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
-  const [operatorTimeline, setOperatorTimeline] = useState<OperatorTimelineEntry[]>([]);
+  const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
+  const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
+  const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
-  const [operatorFeed, setOperatorFeed] = useState<OperatorFeedEntry[]>([]);
+  const [doctorPlans, setDoctorPlans] = useState<DoctorPlanRecord[]>([]);
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [studioSelectedId, setStudioSelectedId] = useState<string | null>(null);
+  const [studioDraft, setStudioDraft] = useState("");
+  const [studioStatus, setStudioStatus] = useState<string | null>(null);
+  const [studioPackageStatus, setStudioPackageStatus] = useState<string | null>(null);
+  const [studioPackagePreview, setStudioPackagePreview] = useState<ExtensionPathPreview | null>(null);
+  const [studioBusy, setStudioBusy] = useState<string | null>(null);
+  const [studioPreflight, setStudioPreflight] = useState<CapabilityPreflightResponse | null>(null);
+  const [studioWorkflowDiagnostics, setStudioWorkflowDiagnostics] = useState<WorkflowDiagnosticsPayload | null>(null);
+  const [studioDraftValidation, setStudioDraftValidation] = useState<Record<string, unknown> | null>(null);
+  const [studioMcpTestResult, setStudioMcpTestResult] = useState<Record<string, unknown> | null>(null);
+  const [studioMcpUrl, setStudioMcpUrl] = useState("");
+  const [studioMcpDescription, setStudioMcpDescription] = useState("");
+  const [studioExtensionPath, setStudioExtensionPath] = useState("");
+  const [studioExtensionConfigDraft, setStudioExtensionConfigDraft] = useState("{}");
+  const [studioExtensionConfigDirty, setStudioExtensionConfigDirty] = useState(false);
+  const [pendingLifecycleApprovalId, setPendingLifecycleApprovalId] = useState<string | null>(null);
+  const studioExtensionConfigSelectionRef = useRef<string | null>(null);
+  const studioSelectionRef = useRef<string | null>(null);
+  const studioLoadRequestRef = useRef(0);
+  const studioValidationRequestRef = useRef(0);
+  const studioSaveRequestRef = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
+  const [windowsMenuOpen, setWindowsMenuOpen] = useState(false);
+  const windowsMenuRef = useRef<HTMLDivElement | null>(null);
   const activeLayoutId = useCockpitLayoutStore((s) => s.activeLayoutId);
-  const inspectorVisible = useCockpitLayoutStore((s) => s.inspectorVisible);
+  const paneVisibility = useCockpitLayoutStore((s) => s.paneVisibility);
+  const savedPaneVisibility = useCockpitLayoutStore((s) => s.savedPaneVisibility);
   const setLayout = useCockpitLayoutStore((s) => s.setLayout);
+  const setPaneVisible = useCockpitLayoutStore((s) => s.setPaneVisible);
+  const togglePaneVisible = useCockpitLayoutStore((s) => s.togglePaneVisible);
+  const savePaneVisibility = useCockpitLayoutStore((s) => s.savePaneVisibility);
+  const showAllPanes = useCockpitLayoutStore((s) => s.showAllPanes);
+  const hideNonCorePanes = useCockpitLayoutStore((s) => s.hideNonCorePanes);
   const applyCockpitLayout = usePanelLayoutStore((s) => s.applyCockpitLayout);
   const saveCockpitLayout = usePanelLayoutStore((s) => s.saveCockpitLayout);
   const resetCockpitLayout = usePanelLayoutStore((s) => s.resetCockpitLayout);
+  const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
+  const syncCockpitPaneStack = usePanelLayoutStore((s) => s.syncCockpitPaneStack);
 
   const messages = useChatStore((s) => s.messages);
   const sessions = useChatStore((s) => s.sessions);
@@ -606,6 +1861,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const isAgentBusy = useChatStore((s) => s.isAgentBusy);
   const ambientState = useChatStore((s) => s.ambientState);
   const ambientTooltip = useChatStore((s) => s.ambientTooltip);
+  const cockpitHintsEnabled = useChatStore((s) => s.cockpitHintsEnabled);
+  const agentVisual = useChatStore((s) => s.agentVisual);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restoreLastSession = useChatStore((s) => s.restoreLastSession);
   const switchSession = useChatStore((s) => s.switchSession);
@@ -620,20 +1877,60 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const refreshGoals = useQuestStore((s) => s.refresh);
 
   const handleResetWorkspace = useCallback(() => {
-    resetCockpitLayout(activeLayoutId, inspectorVisible);
-  }, [activeLayoutId, inspectorVisible, resetCockpitLayout]);
+    resetCockpitLayout(activeLayoutId, paneVisibility);
+    setWindowsMenuOpen(false);
+  }, [activeLayoutId, paneVisibility, resetCockpitLayout]);
 
   const handleSaveWorkspace = useCallback(() => {
+    savePaneVisibility(activeLayoutId);
     saveCockpitLayout(activeLayoutId);
     setOperatorStatus(`Saved ${getCockpitLayout(activeLayoutId).label} workspace`);
-  }, [activeLayoutId, saveCockpitLayout]);
+    setWindowsMenuOpen(false);
+  }, [activeLayoutId, saveCockpitLayout, savePaneVisibility]);
 
   const handleSelectLayout = useCallback(
     (layoutId: (typeof COCKPIT_LAYOUTS)[keyof typeof COCKPIT_LAYOUTS]["id"]) => {
+      const nextVisibility = savedPaneVisibility[layoutId] ?? getDefaultPaneVisibility(layoutId);
       setLayout(layoutId);
-      applyCockpitLayout(layoutId, inspectorVisible);
+      applyCockpitLayout(layoutId, nextVisibility);
+      setWindowsMenuOpen(false);
     },
-    [applyCockpitLayout, inspectorVisible, setLayout],
+    [applyCockpitLayout, savedPaneVisibility, setLayout],
+  );
+
+  const focusPane = useCallback(
+    (paneId: CockpitPaneId) => {
+      if (!paneVisibility[paneId]) {
+        setPaneVisible(paneId, true);
+        window.setTimeout(() => bringToFront(paneId), 0);
+      } else {
+        bringToFront(paneId);
+      }
+      setWindowsMenuOpen(false);
+    },
+    [bringToFront, paneVisibility, setPaneVisible],
+  );
+
+  const closeWindowPane = useCallback(
+    (paneId: CockpitPaneId) => {
+      setPaneVisible(paneId, false);
+    },
+    [setPaneVisible],
+  );
+
+  const panesByGroup = useMemo(() => {
+    const grouped = new Map<string, typeof COCKPIT_PANES>();
+    for (const pane of COCKPIT_PANES) {
+      const current = grouped.get(pane.group) ?? [];
+      current.push(pane);
+      grouped.set(pane.group, current);
+    }
+    return Array.from(grouped.entries());
+  }, []);
+
+  const visiblePaneCount = useMemo(
+    () => COCKPIT_PANES.filter((pane) => paneVisibility[pane.id]).length,
+    [paneVisibility],
   );
 
   useEffect(() => {
@@ -645,119 +1942,156 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     writeRunbookMacros(savedRunbooks);
   }, [savedRunbooks]);
 
+  useEffect(() => {
+    if (!pendingLifecycleApprovalId) return;
+    const approval = pendingApprovals.find((item) => item.id === pendingLifecycleApprovalId);
+    if (!approval) return;
+    focusPane("approvals_pane");
+    setSelectedInspector({ kind: "approval", approval });
+    setPendingLifecycleApprovalId(null);
+  }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
+
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
-    try {
-      const [
-        observerResponse,
-        auditResponse,
-        approvalsResponse,
-        continuityResponse,
-        capabilitiesResponse,
-        operatorTimelineResponse,
-        workflowRunsResponse,
-        toolModeResponse,
-        mcpModeResponse,
-        approvalModeResponse,
-      ] = await Promise.all([
-        fetch(`${API_URL}/api/observer/state`),
-        fetch(`${API_URL}/api/audit/events?limit=12`),
-        fetch(`${API_URL}/api/approvals/pending?limit=8`),
-        fetch(`${API_URL}/api/observer/continuity`),
-        fetch(`${API_URL}/api/capabilities/overview`),
-        fetch(`${API_URL}/api/operator/timeline?limit=12${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-        fetch(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-        fetch(`${API_URL}/api/settings/tool-policy-mode`),
-        fetch(`${API_URL}/api/settings/mcp-policy-mode`),
-        fetch(`${API_URL}/api/settings/approval-mode`),
-      ]);
+    const fetchJson = async (url: string) => {
+      try {
+        const response = await fetch(url);
+        if (isCancelled() || !response.ok) {
+          return { ok: false, payload: null };
+        }
+        const payload = await response.json().catch(() => null);
+        if (isCancelled()) {
+          return { ok: false, payload: null };
+        }
+        return { ok: true, payload };
+      } catch {
+        return { ok: false, payload: null };
+      }
+    };
 
-      if (!isCancelled() && observerResponse.ok) {
-        const observerPayload = await observerResponse.json();
-        setObserverState(observerPayload);
-      }
+    const [
+      runtimeStatusResult,
+      observerResult,
+      auditResult,
+      approvalsResult,
+      continuityResult,
+      capabilitiesResult,
+      extensionsResult,
+      activityLedgerResult,
+      workflowRunsResult,
+      toolModeResult,
+      mcpModeResult,
+      approvalModeResult,
+    ] = await Promise.all([
+      fetchJson(`${API_URL}/api/runtime/status`),
+      fetchJson(`${API_URL}/api/observer/state`),
+      fetchJson(`${API_URL}/api/audit/events?limit=12`),
+      fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
+      fetchJson(`${API_URL}/api/observer/continuity`),
+      fetchJson(`${API_URL}/api/capabilities/overview`),
+      fetchJson(`${API_URL}/api/extensions`),
+      fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
+      fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
+      fetchJson(`${API_URL}/api/settings/approval-mode`),
+    ]);
 
-      if (!isCancelled() && auditResponse.ok) {
-        const auditPayload = await auditResponse.json();
-        setAuditEvents(Array.isArray(auditPayload) ? auditPayload : []);
-      }
+    if (isCancelled()) return;
 
-      if (!isCancelled() && approvalsResponse.ok) {
-        const approvalsPayload = await approvalsResponse.json();
-        setPendingApprovals(Array.isArray(approvalsPayload) ? approvalsPayload : []);
+    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
+      setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
+    }
+    if (observerResult.ok) {
+      setObserverState((observerResult.payload as ObserverState | null) ?? {});
+    }
+    if (auditResult.ok) {
+      setAuditEvents(Array.isArray(auditResult.payload) ? auditResult.payload : []);
+    }
+    if (approvalsResult.ok) {
+      setPendingApprovals(Array.isArray(approvalsResult.payload) ? approvalsResult.payload : []);
+    }
+    if (continuityResult.ok && continuityResult.payload) {
+      const continuityPayload = continuityResult.payload as ObserverContinuitySnapshot;
+      setDaemonPresence(continuityPayload.daemon);
+      setDesktopNotifications(continuityPayload.notifications ?? []);
+      setQueuedInsights(continuityPayload.queued_insights ?? []);
+      setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
+      setRecentInterventions(continuityPayload.recent_interventions ?? []);
+    }
+    if (capabilitiesResult.ok && capabilitiesResult.payload) {
+      const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
+      setWorkflows(Array.isArray(capabilityPayload.workflows) ? capabilityPayload.workflows : []);
+      setSkills(Array.isArray(capabilityPayload.skills) ? capabilityPayload.skills : []);
+      setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
+      setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
+      setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
+      setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
+      setCapabilityRecommendations(
+        Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
+      );
+      setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
+    }
+    if (extensionsResult.ok) {
+      setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
+    } else {
+      setExtensionPackages([]);
+    }
+    if (
+      activityLedgerResult.ok
+      && activityLedgerResult.payload
+      && typeof activityLedgerResult.payload === "object"
+      && Array.isArray((activityLedgerResult.payload as { items?: unknown }).items)
+    ) {
+      const payload = activityLedgerResult.payload as { items?: unknown; summary?: unknown };
+      const items = Array.isArray(payload.items)
+        ? payload.items.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item)
+          ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+          : []))
+        : [];
+      const derivedSummary = deriveActivitySummary(items);
+      setActivityLedger(
+        items,
+      );
+      setActivitySummary(
+        payload.summary && typeof payload.summary === "object"
+          ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
+          : derivedSummary,
+      );
+    } else {
+      const fallbackTimelineResult = await fetchJson(
+        `${API_URL}/api/operator/timeline?limit=16${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`,
+      );
+      if (fallbackTimelineResult.ok && fallbackTimelineResult.payload && typeof fallbackTimelineResult.payload === "object") {
+        const items = Array.isArray((fallbackTimelineResult.payload as { items?: unknown }).items)
+          ? ((fallbackTimelineResult.payload as { items?: unknown }).items as unknown[]).flatMap((item) => (
+            item && typeof item === "object" && !Array.isArray(item)
+              ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+              : []
+          ))
+          : [];
+        setActivityLedger(items);
+        setActivitySummary(deriveActivitySummary(items));
+      } else {
+        setActivityLedger([]);
+        setActivitySummary(deriveActivitySummary([]));
       }
-
-      if (!isCancelled() && continuityResponse.ok) {
-        const continuityPayload: ObserverContinuitySnapshot = await continuityResponse.json();
-        setDaemonPresence(continuityPayload.daemon);
-        setDesktopNotifications(continuityPayload.notifications ?? []);
-        setQueuedInsights(continuityPayload.queued_insights ?? []);
-        setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
-        setRecentInterventions(continuityPayload.recent_interventions ?? []);
-      }
-      if (!isCancelled() && capabilitiesResponse.ok) {
-        const capabilityPayload: CapabilityOverview = await capabilitiesResponse.json();
-        setWorkflows(Array.isArray(capabilityPayload.workflows) ? capabilityPayload.workflows : []);
-        setSkills(Array.isArray(capabilityPayload.skills) ? capabilityPayload.skills : []);
-        setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
-        setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
-        setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
-        setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
-        setCapabilityRecommendations(
-          Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
-        );
-        setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
-      }
-      if (!isCancelled() && operatorTimelineResponse.ok) {
-        const operatorTimelinePayload = await operatorTimelineResponse.json();
-        setOperatorTimeline(
-          Array.isArray(operatorTimelinePayload.items)
-            ? operatorTimelinePayload.items
-            : [],
-        );
-      }
-      if (!isCancelled() && workflowRunsResponse.ok) {
-        const workflowRunsPayload = await workflowRunsResponse.json();
-        setWorkflowRuns(
-          Array.isArray(workflowRunsPayload.runs)
-            ? workflowRunsPayload.runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-            : [],
-        );
-      }
-      if (!isCancelled() && toolModeResponse.ok) {
-        const toolModePayload = await toolModeResponse.json();
-        setToolPolicyMode(toolModePayload.mode ?? "unknown");
-      }
-      if (!isCancelled() && mcpModeResponse.ok) {
-        const mcpModePayload = await mcpModeResponse.json();
-        setMcpPolicyMode(mcpModePayload.mode ?? "unknown");
-      }
-      if (!isCancelled() && approvalModeResponse.ok) {
-        const approvalModePayload = await approvalModeResponse.json();
-        setApprovalMode(approvalModePayload.mode ?? "unknown");
-      }
-    } catch {
-      if (!isCancelled()) {
-        setAuditEvents([]);
-        setPendingApprovals([]);
-        setDaemonPresence(null);
-        setDesktopNotifications([]);
-        setQueuedInsights([]);
-        setQueuedBundleCount(0);
-        setRecentInterventions([]);
-        setWorkflows([]);
-        setWorkflowRuns([]);
-        setSkills([]);
-        setMcpServers([]);
-        setTools([]);
-        setStarterPacks([]);
-        setCatalogItems([]);
-        setCapabilityRecommendations([]);
-        setRunbooks([]);
-        setOperatorTimeline([]);
-        setToolPolicyMode("unknown");
-        setMcpPolicyMode("unknown");
-        setApprovalMode("unknown");
-      }
+    }
+    if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
+      const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
+      setWorkflowRuns(
+        Array.isArray(runs)
+          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+          : [],
+      );
+    }
+    if (toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
+      setToolPolicyMode(((toolModeResult.payload as { mode?: string }).mode ?? "unknown") as ToolPolicyMode | "unknown");
+    }
+    if (mcpModeResult.ok && mcpModeResult.payload && typeof mcpModeResult.payload === "object") {
+      setMcpPolicyMode(((mcpModeResult.payload as { mode?: string }).mode ?? "unknown") as McpPolicyMode | "unknown");
+    }
+    if (approvalModeResult.ok && approvalModeResult.payload && typeof approvalModeResult.payload === "object") {
+      setApprovalMode(((approvalModeResult.payload as { mode?: string }).mode ?? "unknown") as ApprovalMode | "unknown");
     }
   }, [sessionId]);
 
@@ -821,9 +2155,54 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return () => window.removeEventListener("keydown", handleEscape);
   }, [paletteOpen]);
 
+  useEffect(() => {
+    if (!windowsMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!windowsMenuRef.current?.contains(event.target as Node)) {
+        setWindowsMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [windowsMenuOpen]);
+
+  useEffect(() => {
+    if (!studioOpen) return;
+    let cancelled = false;
+    void refreshCockpit(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshCockpit, studioOpen]);
+
+  useEffect(() => {
+    syncCockpitPaneStack(paneVisibility);
+  }, [paneVisibility, syncCockpitPaneStack]);
+
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
-  const activeSessionLabel = activeSession?.title ?? "fresh thread";
+  const visibleSections = useMemo(
+    () => ({
+      rail:
+        paneVisibility.sessions_pane
+        || paneVisibility.goals_pane
+        || paneVisibility.outputs_pane
+        || paneVisibility.approvals_pane,
+      guardianState: paneVisibility.guardian_state_pane,
+      timeline: paneVisibility.operator_timeline_pane,
+      workflows: paneVisibility.workflows_pane,
+      interventions: paneVisibility.interventions_pane,
+      audit: paneVisibility.audit_pane,
+      trace: paneVisibility.trace_pane,
+      inspector: paneVisibility.inspector_pane,
+      conversation:
+        paneVisibility.presence_pane
+        || paneVisibility.conversation_pane
+        || paneVisibility.desktop_shell_pane
+        || paneVisibility.operator_surface_pane,
+    }),
+    [paneVisibility],
+  );
   const recentConversation = messages.slice(-18);
   const latestResponse = useMemo(
     () =>
@@ -904,29 +2283,438 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => Object.fromEntries(sessions.map((item) => [item.id, item.title])),
     [sessions],
   );
+  const knownSessionIds = useMemo(
+    () => new Set(sessions.map((item) => item.id)),
+    [sessions],
+  );
   const topGoals = collectGoalTitles(goalTree, 5);
   const readyStarterPacks = useMemo(
     () => starterPacks.filter((pack) => pack.availability === "ready"),
     [starterPacks],
   );
   const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
+  const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
+    .replace(/^openrouter\//, "")
+    .replace(/^anthropic\//, "")
+    .replace(/[_/-]+/g, " ")
+    .toUpperCase();
+  const runtimeBuildLabel = runtimeStatus?.build_id ?? SERAPH_BUILD_ID;
+  const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
+  const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
+  const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
-    () => runbooks.slice(0, 6),
+    () => runbooks,
     [runbooks],
   );
-  const recentOperatorTimeline = useMemo(
-    () => operatorTimeline.slice(0, 10),
-    [operatorTimeline],
+  const allActivityGroups = useMemo(
+    () => buildActivityLedgerGroups(activityLedger),
+    [activityLedger],
+  );
+  const visibleActivityGroups = useMemo(
+    () => (activityFilter === "all"
+      ? allActivityGroups
+      : allActivityGroups.filter(
+        (group) =>
+          group.lead.category === activityFilter
+          || group.children.some((child) => child.item?.category === activityFilter),
+      )),
+    [activityFilter, allActivityGroups],
+  );
+  const seraphPresenceSnapshot = useMemo(
+    () => ({
+      connectionStatus,
+      animationState: agentVisual.animationState,
+      isAgentBusy,
+      pendingApprovalCount: pendingApprovals.length,
+      recentTraceRole: recentTrace[0]?.role ?? null,
+      recentTraceTool: recentTrace.find((message) => message.toolUsed)?.toolUsed ?? null,
+      latestResponseRole: latestResponse?.role ?? null,
+      ambientState,
+      dataQuality: observerState?.data_quality ?? null,
+      recentInterventionCount: recentInterventions.length,
+      operatorStatus,
+    }),
+    [
+      agentVisual.animationState,
+      ambientState,
+      connectionStatus,
+      isAgentBusy,
+      latestResponse?.role,
+      observerState?.data_quality,
+      operatorStatus,
+      pendingApprovals.length,
+      recentInterventions.length,
+      recentTrace,
+    ],
   );
   const operatorMacros = useMemo(
-    () => savedRunbooks.slice(0, 6),
+    () => savedRunbooks,
     [savedRunbooks],
   );
-  const recentOperatorFeed = useMemo(
-    () => operatorFeed.slice(0, 8),
-    [operatorFeed],
+  const extensionPackagesById = useMemo(
+    () => new Map(extensionPackages.map((item) => [item.id, item])),
+    [extensionPackages],
   );
+
+  const matchPackageFile = useCallback(
+    (
+      extensionId: string | null | undefined,
+      displayType: "skill" | "workflow" | "mcp_server",
+      name: string,
+      filePath: string | null | undefined,
+    ): ExtensionStudioFileInfo | null => {
+      if (!extensionId) return null;
+      const extensionPackage = extensionPackagesById.get(extensionId);
+      if (!extensionPackage) return null;
+      return extensionPackage.studio_files.find((entry) => {
+        if (entry.role !== "contribution" || entry.display_type !== displayType) return false;
+        if (entry.name === name) return true;
+        return typeof entry.resolved_path === "string" && !!filePath && entry.resolved_path === filePath;
+      }) ?? null;
+    },
+    [extensionPackagesById],
+  );
+
+  const studioEntries = useMemo<ExtensionStudioEntry[]>(
+    () => [
+      ...workflows.map((workflow) => ({
+        ...(() => {
+          const packageFile = matchPackageFile(workflow.extension_id, "workflow", workflow.name, workflow.file_path);
+          const extensionPackage = workflow.extension_id ? extensionPackagesById.get(workflow.extension_id) ?? null : null;
+          return {
+            extensionId: workflow.extension_id ?? null,
+            packageReference: packageFile?.reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: packageFile?.format ?? null,
+            saveSupported: workflow.extension_id ? (packageFile?.save_supported ?? false) : true,
+            validationSupported: workflow.extension_id ? (packageFile?.validation_supported ?? false) : true,
+          };
+        })(),
+        id: `workflow:${workflow.name}`,
+        entityType: "workflow_definition" as const,
+        name: workflow.name,
+        summary: workflow.description,
+        availability: workflow.availability ?? (workflow.is_available === false ? "blocked" : "ready"),
+        meta: `${workflow.risk_level} risk · ${workflow.step_count} steps`,
+        entity: buildWorkflowDefinitionEntity(workflow),
+      })),
+      ...skills.map((skill) => ({
+        id: `skill:${skill.name}`,
+        entityType: "skill" as const,
+        name: skill.name,
+        summary: skill.description ?? "Skill capability",
+        availability: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
+        meta: skill.user_invocable ? "invocable skill" : "support skill",
+        entity: buildSkillEntity(skill),
+        ...(() => {
+          const packageFile = matchPackageFile(skill.extension_id, "skill", skill.name, skill.file_path ?? null);
+          const extensionPackage = skill.extension_id ? extensionPackagesById.get(skill.extension_id) ?? null : null;
+          return {
+            extensionId: skill.extension_id ?? null,
+            packageReference: packageFile?.reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: packageFile?.format ?? null,
+            saveSupported: skill.extension_id ? (packageFile?.save_supported ?? false) : true,
+            validationSupported: skill.extension_id ? (packageFile?.validation_supported ?? false) : true,
+          };
+        })(),
+      })),
+      ...mcpServers.map((server) => ({
+        ...(() => {
+          const extensionPackage = server.extension_id ? extensionPackagesById.get(server.extension_id) ?? null : null;
+          const packagedServer = server.source === "extension" && !!server.extension_id;
+          return {
+            extensionId: server.extension_id ?? null,
+            packageReference: server.extension_reference ?? null,
+            packageDisplayName: extensionPackage?.display_name ?? server.extension_display_name ?? null,
+            packageVersion: extensionPackage?.version ?? null,
+            packageLocation: extensionPackage?.location ?? null,
+            packageTrust: extensionPackage?.trust ?? null,
+            studioFormat: null,
+            saveSupported: packagedServer ? false : true,
+            validationSupported: packagedServer ? false : true,
+          };
+        })(),
+        id: `mcp:${server.name}`,
+        entityType: "mcp" as const,
+        name: server.name,
+        summary: server.description || server.url || "MCP server",
+        availability: server.availability ?? server.status ?? "unknown",
+        meta: `${server.status ?? "unknown"} · ${server.tool_count ?? 0} tools`,
+        entity: buildMcpEntity(server),
+      })),
+      ...extensionPackages.map((extensionPackage) => {
+        const manifestFile = extensionPackage.studio_files.find((entry) => entry.role === "manifest") ?? null;
+        return {
+          id: `extension:${extensionPackage.id}`,
+          entityType: "extension_manifest" as const,
+          name: extensionPackage.display_name,
+          summary: extensionPackage.summary || extensionPackage.description || "Extension package manifest",
+          availability: extensionPackage.status,
+          meta: `${extensionPackage.location} · ${extensionPackage.trust} · ${extensionPackage.version ?? "unknown version"}`,
+          entity: buildExtensionManifestEntity(extensionPackage),
+          extensionId: extensionPackage.id,
+          packageReference: manifestFile?.reference ?? null,
+          packageDisplayName: extensionPackage.display_name,
+          packageVersion: extensionPackage.version ?? null,
+          packageLocation: extensionPackage.location,
+          packageTrust: extensionPackage.trust,
+          studioFormat: manifestFile?.format ?? "yaml",
+          saveSupported: manifestFile?.save_supported ?? false,
+          validationSupported: manifestFile?.validation_supported ?? false,
+        };
+      }),
+    ],
+    [extensionPackages, extensionPackagesById, matchPackageFile, mcpServers, skills, workflows],
+  );
+  const selectedStudioEntry = useMemo(
+    () => studioEntries.find((entry) => entry.id === studioSelectedId) ?? studioEntries[0] ?? null,
+    [studioEntries, studioSelectedId],
+  );
+  const selectedExtensionPackage = useMemo(
+    () => (
+      selectedStudioEntry?.extensionId
+        ? extensionPackagesById.get(selectedStudioEntry.extensionId) ?? null
+        : null
+    ),
+    [extensionPackagesById, selectedStudioEntry?.extensionId],
+  );
+  const studioMcpReadOnly = selectedStudioEntry?.entityType === "mcp" && !!selectedStudioEntry.extensionId;
+  const selectedExtensionToggleAction = useMemo(() => {
+    if (!selectedExtensionPackage) return null;
+    const currentlyEnabled = selectedExtensionPackage.enabled !== false;
+    const toggleSupported = currentlyEnabled
+      ? selectedExtensionPackage.disable_supported
+      : selectedExtensionPackage.enable_supported;
+    if (!toggleSupported) return null;
+    const scopeLabel =
+      selectedExtensionPackage.enabled_scope === "toggleable_contributions"
+        ? "contributions"
+        : "extension";
+    return {
+      nextEnabled: !currentlyEnabled,
+      label: `${currentlyEnabled ? "Disable" : "Enable"} ${scopeLabel}`,
+    };
+  }, [selectedExtensionPackage]);
+  useEffect(() => {
+    studioSelectionRef.current = selectedStudioEntry?.id ?? null;
+  }, [selectedStudioEntry?.id]);
+  useEffect(() => {
+    if (selectedStudioEntry?.entityType === "extension_manifest") {
+      const nextSelection = selectedExtensionPackage?.id ?? null;
+      const nextConfig =
+        selectedExtensionPackage?.config && Object.keys(selectedExtensionPackage.config).length > 0
+          ? selectedExtensionPackage.config
+          : {};
+      const nextDraft = JSON.stringify(nextConfig, null, 2);
+      const selectionChanged = studioExtensionConfigSelectionRef.current !== nextSelection;
+      studioExtensionConfigSelectionRef.current = nextSelection;
+      if (selectionChanged || !studioExtensionConfigDirty) {
+        setStudioExtensionConfigDraft(nextDraft);
+        setStudioExtensionConfigDirty(false);
+      }
+      return;
+    }
+    studioExtensionConfigSelectionRef.current = null;
+    setStudioExtensionConfigDirty(false);
+    setStudioExtensionConfigDraft("{}");
+  }, [selectedExtensionPackage?.config, selectedExtensionPackage?.id, selectedStudioEntry?.entityType, studioExtensionConfigDirty]);
+  const studioRecommendedActions = useMemo(
+    () => readActionList(selectedStudioEntry?.entity.details.recommended_actions),
+    [selectedStudioEntry],
+  );
+  const studioPackagePreviewIssueCount = useMemo(() => {
+    if (!studioPackagePreview || !Array.isArray(studioPackagePreview.results)) return 0;
+    return studioPackagePreview.results.reduce((count, result) => {
+      const issues = Array.isArray(result?.issues) ? result.issues.length : 0;
+      return count + issues;
+    }, 0);
+  }, [studioPackagePreview]);
+  const studioPackagePreviewHasLoadErrors = useMemo(
+    () => Array.isArray(studioPackagePreview?.load_errors) && studioPackagePreview.load_errors.length > 0,
+    [studioPackagePreview],
+  );
+  const studioPackagePreviewActionable = useMemo(
+    () => Boolean(studioPackagePreview?.ok)
+      && !studioPackagePreviewHasLoadErrors
+      && studioPackagePreviewIssueCount === 0,
+    [studioPackagePreview, studioPackagePreviewHasLoadErrors, studioPackagePreviewIssueCount],
+  );
+  const studioPackageAction = useMemo(() => {
+    const lifecyclePlan = studioPackagePreview?.lifecycle_plan;
+    const recommendedAction = lifecyclePlan?.recommended_action ?? "install";
+    if (recommendedAction === "update") {
+      return {
+        key: "update",
+        label: "Update package",
+        disabled: !studioPackagePreviewActionable,
+      };
+    }
+    if (recommendedAction === "none") {
+      return {
+        key: "none",
+        label: "Up to date",
+        disabled: true,
+      };
+    }
+    return {
+      key: "install",
+      label: "Install package",
+      disabled: !studioPackagePreviewActionable,
+    };
+  }, [studioPackagePreview, studioPackagePreviewActionable]);
+  const studioSidebarSections = useMemo(() => {
+    const grouped = new Map<string, ExtensionStudioEntry[]>();
+    extensionPackages.forEach((extensionPackage) => {
+      grouped.set(extensionPackage.id, []);
+    });
+    const standalone: ExtensionStudioEntry[] = [];
+    studioEntries.forEach((entry) => {
+      if (entry.extensionId && grouped.has(entry.extensionId)) {
+        grouped.get(entry.extensionId)?.push(entry);
+      } else {
+        standalone.push(entry);
+      }
+    });
+    const sortEntries = (entries: ExtensionStudioEntry[]) => entries.slice().sort((left, right) => {
+      if (left.entityType === "extension_manifest" && right.entityType !== "extension_manifest") return -1;
+      if (right.entityType === "extension_manifest" && left.entityType !== "extension_manifest") return 1;
+      return left.name.localeCompare(right.name);
+    });
+    return {
+      packages: extensionPackages
+        .map((extensionPackage) => ({
+          extension: extensionPackage,
+          entries: sortEntries(grouped.get(extensionPackage.id) ?? []),
+        }))
+        .filter((group) => group.entries.length > 0),
+      standalone: sortEntries(standalone),
+    };
+  }, [extensionPackages, studioEntries]);
+
+  useEffect(() => {
+    if (!studioOpen) return;
+    if (!studioSelectedId && studioEntries[0]) {
+      setStudioSelectedId(studioEntries[0].id);
+      return;
+    }
+    if (studioSelectedId && !studioEntries.some((entry) => entry.id === studioSelectedId)) {
+      setStudioSelectedId(studioEntries[0]?.id ?? null);
+    }
+  }, [studioEntries, studioOpen, studioSelectedId]);
+  const studioWorkflowErrors = useMemo(() => {
+    if (!studioWorkflowDiagnostics || !selectedStudioEntry) return [];
+    const filePath = typeof selectedStudioEntry.entity.details.file_path === "string"
+      ? selectedStudioEntry.entity.details.file_path
+      : null;
+    const errors = Array.isArray(studioWorkflowDiagnostics.load_errors)
+      ? studioWorkflowDiagnostics.load_errors
+      : [];
+    if (!filePath) return errors;
+    return errors.filter((entry) => entry.file_path === filePath || entry.message.includes(selectedStudioEntry.name));
+  }, [selectedStudioEntry, studioWorkflowDiagnostics]);
+  useEffect(() => {
+    if (!studioOpen || !selectedStudioEntry) return;
+    const entryId = selectedStudioEntry.id;
+    const requestId = ++studioLoadRequestRef.current;
+    let cancelled = false;
+    const fallbackDraft = buildExtensionStudioDraft(selectedStudioEntry.entity);
+    setStudioDraft(fallbackDraft);
+    setStudioStatus(null);
+    setStudioPreflight(null);
+    setStudioWorkflowDiagnostics(null);
+    setStudioDraftValidation(null);
+    setStudioMcpTestResult(null);
+    setStudioMcpUrl(typeof selectedStudioEntry.entity.details.url === "string" ? selectedStudioEntry.entity.details.url : "");
+    setStudioMcpDescription(
+      typeof selectedStudioEntry.entity.details.description === "string"
+        ? selectedStudioEntry.entity.details.description
+        : "",
+    );
+    if (selectedStudioEntry.entityType === "mcp" && selectedStudioEntry.extensionId) {
+      setStudioStatus("Packaged MCP definitions are read-only here; use connector test/toggle controls or update the package itself.");
+    }
+    const loadStudioSource = async () => {
+      try {
+        if (selectedStudioEntry.extensionId && selectedStudioEntry.packageReference && selectedStudioEntry.entityType !== "mcp") {
+          const response = await fetch(
+            `${API_URL}/api/extensions/${encodeURIComponent(selectedStudioEntry.extensionId)}/source?reference=${encodeURIComponent(selectedStudioEntry.packageReference)}`,
+          );
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(
+              payload.validation && typeof payload.validation === "object"
+                ? payload.validation as Record<string, unknown>
+                : null,
+            );
+            if (selectedStudioEntry.entityType === "extension_manifest") {
+              setStudioStatus(`${selectedStudioEntry.packageDisplayName ?? selectedStudioEntry.name} manifest loaded`);
+            }
+          }
+          return;
+        }
+        if (selectedStudioEntry.extensionId && selectedStudioEntry.entityType !== "mcp") {
+          if (!cancelled && requestId === studioLoadRequestRef.current && studioSelectionRef.current === entryId) {
+            setStudioDraftValidation(null);
+            setStudioStatus(`Reload extension package metadata before editing ${selectedStudioEntry.name}`);
+          }
+          return;
+        }
+        if (selectedStudioEntry.entityType === "workflow_definition") {
+          const response = await fetch(`${API_URL}/api/workflows/${encodeURIComponent(selectedStudioEntry.name)}/source`);
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(payload && typeof payload === "object" ? payload : null);
+          }
+          return;
+        }
+        if (selectedStudioEntry.entityType === "skill") {
+          const response = await fetch(`${API_URL}/api/skills/${encodeURIComponent(selectedStudioEntry.name)}/source`);
+          const payload = await response.json().catch(() => null);
+          if (
+            !cancelled
+            && requestId === studioLoadRequestRef.current
+            && studioSelectionRef.current === entryId
+            && response.ok
+            && typeof payload?.content === "string"
+          ) {
+            setStudioDraft(payload.content);
+            setStudioDraftValidation(payload && typeof payload === "object" ? payload : null);
+          }
+        }
+      } catch {
+        if (!cancelled && requestId === studioLoadRequestRef.current && studioSelectionRef.current === entryId) {
+          setStudioStatus(`Using generated draft for ${selectedStudioEntry.name}`);
+        }
+      }
+    };
+    void loadStudioSource();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedStudioEntry?.id, studioOpen]);
   const paletteItems = useMemo(() => {
     const query = paletteQuery.trim().toLowerCase();
     const items: Array<{
@@ -953,7 +2741,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `runbook:${item.id}`,
         kind: "runbook",
         label: item.label,
-        detail: `${item.availability ?? "unknown"} · ${item.description}`,
+        detail: `${item.availability ?? "unknown"} · ${item.description}${item.blocking_reasons?.length ? ` · ${item.blocking_reasons.join(", ")}` : ""}`,
         action: item.action ?? null,
         draft: item.command,
       });
@@ -973,7 +2761,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `starter-pack:${pack.name}`,
         kind: "starter pack",
         label: pack.label,
-        detail: `${pack.availability} · ${pack.description}`,
+        detail: `${pack.availability} · ${pack.description}${pack.blocked_skills[0] ? ` · blocked skill ${pack.blocked_skills[0].name}` : pack.blocked_workflows[0] ? ` · blocked workflow ${pack.blocked_workflows[0].name}` : ""}`,
         action: { type: "activate_starter_pack", label: "Activate pack", name: pack.name },
       });
     });
@@ -982,7 +2770,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `workflow:${workflow.name}`,
         kind: "workflow",
         label: workflow.name,
-        detail: `${workflow.is_available === false ? "blocked" : "ready"} · ${workflow.description}`,
+        detail: `${workflow.is_available === false ? "blocked" : "ready"} · ${workflow.description}${workflow.missing_tools?.length ? ` · tools ${workflow.missing_tools.join(", ")}` : ""}${workflow.missing_skills?.length ? ` · skills ${workflow.missing_skills.join(", ")}` : ""}`,
         action: workflow.is_available === false
           ? workflow.missing_skills?.[0]
             ? { type: "open_settings", label: "Open settings", target: "workflows" }
@@ -1023,13 +2811,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         id: `catalog:${item.type}:${item.name}`,
         kind: `install ${item.type}`,
         label: item.name,
-        detail: item.description,
+        detail: `${item.description}${item.missing_tools?.length ? ` · missing tools ${item.missing_tools.join(", ")}` : ""}`,
         action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: "Install", name: item.name },
       });
     });
 
-    if (!query) return items.slice(0, 24);
-    return items.filter((item) => `${item.kind} ${item.label} ${item.detail}`.toLowerCase().includes(query)).slice(0, 24);
+    if (!query) return items.slice(0, 40);
+    return items.filter((item) => `${item.kind} ${item.label} ${item.detail}`.toLowerCase().includes(query)).slice(0, 40);
   }, [
     capabilityRecommendations,
     operatorRunbooks,
@@ -1075,14 +2863,606 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return recentInterventions.filter((intervention) => intervention.session_id === workflow.sessionId);
   }
 
-  function appendOperatorFeed(summary: string, status: OperatorFeedEntry["status"]) {
-    const entry: OperatorFeedEntry = {
+  function studioEntryForWorkflowRun(workflow: WorkflowRunRecord): ExtensionStudioEntry | null {
+    return studioEntries.find(
+      (entry) => entry.entityType === "workflow_definition" && entry.name === workflow.workflowName,
+    ) ?? null;
+  }
+
+  function appendOperatorFeed(summary: string, status: "info" | "success" | "failed") {
+    setOperatorStatus(
+      status === "failed"
+        ? `Action failed: ${summary}`
+        : status === "success"
+          ? summary
+          : `Action recorded: ${summary}`,
+    );
+  }
+
+  async function handleExtensionLifecycleFailure(
+    payload: unknown,
+    fallbackMessage: string,
+    setStatus: (value: string) => void,
+  ): Promise<boolean> {
+    const approvalDetail = normalizeExtensionLifecycleApprovalDetail(payload);
+    if (approvalDetail) {
+      setPendingLifecycleApprovalId(approvalDetail.approval_id || null);
+      setStatus(`${approvalDetail.message} Review Pending approvals, then retry.`);
+      focusPane("approvals_pane");
+      await refreshCockpit();
+      appendOperatorFeed(
+        `${approvalDetail.tool_name} requires ${approvalDetail.risk_level} approval`,
+        "info",
+      );
+      return true;
+    }
+
+    const detail = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { detail?: unknown }).detail
+      : null;
+    setStatus(typeof detail === "string" ? detail : fallbackMessage);
+    return false;
+  }
+
+  function rememberDoctorPlan(plan: Omit<DoctorPlanRecord, "id" | "createdAt">) {
+    const next: DoctorPlanRecord = {
+      ...plan,
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      summary,
-      status,
       createdAt: new Date().toISOString(),
     };
-    setOperatorFeed((current) => [entry, ...current].slice(0, 18));
+    setDoctorPlans((current) => [next, ...current].slice(0, 6));
+  }
+
+  function openExtensionStudio(entry: ExtensionStudioEntry | null) {
+    if (!entry) return;
+    setStudioSelectedId(entry.id);
+    setStudioOpen(true);
+  }
+
+  function openExtensionStudioForEntity(entity: OperatorEntity | null) {
+    if (!entity) return;
+    const match = studioEntries.find(
+      (entry) => entry.entityType === entity.entityType && entry.name === entity.name,
+    );
+    if (match) {
+      openExtensionStudio(match);
+      return;
+    }
+    if (entity.entityType === "workflow_definition" || entity.entityType === "skill" || entity.entityType === "mcp") {
+      setStudioSelectedId(`${entity.entityType === "workflow_definition" ? "workflow" : entity.entityType}:${entity.name}`);
+      setStudioOpen(true);
+    }
+  }
+
+  async function refreshStudioValidation() {
+    if (!selectedStudioEntry) return;
+    const entry = selectedStudioEntry;
+    const entryId = entry.id;
+    const fileName = managedFileName(entry.entity.details.file_path);
+    const requestId = ++studioValidationRequestRef.current;
+    setStudioBusy("validation");
+    setStudioStatus(`Validating ${entry.name}...`);
+    try {
+      if (entry.entityType === "extension_manifest" && entry.extensionId && entry.packageReference) {
+        const response = await fetch(
+          `${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source?reference=${encodeURIComponent(entry.packageReference)}`,
+        );
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(
+          payload?.validation && typeof payload.validation === "object"
+            ? payload.validation as Record<string, unknown>
+            : null,
+        );
+        if (!response.ok) {
+          setStudioStatus(typeof payload?.detail === "string" ? payload.detail : `Failed to validate ${entry.name}`);
+        } else {
+          setStudioStatus(`${entry.packageDisplayName ?? entry.name} manifest is valid`);
+        }
+        return;
+      }
+
+      if (entry.entityType === "workflow_definition") {
+        const [validationResponse, preflightResponse, diagnosticsResponse] = await Promise.all([
+          fetch(`${API_URL}/api/workflows/validate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: studioDraft, file_name: fileName }),
+          }),
+          fetch(
+            `${API_URL}/api/capabilities/preflight?target_type=workflow&name=${encodeURIComponent(entry.name)}`,
+          ),
+          fetch(`${API_URL}/api/workflows/diagnostics`),
+        ]);
+
+        const validationPayload = await validationResponse.json().catch(() => null);
+        const preflightPayload = preflightResponse.ok
+          ? await preflightResponse.json() as CapabilityPreflightResponse
+          : null;
+        const diagnosticsPayload = diagnosticsResponse.ok
+          ? await diagnosticsResponse.json() as WorkflowDiagnosticsPayload
+          : null;
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(validationPayload && typeof validationPayload === "object" ? validationPayload : null);
+        setStudioPreflight(preflightPayload);
+        setStudioWorkflowDiagnostics(diagnosticsPayload);
+        setStudioStatus(
+          validationPayload?.valid === false
+            ? `${entry.name} has draft validation errors`
+            : preflightPayload?.ready
+            ? `${entry.name} is runtime-ready`
+            : `${entry.name} still has runtime blockers`,
+        );
+        return;
+      }
+
+      if (entry.entityType === "skill") {
+        const response = await fetch(`${API_URL}/api/skills/validate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: studioDraft, file_name: fileName }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(payload && typeof payload === "object" ? payload : null);
+        if (!response.ok) {
+          setStudioStatus(typeof payload?.detail === "string" ? payload.detail : `Failed to validate ${entry.name}`);
+        } else if (payload?.valid === false) {
+          setStudioStatus(`${entry.name} has draft validation errors`);
+        } else if (Array.isArray(payload?.missing_tools) && payload.missing_tools.length > 0) {
+          setStudioStatus(`${entry.name} saves cleanly but still needs runtime tools`);
+        } else {
+          setStudioStatus(`${entry.name} is valid and runtime-ready`);
+        }
+        return;
+      }
+
+      if (entry.entityType === "mcp") {
+        const response = await fetch(`${API_URL}/api/mcp/servers/validate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: entry.name,
+            url: studioMcpUrl.trim(),
+            description: studioMcpDescription.trim(),
+            enabled: Boolean(entry.entity.details.enabled ?? true),
+            headers:
+              entry.entity.details.headers && typeof entry.entity.details.headers === "object"
+                ? entry.entity.details.headers
+                : null,
+            auth_hint:
+              typeof entry.entity.details.auth_hint === "string"
+                ? entry.entity.details.auth_hint
+                : "",
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (requestId !== studioValidationRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioMcpTestResult(payload && typeof payload === "object" ? payload : null);
+        if (!response.ok) {
+          setStudioStatus(
+            typeof payload?.detail === "string" ? payload.detail : `${entry.name} test failed`,
+          );
+        } else if (payload?.valid === false) {
+          const issues = Array.isArray(payload?.issues)
+            ? payload.issues.filter((item: unknown): item is string => typeof item === "string")
+            : [];
+          setStudioStatus(
+            issues.length > 0
+              ? issues[0]
+              : `${entry.name} config has validation issues`,
+          );
+        } else {
+          const warnings = Array.isArray(payload?.warnings)
+            ? payload.warnings.filter((item: unknown): item is string => typeof item === "string")
+            : [];
+          setStudioStatus(
+            payload?.status === "auth_required"
+              ? `${entry.name} config is valid but still needs auth`
+              : warnings.length > 0
+                ? warnings[0]
+                : `${entry.name} config is ready to test`,
+          );
+        }
+        return;
+      }
+    } catch {
+      if (requestId === studioValidationRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioStatus(`Failed to validate ${entry.name}`);
+      }
+    } finally {
+      if (requestId === studioValidationRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioBusy(null);
+      }
+    }
+  }
+
+  async function saveStudioDraft() {
+    if (!selectedStudioEntry || selectedStudioEntry.entityType === "mcp") {
+      await saveStudioMcpConfig();
+      return;
+    }
+    const entry = selectedStudioEntry;
+    if (entry.extensionId && !entry.packageReference) {
+      setStudioStatus(`Reload extension packages before saving ${entry.name}`);
+      return;
+    }
+    const entryId = entry.id;
+    const fileName = managedFileName(entry.entity.details.file_path);
+    const requestId = ++studioSaveRequestRef.current;
+    setStudioBusy("save");
+    setStudioStatus(`Saving ${entry.name}...`);
+    try {
+      if (entry.extensionId && entry.packageReference) {
+        const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(entry.extensionId)}/source`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reference: entry.packageReference,
+            content: studioDraft,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+            setStudioStatus(
+              typeof payload?.detail === "string"
+                ? payload.detail
+                : `Failed to save ${entry.name}`,
+            );
+          }
+          return;
+        }
+        await refreshCockpit();
+        if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+        setStudioDraftValidation(
+          payload?.validation && typeof payload.validation === "object"
+            ? payload.validation as Record<string, unknown>
+            : null,
+        );
+        setStudioStatus(
+          entry.entityType === "extension_manifest"
+            ? `${entry.packageDisplayName ?? entry.name} manifest saved`
+            : `${entry.name} saved`,
+        );
+        appendOperatorFeed(
+          entry.entityType === "extension_manifest"
+            ? `${entry.packageDisplayName ?? entry.name} manifest saved`
+            : `${entry.name} saved`,
+          "success",
+        );
+        return;
+      }
+
+      const endpoint = entry.entityType === "workflow_definition"
+        ? `${API_URL}/api/workflows/save`
+        : `${API_URL}/api/skills/save`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: studioDraft,
+          file_name: fileName,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload?.detail;
+        if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+          setStudioStatus(
+            typeof detail === "string"
+              ? detail
+              : `Failed to save ${entry.name}`,
+          );
+          if (detail && typeof detail === "object") {
+            setStudioDraftValidation(detail as Record<string, unknown>);
+          }
+        }
+        return;
+      }
+      await refreshCockpit();
+      if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+      await refreshStudioValidation();
+      if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+      setStudioStatus(`${entry.name} saved`);
+      appendOperatorFeed(`${entry.name} saved`, "success");
+    } catch {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioStatus(`Failed to save ${entry.name}`);
+      }
+    } finally {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioBusy(null);
+      }
+    }
+  }
+
+  async function saveStudioMcpConfig() {
+    if (!selectedStudioEntry || selectedStudioEntry.entityType !== "mcp") return;
+    const entry = selectedStudioEntry;
+    const entryId = entry.id;
+    const requestId = ++studioSaveRequestRef.current;
+    setStudioBusy("save");
+    setStudioStatus(`Saving ${entry.name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/mcp/servers/${entry.name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: studioMcpUrl.trim(),
+          description: studioMcpDescription.trim(),
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+          setStudioStatus(
+            typeof payload?.detail === "string" ? payload.detail : `Failed to save ${entry.name}`,
+          );
+        }
+        return;
+      }
+      await refreshCockpit();
+      if (requestId !== studioSaveRequestRef.current || studioSelectionRef.current !== entryId) return;
+      setStudioStatus(`${entry.name} config saved`);
+      appendOperatorFeed(`${entry.name} config saved`, "success");
+    } catch {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioStatus(`Failed to save ${entry.name}`);
+      }
+    } finally {
+      if (requestId === studioSaveRequestRef.current && studioSelectionRef.current === entryId) {
+        setStudioBusy(null);
+      }
+    }
+  }
+
+  async function validateStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-validate");
+    setStudioPackagePreview(null);
+    setStudioPackageStatus(`Validating ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/validate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setStudioPackageStatus(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : `Failed to validate ${path}`,
+        );
+        return;
+      }
+      const preview = payload as ExtensionPathPreview;
+      setStudioPackagePreview(preview);
+      const issueCount = Array.isArray(payload?.results)
+        ? payload.results.reduce((count: number, result: unknown) => {
+          if (!result || typeof result !== "object" || Array.isArray(result)) return count;
+          const issues = Array.isArray((result as { issues?: unknown }).issues)
+            ? ((result as { issues?: unknown }).issues as unknown[]).length
+            : 0;
+          return count + issues;
+        }, 0)
+        : 0;
+      const loadErrorCount = Array.isArray(payload?.load_errors) ? payload.load_errors.length : 0;
+      const lifecyclePlan = preview.lifecycle_plan;
+      const packageLabel = payload?.display_name ?? payload?.extension_id ?? path;
+      const currentVersion = lifecyclePlan?.current_version;
+      const candidateVersion = lifecyclePlan?.candidate_version ?? payload?.version;
+      const location = lifecyclePlan?.current_location;
+      const validationFailureSummary = [
+        issueCount > 0 ? `${issueCount} doctor issue${issueCount === 1 ? "" : "s"}` : null,
+        loadErrorCount > 0 ? `${loadErrorCount} load error${loadErrorCount === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(" and ");
+      setStudioPackageStatus(
+        issueCount > 0 || loadErrorCount > 0 || payload?.ok === false
+          ? `${packageLabel} failed validation${validationFailureSummary ? ` with ${validationFailureSummary}` : ""}`
+          : lifecyclePlan?.recommended_action === "update"
+            ? `${packageLabel} can update ${currentVersion ?? "installed package"} -> ${candidateVersion ?? "candidate"}`
+            : lifecyclePlan?.mode === "workspace_override"
+              ? `${packageLabel} will install as a workspace override for the ${location ?? "bundled"} package`
+              : lifecyclePlan?.recommended_action === "none"
+                ? `${packageLabel} is already up to date`
+                : `${packageLabel} is valid and installable`,
+      );
+    } catch {
+      setStudioPackagePreview(null);
+      setStudioPackageStatus(`Failed to validate ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function installStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-install");
+    setStudioPackageStatus(`Installing ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/install`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(payload, `Failed to install ${path}`, setStudioPackageStatus);
+        return;
+      }
+      await refreshCockpit();
+      setStudioPackagePreview(null);
+      const extensionId = typeof payload?.extension?.id === "string" ? payload.extension.id : null;
+      if (extensionId) {
+        setStudioSelectedId(`extension:${extensionId}`);
+      }
+      setStudioPackageStatus(
+        `${payload?.extension?.display_name ?? extensionId ?? path} installed`,
+      );
+      appendOperatorFeed(
+        `Installed extension package: ${payload?.extension?.display_name ?? extensionId ?? path}`,
+        "success",
+      );
+    } catch {
+      setStudioPackageStatus(`Failed to install ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function updateStudioExtensionPath() {
+    const path = studioExtensionPath.trim();
+    if (!path) {
+      setStudioPackageStatus("Enter a local extension package path first");
+      return;
+    }
+    setStudioBusy("extension-update");
+    setStudioPackageStatus(`Updating ${path}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(payload, `Failed to update ${path}`, setStudioPackageStatus);
+        return;
+      }
+      await refreshCockpit();
+      setStudioPackagePreview(null);
+      const extensionId = typeof payload?.extension?.id === "string" ? payload.extension.id : null;
+      if (extensionId) {
+        setStudioSelectedId(`extension:${extensionId}`);
+      }
+      setStudioPackageStatus(
+        `${payload?.extension?.display_name ?? extensionId ?? path} updated`,
+      );
+      appendOperatorFeed(
+        `Updated extension package: ${payload?.extension?.display_name ?? extensionId ?? path}`,
+        "success",
+      );
+    } catch {
+      setStudioPackageStatus(`Failed to update ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function setSelectedExtensionEnabled(enabled: boolean) {
+    const extensionId = selectedExtensionPackage?.id;
+    if (!extensionId) return;
+    setStudioBusy(enabled ? "extension-enable" : "extension-disable");
+    setStudioStatus(`${enabled ? "Enabling" : "Disabling"} ${selectedExtensionPackage.display_name}...`);
+    try {
+      const response = await fetch(
+        `${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/${enabled ? "enable" : "disable"}`,
+        { method: "POST" },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to ${enabled ? "enable" : "disable"} ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
+        );
+        return;
+      }
+      await refreshCockpit();
+      setStudioStatus(
+        `${selectedExtensionPackage.display_name} ${enabled ? "enabled" : "disabled"}`,
+      );
+      appendOperatorFeed(
+        `${selectedExtensionPackage.display_name} ${enabled ? "enabled" : "disabled"}`,
+        "success",
+      );
+    } catch {
+      setStudioStatus(`Failed to ${enabled ? "enable" : "disable"} ${selectedExtensionPackage.display_name}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function saveSelectedExtensionMetadata() {
+    const extensionId = selectedExtensionPackage?.id;
+    if (!extensionId) return;
+    let configPayload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(studioExtensionConfigDraft);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setStudioStatus("Extension metadata must be a JSON object");
+        return;
+      }
+      configPayload = parsed as Record<string, unknown>;
+    } catch {
+      setStudioStatus("Extension metadata must be valid JSON");
+      return;
+    }
+    setStudioBusy("extension-configure");
+    setStudioStatus(`Saving metadata for ${selectedExtensionPackage.display_name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/configure`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: configPayload }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to save metadata for ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
+        );
+        return;
+      }
+      setStudioExtensionConfigDirty(false);
+      await refreshCockpit();
+      setStudioStatus(`${selectedExtensionPackage.display_name} metadata saved`);
+      appendOperatorFeed(`${selectedExtensionPackage.display_name} metadata saved`, "success");
+    } catch {
+      setStudioStatus(`Failed to save metadata for ${selectedExtensionPackage.display_name}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function removeSelectedExtension() {
+    const extensionId = selectedExtensionPackage?.id;
+    if (!extensionId) return;
+    setStudioBusy("extension-remove");
+    setStudioStatus(`Removing ${selectedExtensionPackage.display_name}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}`, {
+        method: "DELETE",
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to remove ${selectedExtensionPackage.display_name}`,
+          setStudioStatus,
+        );
+        return;
+      }
+      await refreshCockpit();
+      setStudioSelectedId(null);
+      setStudioStatus(`${selectedExtensionPackage.display_name} removed`);
+      appendOperatorFeed(`${selectedExtensionPackage.display_name} removed`, "success");
+    } catch {
+      setStudioStatus(`Failed to remove ${selectedExtensionPackage.display_name}`);
+    } finally {
+      setStudioBusy(null);
+    }
   }
 
   function saveRunbookMacro(runbook: RunbookInfo) {
@@ -1145,7 +3525,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         if (payload.session_id) {
           await openThread(payload.session_id);
         }
-        EventBus.emit("approval-resume", {
+        appEventBus.emit("approval-resume", {
           sessionId: payload.session_id ?? approval.session_id ?? null,
           message: payload.resume_message,
         });
@@ -1217,30 +3597,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
 
   async function activateStarterPack(pack: StarterPackInfo) {
-    setOperatorStatus(`Activating ${pack.label}...`);
+    setOperatorStatus(`Bootstrapping ${pack.label}...`);
     try {
-      const response = await fetch(`${API_URL}/api/capabilities/starter-packs/${pack.name}/activate`, {
-        method: "POST",
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        setOperatorStatus(payload?.detail || `Failed to activate ${pack.label}`);
-        appendOperatorFeed(`Failed to activate ${pack.label}`, "failed");
-        return;
+      const payload = await bootstrapCapability("starter_pack", pack.name, pack.label);
+      if (payload.ready) {
+        const command = payload.command || pack.sample_prompt;
+        if (command) {
+          queueComposerDraft(command);
+          appendOperatorFeed(`${pack.label} drafted`, "success");
+          setOperatorStatus(`${pack.label} drafted to command bar`);
+        } else {
+          setOperatorStatus(`${pack.label} is ready`);
+        }
       }
-      await refreshCockpit();
-      setOperatorStatus(
-        payload?.status === "degraded"
-          ? `${pack.label} activated with missing entries`
-          : `${pack.label} activated`,
-      );
-      if (typeof pack.sample_prompt === "string" && pack.sample_prompt.trim()) {
-        queueComposerDraft(pack.sample_prompt.trim());
-      }
-      appendOperatorFeed(`${pack.label} activated`, "success");
     } catch {
-      setOperatorStatus(`Failed to activate ${pack.label}`);
-      appendOperatorFeed(`Failed to activate ${pack.label}`, "failed");
+      // bootstrapCapability already reports failures into the operator surface
     }
   }
 
@@ -1273,21 +3644,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!response.ok) {
       throw new Error(payload?.detail || "Capability preflight failed");
     }
-    return payload as {
-      target_type: string;
-      name: string;
-      label: string;
-      description: string;
-      availability: string;
-      blocking_reasons: string[];
-      recommended_actions: CapabilityAction[];
-      command?: string | null;
-      parameter_schema?: Record<string, unknown>;
-      risk_level?: string | null;
-      execution_boundaries?: string[];
-      can_autorepair: boolean;
-      ready: boolean;
-    };
+    return payload as CapabilityPreflightResponse;
+  }
+
+  async function bootstrapCapability(
+    targetType: "runbook" | "workflow" | "starter_pack",
+    name: string,
+    label: string,
+    preflight?: CapabilityPreflightResponse | null,
+  ) {
+    const response = await fetch(`${API_URL}/api/capabilities/bootstrap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_type: targetType, name }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload) {
+      const detail = payload?.detail || `Failed to bootstrap ${label}`;
+      setOperatorStatus(detail);
+      appendOperatorFeed(detail, "failed");
+      const error = new Error(detail) as LoggedOperatorError;
+      error.operatorLogged = true;
+      throw error;
+    }
+    const result = payload as CapabilityBootstrapResponse;
+    await refreshCockpit();
+    rememberDoctorPlan({
+      label,
+      source: targetType,
+      availability: result.availability,
+      blockingReasons: result.blocking_reasons ?? [],
+      autorepairActions: preflight?.autorepair_actions ?? [],
+      recommendedActions: preflight?.recommended_actions ?? [],
+      manualActions: result.manual_actions ?? [],
+      appliedActions: (result.applied_actions ?? []).map((action) => formatCapabilityAction(action)),
+      command: result.command ?? preflight?.command ?? null,
+      riskLevel: result.risk_level ?? preflight?.risk_level ?? null,
+      executionBoundaries: result.execution_boundaries ?? preflight?.execution_boundaries ?? [],
+    });
+    if (result.applied_actions?.length) {
+      appendOperatorFeed(
+        `${label}: ${result.applied_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
+        result.ready ? "success" : "info",
+      );
+    }
+    if (!result.ready && result.manual_actions?.length) {
+      appendOperatorFeed(
+        `${label}: ${result.manual_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
+        "info",
+      );
+      await runCapabilityActions(result.manual_actions, `${label} bootstrap`);
+    }
+    if (result.ready) {
+      setOperatorStatus(`${label} ready`);
+    } else {
+      setOperatorStatus(
+        result.blocking_reasons?.[0]
+          ? `${label} still blocked: ${result.blocking_reasons[0]}`
+          : `${label} still blocked`,
+      );
+    }
+    return result;
   }
 
   async function executeRunbook(runbook: RunbookInfo) {
@@ -1295,19 +3712,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     try {
       const preflight = await preflightCapability("runbook", runbook.id);
       if (!preflight.ready) {
-        if (preflight.recommended_actions?.length) {
-          await runCapabilityActions(preflight.recommended_actions, runbook.label);
-          await refreshCockpit();
-          setOperatorStatus(`${runbook.label} repaired`);
-          appendOperatorFeed(`${runbook.label} repaired`, "success");
-          return;
+        const bootstrap = await bootstrapCapability("runbook", runbook.id, runbook.label, preflight);
+        if (bootstrap.ready && bootstrap.command) {
+          queueComposerDraft(bootstrap.command);
+          appendOperatorFeed(`${runbook.label} drafted`, "success");
         }
-        setOperatorStatus(
-          preflight.blocking_reasons?.[0]
-            ? `${runbook.label} blocked: ${preflight.blocking_reasons[0]}`
-            : `${runbook.label} is blocked`,
-        );
-        appendOperatorFeed(`${runbook.label} blocked`, "failed");
         return;
       }
       if (preflight.command) {
@@ -1319,8 +3728,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Capability preflight failed";
-      setOperatorStatus(message);
-      appendOperatorFeed(message, "failed");
+      if (!(error instanceof Error && (error as LoggedOperatorError).operatorLogged)) {
+        setOperatorStatus(message);
+        appendOperatorFeed(message, "failed");
+      }
     }
   }
 
@@ -1344,6 +3755,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     await runCapabilityActions(actions, `${workflow.workflowName} replay`);
+  }
+
+  function failedWorkflowStep(workflow: WorkflowRunRecord): WorkflowStepRecord | null {
+    return (
+      workflow.stepRecords?.find((step) =>
+        step.status !== "succeeded" || workflow.continuedErrorSteps.includes(step.id),
+      ) ?? null
+    );
   }
 
   async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
@@ -1370,6 +3789,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   async function installCatalogItem(item: CatalogItemInfo) {
     setOperatorStatus(`Installing ${item.name}...`);
+    rememberDoctorPlan({
+      label: item.name,
+      source: `catalog ${item.type}`,
+      availability: item.installed ? "installed" : "missing",
+      blockingReasons: item.missing_tools?.length ? [`missing tools: ${item.missing_tools.join(", ")}`] : [],
+      autorepairActions: [],
+      recommendedActions: item.recommended_actions ?? [],
+      manualActions: item.recommended_actions ?? [],
+      appliedActions: [],
+      command: null,
+      riskLevel: null,
+      executionBoundaries: [],
+    });
     try {
       const response = await fetch(`${API_URL}/api/catalog/install/${item.name}`, {
         method: "POST",
@@ -1415,6 +3847,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     label: string,
   ) {
     const safeTypes = new Set<CapabilityAction["type"]>([
+      "enable_extension",
       "toggle_skill",
       "toggle_workflow",
       "toggle_mcp_server",
@@ -1433,69 +3866,77 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     setOperatorStatus(`Repairing ${label}...`);
+    let completed = true;
     for (const action of allowedActions) {
-      await runCapabilityAction(action);
+      const result = await runCapabilityAction(action);
+      completed = completed && result;
+    }
+    if (!completed) {
+      return;
     }
     setOperatorStatus(`${label} repair sequence applied`);
     appendOperatorFeed(`${label} repair sequence applied`, "success");
   }
 
-  async function runCapabilityAction(action: CapabilityAction | null | undefined) {
-    if (!action) return;
+  async function runCapabilityAction(action: CapabilityAction | null | undefined): Promise<boolean> {
+    if (!action) return false;
     switch (action.type) {
+      case "enable_extension":
+        if (action.name) return enableExtensionPackage(action.name, typeof action.target === "string" ? action.target : undefined);
+        return false;
       case "toggle_skill": {
         const skill = skills.find((item) => item.name === action.name);
         if (skill) await toggleSkill(skill);
-        return;
+        return true;
       }
       case "toggle_workflow": {
         const workflow = workflows.find((item) => item.name === action.name);
         if (workflow) await toggleWorkflow(workflow, Boolean(action.enabled));
-        return;
+        return true;
       }
       case "toggle_mcp_server": {
         const server = mcpServers.find((item) => item.name === action.name);
         if (server) await toggleMcpServer(server);
-        return;
+        return true;
       }
       case "test_mcp_server": {
         const server = mcpServers.find((item) => item.name === action.name);
         if (server) await testMcpServer(server);
-        return;
+        return true;
       }
       case "test_native_notification":
         await sendTestNativeNotification();
-        return;
+        return true;
       case "set_tool_policy":
         if (action.mode === "safe" || action.mode === "balanced" || action.mode === "full") {
           await updateToolPolicy(action.mode);
         }
-        return;
+        return true;
       case "set_mcp_policy":
         if (action.mode === "disabled" || action.mode === "approval" || action.mode === "full") {
           await updateMcpPolicy(action.mode);
         }
-        return;
+        return true;
       case "install_catalog_item": {
         const item = catalogItems.find((entry) => entry.name === action.name);
         if (item) await installCatalogItem(item);
-        return;
+        return true;
       }
       case "activate_starter_pack": {
         const pack = starterPacks.find((entry) => entry.name === action.name);
         if (pack) await activateStarterPack(pack);
-        return;
+        return true;
       }
       case "draft_workflow": {
         const workflow = workflows.find((entry) => entry.name === action.name);
         if (workflow) queueComposerDraft(buildWorkflowDraft(workflow));
-        return;
+        return true;
       }
       case "open_settings":
         setSettingsPanelOpen(true);
-        return;
+        return true;
       default:
-        return;
+        return false;
     }
   }
 
@@ -1590,17 +4031,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function enableExtensionPackage(extensionId: string, displayName?: string): Promise<boolean> {
+    const extensionPackage = extensionPackages.find((item) => item.id === extensionId);
+    const label = displayName ?? extensionPackage?.display_name ?? extensionId;
+    setOperatorStatus(`Enabling ${label}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionId)}/enable`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const approvalHandled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to enable ${label}`,
+          setOperatorStatus,
+        );
+        if (!approvalHandled) {
+          appendOperatorFeed(`Failed to enable extension ${label}`, "failed");
+        }
+        return false;
+      }
+      await refreshCockpit();
+      setOperatorStatus(`${label} enabled`);
+      appendOperatorFeed(`${label} enabled`, "success");
+      return true;
+    } catch {
+      setOperatorStatus(`Failed to enable ${label}`);
+      appendOperatorFeed(`Failed to enable extension ${label}`, "failed");
+      return false;
+    }
+  }
+
   async function toggleMcpServer(server: McpServerInfo) {
     setOperatorStatus(`${server.enabled ? "Disabling" : "Enabling"} ${server.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: !server.enabled }),
-      });
+      const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
+      const response = await fetch(
+        packagedServer
+          ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/enabled`
+          : `${API_URL}/api/mcp/servers/${server.name}`,
+        packagedServer
+          ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: server.extension_reference, enabled: !server.enabled }),
+          }
+          : {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: !server.enabled }),
+          },
+      );
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setOperatorStatus(`Failed to update ${server.name}`);
-        appendOperatorFeed(`Failed to update MCP ${server.name}`, "failed");
+        const approvalHandled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to update ${server.name}`,
+          setOperatorStatus,
+        );
+        if (!approvalHandled) {
+          appendOperatorFeed(`Failed to update MCP ${server.name}`, "failed");
+        }
         return;
       }
       await refreshCockpit();
@@ -1615,7 +4106,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   async function testMcpServer(server: McpServerInfo) {
     setOperatorStatus(`Testing ${server.name}...`);
     try {
-      const response = await fetch(`${API_URL}/api/mcp/servers/${server.name}/test`, { method: "POST" });
+      const packagedServer = server.source === "extension" && !!server.extension_id && !!server.extension_reference;
+      const response = await fetch(
+        packagedServer
+          ? `${API_URL}/api/extensions/${encodeURIComponent(server.extension_id ?? "")}/connectors/test`
+          : `${API_URL}/api/mcp/servers/${server.name}/test`,
+        packagedServer
+          ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reference: server.extension_reference }),
+          }
+          : { method: "POST" },
+      );
       const payload = await response.json();
       if (!response.ok) {
         setOperatorStatus(payload.detail || `${server.name} test failed`);
@@ -1662,6 +4165,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: approval.status,
         resolution: approvalState[approval.id] ?? "pending",
         resume_message: approval.resume_message ?? "n/a",
+        extension_id: approval.extension_id ?? "n/a",
+        extension_display_name: approval.extension_display_name ?? "n/a",
+        extension_action: approval.extension_action ?? "n/a",
+        package_path: approval.package_path ?? "n/a",
+        lifecycle_boundaries: approval.lifecycle_boundaries ?? [],
+        permissions: approval.permissions ?? {},
       };
     } else if (selectedInspector.kind === "workflow") {
       const workflow = selectedInspector.workflow;
@@ -1675,10 +4184,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         session_id: workflow.sessionId ?? "n/a",
         thread: workflow.threadLabel ?? workflow.threadId ?? "ambient",
         status: workflow.status,
+        run_fingerprint: workflow.runFingerprint ?? "n/a",
+        run_identity: workflow.runIdentity ?? "n/a",
         risk_level: workflow.riskLevel ?? "unknown",
         execution_boundaries: workflow.executionBoundaries ?? [],
         accepts_secret_refs: workflow.acceptsSecretRefs ?? false,
         step_tools: workflow.stepTools,
+        step_records: workflow.stepRecords ?? [],
         continued_error_steps: workflow.continuedErrorSteps,
         artifact_paths: workflow.artifactPaths,
         pending_approval: approval ? approval.id : "none",
@@ -1691,6 +4203,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         replay_recommended_actions: workflow.replayRecommendedActions ?? [],
         resume_from_step: workflow.resumeFromStep ?? "n/a",
         resume_checkpoint_label: workflow.resumeCheckpointLabel ?? "n/a",
+        retry_from_step_draft: workflow.retryFromStepDraft ?? "n/a",
         timeline: workflow.timeline ?? [],
         linked_interventions: linkedInterventions.length,
       };
@@ -1752,14 +4265,42 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         {selectedInspector.kind === "workflow" && (
           <div className="cockpit-feedback-row">
             {selectedInspector.workflow.replayAllowed !== false ? (
-              <button
-                className="cockpit-feedback-button"
-                onClick={() => queueComposerDraft(buildWorkflowReplayDraft(selectedInspector.workflow))}
-              >
-                {selectedInspector.workflow.executionBoundaries?.length
-                  ? "Draft Boundary-Aware Rerun"
-                  : "Draft Rerun"}
-              </button>
+              <>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() =>
+                    queueComposerDraft(
+                      selectedInspector.workflow.replayDraft
+                        ?? buildWorkflowReplayDraft(selectedInspector.workflow),
+                    )
+                  }
+                >
+                  {selectedInspector.workflow.executionBoundaries?.length
+                    ? "Draft Boundary-Aware Rerun"
+                    : "Draft Rerun"}
+                </button>
+                {selectedInspector.workflow.retryFromStepDraft && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() =>
+                      queueComposerDraft(
+                        selectedInspector.workflow.retryFromStepDraft
+                        ?? buildWorkflowReplayDraft(selectedInspector.workflow),
+                      )
+                    }
+                  >
+                    Retry From Step
+                  </button>
+                )}
+                {studioEntryForWorkflowRun(selectedInspector.workflow) && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => openExtensionStudio(studioEntryForWorkflowRun(selectedInspector.workflow))}
+                  >
+                    Open Studio
+                  </button>
+                )}
+              </>
             ) : (
               <span className="cockpit-feedback-status">
                 Replay blocked: {replayBlockCopy(selectedInspector.workflow.replayBlockReason)}
@@ -1807,6 +4348,99 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
           </div>
         )}
+        {selectedInspector.kind === "workflow" && workflowResumeDetails(selectedInspector.workflow).length > 0 && (
+          <div className="cockpit-chip-row">
+            {workflowResumeDetails(selectedInspector.workflow).map((detail) => (
+              <span key={`${selectedInspector.workflow.id}:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedInspector.workflow.timeline?.length && (
+          <div className="cockpit-inspector-stack">
+            {selectedInspector.workflow.timeline.map((entry) => (
+              <div key={`${selectedInspector.workflow.id}:${entry.kind}:${entry.at}`} className="cockpit-inspector-stack-row">
+                <div className="cockpit-key">{entry.kind.replace(/_/g, " ")}</div>
+                <div className="cockpit-value">
+                  {entry.summary}
+                  {entry.stepId ? ` · ${entry.stepId}` : ""}
+                  {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "operator" && (
+          <div className="cockpit-feedback-row">
+            {(selectedInspector.entity.entityType === "workflow_definition"
+              || selectedInspector.entity.entityType === "skill"
+              || selectedInspector.entity.entityType === "mcp") && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => openExtensionStudioForEntity(selectedInspector.entity)}
+              >
+                Open Studio
+              </button>
+            )}
+            {typeof selectedInspector.entity.details.file_path === "string" && (
+              <>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() =>
+                    queueComposerDraft(
+                      `Use the definition at "${String(selectedInspector.entity.details.file_path)}" as context for the next editing step.`,
+                    )
+                  }
+                >
+                  Use Path
+                </button>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() =>
+                    queueComposerDraft(
+                      `Open "${String(selectedInspector.entity.details.file_path)}" and update the ${selectedInspector.entity.entityType.replace("_", " ")} "${selectedInspector.entity.name}" based on the current blocker state.`,
+                    )
+                  }
+                >
+                  Draft Authoring
+                </button>
+              </>
+            )}
+            {Array.isArray(selectedInspector.entity.details.recommended_actions)
+              && selectedInspector.entity.details.recommended_actions.length > 0 && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() =>
+                  void runCapabilityActions(
+                    selectedInspector.entity.details.recommended_actions as CapabilityAction[],
+                    selectedInspector.entity.name,
+                  )
+                }
+              >
+                Repair
+              </button>
+            )}
+            {selectedInspector.entity.entityType === "workflow_definition" && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => void refreshStudioValidation()}
+                disabled={studioBusy === "validation"}
+              >
+                Validate
+              </button>
+            )}
+            {selectedInspector.entity.entityType === "mcp"
+              && Boolean(selectedInspector.entity.details.auth_hint || selectedInspector.entity.details.status_message) && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => setSettingsPanelOpen(true)}
+              >
+                Open Settings
+              </button>
+            )}
+          </div>
+        )}
         {selectedInspector.kind === "artifact" && (
           <div className="cockpit-feedback-row">
             <button
@@ -1848,10 +4482,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     <div className="cockpit-shell">
       <header className="cockpit-topbar">
         <div className="cockpit-brand">
-          <div className="cockpit-eyebrow cockpit-brandmark">Seraph</div>
-          <div className="cockpit-subtitle">
-            dense operator surface for state, evidence, interventions, and action
-          </div>
+          <div className="cockpit-eyebrow cockpit-brandmark">SERAPH</div>
+          <div className="cockpit-toolbar-hint">{SERAPH_BUILD_ID}</div>
         </div>
 
         <div className="cockpit-topbar-right">
@@ -1904,7 +4536,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               className="cockpit-action cockpit-action--ghost"
               onClick={() => setQuestPanelOpen(true)}
             >
-              Goals overlay
+              Priorities overlay
             </button>
             <button
               className="cockpit-action cockpit-action--ghost"
@@ -1915,10 +4547,78 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             </button>
             <button
               className="cockpit-action cockpit-action--ghost"
+              onClick={() => {
+                setStudioSelectedId(studioEntries[0]?.id ?? null);
+                setStudioOpen(true);
+              }}
+              title="Open the extension studio for workflows, skills, and MCP configuration"
+            >
+              Extension studio
+            </button>
+            <button
+              className="cockpit-action cockpit-action--ghost"
               onClick={() => setSettingsPanelOpen(true)}
             >
               Settings
             </button>
+          </div>
+        </div>
+
+        <div className="cockpit-topbar-bottom">
+          <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
+            <button
+              className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
+              onClick={() => setWindowsMenuOpen((current) => !current)}
+              title="Show or hide workspace windows"
+              aria-label="Windows"
+            >
+              Windows {visiblePaneCount}/{COCKPIT_PANES.length}
+            </button>
+            {windowsMenuOpen && (
+              <div className="cockpit-windows-menu cockpit-windows-menu--brand cockpit-window-launcher-drawer retro-scrollbar">
+                <div className="cockpit-window-launcher-header">
+                  <div className="cockpit-window-launcher-title">Windows</div>
+                  <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
+                </div>
+                <div className="cockpit-windows-menu-toolbar">
+                  <button className="cockpit-windows-menu-action" onClick={() => showAllPanes()}>
+                    Show all
+                  </button>
+                  <button className="cockpit-windows-menu-action" onClick={() => hideNonCorePanes()}>
+                    Hide non-core
+                  </button>
+                  <button className="cockpit-windows-menu-action" onClick={handleResetWorkspace}>
+                    Reset workspace
+                  </button>
+                </div>
+                {panesByGroup.map(([group, panes]) => (
+                  <div key={group} className="cockpit-windows-menu-group">
+                    <div className="cockpit-windows-menu-group-title">{group}</div>
+                    {panes.map((pane) => {
+                      const isCorePane = CORE_PANE_IDS.includes(pane.id);
+                      return (
+                        <div key={pane.id} className="cockpit-windows-menu-row">
+                          <button
+                            className={`cockpit-windows-menu-toggle ${paneVisibility[pane.id] ? "active" : ""}`}
+                            onClick={() => togglePaneVisible(pane.id)}
+                          >
+                            <span className="cockpit-windows-menu-check">{paneVisibility[pane.id] ? "■" : "□"}</span>
+                            <span>{pane.label}</span>
+                            {isCorePane ? <span className="cockpit-windows-menu-core">core</span> : null}
+                          </button>
+                          <button
+                            className="cockpit-windows-menu-focus"
+                            onClick={() => focusPane(pane.id)}
+                          >
+                            Focus
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="cockpit-layout-row">
@@ -1944,140 +4644,169 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         </div>
       </header>
 
-      <div className="cockpit-workspace">
-        {activeLayout.sections.rail && (
-          <>
-            <CockpitWorkspaceWindow
-              panelId="sessions_pane"
-              title="Sessions"
-              meta={activeSession ? activeSession.title : "fresh thread"}
-              minWidth={260}
-              minHeight={180}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                <div className="cockpit-session-helper">
-                  <div className="cockpit-key">thread control</div>
-                  <div className="cockpit-session-helper-row">
-                    <div className="cockpit-session-helper-text">
-                      Start fresh opens a blank thread and keeps earlier sessions in the list. Seraph names it after the first completed reply.
-                    </div>
-                    <button
-                      type="button"
-                      className="cockpit-feedback-button"
-                      onClick={() => newSession()}
-                    >
-                      Start fresh
-                    </button>
-                  </div>
-                </div>
-                <div className="cockpit-list">
-                  {sessions.slice(0, 8).map((session) => (
-                    <button
-                      key={session.id}
-                      className={`cockpit-session ${session.id === sessionId ? "active" : ""}`}
-                      onClick={() => {
-                        clearSessionContinuity(session.id);
-                        switchSession(session.id, "live");
-                      }}
-                    >
-                      <span className="cockpit-session-title">
-                        {session.title}
-                        {sessionContinuity[session.id] && (
-                          <span className="cockpit-session-badge">
-                            {sessionContinuity[session.id] === "new_activity"
-                              ? "new activity"
-                              : sessionContinuity[session.id]}
-                          </span>
-                        )}
-                      </span>
-                      <span className="cockpit-session-meta">{formatAge(session.updated_at)}</span>
-                    </button>
-                  ))}
-                  {sessions.length === 0 && (
-                    <div className="cockpit-empty">No saved sessions yet.</div>
-                  )}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+      {cockpitHintsEnabled && (
+        <section className="cockpit-hint-strip" aria-label="Workspace hints">
+          {COCKPIT_GLOBAL_HINTS.map((hint) => (
+            <span key={hint} className="cockpit-hint-chip">
+              {hint}
+            </span>
+          ))}
+        </section>
+      )}
 
-            <CockpitWorkspaceWindow
-              panelId="goals_pane"
-              title="Goals"
-              meta={loadingGoals ? "refreshing" : `${dashboard?.active_count ?? 0} active`}
-              minWidth={280}
-              minHeight={220}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                {dashboard ? (
-                  <div className="cockpit-domain-stack">
-                    {Object.entries(dashboard.domains).map(([domain, stat]) => (
-                      <div key={domain} className="cockpit-domain-row">
-                        <div className="cockpit-domain-label">{domain.replace("_", " ")}</div>
-                        <div className="cockpit-domain-bar">
-                          <div
-                            className="cockpit-domain-fill"
-                            style={{ width: `${stat.progress}%` }}
-                          />
+      <div className="cockpit-workspace">
+        {visibleSections.rail && (
+          <>
+            {paneVisibility.sessions_pane && (
+              <CockpitWorkspaceWindow
+                panelId="sessions_pane"
+                title="Sessions"
+                meta={activeSession ? activeSession.title : "fresh thread"}
+                hint={COCKPIT_WINDOW_HINTS.sessions}
+                showHint={cockpitHintsEnabled}
+                minWidth={260}
+                minHeight={180}
+                onClose={() => closeWindowPane("sessions_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  <div className="cockpit-session-helper">
+                    <div className="cockpit-key">thread control</div>
+                    <div className="cockpit-session-helper-row">
+                      <div className="cockpit-session-helper-text">
+                        Start fresh opens a blank thread and keeps earlier sessions in the list. Seraph names it after the first completed reply.
+                      </div>
+                      <button
+                        type="button"
+                        className="cockpit-feedback-button"
+                        onClick={() => newSession()}
+                      >
+                        Start fresh
+                      </button>
+                    </div>
+                  </div>
+                  <div className="cockpit-list">
+                    {sessions.slice(0, 8).map((session) => (
+                      <button
+                        key={session.id}
+                        className={`cockpit-session ${session.id === sessionId ? "active" : ""}`}
+                        onClick={() => {
+                          clearSessionContinuity(session.id);
+                          switchSession(session.id, "live");
+                        }}
+                      >
+                        <span className="cockpit-session-title">
+                          {session.title}
+                          {sessionContinuity[session.id] && (
+                            <span className="cockpit-session-badge">
+                              {sessionContinuity[session.id] === "new_activity"
+                                ? "new activity"
+                                : sessionContinuity[session.id]}
+                            </span>
+                          )}
+                        </span>
+                        <span className="cockpit-session-meta">{formatAge(session.updated_at)}</span>
+                      </button>
+                    ))}
+                    {sessions.length === 0 && (
+                      <div className="cockpit-empty">No saved sessions yet.</div>
+                    )}
+                  </div>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
+
+            {paneVisibility.goals_pane && (
+              <CockpitWorkspaceWindow
+                panelId="goals_pane"
+                title="Priorities"
+                meta={loadingGoals ? "refreshing" : `${dashboard?.active_count ?? 0} active`}
+                hint={COCKPIT_WINDOW_HINTS.goals}
+                showHint={cockpitHintsEnabled}
+                minWidth={280}
+                minHeight={220}
+                onClose={() => closeWindowPane("goals_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  {dashboard ? (
+                    <div className="cockpit-domain-stack">
+                      {Object.entries(dashboard.domains).map(([domain, stat]) => (
+                        <div key={domain} className="cockpit-domain-row">
+                          <div className="cockpit-domain-label">{domain.replace("_", " ")}</div>
+                          <div className="cockpit-domain-bar">
+                            <div
+                              className="cockpit-domain-fill"
+                              style={{ width: `${stat.progress}%` }}
+                            />
+                          </div>
+                          <div className="cockpit-domain-value">{stat.progress}%</div>
                         </div>
-                        <div className="cockpit-domain-value">{stat.progress}%</div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="cockpit-empty">Priority board unavailable.</div>
+                  )}
+                  <div className="cockpit-sublist">
+                    {topGoals.map((goal) => (
+                      <div key={goal} className="cockpit-sublist-item">
+                        {goal}
                       </div>
                     ))}
+                    {topGoals.length === 0 && <div className="cockpit-empty">No active priorities yet.</div>}
                   </div>
-                ) : (
-                  <div className="cockpit-empty">Goal dashboard unavailable.</div>
-                )}
-                <div className="cockpit-sublist">
-                  {topGoals.map((goal) => (
-                    <div key={goal} className="cockpit-sublist-item">
-                      {goal}
-                    </div>
-                  ))}
-                  {topGoals.length === 0 && <div className="cockpit-empty">No active goals yet.</div>}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="outputs_pane"
-              title="Recent outputs"
-              meta={`${artifacts.length} files`}
-              minWidth={280}
-              minHeight={180}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                <div className="cockpit-sublist">
-                  {artifacts.map((artifact) => (
-                    <button
-                      key={artifact.id}
-                      className={`cockpit-sublist-button ${
-                        selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
-                          ? "active"
-                          : ""
-                      }`}
-                      onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
-                    >
-                      <span>{artifact.filePath}</span>
-                      <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
-                    </button>
-                  ))}
-                  {artifacts.length === 0 && (
-                    <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
-                  )}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+            {paneVisibility.outputs_pane && (
+              <CockpitWorkspaceWindow
+                panelId="outputs_pane"
+                title="Recent outputs"
+                meta={`${artifacts.length} files`}
+                hint={COCKPIT_WINDOW_HINTS.outputs}
+                showHint={cockpitHintsEnabled}
+                minWidth={280}
+                minHeight={180}
+                onClose={() => closeWindowPane("outputs_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  <div className="cockpit-sublist">
+                    {artifacts.map((artifact) => (
+                      <button
+                        key={artifact.id}
+                        className={`cockpit-sublist-button ${
+                          selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
+                            ? "active"
+                            : ""
+                        }`}
+                        onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                      >
+                        <span>{artifact.filePath}</span>
+                        <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
+                      </button>
+                    ))}
+                    {artifacts.length === 0 && (
+                      <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
+                    )}
+                  </div>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="approvals_pane"
-              title="Pending approvals"
-              meta={`${pendingApprovals.length} waiting`}
-              minWidth={300}
-              minHeight={220}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
-                <div className="cockpit-list">
-                  {pendingApprovals.map((approval) => (
-                    <div key={approval.id} className="cockpit-row">
+            {paneVisibility.approvals_pane && (
+              <CockpitWorkspaceWindow
+                panelId="approvals_pane"
+                title="Pending approvals"
+                meta={`${pendingApprovals.length} waiting`}
+                hint={COCKPIT_WINDOW_HINTS.approvals}
+                showHint={cockpitHintsEnabled}
+                minWidth={300}
+                minHeight={220}
+                onClose={() => closeWindowPane("approvals_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
+                  <div className="cockpit-list">
+                    {pendingApprovals.map((approval) => (
+                      <div key={approval.id} className="cockpit-row">
                       <button
                         className={`cockpit-row-button ${
                           selectedInspector?.kind === "approval" && selectedInspector.approval.id === approval.id
@@ -2138,18 +4867,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           {approvalState[approval.id] ?? "pending"}
                         </span>
                       </div>
-                    </div>
-                  ))}
-                  {pendingApprovals.length === 0 && (
-                    <div className="cockpit-empty">No pending approvals.</div>
-                  )}
-                </div>
-              </section>
-            </CockpitWorkspaceWindow>
+                      </div>
+                    ))}
+                    {pendingApprovals.length === 0 && (
+                      <div className="cockpit-empty">No pending approvals.</div>
+                    )}
+                  </div>
+                </section>
+              </CockpitWorkspaceWindow>
+            )}
           </>
         )}
 
-        {(latestResponse || isAgentBusy) && (
+        {paneVisibility.response_pane && (latestResponse || isAgentBusy) && (
           <CockpitWorkspaceWindow
             panelId="response_pane"
             title="Latest response"
@@ -2158,8 +4888,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 ? `${labelForRole(latestResponse)} · ${formatAge(latestResponse.timestamp)}`
                 : "awaiting first reply"
             }
+            hint="The newest assistant output stays pinned here while you keep the rest of the workspace visible."
+            showHint={cockpitHintsEnabled}
             minWidth={420}
             minHeight={160}
+            onClose={() => closeWindowPane("response_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded cockpit-panel--response">
               {isAgentBusy && (
@@ -2189,13 +4922,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.guardianState && (
+        {visibleSections.guardianState && (
           <CockpitWorkspaceWindow
             panelId="guardian_state_pane"
             title="Guardian state"
             meta={`${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`}
+            hint={COCKPIT_WINDOW_HINTS.guardianState}
+            showHint={cockpitHintsEnabled}
             minWidth={420}
             minHeight={260}
+            onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-state-grid">
@@ -2245,108 +4981,171 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.timeline && (
+        {visibleSections.timeline && (
           <CockpitWorkspaceWindow
             panelId="operator_timeline_pane"
-            title="Operator timeline"
-            meta={`${recentOperatorTimeline.length} live`}
+            title="Activity ledger"
+            meta={`${visibleActivityGroups.length} groups · ${activitySummary?.llm_call_count ?? 0} llm`}
+            hint={COCKPIT_WINDOW_HINTS.operatorTimeline}
+            showHint={cockpitHintsEnabled}
             minWidth={360}
             minHeight={220}
+            onClose={() => closeWindowPane("operator_timeline_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
-              <div className="cockpit-list">
-                {recentOperatorTimeline.map((item) => (
-                  <div key={item.id} className="cockpit-row">
+              <div className="cockpit-ledger-toolbar">
+                <div className="cockpit-ledger-summary">
+                  <span className="cockpit-ledger-badge">
+                    spend {formatUsd(activitySummary?.llm_cost_usd ?? 0) ?? "$0.0000"}
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.user_triggered_llm_calls ?? 0} user llm
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.autonomous_llm_calls ?? 0} auto llm
+                  </span>
+                  <span className="cockpit-ledger-badge">
+                    {activitySummary?.failure_count ?? 0} failures
+                  </span>
+                  {activitySummary?.is_partial ? (
+                    <span className="cockpit-ledger-badge">
+                      partial {activitySummary.partial_sources?.join(", ") || "window"}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="cockpit-ledger-filter-row">
+                  {ACTIVITY_LEDGER_FILTERS.map((filter) => (
                     <button
-                      className="cockpit-row-button"
-                      onClick={() =>
-                        setSelectedInspector({
-                          kind: "operator",
-                          entity: {
-                            entityType: "workflow_definition",
-                            name: item.title,
-                            meta: timelineStatusLabel(item),
-                            summary: item.summary,
-                            details: {
-                              source: item.source,
-                              thread: item.thread_label ?? item.thread_id ?? "ambient",
-                              status: item.status,
-                              continue_message: item.continue_message ?? "",
-                              replay_allowed: item.replay_allowed ?? false,
-                              replay_block_reason: item.replay_block_reason ?? "none",
-                              metadata: item.metadata ?? {},
-                            },
-                          },
-                        })
-                      }
+                      key={filter}
+                      className={`cockpit-ledger-filter ${activityFilter === filter ? "active" : ""}`}
+                      onClick={() => setActivityFilter(filter)}
                     >
-                      <div className="cockpit-row-header">
-                        <span className="cockpit-role">{item.title}</span>
-                        <span className="cockpit-row-age">{formatAge(item.updated_at)}</span>
-                      </div>
-                      <div className="cockpit-row-body">{item.summary}</div>
-                      <div className="cockpit-row-meta">
-                        {timelineStatusLabel(item)}
-                        {item.thread_label ? ` · ${item.thread_label}` : ""}
-                      </div>
+                      {activityCategoryLabel(filter)}
                     </button>
-                    <div className="cockpit-feedback-row">
-                      {item.continue_message && (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => void queueThreadDraft(item.continue_message ?? "", item.thread_id)}
-                        >
-                          Continue
-                        </button>
+                  ))}
+                </div>
+              </div>
+              <div className="cockpit-list">
+                {visibleActivityGroups.map((group) => {
+                  const actionTarget = activityGroupActionTarget(group);
+                  return (
+                    <div key={group.key} className="cockpit-row cockpit-ledger-group">
+                      <button
+                        className="cockpit-row-button cockpit-ledger-parent"
+                        onClick={() =>
+                          setSelectedInspector({
+                            kind: "operator",
+                            entity: activityInspectorEntity(group.lead),
+                          })
+                        }
+                      >
+                        <div className="cockpit-ledger-line cockpit-ledger-line--primary">
+                          <span className="cockpit-ledger-icon">{group.icon}</span>
+                          <span className="cockpit-role">{group.title}</span>
+                          <span className="cockpit-row-age">{formatAge(group.updatedAt)}</span>
+                        </div>
+                        <div className="cockpit-ledger-line cockpit-ledger-line--summary">{group.summary}</div>
+                        {group.detail ? (
+                          <div className="cockpit-ledger-line cockpit-ledger-line--summary">{group.detail}</div>
+                        ) : null}
+                        <div className="cockpit-row-meta">{group.meta}</div>
+                      </button>
+                      {group.children.length > 0 && (
+                        <div className="cockpit-ledger-children">
+                          {group.children.map((child) => {
+                            const childItem = child.item;
+                            return childItem ? (
+                              <button
+                                key={child.key}
+                                className="cockpit-ledger-child"
+                                onClick={() =>
+                                  setSelectedInspector({
+                                    kind: "operator",
+                                    entity: activityInspectorEntity(childItem),
+                                  })
+                                }
+                              >
+                                <span className="cockpit-ledger-icon">{child.icon}</span>
+                                <span className="cockpit-ledger-child-label">{child.label}</span>
+                                <span className="cockpit-ledger-child-summary">{child.summary}</span>
+                                <span className="cockpit-ledger-child-meta">{child.meta}</span>
+                              </button>
+                            ) : (
+                              <div key={child.key} className="cockpit-ledger-child cockpit-ledger-child--static">
+                                <span className="cockpit-ledger-icon">{child.icon}</span>
+                                <span className="cockpit-ledger-child-label">{child.label}</span>
+                                <span className="cockpit-ledger-child-summary">{child.summary}</span>
+                                <span className="cockpit-ledger-child-meta">{child.meta}</span>
+                              </div>
+                            );
+                          })}
+                          {group.footer ? (
+                            <div className="cockpit-ledger-footer">{group.footer}</div>
+                          ) : null}
+                        </div>
                       )}
-                      {item.thread_id && (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => void openThread(item.thread_id)}
-                        >
-                          Open Thread
-                        </button>
-                      )}
-                      {item.replay_draft && item.replay_allowed !== false && (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => queueComposerDraft(item.replay_draft ?? "")}
-                        >
-                          Replay
-                        </button>
-                      )}
-                      {item.recommended_actions?.length ? (
-                        <button
-                          className="cockpit-feedback-button"
-                          onClick={() => void runCapabilityActions(item.recommended_actions ?? [], item.title)}
-                        >
-                          Repair
-                        </button>
-                      ) : null}
+                      <div className="cockpit-feedback-row">
+                        {actionTarget.continue_message && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void queueThreadDraft(actionTarget.continue_message ?? "", actionTarget.thread_id)}
+                          >
+                            Continue
+                          </button>
+                        )}
+                        {canOpenLedgerThread(actionTarget.thread_id, sessionId, knownSessionIds) && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(actionTarget.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
+                        {actionTarget.replay_draft && actionTarget.replay_allowed !== false && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueComposerDraft(actionTarget.replay_draft ?? "")}
+                          >
+                            Replay
+                          </button>
+                        )}
+                        {actionTarget.recommended_actions?.length ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void runCapabilityActions(actionTarget.recommended_actions ?? [], actionTarget.title)}
+                          >
+                            Repair
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                ))}
-                {recentOperatorTimeline.length === 0 && (
-                  <div className="cockpit-empty">No threaded operator timeline entries yet.</div>
+                  );
+                })}
+                {visibleActivityGroups.length === 0 && (
+                  <div className="cockpit-empty">No recent activity ledger entries for this filter.</div>
                 )}
               </div>
             </section>
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.workflows && (
+        {visibleSections.workflows && (
           <CockpitWorkspaceWindow
             panelId="workflows_pane"
             title="Workflow timeline"
             meta={`${workflowRunsWithArtifacts.length} recent`}
+            hint={COCKPIT_WINDOW_HINTS.workflowTimeline}
+            showHint={cockpitHintsEnabled}
             minWidth={380}
             minHeight={220}
+            onClose={() => closeWindowPane("workflows_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
                 {workflowRunsWithArtifacts.map((workflow) => {
                   const approval = approvalForWorkflow(workflow);
                   const linkedInterventions = interventionsForWorkflow(workflow);
+                  const failedStep = failedWorkflowStep(workflow);
                   return (
                     <div key={workflow.id} className="cockpit-row">
                       <button
@@ -2372,9 +5171,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           {workflow.availability ? ` · ${workflow.availability}` : ""}
                           {workflow.replayAllowed === false ? ` · replay blocked` : ""}
                         </div>
+                        {workflow.stepRecords?.length ? (
+                          <div className="cockpit-row-meta">
+                            {workflow.stepRecords
+                              .slice(0, 3)
+                              .map((step) => `${step.id} ${step.status}${step.durationMs ? ` · ${step.durationMs}ms` : ""}${step.resultSummary ? ` · ${step.resultSummary}` : ""}${step.errorSummary ? ` · ${step.errorSummary}` : ""}`)
+                              .join(" · ")}
+                          </div>
+                        ) : null}
                         {workflow.timeline?.length ? (
                           <div className="cockpit-row-meta">
                             {workflow.timeline.map((entry) => `${entry.kind.replace(/_/g, " ")}: ${entry.summary}`).join(" · ")}
+                          </div>
+                        ) : null}
+                        {workflowResumeDetails(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowResumeDetails(workflow).join(" · ")}
                           </div>
                         ) : null}
                       </button>
@@ -2401,12 +5213,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           </button>
                         )}
                         {workflow.replayAllowed !== false ? (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() => queueComposerDraft(buildWorkflowReplayDraft(workflow))}
-                          >
-                            Draft rerun
-                          </button>
+                          <>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => queueComposerDraft(workflow.replayDraft ?? buildWorkflowReplayDraft(workflow))}
+                            >
+                              Draft rerun
+                            </button>
+                            {workflow.retryFromStepDraft && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueComposerDraft(workflow.retryFromStepDraft ?? buildWorkflowReplayDraft(workflow))}
+                              >
+                                Retry step
+                              </button>
+                            )}
+                          </>
                         ) : (
                           <>
                             <span className="cockpit-feedback-status">
@@ -2422,6 +5244,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             ) : null}
                           </>
                         )}
+                        {failedStep?.recoveryActions?.length ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void runCapabilityActions(
+                              readActionList(failedStep.recoveryActions),
+                              `${workflow.workflowName} ${failedStep.id}`,
+                            )}
+                          >
+                            Repair step
+                          </button>
+                        ) : null}
+                        {studioEntryForWorkflowRun(workflow) ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => openExtensionStudio(studioEntryForWorkflowRun(workflow))}
+                          >
+                            Studio
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   );
@@ -2434,13 +5275,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.interventions && (
+        {visibleSections.interventions && (
           <CockpitWorkspaceWindow
             panelId="interventions_pane"
             title="Interventions"
             meta={`${recentInterventions.length} recent`}
+            hint={COCKPIT_WINDOW_HINTS.interventions}
+            showHint={cockpitHintsEnabled}
             minWidth={380}
             minHeight={220}
+            onClose={() => closeWindowPane("interventions_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -2505,13 +5349,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.audit && (
+        {visibleSections.audit && (
           <CockpitWorkspaceWindow
             panelId="audit_pane"
             title="Audit surface"
             meta={`${auditEvents.length} events`}
+            hint={COCKPIT_WINDOW_HINTS.audit}
+            showHint={cockpitHintsEnabled}
             minWidth={340}
             minHeight={220}
+            onClose={() => closeWindowPane("audit_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -2543,13 +5390,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.trace && (
+        {visibleSections.trace && (
           <CockpitWorkspaceWindow
             panelId="trace_pane"
             title="Live trace"
             meta={isAgentBusy ? "agent active" : "idle"}
+            hint={COCKPIT_WINDOW_HINTS.trace}
+            showHint={cockpitHintsEnabled}
             minWidth={320}
             minHeight={180}
+            onClose={() => closeWindowPane("trace_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-list">
@@ -2578,13 +5428,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.inspector && inspectorVisible && (
+        {visibleSections.inspector && (
           <CockpitWorkspaceWindow
             panelId="inspector_pane"
             title="Operations inspector"
             meta={selectedInspector ? selectedInspector.kind : "nothing selected"}
+            hint={COCKPIT_WINDOW_HINTS.inspector}
+            showHint={cockpitHintsEnabled}
             minWidth={480}
             minHeight={240}
+            onClose={() => closeWindowPane("inspector_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-feed">{renderInspector()}</div>
@@ -2592,15 +5445,34 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </CockpitWorkspaceWindow>
         )}
 
-        {activeLayout.sections.conversation && (
+        {visibleSections.conversation && (
           <>
-            <CockpitWorkspaceWindow
-              panelId="conversation_pane"
-              title="Conversation"
-              meta={activeSession?.title ?? "fresh thread · saved after first reply"}
-              minWidth={360}
-              minHeight={260}
-            >
+            {paneVisibility.presence_pane && (
+              <CockpitWorkspaceWindow
+                panelId="presence_pane"
+                title="Seraph presence"
+                meta={connectionStatus === "connected" ? "runtime linked" : connectionLabel}
+                hint={COCKPIT_WINDOW_HINTS.presence}
+                showHint={false}
+                minWidth={368}
+                minHeight={256}
+                onClose={() => closeWindowPane("presence_pane")}
+              >
+                <SeraphPresencePane snapshot={seraphPresenceSnapshot} />
+              </CockpitWorkspaceWindow>
+            )}
+
+            {paneVisibility.conversation_pane && (
+              <CockpitWorkspaceWindow
+                panelId="conversation_pane"
+                title="Conversation"
+                meta={activeSession?.title ?? "fresh thread · saved after first reply"}
+                hint={COCKPIT_WINDOW_HINTS.conversation}
+                showHint={cockpitHintsEnabled}
+                minWidth={360}
+                minHeight={260}
+                onClose={() => closeWindowPane("conversation_pane")}
+              >
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
@@ -2635,15 +5507,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
               </section>
-            </CockpitWorkspaceWindow>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="desktop_shell_pane"
-              title="Desktop shell"
-              meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
-              minWidth={340}
-              minHeight={220}
-            >
+            {paneVisibility.desktop_shell_pane && (
+              <CockpitWorkspaceWindow
+                panelId="desktop_shell_pane"
+                title="Desktop shell"
+                meta={`${daemonPresence?.connected ? "linked" : "offline"} · ${desktopNotifications.length} alerts`}
+                hint={COCKPIT_WINDOW_HINTS.desktopShell}
+                showHint={cockpitHintsEnabled}
+                minWidth={340}
+                minHeight={220}
+                onClose={() => closeWindowPane("desktop_shell_pane")}
+              >
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
                   <div className="cockpit-sublist-item">
@@ -2660,6 +5537,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{notification.body}</div>
                       <div className="cockpit-row-meta">
                         {notification.surface ?? "notification"}
+                        {notification.continuation_mode ? ` · ${notification.continuation_mode.replace(/_/g, " ")}` : ""}
                         {(notification.thread_label ?? (notification.thread_id ? sessionTitleById[notification.thread_id] : null))
                           ? ` · ${notification.thread_label ?? sessionTitleById[notification.thread_id ?? ""]}`
                           : notification.thread_id
@@ -2779,16 +5657,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
               </section>
-            </CockpitWorkspaceWindow>
+              </CockpitWorkspaceWindow>
+            )}
 
-            <CockpitWorkspaceWindow
-              panelId="operator_surface_pane"
-              title="Operator terminal"
-              meta={`tool ${toolPolicyMode} · mcp ${mcpPolicyMode}`}
-              minWidth={360}
-              minHeight={260}
-            >
-              <section className="cockpit-panel cockpit-panel--embedded">
+            {paneVisibility.operator_surface_pane && (
+              <CockpitWorkspaceWindow
+                panelId="operator_surface_pane"
+                title="Operator terminal"
+                meta={`tool ${toolPolicyMode} · mcp ${mcpPolicyMode}`}
+                hint={COCKPIT_WINDOW_HINTS.operatorTerminal}
+                showHint={cockpitHintsEnabled}
+                minWidth={360}
+                minHeight={260}
+                onClose={() => closeWindowPane("operator_surface_pane")}
+              >
+                <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-state-grid">
                   <div>
                     <div className="cockpit-key">approval</div>
@@ -2833,6 +5716,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <button
                           type="button"
                           className="cockpit-operator-button"
+                          onClick={() => {
+                            setStudioSelectedId(studioEntries[0]?.id ?? null);
+                            setStudioOpen(true);
+                          }}
+                        >
+                          studio
+                        </button>
+                        <button
+                          type="button"
+                          className="cockpit-operator-button"
                           onClick={() => setPaletteOpen(true)}
                         >
                           palette
@@ -2858,21 +5751,76 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
                   <div className="cockpit-operator-section">
                     <div className="cockpit-operator-row">
-                      <span className="cockpit-key">live logs</span>
-                      <span className="cockpit-operator-link">{recentOperatorFeed.length} recent</span>
+                      <span className="cockpit-key">doctor plans</span>
+                      <span className="cockpit-operator-link">{doctorPlans.length} recent</span>
                     </div>
-                    {recentOperatorFeed.map((entry) => (
-                      <div key={entry.id} className="cockpit-operator-row">
-                        <div className="cockpit-operator-details">
-                          <div className="cockpit-value">{entry.summary}</div>
+                    {doctorPlans.map((plan) => (
+                      <div key={plan.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: "workflow_definition",
+                                name: plan.label,
+                                meta: `${plan.source} · ${plan.availability}`,
+                                summary: plan.blockingReasons[0] ?? "Capability plan snapshot",
+                                details: {
+                                  blocking_reasons: plan.blockingReasons,
+                                  autorepair_actions: plan.autorepairActions,
+                                  recommended_actions: plan.recommendedActions,
+                                  manual_actions: plan.manualActions,
+                                  applied_actions: plan.appliedActions,
+                                  command: plan.command ?? "",
+                                  risk_level: plan.riskLevel ?? "unknown",
+                                  execution_boundaries: plan.executionBoundaries ?? [],
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{plan.label}</div>
                           <div className="cockpit-operator-note">
-                            {formatFeedStatus(entry.status)} · {formatAge(entry.createdAt)}
+                            {plan.source} · {plan.availability}
+                            {plan.blockingReasons[0] ? ` · ${plan.blockingReasons[0]}` : ""}
+                            {plan.manualActions.length ? ` · ${plan.manualActions.length} manual` : ""}
                           </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {plan.command ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => queueComposerDraft(plan.command ?? "")}
+                            >
+                              draft
+                            </button>
+                          ) : null}
+                          {plan.manualActions.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityActions(plan.manualActions, plan.label)}
+                            >
+                              run manual
+                            </button>
+                          ) : null}
+                          {plan.autorepairActions.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityActions(plan.autorepairActions, plan.label)}
+                            >
+                              run safe
+                            </button>
+                          ) : null}
                         </div>
                       </div>
                     ))}
-                    {recentOperatorFeed.length === 0 && (
-                      <div className="cockpit-empty">No operator actions recorded yet.</div>
+                    {doctorPlans.length === 0 && (
+                      <div className="cockpit-empty">No bootstrap or doctor plans captured yet.</div>
                     )}
                   </div>
 
@@ -2881,7 +5829,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">recommendations</span>
                       <span className="cockpit-operator-link">{capabilityRecommendations.length} queued</span>
                     </div>
-                    {capabilityRecommendations.slice(0, 3).map((item) => (
+                    {capabilityRecommendations.map((item) => (
                       <div key={item.id} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -2990,7 +5938,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </span>
                     </div>
                     {operatorRunbooks.map((runbook) => (
-                      <div key={runbook.id} className="cockpit-operator-row">
+                      <div key={runbook.id} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -3008,6 +5956,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                   risk_level: runbook.risk_level ?? "unknown",
                                   execution_boundaries: runbook.execution_boundaries ?? [],
                                   parameter_schema: runbook.parameter_schema ?? {},
+                                  recommended_actions: runbook.recommended_actions ?? [],
                                 },
                               },
                             })
@@ -3056,7 +6005,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">{operatorMacros.length} saved</span>
                     </div>
                     {operatorMacros.map((runbook) => (
-                      <div key={`macro:${runbook.id}`} className="cockpit-operator-row">
+                      <div key={`macro:${runbook.id}`} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -3093,8 +6042,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">starter packs</span>
                       <span className="cockpit-operator-link">{readyStarterPacks.length}/{starterPacks.length} ready</span>
                     </div>
-                    {starterPacks.slice(0, 3).map((pack) => (
-                      <div key={pack.name} className="cockpit-operator-row">
+                    {starterPacks.map((pack) => (
+                      <div key={pack.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -3174,8 +6123,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {catalogItems.filter((item) => !item.installed).length} missing
                       </span>
                     </div>
-                    {catalogItems.filter((item) => !item.installed).slice(0, 3).map((item) => (
-                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row">
+                    {catalogItems.filter((item) => !item.installed).map((item) => (
+                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -3226,7 +6175,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">tool inventory</span>
                       <span className="cockpit-operator-link">{blockedTools.length} blocked</span>
                     </div>
-                    {tools.slice(0, 4).map((tool) => (
+                    {tools.map((tool) => (
                       <div key={tool.name} className="cockpit-operator-row">
                         <button
                           type="button"
@@ -3272,29 +6221,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         full settings
                       </button>
                     </div>
-                    {mcpServers.slice(0, 3).map((server) => (
-                      <div key={server.name} className="cockpit-operator-row">
+                    {mcpServers.map((server) => (
+                      <div key={server.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() =>
-                            setSelectedInspector({
-                              kind: "operator",
-                              entity: {
-                                entityType: "mcp",
-                                name: server.name,
-                                meta: server.status ?? "unknown",
-                                summary: server.description || server.url || "MCP server",
-                                details: {
-                                  availability: server.availability ?? "unknown",
-                                  blocked_reason: server.blocked_reason ?? "none",
-                                  tool_count: server.tool_count ?? 0,
-                                  auth_hint: server.auth_hint ?? "",
-                                  status_message: server.status_message ?? "",
-                                },
-                              },
-                            })
-                          }
+                          onClick={() => setSelectedInspector({ kind: "operator", entity: buildMcpEntity(server) })}
                         >
                           <div className="cockpit-value">{server.name}</div>
                           <div className="cockpit-operator-note">
@@ -3335,6 +6267,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               repair
                             </button>
                           ) : null}
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => openExtensionStudio(
+                              studioEntries.find((entry) => entry.id === `mcp:${server.name}`) ?? null,
+                            )}
+                          >
+                            studio
+                          </button>
                           {(server.status === "auth_required" || server.has_headers) && (
                             <button
                               type="button"
@@ -3364,28 +6305,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         reload
                       </button>
                     </div>
-                    {skills.slice(0, 4).map((skill) => (
-                      <div key={skill.name} className="cockpit-operator-row">
+                    {skills.map((skill) => (
+                      <div key={skill.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() =>
-                            setSelectedInspector({
-                              kind: "operator",
-                              entity: {
-                                entityType: "skill",
-                                name: skill.name,
-                                meta: skill.availability ?? (skill.enabled ? "ready" : "disabled"),
-                                summary: skill.description ?? "Skill capability",
-                                details: {
-                                  enabled: skill.enabled,
-                                  user_invocable: skill.user_invocable ?? false,
-                                  requires_tools: skill.requires_tools ?? [],
-                                  missing_tools: skill.missing_tools ?? [],
-                                },
-                              },
-                            })
-                          }
+                          onClick={() => setSelectedInspector({ kind: "operator", entity: buildSkillEntity(skill) })}
                         >
                           <div className="cockpit-value">{skill.name}</div>
                           <div className="cockpit-operator-note">
@@ -3414,6 +6339,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               repair
                             </button>
                           ) : null}
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => openExtensionStudio(
+                              studioEntries.find((entry) => entry.id === `skill:${skill.name}`) ?? null,
+                            )}
+                          >
+                            studio
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -3439,31 +6373,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <div className="cockpit-sublist-item">
                       approval {approvalWorkflows.length} · blocked {blockedWorkflows.length}
                     </div>
-                    {blockedWorkflows.slice(0, 2).map((workflow) => (
-                      <div key={workflow.name} className="cockpit-operator-row">
+                    {blockedWorkflows.map((workflow) => (
+                      <div key={workflow.name} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
-                          onClick={() =>
-                            setSelectedInspector({
-                              kind: "operator",
-                              entity: {
-                                entityType: "workflow_definition",
-                                name: workflow.name,
-                                meta: `${workflow.risk_level} risk`,
-                                summary: workflow.description,
-                                details: {
-                                  requires_tools: workflow.requires_tools,
-                                  requires_skills: workflow.requires_skills,
-                                  missing_tools: workflow.missing_tools ?? [],
-                                  missing_skills: workflow.missing_skills ?? [],
-                                  execution_boundaries: workflow.execution_boundaries,
-                                  approval_behavior: workflow.approval_behavior,
-                                  recommended_actions: workflow.recommended_actions ?? [],
-                                },
-                              },
-                            })
-                          }
+                          onClick={() => setSelectedInspector({ kind: "operator", entity: buildWorkflowDefinitionEntity(workflow) })}
                         >
                           <div className="cockpit-value">blocked {workflow.name}</div>
                           <div className="cockpit-operator-note">
@@ -3477,7 +6392,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             <button
                               type="button"
                               className="cockpit-operator-button"
-                              onClick={() => void runCapabilityActions(workflow.recommended_actions ?? [], workflow.name)}
+                              onClick={() => void runCapabilityActions(readActionList(workflow.recommended_actions), workflow.name)}
                             >
                               repair
                             </button>
@@ -3485,11 +6400,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <button
                             type="button"
                             className="cockpit-operator-button"
+                            onClick={() => openExtensionStudio(
+                              studioEntries.find((entry) => entry.id === `workflow:${workflow.name}`) ?? null,
+                            )}
+                          >
+                            studio
+                          </button>
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
                             onClick={async () => {
                               try {
                                 const preflight = await preflightCapability("workflow", workflow.name);
-                                if (!preflight.ready && preflight.recommended_actions?.length) {
-                                  await runCapabilityActions(preflight.recommended_actions, workflow.name);
+                                if (!preflight.ready) {
+                                  const bootstrap = await bootstrapCapability("workflow", workflow.name, workflow.name, preflight);
+                                  if (bootstrap.ready && bootstrap.command) {
+                                    queueComposerDraft(bootstrap.command);
+                                  }
                                   return;
                                 }
                                 queueComposerDraft(preflight.command ?? buildWorkflowDraft(workflow));
@@ -3526,10 +6453,467 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
               </section>
-            </CockpitWorkspaceWindow>
+              </CockpitWorkspaceWindow>
+            )}
           </>
         )}
       </div>
+
+      {studioOpen && (
+        <div className="cockpit-overlay-backdrop" onClick={() => setStudioOpen(false)}>
+          <section
+            className="cockpit-palette cockpit-studio"
+            onClick={(event) => event.stopPropagation()}
+            aria-label="Extension studio"
+          >
+            <div className="cockpit-window-header">
+              <div className="cockpit-window-header-main">
+                <div className="cockpit-window-title">Extension studio</div>
+                <div className="cockpit-window-meta">
+                  validate, repair, and author extension packages, workflows, skills, and MCP config from one workspace
+                </div>
+              </div>
+              <div className="cockpit-window-controls">
+                <div className="cockpit-window-meta">
+                  {selectedStudioEntry
+                    ? `${selectedStudioEntry.entityType.replace(/_/g, " ")} · ${selectedStudioEntry.availability}`
+                    : "package lifecycle · install / validate"}
+                </div>
+                <button
+                  type="button"
+                  className="cockpit-window-control cockpit-window-control--close"
+                  title="Close extension studio"
+                  aria-label="Close extension studio"
+                  onClick={() => setStudioOpen(false)}
+                >
+                  x
+                </button>
+              </div>
+            </div>
+            <div className="cockpit-studio-shell">
+              <aside className="cockpit-studio-sidebar">
+                <div className="cockpit-operator-row">
+                  <span className="cockpit-key">extensions</span>
+                  <span className="cockpit-operator-link">{studioEntries.length} loaded</span>
+                </div>
+                <div className="cockpit-studio-sidebar-group">
+                  <div className="cockpit-operator-row">
+                    <span className="cockpit-key">package path</span>
+                    <span className="cockpit-row-age">install / validate</span>
+                  </div>
+                  <input
+                    className="cockpit-input"
+                    aria-label="Extension package path"
+                    value={studioExtensionPath}
+                    onChange={(event) => {
+                      setStudioExtensionPath(event.target.value);
+                      setStudioPackagePreview(null);
+                      setStudioPackageStatus(null);
+                    }}
+                    placeholder="/path/to/extension-pack"
+                  />
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void validateStudioExtensionPath()}
+                      disabled={
+                        studioBusy === "extension-validate"
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-update"
+                      }
+                    >
+                      Validate path
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void (
+                        studioPackageAction.key === "update"
+                          ? updateStudioExtensionPath()
+                          : installStudioExtensionPath()
+                      )}
+                      disabled={
+                        studioPackageAction.disabled
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-validate"
+                        || studioBusy === "extension-update"
+                      }
+                    >
+                      {studioPackageAction.label}
+                    </button>
+                  </div>
+                  {studioPackageStatus ? (
+                    <div className="cockpit-sublist-item">{studioPackageStatus}</div>
+                  ) : null}
+                </div>
+                {studioSidebarSections.packages.map((group) => (
+                  <div key={group.extension.id} className="cockpit-studio-sidebar-group">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">{group.extension.display_name}</span>
+                      <span className="cockpit-row-age">{group.extension.location}</span>
+                    </div>
+                    <div className="cockpit-list cockpit-list--palette">
+                      {group.entries.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          className={`cockpit-sublist-button ${selectedStudioEntry?.id === entry.id ? "active" : ""}`}
+                          onClick={() => setStudioSelectedId(entry.id)}
+                        >
+                          <span>{entry.entityType === "extension_manifest" ? "manifest.yaml" : entry.name}</span>
+                          <span className="cockpit-row-age">
+                            {entry.entityType === "workflow_definition"
+                              ? "workflow"
+                              : entry.entityType === "extension_manifest"
+                                ? "manifest"
+                                : entry.entityType}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {studioSidebarSections.standalone.length ? (
+                  <div className="cockpit-studio-sidebar-group">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">standalone</span>
+                      <span className="cockpit-row-age">{studioSidebarSections.standalone.length}</span>
+                    </div>
+                    <div className="cockpit-list cockpit-list--palette">
+                      {studioSidebarSections.standalone.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          className={`cockpit-sublist-button ${selectedStudioEntry?.id === entry.id ? "active" : ""}`}
+                          onClick={() => setStudioSelectedId(entry.id)}
+                        >
+                          <span>{entry.name}</span>
+                          <span className="cockpit-row-age">{entry.entityType === "workflow_definition" ? "workflow" : entry.entityType}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </aside>
+              <div className="cockpit-studio-main">
+                {selectedStudioEntry ? (
+                <div className="cockpit-inspector">
+                  <div className="cockpit-inspector-title">{selectedStudioEntry.name}</div>
+                  <div className="cockpit-inspector-meta">{selectedStudioEntry.meta}</div>
+                  <div className="cockpit-inspector-body">{selectedStudioEntry.summary}</div>
+                  <div className="cockpit-chip-row">
+                    <span className="cockpit-chip">{selectedStudioEntry.availability}</span>
+                    {selectedStudioEntry.packageDisplayName ? (
+                      <span className="cockpit-chip">
+                        {selectedStudioEntry.packageDisplayName}
+                        {selectedStudioEntry.packageVersion ? ` · ${selectedStudioEntry.packageVersion}` : ""}
+                      </span>
+                    ) : null}
+                    {selectedStudioEntry.packageLocation ? (
+                      <span className="cockpit-chip">
+                        {selectedStudioEntry.packageLocation}
+                        {selectedStudioEntry.packageTrust ? ` · ${selectedStudioEntry.packageTrust}` : ""}
+                      </span>
+                    ) : null}
+                    {typeof selectedStudioEntry.entity.details.file_path === "string" && selectedStudioEntry.entity.details.file_path
+                      ? <span className="cockpit-chip">{String(selectedStudioEntry.entity.details.file_path)}</span>
+                      : null}
+                    {typeof selectedStudioEntry.entity.details.url === "string" && selectedStudioEntry.entity.details.url
+                      ? <span className="cockpit-chip">{String(selectedStudioEntry.entity.details.url)}</span>
+                      : null}
+                  </div>
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void refreshStudioValidation()}
+                      disabled={studioBusy === "validation" || selectedStudioEntry.validationSupported === false}
+                    >
+                      {selectedStudioEntry.entityType === "mcp"
+                        ? "Validate config"
+                        : selectedStudioEntry.entityType === "extension_manifest"
+                          ? "Validate manifest"
+                          : "Refresh validation"}
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void saveStudioDraft()}
+                      disabled={studioBusy === "save" || selectedStudioEntry.saveSupported === false}
+                    >
+                      {selectedStudioEntry.entityType === "mcp"
+                        ? "Save config"
+                        : selectedStudioEntry.entityType === "extension_manifest"
+                          ? "Save manifest"
+                          : "Save draft"}
+                    </button>
+                    {selectedStudioEntry.entityType !== "mcp" && selectedStudioEntry.entityType !== "extension_manifest" ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => queueComposerDraft(studioDraft)}
+                      >
+                        Queue authoring draft
+                      </button>
+                    ) : null}
+                    {studioRecommendedActions.length ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void runCapabilityActions(studioRecommendedActions, selectedStudioEntry.name)}
+                      >
+                        Run repairs
+                      </button>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionToggleAction ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void setSelectedExtensionEnabled(selectedExtensionToggleAction.nextEnabled)}
+                        disabled={studioBusy === "extension-enable" || studioBusy === "extension-disable"}
+                      >
+                        {selectedExtensionToggleAction.label}
+                      </button>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.metadata_supported ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void saveSelectedExtensionMetadata()}
+                        disabled={studioBusy === "extension-configure"}
+                      >
+                        Save metadata
+                      </button>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.removable ? (
+                      <button
+                        className="cockpit-feedback-button"
+                        onClick={() => void removeSelectedExtension()}
+                        disabled={studioBusy === "extension-remove"}
+                      >
+                        Remove package
+                      </button>
+                    ) : null}
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => setStudioOpen(false)}
+                    >
+                      Close
+                    </button>
+                  </div>
+                  {studioStatus && (
+                    <div className="cockpit-sublist-item">{studioStatus}</div>
+                  )}
+                  <div className="cockpit-inspector-stack">
+                    <div className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">doctor plan</div>
+                      <div className="cockpit-value">
+                        {studioPreflight
+                          ? `${studioPreflight.ready ? "ready" : "blocked"} · ${studioPreflight.blocking_reasons.join(" · ") || "no blockers"}`
+                          : selectedStudioEntry.entityType === "extension_manifest"
+                            ? "Manage install state, metadata, and manifest integrity from one package surface."
+                            : selectedStudioEntry.entityType === "skill"
+                              ? "Use validation to check draft syntax and current runtime blockers."
+                            : "Run validation to capture a current plan."}
+                      </div>
+                    </div>
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">package state</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.status}
+                          {selectedExtensionPackage.enabled_scope !== "none"
+                            ? ` · ${selectedExtensionPackage.enabled === false ? "disabled" : "enabled"}`
+                            : ""}
+                          {selectedExtensionPackage.toggleable_contribution_types.length
+                            ? ` · toggles ${selectedExtensionPackage.toggleable_contribution_types.join(", ")}`
+                            : ""}
+                          {selectedExtensionPackage.passive_contribution_types.length
+                            ? ` · passive ${selectedExtensionPackage.passive_contribution_types.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.issues.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">doctor issues</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.issues.map((issue) => issue.message).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.load_errors.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">load errors</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.load_errors.map((error) => error.message).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.toggle_targets.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">toggle targets</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.toggle_targets
+                            .map((target) => `${target.type.replace(/_/g, " ")} ${target.name}`)
+                            .join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.metadata_supported ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">metadata scope</div>
+                        <div className="cockpit-value">
+                          {selectedExtensionPackage.config_scope.replace(/_/g, " ")}
+                          {selectedExtensionPackage.publisher?.name
+                            ? ` · publisher ${selectedExtensionPackage.publisher.name}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioDraftValidation ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">draft status</div>
+                        <div className="cockpit-value">
+                          {"valid" in studioDraftValidation
+                            ? studioDraftValidation.valid === false
+                              ? "invalid"
+                              : "valid"
+                            : "captured"}
+                          {Array.isArray(studioDraftValidation.missing_tools) && studioDraftValidation.missing_tools.length
+                            ? ` · tools ${studioDraftValidation.missing_tools.join(", ")}`
+                            : ""}
+                          {Array.isArray(studioDraftValidation.missing_skills) && studioDraftValidation.missing_skills.length
+                            ? ` · skills ${studioDraftValidation.missing_skills.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioDraftValidation && Array.isArray(studioDraftValidation.errors) && studioDraftValidation.errors.length > 0 ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">draft errors</div>
+                        <div className="cockpit-value">
+                          {studioDraftValidation.errors.map((entry) => {
+                            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "";
+                            const record = entry as Record<string, unknown>;
+                            return typeof record.message === "string" ? record.message : JSON.stringify(record);
+                          }).filter(Boolean).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioPreflight?.autorepair_actions?.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">safe actions</div>
+                        <div className="cockpit-value">
+                          {studioPreflight.autorepair_actions.map((action) => formatCapabilityAction(action)).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioPreflight?.recommended_actions?.length ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">manual actions</div>
+                        <div className="cockpit-value">
+                          {studioPreflight.recommended_actions.map((action) => formatCapabilityAction(action)).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioWorkflowErrors.length > 0 ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">load errors</div>
+                        <div className="cockpit-value">
+                          {studioWorkflowErrors.map((entry) => entry.message).join(" · ")}
+                        </div>
+                      </div>
+                    ) : null}
+                    {studioMcpTestResult ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">mcp test</div>
+                        <div className="cockpit-value">
+                          {typeof studioMcpTestResult.status === "string" ? studioMcpTestResult.status : "result"}
+                          {typeof studioMcpTestResult.tool_count === "number"
+                            ? ` · ${studioMcpTestResult.tool_count} tools`
+                            : ""}
+                          {typeof studioMcpTestResult.message === "string"
+                            ? ` · ${studioMcpTestResult.message}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  {selectedStudioEntry.entityType === "mcp" ? (
+                    <div className="cockpit-studio-form">
+                      <label className="cockpit-key" htmlFor="studio-mcp-url">mcp url</label>
+                      <input
+                        id="studio-mcp-url"
+                        className="cockpit-input"
+                        value={studioMcpUrl}
+                        onChange={(event) => setStudioMcpUrl(event.target.value)}
+                        placeholder="http://host.docker.internal:9001/mcp"
+                        disabled={studioMcpReadOnly}
+                      />
+                      <label className="cockpit-key" htmlFor="studio-mcp-description">description</label>
+                      <input
+                        id="studio-mcp-description"
+                        className="cockpit-input"
+                        value={studioMcpDescription}
+                        onChange={(event) => setStudioMcpDescription(event.target.value)}
+                        placeholder="What this MCP server provides"
+                        disabled={studioMcpReadOnly}
+                      />
+                    </div>
+                  ) : (
+                    <div className="cockpit-studio-form">
+                      <label className="cockpit-key" htmlFor="studio-authoring-draft">
+                        {selectedStudioEntry.entityType === "extension_manifest" ? "manifest draft" : "authoring draft"}
+                      </label>
+                      <textarea
+                        id="studio-authoring-draft"
+                        className="cockpit-input cockpit-studio-textarea"
+                        value={studioDraft}
+                        onChange={(event) => setStudioDraft(event.target.value)}
+                      />
+                      {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.metadata_supported ? (
+                        <>
+                          <label className="cockpit-key" htmlFor="studio-extension-config">package metadata</label>
+                          <textarea
+                            id="studio-extension-config"
+                            className="cockpit-input cockpit-studio-textarea cockpit-studio-textarea--compact"
+                            value={studioExtensionConfigDraft}
+                            onChange={(event) => {
+                              setStudioExtensionConfigDraft(event.target.value);
+                              setStudioExtensionConfigDirty(true);
+                            }}
+                          />
+                        </>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+                ) : (
+                  <div className="cockpit-inspector">
+                    <div className="cockpit-inspector-title">Extension packages</div>
+                    <div className="cockpit-inspector-meta">install, validate, and inspect lifecycle state</div>
+                    <div className="cockpit-inspector-body">
+                      Enter a local package path to validate or install a new extension. Installed packages appear in the left sidebar with manifest-backed lifecycle controls.
+                    </div>
+                    <div className="cockpit-inspector-stack">
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">loaded packages</div>
+                        <div className="cockpit-value">{extensionPackages.length}</div>
+                      </div>
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">workspace packages</div>
+                        <div className="cockpit-value">
+                          {extensionPackages.filter((item) => item.location === "workspace").length}
+                        </div>
+                      </div>
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">doctor state</div>
+                        <div className="cockpit-value">
+                          {extensionPackages.filter((item) => item.status === "degraded").length} degraded
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       {paletteOpen && (
         <div className="cockpit-overlay-backdrop" onClick={() => setPaletteOpen(false)}>
@@ -3539,13 +6923,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             aria-label="Capability palette"
           >
             <div className="cockpit-window-header">
-              <div>
+              <div className="cockpit-window-header-main">
                 <div className="cockpit-window-title">Capability palette</div>
                 <div className="cockpit-window-meta">
                   keyboard-first launcher for capabilities, installs, repairs, and runbooks
                 </div>
               </div>
-              <div className="cockpit-window-grip">Shift+K / Ctrl+K</div>
+              <div className="cockpit-window-controls">
+                <div className="cockpit-window-meta">Shift+K / Ctrl+K</div>
+                <button
+                  type="button"
+                  className="cockpit-window-control cockpit-window-control--close"
+                  title="Close capability palette"
+                  aria-label="Close capability palette"
+                  onClick={() => setPaletteOpen(false)}
+                >
+                  x
+                </button>
+              </div>
             </div>
             <div className="cockpit-palette-body">
               <input
@@ -3604,11 +6999,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
       <form className="cockpit-composer" onSubmit={handleSubmit}>
         <div className="cockpit-composer-meta">
-          <span>command bar</span>
+          <span>{workspaceTelemetryLeft}</span>
           <span className="cockpit-composer-meta-center">
-            {activeLayout.label} · drag panes on 16px grid · resize edges · Shift+1/2/3 layouts · Shift+K palette
+            {workspaceTelemetryCenter}
           </span>
-          <span>{isAgentBusy ? "Seraph is responding" : `thread ${activeSessionLabel}`}</span>
+          <span>{isAgentBusy ? "SERAPH RESPONDING" : workspaceTelemetryRight}</span>
         </div>
         <div className="cockpit-composer-row">
           <input

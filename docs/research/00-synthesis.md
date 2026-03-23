@@ -7,6 +7,8 @@ title: Seraph Research Synthesis
 
 **Status:** canonical design synthesis for the current Seraph superiority program
 
+Seraph is an AI guardian that remembers, watches, and acts. This research tree defines the product contract behind that claim.
+
 ## Purpose
 
 This research tree defines what Seraph is trying to become. It is not the shipped-status ledger. For shipped truth, use `docs/implementation/`.
@@ -21,7 +23,7 @@ This tree now has a narrower standard than before: every major product claim sho
 
 ## Locked Product Direction
 
-Seraph is being optimized for a **power-user guardian cockpit**, not a broad consumer chat assistant.
+Seraph is being optimized for a **power-user guardian workspace**, not a broad consumer chat assistant.
 
 That means:
 
@@ -58,7 +60,7 @@ Seraph should be judged against OpenClaw, Hermes, and IronClaw on explicit axes:
 
 ## Design Principles
 
-- local-first where it meaningfully improves trust, speed, and availability
+- private and operator-controlled runtime paths where they meaningfully improve trust, speed, and availability
 - explicit trust boundaries before broader autonomy
 - real execution, not simulated competence
 - observability before optimism

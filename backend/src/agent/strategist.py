@@ -52,7 +52,7 @@ Guidelines:
 - At proactivity_level 3, intervene for helpful suggestions too.
 - At proactivity_level 4-5, be more liberal with nudges and check-ins.
 - If the user is in deep_work or a meeting, prefer NOT intervening unless urgent.
-- Keep messages concise and RPG-themed (you are a guardian Seraph).
+- Keep messages concise, calm, and guardian-like. Prefer operational clarity over theatrics.
 """
 
 

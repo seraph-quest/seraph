@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, type CSSProperties, type PointerEventHandler } from "react";
-import { usePanelLayoutStore, PANEL_MIN_SIZES } from "../stores/panelLayoutStore";
+import { useCallback, useEffect, useMemo, useRef, type CSSProperties, type PointerEventHandler } from "react";
+import { useCockpitLayoutStore } from "../stores/cockpitLayoutStore";
+import { getPackedCockpitPanels, PANEL_MIN_SIZES, usePanelLayoutStore } from "../stores/panelLayoutStore";
 
 export type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
@@ -69,8 +70,16 @@ export function useDragResize(
   panelId: string,
   opts: { minWidth: number; minHeight: number },
 ) {
-  const { setRect, bringToFront, getZIndex, panels } = usePanelLayoutStore();
+  const { setRect, bringToFront, getZIndex, panels, zStack } = usePanelLayoutStore();
+  const activeLayoutId = useCockpitLayoutStore((state) => state.activeLayoutId);
+  const paneVisibility = useCockpitLayoutStore((state) => state.paneVisibility);
+  const fallbackRect = useMemo(() => {
+    if (!(panelId in PANEL_MIN_SIZES)) return null;
+    return getPackedCockpitPanels(activeLayoutId, paneVisibility)[panelId] ?? null;
+  }, [activeLayoutId, paneVisibility, panelId]);
   const rect = panels[panelId];
+  const resolvedRect = rect ?? fallbackRect;
+  const isFront = zStack[zStack.length - 1] === panelId;
   const minW = opts.minWidth ?? PANEL_MIN_SIZES[panelId]?.width ?? 200;
   const minH = opts.minHeight ?? PANEL_MIN_SIZES[panelId]?.height ?? 200;
 
@@ -92,10 +101,11 @@ export function useDragResize(
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       bringToFront(panelId);
-      const r = usePanelLayoutStore.getState().panels[panelId];
+      const r = usePanelLayoutStore.getState().panels[panelId] ?? fallbackRect;
+      if (!r) return;
       dragState.current = { startX: e.clientX, startY: e.clientY, origX: r.x, origY: r.y };
     },
-    [panelId, bringToFront],
+    [panelId, bringToFront, fallbackRect],
   );
 
   const onResizePointerDown = useCallback(
@@ -106,7 +116,8 @@ export function useDragResize(
         e.stopPropagation();
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
         bringToFront(panelId);
-        const r = usePanelLayoutStore.getState().panels[panelId];
+        const r = usePanelLayoutStore.getState().panels[panelId] ?? fallbackRect;
+        if (!r) return;
         resizeState.current = {
           edge,
           startX: e.clientX,
@@ -117,7 +128,7 @@ export function useDragResize(
           origH: r.height,
         };
       },
-    [panelId, bringToFront],
+    [panelId, bringToFront, fallbackRect],
   );
 
   useEffect(() => {
@@ -128,7 +139,8 @@ export function useDragResize(
       if (dragState.current) {
         const dx = e.clientX - dragState.current.startX;
         const dy = e.clientY - dragState.current.startY;
-        const r = usePanelLayoutStore.getState().panels[panelId];
+        const r = usePanelLayoutStore.getState().panels[panelId] ?? fallbackRect;
+        if (!r) return;
         const clamped = clampRect(
           dragState.current.origX + dx,
           dragState.current.origY + dy,
@@ -203,7 +215,7 @@ export function useDragResize(
     const onResize = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        const r = usePanelLayoutStore.getState().panels[panelId];
+        const r = usePanelLayoutStore.getState().panels[panelId] ?? fallbackRect;
         if (!r) return;
         const clamped = clampRect(r.x, r.y, r.width, r.height, minW, minH);
         setRect(panelId, clamped);
@@ -214,14 +226,14 @@ export function useDragResize(
       window.removeEventListener("resize", onResize);
       clearTimeout(timer);
     };
-  }, [panelId, setRect, minW, minH]);
+  }, [panelId, setRect, minW, minH, fallbackRect]);
 
   const style: CSSProperties = {
     position: "fixed",
-    left: rect.x,
-    top: rect.y,
-    width: rect.width,
-    height: rect.height,
+    left: resolvedRect?.x ?? 0,
+    top: resolvedRect?.y ?? 0,
+    width: resolvedRect?.width ?? minW,
+    height: resolvedRect?.height ?? minH,
     zIndex: getZIndex(panelId),
   };
 
@@ -232,5 +244,12 @@ export function useDragResize(
     style: { cursor: CURSOR_MAP[edge] } as CSSProperties,
   });
 
-  return { panelRef, dragHandleProps, resizeHandleProps, style, bringToFront: () => bringToFront(panelId) };
+  return {
+    panelRef,
+    dragHandleProps,
+    resizeHandleProps,
+    style,
+    isFront,
+    bringToFront: () => bringToFront(panelId),
+  };
 }

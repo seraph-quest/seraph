@@ -7,9 +7,11 @@ title: Master Plan
 
 > Legacy note: this page now lives under `/legacy`. The canonical roadmap is `docs/implementation/00-master-roadmap.md`, and the canonical shipped-status ledger is `docs/implementation/STATUS.md`.
 
+Seraph is an AI guardian that remembers, watches, and acts. This page is preserved only as historical planning context.
+
 ## Summary
 
-Seraph now uses a `maas`-style live planning structure:
+Current docs split:
 
 - `docs/implementation/` for shipped state and delivery tracking
 - `docs/research/` for design and product thesis
@@ -32,7 +34,7 @@ Legend for the checklist column:
 | 03. Runtime Reliability | `[ ]` | Ordered fallbacks, runtime-path primary and fallback overrides, local routing across helper/agent/delegation/MCP-specialist paths, runtime audit visibility including embedding, vector-store, soul-file, and filesystem boundaries, and deterministic eval foundations are shipped; richer provider selection, remaining edge coverage, and broader evals are still left |
 | 04. Presence And Reach | `[ ]` | Browser, WebSocket, proactive delivery, and the native observer daemon are shipped foundations; desktop presence, notifications, channels, and cross-surface continuity are still left |
 | 05. Guardian Intelligence | `[ ]` | Soul, memory, strategist, goals, daily briefing, and evening review foundations are shipped; the deeper adaptive guardian layer is still left |
-| 06. Embodied UX | `[ ]` | Guardian cockpit, goals/settings overlays, operator panes, and continuity surfaces are shipped; denser workspace composition and full retirement of the village/editor line are still left |
+| 06. Embodied UX | `[ ]` | Guardian cockpit, goals/settings overlays, operator panes, continuity surfaces, and retirement of the village/editor line are shipped; denser workspace composition and deeper step-level operator control are still left |
 | 07. Ecosystem And Leverage | `[ ]` | Skills, MCP, and delegation foundations are shipped; stronger workflow leverage and extension ergonomics are still left |
 
 ## Delivery Order

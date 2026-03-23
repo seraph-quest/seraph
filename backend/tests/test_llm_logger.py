@@ -71,7 +71,11 @@ def _read_log(log_dir):
 class TestSuccessEvent:
     def test_writes_valid_jsonl(self, log_dir):
         """Success event writes a JSONL line with expected fields."""
-        with patch("src.llm_logger.settings", _make_settings(log_dir)):
+        with (
+            patch("src.llm_logger.settings", _make_settings(log_dir)),
+            patch("src.llm_logger.get_current_session_id", return_value="session-1"),
+            patch("src.llm_logger.get_current_llm_request_id", return_value="agent-ws:session-1:123"),
+        ):
             from src.llm_logger import SeraphLLMLogger
 
             lg = SeraphLLMLogger()
@@ -94,6 +98,10 @@ class TestSuccessEvent:
         assert e["tokens"]["total"] == 150
         assert e["cost_usd"] == 0.0012
         assert "latency_ms" in e
+        assert e["session_id"] == "session-1"
+        assert e["request_id"] == "agent-ws:session-1:123"
+        assert e["actor"] == "user_request"
+        assert e["source"] == "websocket_chat"
         assert "error" not in e
 
     def test_content_logging_off(self, log_dir):
@@ -188,3 +196,30 @@ class TestInitLLMLogging:
         assert len(litellm.callbacks) == before + 1
         # Clean up so other tests aren't affected
         litellm.callbacks.pop()
+
+
+class TestListRecentLLMCalls:
+    def test_reads_recent_entries_and_infers_session_from_request_id(self, log_dir):
+        entry = {
+            "timestamp": "2026-03-20T10:00:00+00:00",
+            "status": "success",
+            "model": "openrouter/anthropic/claude-sonnet-4",
+            "provider": "openrouter",
+            "tokens": {"input": 10, "output": 5, "total": 15},
+            "cost_usd": 0.0001,
+            "latency_ms": 123.0,
+            "request_id": "agent-rest:session-9:123",
+        }
+        path = os.path.join(log_dir, "llm_calls.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+
+        with patch("src.llm_logger.settings", _make_settings(log_dir)):
+            from src.llm_logger import list_recent_llm_calls
+
+            entries = list_recent_llm_calls(limit=10, session_id="session-9")
+
+        assert len(entries) == 1
+        assert entries[0]["session_id"] == "session-9"
+        assert entries[0]["actor"] == "user_request"
+        assert entries[0]["source"] == "rest_chat"

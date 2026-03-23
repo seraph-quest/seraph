@@ -15,14 +15,12 @@
   Seraph is a proactive AI system for people who want an agent that can keep state, watch what is happening on the desktop, use tools, run workflows, and surface useful actions instead of waiting for one-off prompts.
 </p>
 
-<p align="center">
-  <a href="assets/github/seraph-demo.mp4">
-    <img src="assets/github/seraph-demo-poster.jpg" alt="Seraph workspace demo" width="900" />
-  </a>
-</p>
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24" width="900" controls></video>
+</div>
 
 <p align="center">
-  <a href="assets/github/seraph-demo.mp4"><strong>Watch the 20-second workspace demo</strong></a>
+  <a href="https://github.com/user-attachments/assets/b4624170-0982-475e-b1ad-709a92a21f24"><strong>Watch the 20-second workspace demo</strong></a>
 </p>
 
 ---

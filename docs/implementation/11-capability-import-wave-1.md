@@ -40,11 +40,19 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 ### 2. hermes-delegate-task-runtime-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_delegate_task_tool.py tests/test_tools_api.py tests/test_agent.py tests/test_delegation.py tests/test_specialists.py -q`
 - subagent review:
-  - pending
+  - reviewer: `Hooke`
+  - findings:
+    - the first draft bypassed the existing delegation feature flag and exposed specialist delegation on the monolithic agent path
+    - the first draft allowed recursive delegation paths through `workflow_runner` because specialists and workflow composition still saw `delegate_task`
+    - boundary coverage was too shallow until the slice added explicit disabled and nested-delegation regressions
+  - resolution:
+    - `delegate_task` is only exposed through the runtime tool surface when delegation mode is enabled
+    - specialists and workflow composition now strip `delegate_task`, so the specialist graph cannot recurse back into delegation
+    - the tool itself now guards against nested delegation and has direct regressions for disabled and recursive paths
 
 ### 3. hermes-clarify-runtime-v1
 

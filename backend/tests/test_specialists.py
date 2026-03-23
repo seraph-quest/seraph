@@ -329,6 +329,53 @@ class TestBuildAllSpecialists:
     @patch("src.agent.specialists.mcp_manager")
     @patch("src.agent.specialists.discover_tools")
     @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_filters_delegate_task_from_specialist_and_workflow_surfaces(
+        self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls,
+    ):
+        mock_model_cls.return_value = MagicMock()
+        mock_mcp.get_config.return_value = []
+
+        def _make_agent(**kwargs):
+            agent = MagicMock()
+            agent.name = kwargs.get("name", "unknown")
+            agent.tools = kwargs.get("tools", [])
+            return agent
+
+        mock_agent_cls.side_effect = _make_agent
+
+        tools = []
+        for name in TOOL_DOMAINS:
+            tool = MagicMock()
+            tool.name = name
+            tools.append(tool)
+        delegate_tool = MagicMock()
+        delegate_tool.name = "delegate_task"
+        tools.append(delegate_tool)
+        mock_discover.return_value = tools
+
+        workflow_tool = MagicMock()
+        workflow_tool.name = "workflow_web_brief_to_file"
+
+        with (
+            patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+            patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[workflow_tool]) as mock_build_workflow_tools,
+        ):
+            specialists = build_all_specialists()
+
+        passed_tool_names = {tool.name for tool in mock_build_workflow_tools.call_args.args[0]}
+        assert "delegate_task" not in passed_tool_names
+        specialist_tool_names = {
+            tool.name
+            for specialist in specialists
+            for tool in getattr(specialist, "tools", [])
+        }
+        assert "delegate_task" not in specialist_tool_names
+
+    @patch("src.agent.specialists.ToolCallingAgent")
+    @patch("src.agent.specialists.LiteLLMModel")
+    @patch("src.agent.specialists.mcp_manager")
+    @patch("src.agent.specialists.discover_tools")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
     def test_with_mcp_returns_builtin_plus_mcp(self, _mock_context, mock_discover, mock_mcp, mock_model_cls, mock_agent_cls):
         mock_model_cls.return_value = MagicMock()
 

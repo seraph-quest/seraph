@@ -17,6 +17,32 @@ async def test_tools_api_full_mode_includes_execute_code(client):
 
 
 @pytest.mark.asyncio
+async def test_tools_api_balanced_mode_keeps_delegate_task_available(client):
+    ctx = CurrentContext(tool_policy_mode="balanced")
+    with (
+        patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+        patch("src.agent.factory.settings.use_delegation", True),
+    ):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "delegate_task" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_api_hides_delegate_task_when_delegation_is_disabled(client):
+    ctx = CurrentContext(tool_policy_mode="full")
+    with (
+        patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+        patch("src.agent.factory.settings.use_delegation", False),
+    ):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "delegate_task" not in names
+
+
+@pytest.mark.asyncio
 async def test_tools_api_balanced_mode_hides_full_only_tools(client):
     ctx = CurrentContext(tool_policy_mode="balanced")
     with patch("src.tools.policy.context_manager.get_context", return_value=ctx):

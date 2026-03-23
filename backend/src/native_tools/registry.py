@@ -72,6 +72,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["full"],
         "execution_boundaries": ["sandbox_execution"],
     },
+    "delegate_task": {
+        "description": "Delegate a bounded subtask to a specialist runtime",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["delegation"],
+    },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
         "policy_modes": ["safe", "balanced", "full"],

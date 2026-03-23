@@ -206,6 +206,7 @@ def build_all_specialists() -> list[ToolCallingAgent]:
             wrap_tools_for_secret_refs(filter_tools(discover_tools(), mode))
         )
     )
+    all_tools = [tool for tool in all_tools if tool.name != "delegate_task"]
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []

@@ -16,13 +16,24 @@ class TestAgentFactory:
     @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
     def test_get_tools_returns_list(self, _mock_context, mock_mcp):
         mock_mcp.get_tools.return_value = []
-        tools = get_tools()
+        with patch("src.agent.factory.settings.use_delegation", False):
+            tools = get_tools()
         assert isinstance(tools, list)
         assert len(tools) >= 10
         tool_names = [t.name for t in tools]
         for expected in ["read_file", "write_file", "web_search", "fill_template",
                          "view_soul", "update_soul", "create_goal", "execute_code"]:
             assert expected in tool_names
+        assert "delegate_task" not in tool_names
+
+    @patch("src.agent.factory.mcp_manager")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_includes_delegate_task_when_delegation_is_enabled(self, _mock_context, mock_mcp):
+        mock_mcp.get_tools.return_value = []
+        with patch("src.agent.factory.settings.use_delegation", True):
+            tools = get_tools()
+
+        assert "delegate_task" in {tool.name for tool in tools}
 
     @patch("src.agent.factory.LiteLLMModel")
     def test_get_model(self, mock_litellm_cls):

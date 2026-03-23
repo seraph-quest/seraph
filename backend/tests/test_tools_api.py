@@ -17,6 +17,16 @@ async def test_tools_api_full_mode_includes_execute_code(client):
 
 
 @pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_clarify_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "clarify" in names
+
+
+@pytest.mark.asyncio
 async def test_tools_api_balanced_mode_keeps_delegate_task_available(client):
     ctx = CurrentContext(tool_policy_mode="balanced")
     with (

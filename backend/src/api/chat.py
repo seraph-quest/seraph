@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import json
 import logging
 from time import perf_counter
 
@@ -8,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
@@ -90,6 +92,43 @@ async def chat(request: ChatRequest):
                     f"{exc.summary}\n\n"
                     "This is a high-risk action. Approve it first, then resend your request."
                 ),
+            },
+        )
+    except ClarificationRequired as exc:
+        rendered = await redact_secrets_in_text(exc.render_message())
+        await session_manager.add_message(
+            session.id,
+            "assistant",
+            rendered,
+            metadata_json=json.dumps({
+                "display_role": "clarification",
+                "question": exc.question,
+                "reason": exc.reason,
+                "options": exc.options,
+            }),
+        )
+        await audit_repository.log_event(
+            session_id=session.id,
+            actor="agent",
+            event_type="clarification_requested",
+            tool_name="clarify",
+            risk_level="low",
+            policy_mode=get_current_tool_policy_mode(),
+            summary=exc.question,
+            details={
+                "reason": exc.reason,
+                "options": exc.options,
+            },
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "type": "clarification_required",
+                "session_id": session.id,
+                "question": exc.question,
+                "reason": exc.reason,
+                "options": exc.options,
+                "message": rendered,
             },
         )
     except asyncio.TimeoutError:

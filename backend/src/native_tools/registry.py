@@ -77,6 +77,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["delegation"],
     },
+    "clarify": {
+        "description": "Request a missing input from the user before continuing",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["conversation"],
+    },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
         "policy_modes": ["safe", "balanced", "full"],

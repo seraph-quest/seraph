@@ -56,11 +56,25 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 ### 3. hermes-clarify-runtime-v1
 
-- status: pending
+- status: complete
 - validation:
-  - pending
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_clarify_tool.py tests/test_tools_api.py tests/test_agent.py tests/test_chat_api.py tests/test_e2e_conversation.py -q`
+  - `cd frontend && npm test -- src/hooks/useWebSocket.test.ts src/stores/chatStore.test.ts src/components/chat/MessageBubble.test.tsx`
+  - `cd frontend && npm run build`
+  - `git diff --check`
 - subagent review:
-  - pending
+  - reviewer: `Hooke`
+  - findings:
+    - the initial REST clarification path stranded newly created sessions because the 409 response did not carry a restorable `session_id`
+    - the first pass collapsed clarification into generic assistant text, which lost typed question/reason/options structure at the UI boundary
+    - the first pass lacked frontend regressions for the clarification transport and rendering path
+    - the follow-up pass still failed persistence parity because stored clarification prompts reloaded as plain assistant messages instead of a first-class clarification surface
+    - helper-only frontend tests were not enough until the slice covered actual restore and render behavior
+  - resolution:
+    - REST clarification responses now return and persist `session_id`, so fresh-thread clarification requests do not strand the session
+    - clarification is a first-class native tool and frontend message role with dedicated `question`, `reason`, and `options` fields
+    - backend session history now persists clarification metadata, and the chat store restores that metadata back into the dedicated clarification role on reload
+    - frontend regressions now cover transport helpers, restored session history mapping, and rendered clarification options chips
 
 ### 4. hermes-todo-runtime-v1
 

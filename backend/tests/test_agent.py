@@ -22,7 +22,7 @@ class TestAgentFactory:
         assert len(tools) >= 10
         tool_names = [t.name for t in tools]
         for expected in ["read_file", "write_file", "web_search", "fill_template",
-                         "view_soul", "update_soul", "create_goal", "execute_code"]:
+                         "view_soul", "update_soul", "create_goal", "execute_code", "clarify"]:
             assert expected in tool_names
         assert "delegate_task" not in tool_names
 

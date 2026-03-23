@@ -106,6 +106,30 @@ function safeStorageBool(key: string, fallback: boolean): boolean {
   return value !== "0" && value.toLowerCase() !== "false";
 }
 
+function parseDisplayRole(message: Record<string, unknown>): {
+  role: ChatMessage["role"];
+  clarificationQuestion?: string;
+  clarificationReason?: string;
+  clarificationOptions?: string[];
+} {
+  const metadata = message.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { role: message.role === "assistant" ? "agent" : message.role as ChatMessage["role"] };
+  }
+  const record = metadata as Record<string, unknown>;
+  if (record.display_role !== "clarification") {
+    return { role: message.role === "assistant" ? "agent" : message.role as ChatMessage["role"] };
+  }
+  return {
+    role: "clarification",
+    clarificationQuestion: typeof record.question === "string" ? record.question : undefined,
+    clarificationReason: typeof record.reason === "string" ? record.reason : undefined,
+    clarificationOptions: Array.isArray(record.options)
+      ? record.options.filter((item): item is string => typeof item === "string")
+      : undefined,
+  };
+}
+
 const defaultVisual: AgentVisualState = {
   animationState: "idle",
   positionX: 50,
@@ -305,15 +329,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const res = await fetch(`${API_URL}/api/sessions/${sessionId}/messages`);
       if (res.ok) {
         const msgs = await res.json();
-        const chatMessages: ChatMessage[] = msgs.map((m: Record<string, unknown>) => ({
-          id: m.id as string,
-          role: m.role === "assistant" ? "agent" : m.role as string,
-          content: m.content as string,
-          timestamp: new Date(m.created_at as string).getTime(),
-          sessionId,
-          stepNumber: m.step_number as number | undefined,
-          toolUsed: m.tool_used as string | undefined,
-        }));
+        const chatMessages: ChatMessage[] = msgs.map((m: Record<string, unknown>) => {
+          const display = parseDisplayRole(m);
+          return {
+            id: m.id as string,
+            role: display.role,
+            content: m.content as string,
+            timestamp: new Date(m.created_at as string).getTime(),
+            sessionId,
+            stepNumber: m.step_number as number | undefined,
+            toolUsed: m.tool_used as string | undefined,
+            clarificationQuestion: display.clarificationQuestion,
+            clarificationReason: display.clarificationReason,
+            clarificationOptions: display.clarificationOptions,
+          };
+        });
         safeStorageSet(LAST_SESSION_KEY, sessionId);
         set((state) => {
           const nextContinuity = { ...state.sessionContinuity };

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -223,6 +224,7 @@ class SessionManager:
                     "id": m.id,
                     "role": m.role,
                     "content": m.content,
+                    "metadata": json.loads(m.metadata_json) if m.metadata_json else None,
                     "step_number": m.step_number,
                     "tool_used": m.tool_used,
                     "created_at": m.created_at.isoformat(),

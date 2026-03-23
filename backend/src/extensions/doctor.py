@@ -380,9 +380,10 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                 )
                 continue
             if contribution.contribution_type == "toolset_presets":
-                permission_profile = evaluate_tool_permissions(
+                permission_profile = evaluate_contribution_permissions(
                     extension,
-                    tool_names=list(definition.include_tools),
+                    contribution_type=contribution.contribution_type,
+                    metadata=definition.as_metadata(),
                 )
                 if permission_profile["missing_tools"]:
                     issues.append(
@@ -398,16 +399,7 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                             suggested_fix="add the missing tools to manifest.permissions.tools",
                         )
                     )
-                declared_boundaries = (
-                    list(extension.manifest.permissions.execution_boundaries)
-                    if extension.manifest is not None
-                    else []
-                )
-                missing_boundaries = [
-                    boundary
-                    for boundary in definition.execution_boundaries
-                    if declared_boundaries and boundary not in declared_boundaries
-                ]
+                missing_boundaries = list(permission_profile["missing_execution_boundaries"])
                 if missing_boundaries:
                     issues.append(
                         ExtensionDoctorIssue(

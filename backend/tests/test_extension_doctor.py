@@ -418,6 +418,49 @@ permissions:
     assert any("external_read" in issue.message for issue in result.issues)
 
 
+def test_doctor_reports_toolset_network_mismatch_from_explicit_boundaries(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "toolset-network-pack"
+    preset_dir = pack_dir / "presets" / "toolset"
+    preset_dir.mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.toolset-network-pack
+version: 2026.3.23
+display_name: Toolset Network Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  toolset_presets:
+    - presets/toolset/remote.yaml
+permissions:
+  network: false
+""".strip(),
+        encoding="utf-8",
+    )
+    (preset_dir / "remote.yaml").write_text(
+        "name: remote\nexecution_boundaries:\n  - external_read\n",
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.3.19",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.toolset-network-pack"))
+
+    assert result.ok is False
+    assert any(issue.code == "permission_mismatch" for issue in result.issues)
+    assert any("network access" in issue.message for issue in result.issues)
+
+
 def test_doctor_reports_wave2_network_mismatch(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "browser-pack"
     provider_dir = pack_dir / "connectors" / "browser"

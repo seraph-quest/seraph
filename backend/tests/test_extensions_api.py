@@ -380,6 +380,34 @@ def _write_wave2_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_toolset_boundary_extension(root: Path, *, boundary: str, network: bool = False) -> Path:
+    package_dir = root / f"toolset-{boundary.replace('_', '-')}"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    network_literal = "true" if network else "false"
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.toolset-boundary-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: Toolset Boundary Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "permissions:\n"
+        f"  network: {network_literal}\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/boundary.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "boundary.yaml").write_text(
+        f"name: boundary\nexecution_boundaries:\n  - {boundary}\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_invalid_observer_extension(root: Path) -> Path:
     package_dir = root / "invalid-observer-pack"
     (package_dir / "observers" / "definitions").mkdir(parents=True)
@@ -618,6 +646,40 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
     assert log_event.await_args.kwargs["integration_type"] == "extension"
     assert log_event.await_args.kwargs["outcome"] == "succeeded"
     assert log_event.await_args.kwargs["details"]["status"] == "validated"
+
+
+@pytest.mark.asyncio
+async def test_validate_extension_reports_lifecycle_approval_for_boundary_only_toolset(client, tmp_path):
+    package_dir = _write_toolset_boundary_extension(tmp_path, boundary="secret_read")
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["approval_profile"]["requires_lifecycle_approval"] is True
+    assert "secret_read" in payload["approval_profile"]["lifecycle_boundaries"]
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+
+    assert install_response.status_code == 409
+    assert install_response.json()["detail"]["type"] == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_validate_extension_reports_network_for_boundary_only_toolset(client, tmp_path):
+    package_dir = _write_toolset_boundary_extension(tmp_path, boundary="external_read", network=False)
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["permission_summary"]["required"]["network"] is True
+    assert payload["permission_summary"]["missing"]["network"] is True
 
 
 @pytest.mark.asyncio

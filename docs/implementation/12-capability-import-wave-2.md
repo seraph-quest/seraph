@@ -30,6 +30,8 @@ those later imports depend on.
   - the extension registry now surfaces typed metadata for toolset presets
   - doctor and permission evaluation now validate preset tool permissions plus
     derived execution-boundary and network requirements
+  - explicit preset `execution_boundaries` now also drive lifecycle-approval
+    previews and network checks even when a preset declares no `include_tools`
 - validation:
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_extension_manifest.py tests/test_extension_registry.py tests/test_extension_doctor.py tests/test_extensions_api.py -q`
 
@@ -206,7 +208,7 @@ those later imports depend on.
   - `git diff --check`
 - result:
   - focused Wave 2 backend suite: `104 passed`
-  - backend full suite: `1123 passed`, `4` existing warnings
+  - backend full suite: `1126 passed`, `4` existing warnings
   - frontend full suite: `154 passed`
   - frontend build: passed
   - docs build: passed

@@ -78,6 +78,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
+    assert "activity_ledger_attribution_behavior" in captured.out
+    assert "imported_capability_surface_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -180,6 +182,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "threaded_operator_timeline_behavior",
                 "capability_repair_behavior",
                 "capability_preflight_behavior",
+                "activity_ledger_attribution_behavior",
+                "imported_capability_surface_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -717,6 +721,34 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["capability_preflight_behavior"]["runbook_autorepair_action_types"] == [
         "set_tool_policy",
+    ]
+    assert details_by_name["activity_ledger_attribution_behavior"]["runtime_path_bucket_keys"] == [
+        "browser_agent",
+        "chat_agent",
+        "unattributed",
+    ]
+    assert details_by_name["activity_ledger_attribution_behavior"]["capability_family_bucket_keys"] == [
+        "browser",
+        "conversation",
+        "unattributed",
+    ]
+    assert details_by_name["activity_ledger_attribution_behavior"]["chat_runtime_path"] == "chat_agent"
+    assert details_by_name["activity_ledger_attribution_behavior"]["chat_budget_class"] == "medium"
+    assert details_by_name["activity_ledger_attribution_behavior"]["browser_selected_source"] == "browser_provider"
+    assert details_by_name["activity_ledger_attribution_behavior"]["unattributed_family"] == "unattributed"
+    assert details_by_name["imported_capability_surface_behavior"]["catalog_extension_package_count"] >= 10
+    assert details_by_name["imported_capability_surface_behavior"]["browser_provider_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["messaging_connector_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["automation_trigger_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["node_adapter_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["canvas_output_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["workflow_runtime_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["extension_payload_has_governance"] is True
+    assert "channel_adapters" in details_by_name["imported_capability_surface_behavior"][
+        "installed_extension_contribution_types"
+    ]
+    assert "managed_connectors" in details_by_name["imported_capability_surface_behavior"][
+        "installed_extension_contribution_types"
     ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"

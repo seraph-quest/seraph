@@ -72,7 +72,6 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/capabilities/overview")) {
         return Promise.resolve(
           mockResponse({
@@ -513,7 +512,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -646,7 +644,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -771,7 +768,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -929,7 +925,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -1085,7 +1080,6 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -1245,7 +1239,7 @@ describe("CockpitView", () => {
           runbooks: [],
         }));
       }
-      if (url.includes("/api/operator/timeline")) {
+      if (url.includes("/api/activity/ledger")) {
         return Promise.resolve(mockResponse({
           items: [
             {
@@ -1373,7 +1367,14 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: { request_id: "agent-ws:session-1:123" },
+              metadata: {
+                request_id: "agent-ws:session-1:123",
+                capability_family: "conversation",
+                runtime_path: "chat_agent",
+                required_policy_intents: ["fast"],
+                max_cost_tier: "medium",
+                max_latency_tier: "low",
+              },
             },
             {
               id: "tool-1",
@@ -1406,6 +1407,11 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
+    expect(
+      screen.getByRole("button", {
+        name: /LLM call[\s\S]*Conversation reasoning for Session 1 using claude-sonnet-4[\s\S]*chat_agent/i,
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByText("write_file")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Repair" }));
     await waitFor(() =>
@@ -1478,6 +1484,12 @@ describe("CockpitView", () => {
             output_tokens: 250,
             user_triggered_llm_calls: 1,
             autonomous_llm_calls: 0,
+            llm_cost_by_runtime_path: [
+              { key: "chat_agent", calls: 1, cost_usd: 0.0123, input_tokens: 1000, output_tokens: 250 },
+            ],
+            llm_cost_by_capability_family: [
+              { key: "conversation", calls: 1, cost_usd: 0.0123, input_tokens: 1000, output_tokens: 250 },
+            ],
             categories: { llm: 1, workflow: 1, approval: 0, guardian: 0, agent: 1, system: 0 },
           },
           items: [
@@ -1500,7 +1512,7 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: { request_id: "agent-ws:session-1:123" },
+              metadata: { request_id: "agent-ws:session-1:123", runtime_path: "chat_agent", capability_family: "conversation" },
             },
             {
               id: "tool-1",
@@ -1546,11 +1558,189 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
+    expect(screen.getByText(/conversation \$0\.012/)).toBeInTheDocument();
+    expect(screen.getByText(/chat_agent \$0\.012/)).toBeInTheDocument();
     expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument();
     expect(screen.getByText("web_search")).toBeInTheDocument();
     expect(screen.getByText(/2 tools|1 tool/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "llm" }));
     expect(screen.queryByText("Workflow resumed after approval")).not.toBeInTheDocument();
+  });
+
+  it("surfaces imported capability families and extension governance in the operator terminal", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) {
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.browser-ops",
+            display_name: "Browser Ops Pack",
+            version: "2026.3.24",
+            kind: "connector-pack",
+            trust: "workspace",
+            source: "manifest",
+            location: "workspace",
+            status: "degraded",
+            summary: "Browser and messaging reach",
+            issues: [],
+            load_errors: [],
+            toggle_targets: [],
+            toggleable_contribution_types: ["browser_providers", "messaging_connectors"],
+            passive_contribution_types: ["toolset_presets"],
+            enable_supported: false,
+            disable_supported: false,
+            removable: true,
+            enabled_scope: "none",
+            configurable: true,
+            metadata_supported: true,
+            config_scope: "metadata_and_connector_configs",
+            enabled: true,
+            config: {},
+            permission_summary: {
+              status: "missing_permissions",
+              ok: false,
+              required: { network: true },
+              missing: { network: true },
+              risk_level: "high",
+            },
+            approval_profile: {
+              requires_runtime_approval: true,
+              runtime_behavior: "always",
+              requires_lifecycle_approval: true,
+              lifecycle_boundaries: ["network"],
+              risk_level: "high",
+            },
+            connector_summary: {
+              total: 2,
+              ready: 1,
+              states: { ready: 1, requires_config: 1 },
+            },
+            contributions: [
+              {
+                type: "browser_providers",
+                reference: "browserbase",
+                name: "browserbase",
+                status: "ready",
+                configured: true,
+                enabled: true,
+                capabilities: ["tabs", "snapshots"],
+                requires_network: true,
+                permission_profile: {
+                  status: "granted",
+                  requires_network: true,
+                  missing_network: false,
+                  requires_approval: false,
+                  approval_behavior: "never",
+                  missing_tools: [],
+                  missing_execution_boundaries: [],
+                },
+                health: { state: "ready", ready: true, configured: true, enabled: true },
+              },
+              {
+                type: "messaging_connectors",
+                reference: "telegram",
+                name: "telegram",
+                status: "requires_config",
+                configured: false,
+                enabled: false,
+                platform: "telegram",
+                config_fields: [{ key: "bot_token", secret: true }],
+                requires_network: true,
+                permission_profile: {
+                  status: "missing_permissions",
+                  requires_network: true,
+                  missing_network: true,
+                  requires_approval: true,
+                  approval_behavior: "always",
+                  missing_tools: [],
+                  missing_execution_boundaries: [],
+                },
+                health: { state: "requires_config", ready: false, configured: false, enabled: false },
+              },
+              {
+                type: "toolset_presets",
+                reference: "browser-ops",
+                name: "browser ops",
+                loaded: false,
+                requires_network: true,
+                permission_profile: {
+                  status: "missing_permissions",
+                  requires_network: true,
+                  missing_network: true,
+                  requires_approval: false,
+                  approval_behavior: "never",
+                  missing_tools: [],
+                  missing_execution_boundaries: [],
+                },
+              },
+            ],
+            studio_files: [],
+          }],
+        }));
+      }
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    expect(await screen.findByText("browser providers")).toBeInTheDocument();
+    expect(screen.getByText("extension boundaries")).toBeInTheDocument();
+    expect(screen.getByText("Browser Ops Pack")).toBeInTheDocument();
+    expect(screen.getByText(/lifecycle approval network/)).toBeInTheDocument();
+    const operatorPane = screen.getByText("Operator terminal").closest("section");
+    expect(operatorPane?.textContent ?? "").toContain("imported reach");
+    expect(operatorPane?.textContent ?? "").toContain("1 active");
+    expect(operatorPane?.textContent ?? "").toContain("3 installed");
+    expect(operatorPane?.textContent ?? "").toContain("1 inactive");
   });
 
   it("derives activity ledger summary when the new endpoint omits summary fields", async () => {
@@ -1622,7 +1812,31 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: {},
+              metadata: {
+                runtime_path: " chat_agent ",
+              },
+            },
+            {
+              id: "llm-2",
+              kind: "llm_call",
+              category: "llm",
+              title: "LLM call",
+              summary: "Automation reasoning for Session 1",
+              status: "success",
+              created_at: "2026-03-19T10:02:00Z",
+              updated_at: "2026-03-19T10:02:00Z",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              source: "system",
+              model: "openai/gpt-4.1-mini",
+              provider: "openai",
+              prompt_tokens: 100,
+              completion_tokens: 50,
+              cost_usd: 0.001,
+              duration_ms: 120,
+              metadata: {
+                capability_family: " ",
+              },
             },
           ],
         }));
@@ -1636,11 +1850,24 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
-    expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
+    expect(await screen.findByText(/spend \$0\.013/)).toBeInTheDocument();
     expect(screen.getByText("1 user llm")).toBeInTheDocument();
+    const runtimeSpendRow = screen.getByText((_, element) => !!(
+      element?.classList.contains("cockpit-ledger-badge")
+      && /chat_agent/i.test(element.textContent ?? "")
+      && /\$0\.012/i.test(element.textContent ?? "")
+    ));
+    expect(runtimeSpendRow).toBeInTheDocument();
+    const unattributedSpendRow = screen.getByText((_, element) => !!(
+      element?.classList.contains("cockpit-ledger-badge")
+      && /unattributed/i.test(element.textContent ?? "")
+      && /\$0\.013/i.test(element.textContent ?? "")
+      && /2x/i.test(element.textContent ?? "")
+    ));
+    expect(unattributedSpendRow).toBeInTheDocument();
   });
 
-  it("clears stale activity ledger rows when both ledger sources fail", async () => {
+  it("clears stale activity ledger rows when the current ledger fetch fails before any successful payload", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -1717,9 +1944,6 @@ describe("CockpitView", () => {
         }
         return Promise.resolve(mockResponse({}, false, 500));
       }
-      if (url.includes("/api/operator/timeline")) {
-        return Promise.resolve(mockResponse({}, false, 500));
-      }
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
@@ -1794,7 +2018,7 @@ describe("CockpitView", () => {
           runbooks: [],
         }));
       }
-      if (url.includes("/api/operator/timeline")) {
+      if (url.includes("/api/activity/ledger")) {
         return Promise.resolve(mockResponse({
           items: [
             {
@@ -1857,7 +2081,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -1908,7 +2131,6 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/capabilities/overview")) {
@@ -1986,7 +2208,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2095,7 +2316,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2134,7 +2354,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2189,7 +2408,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2238,7 +2456,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2282,7 +2499,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2331,7 +2547,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2452,7 +2667,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2566,7 +2780,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2687,7 +2900,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2805,7 +3017,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2896,7 +3107,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3019,7 +3229,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3170,7 +3379,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3351,7 +3559,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3448,7 +3655,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3600,7 +3806,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3705,7 +3910,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3855,7 +4059,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3958,7 +4161,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4073,7 +4275,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4174,7 +4375,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4351,7 +4551,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4508,7 +4707,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4605,7 +4803,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4822,7 +5019,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4993,7 +5189,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5160,7 +5355,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5278,7 +5472,8 @@ describe("CockpitView", () => {
     await waitFor(() => expect(within(studio).queryByText("Test Installable")).not.toBeInTheDocument());
   }, 15000);
 
-  it("keeps successful cockpit surfaces visible when one refresh endpoint fails", async () => {
+  it("keeps the last successful activity ledger visible when a refresh fails", async () => {
+    let activityLedgerCalls = 0;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -5289,7 +5484,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.reject(new Error("timeline unavailable"));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5373,6 +5567,60 @@ describe("CockpitView", () => {
           }],
         }));
       }
+      if (url.includes("/api/skills/reload")) return Promise.resolve(mockResponse({ ok: true }));
+      if (url.includes("/api/activity/ledger")) {
+        activityLedgerCalls += 1;
+        if (activityLedgerCalls === 1) {
+          return Promise.resolve(mockResponse({
+            summary: {
+              window_hours: 24,
+              started_at: "2026-03-24T10:00:00Z",
+              total_items: 1,
+              visible_groups: 1,
+              llm_calls: 1,
+              spend_usd: 0.015,
+              input_tokens: 200,
+              output_tokens: 40,
+              user_triggered_llm_calls: 1,
+              autonomous_llm_calls: 0,
+              llm_cost_by_runtime_path: [
+                { key: "chat_agent", calls: 1, cost_usd: 0.015, input_tokens: 200, output_tokens: 40 },
+              ],
+              llm_cost_by_capability_family: [
+                { key: "conversation", calls: 1, cost_usd: 0.015, input_tokens: 200, output_tokens: 40 },
+              ],
+              categories: { llm: 1, workflow: 0, approval: 0, guardian: 0, agent: 0, system: 0 },
+            },
+            items: [
+              {
+                id: "llm-1",
+                kind: "llm_call",
+                category: "llm",
+                title: "Conversation reasoning for Session 1 using claude-sonnet-4",
+                summary: "Initial activity snapshot",
+                status: "success",
+                created_at: "2026-03-24T10:01:00Z",
+                updated_at: "2026-03-24T10:01:00Z",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                source: "websocket_chat",
+                model: "openrouter/anthropic/claude-sonnet-4",
+                provider: "openrouter",
+                prompt_tokens: 200,
+                completion_tokens: 40,
+                cost_usd: 0.015,
+                duration_ms: 620,
+                metadata: {
+                  request_id: "agent-ws:session-1:refresh",
+                  runtime_path: "chat_agent",
+                  capability_family: "conversation",
+                },
+              },
+            ],
+          }));
+        }
+        return Promise.reject(new Error("activity ledger unavailable"));
+      }
       if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
@@ -5383,8 +5631,15 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument());
-    expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
-    expect(screen.queryByText("Operator surface unavailable.")).not.toBeInTheDocument();
+    expect(await screen.findByText(/spend \$0\.015/)).toBeInTheDocument();
+    expect(screen.getByText(/conversation \$0\.015/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "reload" })[0]);
+
+    await waitFor(() => expect(activityLedgerCalls).toBeGreaterThan(1));
+    expect(screen.getByText(/spend \$0\.015/)).toBeInTheDocument();
+    expect(screen.getByText(/conversation \$0\.015/)).toBeInTheDocument();
+    expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument();
   }, 15000);
 
   it("ignores stale studio source responses after switching entries", async () => {
@@ -5403,7 +5658,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5555,7 +5809,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },

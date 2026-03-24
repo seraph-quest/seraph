@@ -38,6 +38,7 @@ from src.agent.onboarding import create_onboarding_agent
 from src.agent.specialists import build_all_specialists, create_mcp_specialist, create_specialist, mcp_specialist_runtime_path
 from src.agent.strategist import create_strategist_agent
 from src.guardian.state import build_guardian_state
+from src.guardian.feedback import GuardianLearningSignal
 from src.api.mcp import test_server as test_mcp_server
 from src.api.observer import (
     InterventionFeedbackRequest,
@@ -3500,6 +3501,11 @@ async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
         patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+        patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         await deliver_or_queue(
@@ -3562,6 +3568,11 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
         patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+        patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         await deliver_or_queue(
@@ -3697,6 +3708,11 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
         patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+        patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         delivered = await deliver_or_queue(message)
@@ -4765,6 +4781,199 @@ def _eval_capability_preflight_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_activity_ledger_attribution_behavior() -> dict[str, Any]:
+    from src.api.activity import get_activity_ledger
+
+    now = datetime.now(timezone.utc)
+
+    def _offset(minutes: int = 0, seconds: int = 0, *, zulu: bool = True) -> str:
+        value = (now - timedelta(minutes=minutes, seconds=seconds)).isoformat()
+        return value.replace("+00:00", "Z") if zulu else value
+
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-routing-chat-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Initial routing candidate",
+                        "created_at": _offset(minutes=7),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:chat",
+                            "runtime_path": "session_runtime",
+                            "selected_source": "primary",
+                            "max_budget_class": "low",
+                        },
+                    },
+                    {
+                        "id": "audit-routing-chat-2",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Selected claude-sonnet-4 for websocket chat",
+                        "created_at": _offset(minutes=6),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:chat",
+                            "runtime_path": "chat_agent",
+                            "selected_source": "primary",
+                            "max_budget_class": "medium",
+                        },
+                    },
+                    {
+                        "id": "audit-routing-browser-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Selected grok-4.1-fast for browser tool",
+                        "created_at": _offset(minutes=5),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:browser",
+                            "runtime_path": "browser_agent",
+                            "selected_source": "browser_provider",
+                            "max_budget_class": "high",
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": _offset(minutes=6, seconds=10, zulu=False),
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 500, "output": 150, "total": 650},
+                    "cost_usd": 0.01,
+                    "latency_ms": 610.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:chat",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+                {
+                    "timestamp": _offset(minutes=5, seconds=10, zulu=False),
+                    "status": "success",
+                    "model": "openrouter/x-ai/grok-4.1-fast",
+                    "provider": "openrouter",
+                    "tokens": {"input": 250, "output": 60, "total": 310},
+                    "cost_usd": 0.025,
+                    "latency_ms": 880.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:browser",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+                {
+                    "timestamp": _offset(minutes=4, seconds=10, zulu=False),
+                    "status": "success",
+                    "model": "openai/gpt-4.1-mini",
+                    "provider": "openai",
+                    "tokens": {"input": 120, "output": 30, "total": 150},
+                    "cost_usd": 0.0042,
+                    "latency_ms": 420.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:unknown",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        payload = await get_activity_ledger(limit=20, session_id="session-1", window_hours=24)
+
+    llm_items = {
+        item["metadata"]["request_id"]: item["metadata"]
+        for item in payload["items"]
+        if item["kind"] == "llm_call"
+    }
+
+    return {
+        "runtime_path_bucket_keys": [
+            bucket["key"] for bucket in payload["summary"]["llm_cost_by_runtime_path"]
+        ],
+        "capability_family_bucket_keys": [
+            bucket["key"] for bucket in payload["summary"]["llm_cost_by_capability_family"]
+        ],
+        "chat_runtime_path": llm_items["agent-ws:session-1:chat"]["runtime_path"],
+        "chat_budget_class": llm_items["agent-ws:session-1:chat"]["max_budget_class"],
+        "browser_selected_source": llm_items["agent-ws:session-1:browser"]["selected_source"],
+        "unattributed_family": llm_items["agent-ws:session-1:unknown"]["capability_family"],
+    }
+
+
+def _eval_imported_capability_surface_behavior() -> dict[str, Any]:
+    from src.api.catalog import load_catalog_items
+    from src.extensions.lifecycle import list_extensions
+
+    catalog_items = load_catalog_items()
+    extension_packages = (
+        catalog_items.get("extension_packages")
+        if isinstance(catalog_items, dict)
+        else []
+    )
+    family_counts: dict[str, int] = {}
+    for package in extension_packages if isinstance(extension_packages, list) else []:
+        if not isinstance(package, dict):
+            continue
+        contribution_types = package.get("contribution_types")
+        if not isinstance(contribution_types, list):
+            continue
+        for contribution_type in contribution_types:
+            if isinstance(contribution_type, str) and contribution_type.strip():
+                family_counts[contribution_type] = family_counts.get(contribution_type, 0) + 1
+
+    payload = list_extensions()
+    extensions = payload.get("extensions", []) if isinstance(payload, dict) else []
+    installed_contribution_types = sorted({
+        str(contribution.get("type"))
+        for extension in extensions
+        if isinstance(extension, dict)
+        for contribution in extension.get("contributions", [])
+        if isinstance(contribution, dict) and isinstance(contribution.get("type"), str)
+    })
+
+    return {
+        "catalog_extension_package_count": (
+            len(extension_packages) if isinstance(extension_packages, list) else 0
+        ),
+        "catalog_families": sorted(family_counts),
+        "browser_provider_pack_count": family_counts.get("browser_providers", 0),
+        "messaging_connector_pack_count": family_counts.get("messaging_connectors", 0),
+        "automation_trigger_pack_count": family_counts.get("automation_triggers", 0),
+        "node_adapter_pack_count": family_counts.get("node_adapters", 0),
+        "canvas_output_pack_count": family_counts.get("canvas_outputs", 0),
+        "workflow_runtime_pack_count": family_counts.get("workflow_runtimes", 0),
+        "extension_payload_has_governance": all(
+            isinstance(extension, dict)
+            and "permission_summary" in extension
+            and "approval_profile" in extension
+            and "connector_summary" in extension
+            for extension in extensions
+        ),
+        "installed_extension_contribution_types": installed_contribution_types,
+        "installed_extension_statuses": sorted({
+            str(extension.get("status") or "")
+            for extension in extensions
+            if isinstance(extension, dict)
+        }),
+    }
+
+
 async def _eval_guardian_learning_policy_v2_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -5113,6 +5322,11 @@ async def _eval_observer_delivery_salience_confidence_behavior() -> dict[str, An
         patch("src.observer.manager.context_manager", mock_context_manager),
         patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
         patch("src.observer.insight_queue.insight_queue", mock_insight_queue),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+        patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         calibrated = await deliver_or_queue(calibrated_message, guardian_confidence="grounded")
@@ -5617,6 +5831,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Capability preflight exposes blocking reasons, parameter schemas, autorepair hints, and runbook metadata before the operator launches or repairs a capability.",
         runner=_eval_capability_preflight_behavior,
+    ),
+    EvalScenario(
+        name="activity_ledger_attribution_behavior",
+        category="observability",
+        description="Activity ledger attributes LLM spend to runtime paths and capability families, while keeping missing routing metadata explicitly unattributed.",
+        runner=_eval_activity_ledger_attribution_behavior,
+    ),
+    EvalScenario(
+        name="imported_capability_surface_behavior",
+        category="behavior",
+        description="Imported capability families stay visible through catalog packages and extension lifecycle surfaces, with governance metadata present on installed extensions.",
+        runner=_eval_imported_capability_surface_behavior,
     ),
     EvalScenario(
         name="mcp_specialist_local_runtime_profile",

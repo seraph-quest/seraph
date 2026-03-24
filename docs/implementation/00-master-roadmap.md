@@ -425,17 +425,17 @@ See [Capability Import Wave 2](./12-capability-import-wave-2.md) for the impleme
 
 ### Wave 5: Operator Surface, Proof, And Hardening
 
-31. [ ] `capability-operator-surface-v1`:
+31. [x] `capability-operator-surface-v1`:
     expose all imported runtime tools, presets, connectors, browser modes, and automation surfaces clearly in the cockpit so new breadth stays operable
-32. [ ] `capability-budget-and-cost-attribution-v1`:
+32. [x] `capability-budget-and-cost-attribution-v1`:
     show which imported capability used model budget, why it ran, and what it cost so added capability breadth does not become opaque spend
-33. [ ] `capability-approval-and-policy-integration-v1`:
+33. [x] `capability-approval-and-policy-integration-v1`:
     map all imported capability families cleanly into approvals, policy, and trust boundaries so no new surface bypasses the guardian safety model
-34. [ ] `capability-benchmark-refresh-v1`:
+34. [x] `capability-benchmark-refresh-v1`:
     refresh the benchmark and capability-gap docs after the major parity waves so the roadmap continues to reflect evidence instead of stale aspirations
-35. [ ] `capability-evals-v1`:
+35. [x] `capability-evals-v1`:
     add deterministic eval contracts for new runtime primitives, connector families, browser modes, and automation triggers so imported breadth is provable
-36. [ ] `capability-cleanup-and-legacy-path-removal-v1`:
+36. [x] `capability-cleanup-and-legacy-path-removal-v1`:
     remove transitional seams and legacy compatibility paths once the imported capability families are first-class, stable parts of Seraph’s architecture
 
 ## Delivery Order
@@ -468,6 +468,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 - [x] local guardian stack with browser UI, backend APIs, WebSocket chat, scheduler, observer loop, and native macOS daemon
 - [x] guardian cockpit as the active and only supported browser shell
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, and a first actionable desktop control shell inside the cockpit
+- [x] full five-wave Hermes/OpenClaw capability import program, including runtime parity primitives, packaged reach surfaces, selective OpenClaw browser/channel/automation imports, operator-surface governance, budget attribution, and deterministic proof for the imported capability families
 - [x] browser-side continuity controls for native notifications, including pending notification inspection, per-notification dismiss, bulk clear, cockpit-to-settings linkage for queued desktop state, and desktop-shell draft/continue actions over pending notifications, queued bundle items, and recent interventions
 - [x] a unified continuity snapshot now ties daemon state, pending native notifications, deferred bundle items, and recent interventions into one browser-readable model across cockpit and settings surfaces
 - [x] first capability-overview and starter-pack APIs now expose tools, skills, workflows, MCP servers, blocked-state reasons, recommended starter bundles, installable catalog items, repair actions, runbook metadata, and preflight-ready action payloads in one operator-readable shape

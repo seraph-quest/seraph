@@ -33,6 +33,7 @@ function resetStore() {
     questPanelOpen: false,
     settingsPanelOpen: false,
     cockpitHintsEnabled: true,
+    themePreference: "system",
     onboardingCompleted: null,
     toolRegistry: [],
   });
@@ -62,6 +63,12 @@ describe("chatStore sync actions", () => {
     useChatStore.getState().setCockpitHintsEnabled(false);
     expect(useChatStore.getState().cockpitHintsEnabled).toBe(false);
     expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_cockpit_hints_enabled", "0");
+  });
+
+  it("setThemePreference persists the theme preference", () => {
+    useChatStore.getState().setThemePreference("light");
+    expect(useChatStore.getState().themePreference).toBe("light");
+    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_theme_preference", "light");
   });
 
   it("setAgentVisual merges partial state", () => {

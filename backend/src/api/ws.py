@@ -102,6 +102,7 @@ async def websocket_chat(websocket: WebSocket):
                         "Seraph online. Before I begin acting on your behalf, I need a clearer read on who you are, "
                         "what matters most, and how you want this workspace to operate. "
                         "I'll ask a few short onboarding questions to establish that baseline. "
+                        "During onboarding I'm using a limited setup focused on your guardian record and priorities. "
                         "If you want the full workspace immediately, just say the word and I'll skip ahead."
                     ),
                     intervention_type="advisory",

@@ -84,6 +84,7 @@ class TestWebSocket:
                 welcome = json.loads(ws.receive_text())
                 assert welcome["type"] == "proactive"
                 assert "Seraph online" in welcome["content"]
+                assert "limited setup" in welcome["content"].lower()
                 ws.send_text(json.dumps({"type": "ping"}))
                 resp = json.loads(ws.receive_text())
                 assert resp["type"] == "pong"

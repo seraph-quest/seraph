@@ -10,6 +10,8 @@ import type {
   ToolMeta,
 } from "../types";
 
+export type ThemePreference = "system" | "dark" | "light";
+
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
@@ -25,6 +27,7 @@ interface ChatStore {
   questPanelOpen: boolean;
   settingsPanelOpen: boolean;
   cockpitHintsEnabled: boolean;
+  themePreference: ThemePreference;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
 
@@ -45,6 +48,7 @@ interface ChatStore {
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsPanelOpen: (open: boolean) => void;
   setCockpitHintsEnabled: (enabled: boolean) => void;
+  setThemePreference: (theme: ThemePreference) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
   fetchToolRegistry: () => Promise<void>;
@@ -62,6 +66,7 @@ interface ChatStore {
 
 const LAST_SESSION_KEY = "seraph_last_session_id";
 const COCKPIT_HINTS_KEY = "seraph_cockpit_hints_enabled";
+const THEME_PREFERENCE_KEY = "seraph_theme_preference";
 const MAX_MESSAGES = 500;
 let restoreLastSessionPromise: Promise<void> | null = null;
 
@@ -104,6 +109,14 @@ function safeStorageBool(key: string, fallback: boolean): boolean {
     return fallback;
   }
   return value !== "0" && value.toLowerCase() !== "false";
+}
+
+function safeStorageTheme(): ThemePreference {
+  const value = safeStorageGet(THEME_PREFERENCE_KEY);
+  if (value === "dark" || value === "light" || value === "system") {
+    return value;
+  }
+  return "system";
 }
 
 function parseDisplayRole(message: Record<string, unknown>): {
@@ -152,6 +165,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   questPanelOpen: false,
   settingsPanelOpen: false,
   cockpitHintsEnabled: safeStorageBool(COCKPIT_HINTS_KEY, true),
+  themePreference: safeStorageTheme(),
   onboardingCompleted: null,
   toolRegistry: [],
 
@@ -215,6 +229,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setCockpitHintsEnabled: (enabled) => {
     safeStorageSet(COCKPIT_HINTS_KEY, enabled ? "1" : "0");
     set({ cockpitHintsEnabled: enabled });
+  },
+
+  setThemePreference: (theme) => {
+    safeStorageSet(THEME_PREFERENCE_KEY, theme);
+    set({ themePreference: theme });
   },
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),

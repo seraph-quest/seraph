@@ -164,8 +164,10 @@ class ExtensionRegistry:
         load_errors: list[ExtensionLoadErrorRecord] = []
 
         manifest_extensions, manifest_errors = self._scan_manifest_extensions()
+        manifest_extensions, manifest_conflict_errors = self._annotate_named_contribution_conflicts(
+            manifest_extensions
+        )
         manifest_extensions = self._enrich_workflow_contribution_metadata(manifest_extensions)
-        manifest_extensions, manifest_conflict_errors = self._annotate_named_contribution_conflicts(manifest_extensions)
         extensions.extend(manifest_extensions)
         load_errors.extend(manifest_errors)
         load_errors.extend(manifest_conflict_errors)
@@ -435,6 +437,8 @@ class ExtensionRegistry:
         canvas_metadata_by_name: dict[str, dict[str, Any]] = {}
         for extension in extensions:
             for contribution in extension.contributions:
+                if isinstance(contribution.metadata.get("registry_conflict"), dict):
+                    continue
                 if contribution.contribution_type == "workflow_runtimes":
                     name = contribution.metadata.get("name")
                     default_output_surface = contribution.metadata.get("default_output_surface")

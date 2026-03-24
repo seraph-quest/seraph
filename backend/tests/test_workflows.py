@@ -328,6 +328,25 @@ class TestWorkflowManager:
             "goal-snapshot-to-file",
         }
 
+    def test_active_workflow_gating_uses_step_tools_even_without_requires_tools(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+        workflow = mgr.get_workflow("web-brief-to-file")
+        assert workflow is not None
+        workflow.requires_tools = []
+
+        listed = next(
+            workflow
+            for workflow in mgr.list_workflows(
+                available_tool_names=["web_search"],
+                active_skill_names=[],
+            )
+            if workflow["name"] == "web-brief-to-file"
+        )
+        assert listed["is_available"] is False
+        assert listed["missing_tools"] == ["write_file"]
+        assert mgr.get_active_workflows(["web_search"], []) == []
+
     def test_enable_disable_persists(self, workflows_dir):
         mgr = WorkflowManager()
         mgr.init(workflows_dir)

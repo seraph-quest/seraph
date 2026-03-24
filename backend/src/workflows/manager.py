@@ -814,9 +814,12 @@ class WorkflowManager:
         skill_set = set(active_skill_names)
         runtime_profiles = available_runtime_profiles or set()
         output_surfaces = available_output_surfaces or set()
+        required_runtime_tools = _canonicalize_tool_names(
+            list(workflow.requires_tools) + list(workflow.step_tools)
+        )
         missing_tools = [
-            canonical_tool_name(tool_name) for tool_name in workflow.requires_tools
-            if canonical_tool_name(tool_name) not in tool_set
+            tool_name for tool_name in required_runtime_tools
+            if tool_name not in tool_set
         ]
         missing_skills = [
             skill_name for skill_name in workflow.requires_skills

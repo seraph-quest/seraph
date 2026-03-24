@@ -563,6 +563,191 @@ contributes:
     assert extension.metadata["manifest_root_index"] == 0
 
 
+def test_registry_enriches_workflow_metadata_after_conflict_resolution(tmp_path: Path):
+    extensions_root = tmp_path / "extensions"
+
+    winner_canvas_dir = extensions_root / "canvas-a"
+    (winner_canvas_dir / "canvas").mkdir(parents=True)
+    (winner_canvas_dir / "manifest.yaml").write_text(
+        """
+id: seraph.canvas-a
+version: 2026.3.24
+display_name: A Canvas Winner
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  canvas_outputs:
+    - canvas/guardian-board.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (winner_canvas_dir / "canvas" / "guardian-board.yaml").write_text(
+        """
+name: guardian-board
+title: Winner Board
+description: Preferred board.
+surface_kind: board
+sections:
+  - Summary
+  - Steps
+""".strip(),
+        encoding="utf-8",
+    )
+
+    loser_canvas_dir = extensions_root / "canvas-z"
+    (loser_canvas_dir / "canvas").mkdir(parents=True)
+    (loser_canvas_dir / "manifest.yaml").write_text(
+        """
+id: seraph.canvas-z
+version: 2026.3.24
+display_name: Z Canvas Loser
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  canvas_outputs:
+    - canvas/guardian-board.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (loser_canvas_dir / "canvas" / "guardian-board.yaml").write_text(
+        """
+name: guardian-board
+title: Loser Board
+description: Losing board.
+surface_kind: board
+sections:
+  - Wrong
+""".strip(),
+        encoding="utf-8",
+    )
+
+    winner_runtime_dir = extensions_root / "runtime-a"
+    (winner_runtime_dir / "runtimes").mkdir(parents=True)
+    (winner_runtime_dir / "manifest.yaml").write_text(
+        """
+id: seraph.runtime-a
+version: 2026.3.24
+display_name: A Runtime Winner
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflow_runtimes:
+    - runtimes/openprose.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (winner_runtime_dir / "runtimes" / "openprose.yaml").write_text(
+        """
+name: openprose
+engine_kind: openprose
+description: Preferred runtime.
+delegation_mode: inline
+checkpoint_policy: step
+structured_output: true
+default_output_surface: guardian-board
+""".strip(),
+        encoding="utf-8",
+    )
+
+    loser_runtime_dir = extensions_root / "runtime-z"
+    (loser_runtime_dir / "runtimes").mkdir(parents=True)
+    (loser_runtime_dir / "manifest.yaml").write_text(
+        """
+id: seraph.runtime-z
+version: 2026.3.24
+display_name: Z Runtime Loser
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflow_runtimes:
+    - runtimes/openprose.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (loser_runtime_dir / "runtimes" / "openprose.yaml").write_text(
+        """
+name: openprose
+engine_kind: openprose
+description: Losing runtime.
+delegation_mode: inline
+checkpoint_policy: step
+structured_output: true
+default_output_surface: wrong-board
+""".strip(),
+        encoding="utf-8",
+    )
+
+    workflow_dir = extensions_root / "workflow-pack"
+    (workflow_dir / "workflows").mkdir(parents=True)
+    (workflow_dir / "manifest.yaml").write_text(
+        """
+id: seraph.workflow-pack
+version: 2026.3.24
+display_name: Workflow Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflows:
+    - workflows/runtime-aware.md
+permissions:
+  tools: [web_search]
+""".strip(),
+        encoding="utf-8",
+    )
+    (workflow_dir / "workflows" / "runtime-aware.md").write_text(
+        "---\n"
+        "name: runtime-aware\n"
+        "description: Runtime-aware workflow\n"
+        "runtime_profile: openprose\n"
+        "requires:\n"
+        "  tools: [web_search]\n"
+        "steps:\n"
+        "  - id: search\n"
+        "    tool: web_search\n"
+        "    arguments: {}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(extensions_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+
+    extension = snapshot.get_extension("seraph.workflow-pack")
+    assert extension is not None
+    workflow_contribution = next(
+        contribution
+        for contribution in extension.contributions
+        if contribution.contribution_type == "workflows"
+    )
+    assert workflow_contribution.metadata["effective_output_surface"] == "guardian-board"
+    assert workflow_contribution.metadata["output_surface_title"] == "Winner Board"
+    assert workflow_contribution.metadata["output_surface_sections"] == ["Summary", "Steps"]
+
+
 def test_registry_enriches_manifest_backed_managed_connector_metadata(tmp_path: Path):
     pack_dir = tmp_path / "extensions" / "managed-connector-pack"
     connector_dir = pack_dir / "connectors" / "managed"

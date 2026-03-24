@@ -355,6 +355,17 @@ ideas through Seraph's extension platform and guardian trust boundaries.
 - resolution:
   - no additional changes were required before final validation
 
+### Review 12
+
+- reviewer: Darwin
+- scope:
+  - PR `#226` follow-up fixes for workflow step-tool gating and registry
+    conflict-order metadata enrichment
+- findings:
+  - none
+- resolution:
+  - no additional changes were required after the follow-up patch
+
 ## Wave Validation
 
 - focused Wave 4 follow-up suite:
@@ -363,6 +374,12 @@ ideas through Seraph's extension platform and guardian trust boundaries.
 - targeted Wave 4 backend matrix:
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_browser_session_tool.py tests/test_browser_api.py tests/test_extensions_api.py tests/test_delivery.py tests/test_automation_api.py tests/test_nodes_api.py tests/test_canvas_api.py tests/test_workflow_runtimes_api.py tests/test_workflows.py tests/test_catalog_api.py tests/test_app.py -q`
   - result: `187 passed`
+- PR review follow-up slice:
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_workflows.py tests/test_extension_registry.py -q`
+  - result: `71 passed`
+- PR review follow-up matrix:
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_extensions_api.py tests/test_workflow_runtimes_api.py tests/test_workflows.py tests/test_extension_registry.py -q`
+  - result: `125 passed`
 - backend full suite:
   - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
   - result: `1192 passed, 4 warnings`

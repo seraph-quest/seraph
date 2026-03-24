@@ -255,10 +255,27 @@ body {
   --cockpit-modal-card-bg:
     linear-gradient(180deg, rgba(7, 21, 32, 0.98), rgba(8, 22, 34, 0.96)),
     radial-gradient(circle at top right, rgba(141, 226, 255, 0.1), transparent 44%);
+  --cockpit-overlay-backdrop-bg:
+    linear-gradient(180deg, rgba(3, 9, 15, 0.72), rgba(2, 8, 15, 0.82)),
+    radial-gradient(circle at top, rgba(141, 226, 255, 0.08), transparent 34%);
+  --cockpit-palette-bg:
+    linear-gradient(180deg, rgba(7, 20, 31, 0.98), rgba(9, 24, 37, 0.97)),
+    radial-gradient(circle at top right, rgba(141, 226, 255, 0.08), transparent 42%);
   --cockpit-modal-close-bg: rgba(11, 27, 40, 0.78);
   --cockpit-settings-inline-bg: rgba(9, 24, 36, 0.44);
   --cockpit-settings-toggle-bg: rgba(8, 22, 33, 0.82);
   --cockpit-session-helper-bg: rgba(10, 25, 38, 0.36);
+  --cockpit-input-bg: rgba(10, 23, 35, 0.9);
+  --cockpit-tone-bg: rgba(7, 20, 31, 0.74);
+  --cockpit-tone-border-soft: rgba(141, 226, 255, 0.12);
+  --cockpit-tone-border: rgba(141, 226, 255, 0.18);
+  --cockpit-tone-border-strong: rgba(141, 226, 255, 0.28);
+  --cockpit-tone-muted-20: rgba(126, 154, 176, 0.46);
+  --cockpit-tone-muted-30: rgba(126, 154, 176, 0.58);
+  --cockpit-tone-muted-40: rgba(126, 154, 176, 0.72);
+  --cockpit-tone-muted-60: rgba(152, 180, 201, 0.84);
+  --cockpit-tone-shadow-inset: rgba(7, 16, 25, 0.92);
+  --cockpit-tone-shadow-outline: rgba(141, 226, 255, 0.1);
   font-family: "IBM Plex Mono", "Iosevka", "SFMono-Regular", Menlo, Consolas, monospace;
   display: flex;
   flex-direction: column;
@@ -394,10 +411,27 @@ body {
   --cockpit-modal-card-bg:
     linear-gradient(180deg, rgba(252, 254, 255, 0.99), rgba(244, 248, 251, 0.97)),
     radial-gradient(circle at top right, rgba(30, 127, 174, 0.08), transparent 44%);
+  --cockpit-overlay-backdrop-bg:
+    linear-gradient(180deg, rgba(224, 233, 240, 0.7), rgba(216, 227, 235, 0.8)),
+    radial-gradient(circle at top, rgba(30, 127, 174, 0.08), transparent 34%);
+  --cockpit-palette-bg:
+    linear-gradient(180deg, rgba(248, 251, 253, 0.99), rgba(240, 246, 250, 0.97)),
+    radial-gradient(circle at top right, rgba(30, 127, 174, 0.08), transparent 42%);
   --cockpit-modal-close-bg: rgba(248, 251, 253, 0.96);
   --cockpit-settings-inline-bg: rgba(243, 248, 251, 0.82);
   --cockpit-settings-toggle-bg: rgba(248, 251, 253, 0.94);
   --cockpit-session-helper-bg: rgba(240, 246, 249, 0.82);
+  --cockpit-input-bg: rgba(232, 239, 244, 0.94);
+  --cockpit-tone-bg: rgba(234, 241, 246, 0.92);
+  --cockpit-tone-border-soft: rgba(31, 116, 162, 0.12);
+  --cockpit-tone-border: rgba(31, 116, 162, 0.18);
+  --cockpit-tone-border-strong: rgba(31, 116, 162, 0.28);
+  --cockpit-tone-muted-20: rgba(93, 118, 136, 0.62);
+  --cockpit-tone-muted-30: rgba(93, 118, 136, 0.74);
+  --cockpit-tone-muted-40: rgba(93, 118, 136, 0.82);
+  --cockpit-tone-muted-60: rgba(74, 98, 116, 0.9);
+  --cockpit-tone-shadow-inset: rgba(255, 255, 255, 0.92);
+  --cockpit-tone-shadow-outline: rgba(31, 116, 162, 0.08);
 }
 
 .cockpit-shell::before {
@@ -1109,9 +1143,7 @@ body {
   align-items: flex-start;
   justify-content: center;
   padding: 96px 24px 24px;
-  background:
-    linear-gradient(180deg, rgba(3, 9, 15, 0.72), rgba(2, 8, 15, 0.82)),
-    radial-gradient(circle at top, rgba(141, 226, 255, 0.08), transparent 34%);
+  background: var(--cockpit-overlay-backdrop-bg);
   backdrop-filter: blur(10px);
 }
 
@@ -1123,9 +1155,7 @@ body {
   border: 1px solid var(--cockpit-border-strong);
   border-radius: 0;
   overflow: hidden;
-  background:
-    linear-gradient(180deg, rgba(7, 20, 31, 0.98), rgba(9, 24, 37, 0.97)),
-    radial-gradient(circle at top right, rgba(141, 226, 255, 0.08), transparent 42%);
+  background: var(--cockpit-palette-bg);
   box-shadow:
     0 22px 64px rgba(0, 0, 0, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -1437,37 +1467,37 @@ body {
 }
 
 .cockpit-tone-scope [class*="text-retro-text/20"] {
-  color: rgba(126, 154, 176, 0.46);
+  color: var(--cockpit-tone-muted-20);
 }
 
 .cockpit-tone-scope [class*="text-retro-text/30"] {
-  color: rgba(126, 154, 176, 0.58);
+  color: var(--cockpit-tone-muted-30);
 }
 
 .cockpit-tone-scope [class*="text-retro-text/40"] {
-  color: rgba(126, 154, 176, 0.72);
+  color: var(--cockpit-tone-muted-40);
 }
 
 .cockpit-tone-scope [class*="text-retro-text/50"],
 .cockpit-tone-scope [class*="text-retro-text/60"] {
-  color: rgba(152, 180, 201, 0.84);
+  color: var(--cockpit-tone-muted-60);
 }
 
 .cockpit-tone-scope [class*="border-retro-text/10"] {
-  border-color: rgba(141, 226, 255, 0.12);
+  border-color: var(--cockpit-tone-border-soft);
 }
 
 .cockpit-tone-scope [class*="border-retro-text/20"],
 .cockpit-tone-scope [class*="border-retro-border/20"] {
-  border-color: rgba(141, 226, 255, 0.18);
+  border-color: var(--cockpit-tone-border);
 }
 
 .cockpit-tone-scope [class*="border-retro-text/40"] {
-  border-color: rgba(141, 226, 255, 0.28);
+  border-color: var(--cockpit-tone-border-strong);
 }
 
 .cockpit-tone-scope [class*="bg-retro-bg"] {
-  background: rgba(7, 20, 31, 0.74);
+  background: var(--cockpit-tone-bg);
 }
 
 .cockpit-tone-scope [class~="rounded"],
@@ -1480,23 +1510,23 @@ body {
 }
 
 .cockpit-tone-scope .pixel-border-thin {
-  border-color: rgba(141, 226, 255, 0.18);
+  border-color: var(--cockpit-tone-border);
   box-shadow:
-    inset 0 0 0 1px rgba(7, 16, 25, 0.92),
-    0 0 0 1px rgba(141, 226, 255, 0.1);
+    inset 0 0 0 1px var(--cockpit-tone-shadow-inset),
+    0 0 0 1px var(--cockpit-tone-shadow-outline);
 }
 
 .cockpit-tone-scope input,
 .cockpit-tone-scope select,
 .cockpit-tone-scope textarea {
   color: var(--cockpit-text);
-  background-color: rgba(7, 20, 31, 0.74);
+  background-color: var(--cockpit-tone-bg);
   border-radius: 0;
 }
 
 .cockpit-tone-scope input::placeholder,
 .cockpit-tone-scope textarea::placeholder {
-  color: rgba(126, 154, 176, 0.56);
+  color: var(--cockpit-tone-muted-30);
 }
 
 .cockpit-tone-scope button {
@@ -2539,7 +2569,7 @@ body {
   min-width: 0;
   border: 1px solid rgba(141, 226, 255, 0.14);
   border-radius: 0;
-  background: rgba(10, 23, 35, 0.9);
+  background: var(--cockpit-input-bg);
   color: var(--cockpit-text);
   padding: 14px 16px;
   font: inherit;

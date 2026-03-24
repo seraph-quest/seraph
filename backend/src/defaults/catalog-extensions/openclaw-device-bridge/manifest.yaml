@@ -1,0 +1,16 @@
+id: seraph.openclaw-device-bridge
+version: 2026.3.24
+display_name: OpenClaw Device Bridge
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Device-bridge package for staged OpenClaw hardware reach.
+description: Packages a guarded device node adapter so Seraph can stage direct device reach through the extension platform.
+permissions:
+  network: true
+contributes:
+  node_adapters:
+    - connectors/nodes/device.yaml

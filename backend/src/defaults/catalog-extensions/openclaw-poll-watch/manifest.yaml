@@ -1,0 +1,16 @@
+id: seraph.openclaw-poll-watch
+version: 2026.3.24
+display_name: OpenClaw Poll Watch
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Poll-trigger package for staged OpenClaw-style recurring fetch workflows.
+description: Packages poll-trigger metadata so Seraph can stage external watch loops through the extension platform before the full poll runtime lands.
+permissions:
+  network: true
+contributes:
+  automation_triggers:
+    - automation/poll-watch.yaml

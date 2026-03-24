@@ -59,6 +59,11 @@ class Workflow:
     result_template: str = ""
     source: str = "legacy"
     extension_id: str | None = None
+    runtime_profile: str = ""
+    output_surface: str = ""
+    output_surface_title: str = ""
+    output_surface_sections: list[str] = field(default_factory=list)
+    output_surface_artifact_types: list[str] = field(default_factory=list)
 
     @property
     def tool_name(self) -> str:
@@ -114,6 +119,8 @@ def parse_workflow_content(
     requires = frontmatter.get("requires", {})
     inputs = frontmatter.get("inputs", {})
     result_template = frontmatter.get("result", "")
+    runtime_profile = frontmatter.get("runtime_profile", "")
+    output_surface = frontmatter.get("output_surface", "")
     if not isinstance(requires, dict):
         requires = {}
     if not isinstance(inputs, dict):
@@ -121,6 +128,12 @@ def parse_workflow_content(
         return None
     if result_template and not isinstance(result_template, str):
         _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid 'result' field")
+        return None
+    if runtime_profile and not isinstance(runtime_profile, str):
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid 'runtime_profile' field")
+        return None
+    if output_surface and not isinstance(output_surface, str):
+        _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid 'output_surface' field")
         return None
 
     parsed_steps: list[WorkflowStep] = []
@@ -203,6 +216,8 @@ def parse_workflow_content(
         file_path=path,
         body=body,
         result_template=result_template if isinstance(result_template, str) else "",
+        runtime_profile=runtime_profile.strip() if isinstance(runtime_profile, str) else "",
+        output_surface=output_surface.strip() if isinstance(output_surface, str) else "",
     )
 
 

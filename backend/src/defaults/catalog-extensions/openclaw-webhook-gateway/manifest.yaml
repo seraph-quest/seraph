@@ -1,0 +1,16 @@
+id: seraph.openclaw-webhook-gateway
+version: 2026.3.24
+display_name: OpenClaw Webhook Gateway
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Webhook-trigger package for OpenClaw-style inbound automation.
+description: Packages a guarded webhook automation trigger so Seraph can accept signed external trigger calls through the extension platform.
+permissions:
+  network: true
+contributes:
+  automation_triggers:
+    - automation/webhook-ingress.yaml

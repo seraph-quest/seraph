@@ -1,0 +1,16 @@
+name: extension-relay
+description: Browser-extension relay provider for staged session capture through a paired browser surface.
+provider_kind: extension_relay
+enabled: false
+capabilities:
+  - browser_mode_matrix
+  - extension_relay
+config_fields:
+  - key: relay_token
+    label: Relay Token
+    input: password
+    required: true
+  - key: bridge_origin
+    label: Relay Origin
+    input: url
+    required: false

@@ -24,6 +24,8 @@ CONTRIBUTION_LAYOUTS: dict[str, tuple[str, ...]] = {
     "observer_definitions": ("observers/definitions/",),
     "observer_connectors": ("observers/connectors/",),
     "channel_adapters": ("channels/",),
+    "canvas_outputs": ("canvas/",),
+    "workflow_runtimes": ("runtimes/",),
     "speech_profiles": ("speech/",),
     "node_adapters": ("connectors/nodes/",),
     "workspace_adapters": ("workspace/",),

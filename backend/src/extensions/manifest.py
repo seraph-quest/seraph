@@ -31,6 +31,8 @@ _CONTRIBUTION_FIELDS = (
     "observer_definitions",
     "observer_connectors",
     "channel_adapters",
+    "canvas_outputs",
+    "workflow_runtimes",
     "speech_profiles",
     "node_adapters",
     "workspace_adapters",
@@ -173,6 +175,8 @@ class ExtensionContributionPaths(BaseModel):
     observer_definitions: list[str] = Field(default_factory=list)
     observer_connectors: list[str] = Field(default_factory=list)
     channel_adapters: list[str] = Field(default_factory=list)
+    canvas_outputs: list[str] = Field(default_factory=list)
+    workflow_runtimes: list[str] = Field(default_factory=list)
     speech_profiles: list[str] = Field(default_factory=list)
     node_adapters: list[str] = Field(default_factory=list)
     workspace_adapters: list[str] = Field(default_factory=list)

@@ -1,0 +1,25 @@
+id: seraph.openclaw-workflow-runtimes
+version: 2026.3.24
+display_name: OpenClaw Workflow Runtimes
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Typed workflow-runtime profiles inspired by OpenClaw runtime families.
+description: Packages OpenProse, Lobster, and LLM Task style workflow-runtime profiles plus example workflows that reinterpret those ideas inside Seraph's workflow engine.
+permissions:
+  tools:
+    - session_search
+    - delegate_task
+  network: false
+contributes:
+  workflow_runtimes:
+    - runtimes/openprose.yaml
+    - runtimes/lobster.yaml
+    - runtimes/llm-task.yaml
+  workflows:
+    - workflows/openprose-brief.md
+    - workflows/lobster-review.md
+    - workflows/llm-task-triage.md

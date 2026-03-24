@@ -1,0 +1,12 @@
+name: remote-cdp
+description: Remote Chrome DevTools Protocol provider for staged OpenClaw-style browser sessions.
+provider_kind: remote_cdp
+enabled: false
+capabilities:
+  - browser_mode_matrix
+  - remote_cdp
+config_fields:
+  - key: ws_endpoint
+    label: CDP WebSocket Endpoint
+    input: url
+    required: true

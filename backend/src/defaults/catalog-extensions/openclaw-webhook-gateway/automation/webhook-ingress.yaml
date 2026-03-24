@@ -1,0 +1,12 @@
+name: openclaw-webhook
+description: Signed webhook ingress trigger for guarded external automations.
+trigger_type: webhook
+endpoint: /api/automation/webhooks/openclaw-webhook
+enabled: true
+capabilities:
+  - webhook_ingress
+config_fields:
+  - key: signing_secret
+    label: Signing Secret
+    input: password
+    required: true

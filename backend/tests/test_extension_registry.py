@@ -102,7 +102,7 @@ contributes:
         encoding="utf-8",
     )
     (pack_dir / "automation" / "daily-brief.yaml").write_text(
-        "name: daily-brief\ntrigger_type: webhook\nendpoint: https://example.test/hook\n",
+        "name: daily-brief\ntrigger_type: webhook\nendpoint: /api/automation/webhooks/daily-brief\n",
         encoding="utf-8",
     )
     (pack_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
@@ -137,6 +137,8 @@ contributes:
     assert contributions["prompt_packs"]["name"] == "review-prompt"
     assert contributions["prompt_packs"]["title"] == "Review Prompt"
     assert contributions["automation_triggers"]["requires_network"] is True
+    assert contributions["automation_triggers"]["endpoint"] == "/api/automation/webhooks/daily-brief"
+    assert contributions["automation_triggers"]["config_fields"][0]["key"] == "signing_secret"
     assert contributions["browser_providers"]["provider_kind"] == "browserbase"
     assert contributions["messaging_connectors"]["platform"] == "telegram"
     assert contributions["speech_profiles"]["supports_tts"] is True

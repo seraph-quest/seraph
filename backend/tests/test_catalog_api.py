@@ -678,6 +678,50 @@ class TestCatalogAPI:
         assert "browser_session" in preset["include_tools"]
 
     @pytest.mark.asyncio
+    async def test_install_catalog_remote_cdp_pack_surfaces_staged_browser_provider_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.openclaw-remote-cdp")
+
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.openclaw-remote-cdp"
+
+        extension = await client.get("/api/extensions/seraph.openclaw-remote-cdp")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        provider = next(item for item in contributions if item["type"] == "browser_providers")
+        preset = next(item for item in contributions if item["type"] == "toolset_presets")
+        assert provider["name"] == "remote-cdp"
+        assert provider["provider_kind"] == "remote_cdp"
+        assert provider["status"] == "requires_config"
+        assert preset["name"] == "remote-cdp-ops"
+        assert "browser_session" in preset["include_tools"]
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_extension_relay_pack_surfaces_staged_browser_provider_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.openclaw-extension-relay")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        install = await client.post("/api/catalog/install/seraph.openclaw-extension-relay")
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.openclaw-extension-relay"
+
+        extension = await client.get("/api/extensions/seraph.openclaw-extension-relay")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        provider = next(item for item in contributions if item["type"] == "browser_providers")
+        preset = next(item for item in contributions if item["type"] == "toolset_presets")
+        assert provider["name"] == "extension-relay"
+        assert provider["provider_kind"] == "extension_relay"
+        assert provider["status"] == "requires_config"
+        assert preset["name"] == "extension-relay-ops"
+        assert "browser_session" in preset["include_tools"]
+
+    @pytest.mark.asyncio
     async def test_install_catalog_browser_ops_pack_surfaces_browser_skills_and_toolset(self, client, catalog_extension_runtime):
         install = await client.post("/api/catalog/install/seraph.hermes-browser-ops")
 
@@ -696,6 +740,111 @@ class TestCatalogAPI:
         assert skill_names == {"browser-session-review", "browser-snapshot"}
         assert preset["name"] == "browser-session-ops"
         assert "browser_session" in preset["include_tools"]
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_webhook_gateway_pack_surfaces_automation_trigger_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.openclaw-webhook-gateway")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        install = await client.post("/api/catalog/install/seraph.openclaw-webhook-gateway")
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.openclaw-webhook-gateway"
+
+        extension = await client.get("/api/extensions/seraph.openclaw-webhook-gateway")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        trigger = next(item for item in contributions if item["type"] == "automation_triggers")
+        assert trigger["name"] == "openclaw-webhook"
+        assert trigger["trigger_type"] == "webhook"
+        assert trigger["status"] == "requires_config"
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_poll_and_pubsub_packs_surface_staged_trigger_metadata(self, client, catalog_extension_runtime):
+        poll_install = await client.post("/api/catalog/install/seraph.openclaw-poll-watch")
+        pubsub_install = await client.post("/api/catalog/install/seraph.openclaw-pubsub-relay")
+
+        assert poll_install.status_code == 201
+        assert pubsub_install.status_code == 201
+
+        poll_extension = await client.get("/api/extensions/seraph.openclaw-poll-watch")
+        pubsub_extension = await client.get("/api/extensions/seraph.openclaw-pubsub-relay")
+        assert poll_extension.status_code == 200
+        assert pubsub_extension.status_code == 200
+
+        poll_trigger = next(
+            item for item in poll_extension.json()["extension"]["contributions"] if item["type"] == "automation_triggers"
+        )
+        pubsub_trigger = next(
+            item for item in pubsub_extension.json()["extension"]["contributions"] if item["type"] == "automation_triggers"
+        )
+        assert poll_trigger["trigger_type"] == "poll"
+        assert poll_trigger["status"] == "disabled"
+        assert pubsub_trigger["trigger_type"] == "pubsub"
+        assert pubsub_trigger["status"] == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_node_packs_surface_node_adapter_metadata(self, client, catalog_extension_runtime):
+        companion_install = await client.post("/api/catalog/install/seraph.openclaw-companion-node")
+        device_install = await client.post("/api/catalog/install/seraph.openclaw-device-bridge")
+
+        assert companion_install.status_code == 201
+        assert device_install.status_code == 201
+
+        companion_extension = await client.get("/api/extensions/seraph.openclaw-companion-node")
+        device_extension = await client.get("/api/extensions/seraph.openclaw-device-bridge")
+        assert companion_extension.status_code == 200
+        assert device_extension.status_code == 200
+
+        companion_adapter = next(
+            item for item in companion_extension.json()["extension"]["contributions"] if item["type"] == "node_adapters"
+        )
+        device_adapter = next(
+            item for item in device_extension.json()["extension"]["contributions"] if item["type"] == "node_adapters"
+        )
+        assert companion_adapter["name"] == "openclaw-companion"
+        assert companion_adapter["adapter_kind"] == "companion"
+        assert companion_adapter["status"] == "requires_config"
+        assert device_adapter["name"] == "openclaw-device"
+        assert device_adapter["adapter_kind"] == "device"
+        assert device_adapter["status"] == "requires_config"
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_canvas_pack_surfaces_canvas_output_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.openclaw-canvas-board")
+
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.openclaw-canvas-board"
+
+        extension = await client.get("/api/extensions/seraph.openclaw-canvas-board")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        canvas_output = next(item for item in contributions if item["type"] == "canvas_outputs")
+        assert canvas_output["name"] == "guardian-board"
+        assert canvas_output["surface_kind"] == "board"
+        assert canvas_output["sections"] == ["Summary", "Steps", "Artifacts"]
+
+    @pytest.mark.asyncio
+    async def test_install_catalog_workflow_runtimes_pack_surfaces_runtime_and_workflow_metadata(self, client, catalog_extension_runtime):
+        install = await client.post("/api/catalog/install/seraph.openclaw-workflow-runtimes")
+
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.openclaw-workflow-runtimes"
+
+        extension = await client.get("/api/extensions/seraph.openclaw-workflow-runtimes")
+        assert extension.status_code == 200
+        contributions = extension.json()["extension"]["contributions"]
+        runtime_profile = next(item for item in contributions if item["type"] == "workflow_runtimes" and item["name"] == "openprose")
+        workflow = next(item for item in contributions if item["type"] == "workflows" and item["name"] == "openprose-brief")
+        assert runtime_profile["engine_kind"] == "openprose"
+        assert runtime_profile["structured_output"] is True
+        assert workflow["runtime_profile"] == "openprose"
+        assert workflow["output_surface"] == "guardian-board"
 
     @pytest.mark.asyncio
     async def test_install_catalog_speech_pack_surfaces_speech_profile_metadata(self, client, catalog_extension_runtime):

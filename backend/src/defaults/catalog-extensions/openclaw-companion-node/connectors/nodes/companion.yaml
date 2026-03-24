@@ -1,0 +1,12 @@
+name: openclaw-companion
+description: Companion node adapter for staged desktop and phone bridge sessions.
+adapter_kind: companion
+enabled: true
+capabilities:
+  - notify
+  - sync
+config_fields:
+  - key: node_url
+    label: Node URL
+    input: url
+    required: true

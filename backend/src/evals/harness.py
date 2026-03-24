@@ -3533,7 +3533,11 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
     failed_ctx = _make_context(user_state="available", interruption_mode="balanced", attention_budget_remaining=3)
     mock_context_manager = MagicMock()
     mock_context_manager.get_context.side_effect = [delivered_ctx, failed_ctx]
+    mock_context_manager.is_daemon_connected.return_value = False
     mock_context_manager.decrement_attention_budget = MagicMock()
+    # Keep the transport audit deterministic: websocket failures should stay
+    # failed here rather than rerouting through the native-notification lane.
+    mock_context_manager.is_daemon_connected.return_value = False
     mock_ws_manager = MagicMock()
     mock_ws_manager.broadcast = AsyncMock(
         side_effect=[

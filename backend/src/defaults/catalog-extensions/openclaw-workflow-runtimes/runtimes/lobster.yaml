@@ -1,0 +1,7 @@
+name: lobster
+engine_kind: lobster
+description: Delegation-first review loop for bounded specialist execution.
+delegation_mode: delegate
+checkpoint_policy: approval
+structured_output: true
+default_output_surface: guardian-board

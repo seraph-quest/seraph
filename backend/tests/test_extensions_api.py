@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -362,7 +362,7 @@ def _write_wave2_extension(root: Path) -> Path:
         encoding="utf-8",
     )
     (package_dir / "automation" / "daily-brief.yaml").write_text(
-        "name: daily-brief\ntrigger_type: webhook\nendpoint: https://example.test/hooks/daily\nconfig_fields:\n  - key: signing_secret\n    label: Signing Secret\n    input: password\n",
+        "name: daily-brief\ntrigger_type: webhook\nendpoint: /api/automation/webhooks/daily-brief\nconfig_fields:\n  - key: signing_secret\n    label: Signing Secret\n    input: password\n",
         encoding="utf-8",
     )
     (package_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
@@ -486,6 +486,69 @@ def _write_invalid_channel_adapter_extension(root: Path) -> Path:
     (package_dir / "channels" / "native.yaml").write_text(
         "name: invalid-native\n"
         "description: Missing transport\n"
+        "enabled: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_invalid_planned_connector_extension(root: Path) -> Path:
+    package_dir = root / "invalid-planned-pack"
+    (package_dir / "automation").mkdir(parents=True)
+    (package_dir / "connectors" / "nodes").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.invalid-planned\n"
+        "version: 2026.3.24\n"
+        "display_name: Invalid Planned Connectors\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  automation_triggers:\n"
+        "    - automation/trigger.yaml\n"
+        "  node_adapters:\n"
+        "    - connectors/nodes/adapter.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "automation" / "trigger.yaml").write_text(
+        "name: broken-trigger\n"
+        "description: Missing trigger type.\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "nodes" / "adapter.yaml").write_text(
+        "name: broken-node\n"
+        "description: Missing adapter kind.\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_duplicate_automation_extension(root: Path, *, package_name: str, extension_id: str) -> Path:
+    package_dir = root / package_name
+    (package_dir / "automation").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        f"id: {extension_id}\n"
+        "version: 2026.3.24\n"
+        "display_name: Duplicate Automation\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  automation_triggers:\n"
+        "    - automation/shared.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "automation" / "shared.yaml").write_text(
+        "name: shared-hook\n"
+        "description: Duplicate shared webhook.\n"
+        "trigger_type: webhook\n"
+        "endpoint: /api/automation/webhooks/shared-hook\n"
         "enabled: true\n",
         encoding="utf-8",
     )
@@ -2197,6 +2260,181 @@ async def test_invalid_channel_adapter_surfaces_invalid_status_in_extension_payl
     assert adapter["loaded"] is False
     assert adapter["status"] == "invalid"
     assert invalid_extension["doctor_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_planned_connectors_surface_invalid_status_in_extension_payload(client, extension_runtime):
+    _write_invalid_planned_connector_extension(extension_runtime / "extensions")
+
+    response = await client.get("/api/extensions")
+
+    assert response.status_code == 200
+    extensions = {item["id"]: item for item in response.json()["extensions"]}
+    invalid_extension = extensions["seraph.invalid-planned"]
+    connectors = {item["type"]: item for item in invalid_extension["contributions"]}
+
+    assert connectors["automation_triggers"]["status"] == "invalid"
+    assert connectors["automation_triggers"]["health"]["state"] == "invalid"
+    assert connectors["node_adapters"]["status"] == "invalid"
+    assert connectors["node_adapters"]["health"]["state"] == "invalid"
+    assert invalid_extension["doctor_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_automation_trigger_name_invalidates_all_colliding_definitions(client, extension_runtime):
+    _write_duplicate_automation_extension(
+        extension_runtime / "extensions",
+        package_name="dup-automation-a",
+        extension_id="seraph.dup-automation-a",
+    )
+    _write_duplicate_automation_extension(
+        extension_runtime / "extensions",
+        package_name="dup-automation-b",
+        extension_id="seraph.dup-automation-b",
+    )
+
+    responses = [
+        await client.get("/api/extensions/seraph.dup-automation-a"),
+        await client.get("/api/extensions/seraph.dup-automation-b"),
+    ]
+
+    for response in responses:
+        assert response.status_code == 200
+        extension = response.json()["extension"]
+        trigger = next(item for item in extension["contributions"] if item["type"] == "automation_triggers")
+        assert trigger["status"] == "invalid"
+        assert trigger["health"]["state"] == "invalid"
+        assert "conflicts with" in trigger["health"]["summary"]
+        assert any(error["phase"] == "duplicate-automation_trigger-name" for error in extension["load_errors"])
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_defaults_surface_active_adapters(client, extension_runtime):
+    response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    bindings = {item["route"]: item for item in payload["bindings"]}
+
+    assert payload["supported_transports"] == ["websocket", "native_notification"]
+    assert payload["active_transports"] == ["native_notification", "websocket"]
+    assert {item["transport"] for item in payload["active_adapters"]} == {
+        "websocket",
+        "native_notification",
+    }
+    assert bindings["live_delivery"]["primary_transport"] == "websocket"
+    assert bindings["live_delivery"]["fallback_transport"] == "native_notification"
+    assert bindings["alert_delivery"]["primary_transport"] == "native_notification"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_defaults_to_builtin_transports_when_no_channel_adapters_are_active(client, extension_runtime):
+    snapshot = MagicMock()
+    snapshot.list_contributions.return_value = [MagicMock()]
+    registry_instance = MagicMock()
+    registry_instance.snapshot.return_value = snapshot
+
+    with (
+        patch("src.api.extensions.ExtensionRegistry", return_value=registry_instance),
+        patch("src.api.extensions.select_active_channel_adapters", return_value=[]),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_transports"] == ["native_notification", "websocket"]
+    assert {item["transport"] for item in payload["active_adapters"]} == {
+        "websocket",
+        "native_notification",
+    }
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_keeps_builtin_transport_for_unclaimed_route(client, extension_runtime):
+    snapshot = MagicMock()
+    snapshot.list_contributions.return_value = [MagicMock()]
+    registry_instance = MagicMock()
+    registry_instance.snapshot.return_value = snapshot
+
+    with (
+        patch("src.api.extensions.ExtensionRegistry", return_value=registry_instance),
+        patch(
+            "src.api.extensions.select_active_channel_adapters",
+            return_value=[
+                type(
+                    "Adapter",
+                    (),
+                    {
+                        "extension_id": "seraph.custom-native",
+                        "name": "custom-native",
+                        "transport": "native_notification",
+                        "reference": "channels/native.yaml",
+                    },
+                )()
+            ],
+        ),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_transports"] == ["native_notification", "websocket"]
+    assert {item["transport"] for item in payload["active_adapters"]} == {
+        "websocket",
+        "native_notification",
+    }
+    websocket_adapter = next(item for item in payload["active_adapters"] if item["transport"] == "websocket")
+    assert websocket_adapter["extension_id"] == "seraph.builtin-channel-adapters"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_update_persists_custom_bindings(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        update_response = await client.put(
+            "/api/extensions/channel-routing",
+            json={
+                "bindings": {
+                    "live_delivery": {
+                        "primary_transport": "native_notification",
+                        "fallback_transport": "websocket",
+                    },
+                    "bundle_delivery": {
+                        "primary_transport": "native_notification",
+                    },
+                }
+            },
+        )
+
+    assert update_response.status_code == 200
+    updated = {item["route"]: item for item in update_response.json()["bindings"]}
+    assert updated["live_delivery"]["primary_transport"] == "native_notification"
+    assert updated["live_delivery"]["fallback_transport"] == "websocket"
+    assert updated["bundle_delivery"]["primary_transport"] == "native_notification"
+    assert updated["bundle_delivery"]["fallback_transport"] is None
+
+    reread_response = await client.get("/api/extensions/channel-routing")
+    assert reread_response.status_code == 200
+    reread = {item["route"]: item for item in reread_response.json()["bindings"]}
+    assert reread["live_delivery"]["primary_transport"] == "native_notification"
+    assert reread["bundle_delivery"]["primary_transport"] == "native_notification"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_update_rejects_unknown_routes_and_transports(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        invalid_route = await client.put(
+            "/api/extensions/channel-routing",
+            json={"bindings": {"unknown_route": {"primary_transport": "websocket"}}},
+        )
+        invalid_transport = await client.put(
+            "/api/extensions/channel-routing",
+            json={"bindings": {"live_delivery": {"primary_transport": "email"}}},
+        )
+
+    assert invalid_route.status_code == 422
+    assert "Unknown channel route" in invalid_route.json()["detail"]
+    assert invalid_transport.status_code == 422
+    assert "Unsupported channel route transport" in invalid_transport.json()["detail"]
 
 
 @pytest.mark.asyncio

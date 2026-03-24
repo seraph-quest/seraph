@@ -1,0 +1,7 @@
+name: llm-task
+engine_kind: llm_task
+description: Lightweight task runtime for triage and structured follow-up preparation.
+delegation_mode: inline
+checkpoint_policy: manual
+structured_output: true
+default_output_surface: guardian-board

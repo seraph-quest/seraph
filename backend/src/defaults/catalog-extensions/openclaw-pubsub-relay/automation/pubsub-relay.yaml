@@ -1,0 +1,7 @@
+name: openclaw-pubsub
+description: Staged pubsub trigger for event-stream driven automation.
+trigger_type: pubsub
+topic: seraph.events.guardian
+enabled: false
+capabilities:
+  - pubsub_ingress

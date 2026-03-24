@@ -7,7 +7,7 @@ import pytest
 from config.settings import settings
 from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
-from src.guardian.feedback import guardian_feedback_repository
+from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
@@ -26,7 +26,7 @@ def _make_context(**overrides) -> CurrentContext:
     return CurrentContext(**defaults)
 
 
-def _patch_deps(ctx):
+def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
     """Patch the lazy-imported singletons at their source modules."""
     mock_cm = MagicMock()
     mock_cm.get_context.return_value = ctx
@@ -48,6 +48,13 @@ def _patch_deps(ctx):
         patch("src.scheduler.connection_manager.ws_manager", mock_ws),
         patch("src.observer.insight_queue.insight_queue", mock_iq),
     ]
+    if not use_actual_learning_signal:
+        patches.append(
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+                AsyncMock(side_effect=lambda intervention_type, limit=12: GuardianLearningSignal.neutral(intervention_type)),
+            )
+        )
     return patches, mock_cm, mock_ws, mock_iq
 
 
@@ -96,6 +103,48 @@ async def test_native_channel_adapter_can_deliver_without_websocket():
 
 
 @pytest.mark.asyncio
+async def test_channel_routing_can_prefer_native_notification_for_live_delivery(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    original_workspace_dir = settings.workspace_dir
+    settings.workspace_dir = str(workspace_dir)
+    save_extension_state_payload(
+        {
+            "extensions": {},
+            "channel_routing": {
+                "bindings": {
+                    "live_delivery": {
+                        "primary_transport": "native_notification",
+                        "fallback_transport": "websocket",
+                    }
+                }
+            },
+        }
+    )
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Route to native", intervention_type="advisory", urgency=2)
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"websocket", "native_notification"}):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.act
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Route to native"
+    finally:
+        await native_notification_queue.clear()
+        settings.workspace_dir = original_workspace_dir
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocket():
     ctx = _make_context()
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
@@ -124,7 +173,135 @@ async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocke
             p.stop()
 
 
-def test_active_channel_adapters_can_disable_all_packaged_transports(tmp_path):
+@pytest.mark.asyncio
+async def test_channel_routing_can_prefer_native_notification_for_bundle_delivery(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    original_workspace_dir = settings.workspace_dir
+    settings.workspace_dir = str(workspace_dir)
+    save_extension_state_payload(
+        {
+            "extensions": {},
+            "channel_routing": {
+                "bindings": {
+                    "bundle_delivery": {
+                        "primary_transport": "native_notification",
+                        "fallback_transport": "websocket",
+                    }
+                }
+            },
+        }
+    )
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_iq.peek_all = AsyncMock(
+        return_value=[
+            MagicMock(id="queued-1", content="Queued update", intervention_id="intervention-1"),
+        ]
+    )
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"websocket", "native_notification"}):
+            delivered = await deliver_queued_bundle()
+
+        assert delivered == 1
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert "Queued update" in notification.body
+    finally:
+        await native_notification_queue.clear()
+        settings.workspace_dir = original_workspace_dir
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_can_prefer_websocket_for_scheduled_delivery(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    original_workspace_dir = settings.workspace_dir
+    settings.workspace_dir = str(workspace_dir)
+    save_extension_state_payload(
+        {
+            "extensions": {},
+            "channel_routing": {
+                "bindings": {
+                    "scheduled_delivery": {
+                        "primary_transport": "websocket",
+                        "fallback_transport": "native_notification",
+                    }
+                }
+            },
+        }
+    )
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Scheduled route", intervention_type="advisory", urgency=2)
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"websocket", "native_notification"}):
+            decision = await deliver_or_queue(msg, is_scheduled=True)
+
+        assert decision.action == InterventionAction.act
+        mock_ws.broadcast.assert_called_once_with(msg)
+        assert await native_notification_queue.count() == 0
+    finally:
+        await native_notification_queue.clear()
+        settings.workspace_dir = original_workspace_dir
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_can_prefer_native_notification_for_alert_delivery(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    original_workspace_dir = settings.workspace_dir
+    settings.workspace_dir = str(workspace_dir)
+    save_extension_state_payload(
+        {
+            "extensions": {},
+            "channel_routing": {
+                "bindings": {
+                    "alert_delivery": {
+                        "primary_transport": "native_notification",
+                        "fallback_transport": "websocket",
+                    }
+                }
+            },
+        }
+    )
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Alert route", intervention_type="alert", urgency=5)
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"websocket", "native_notification"}):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.act
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Alert route"
+    finally:
+        await native_notification_queue.clear()
+        settings.workspace_dir = original_workspace_dir
+        for p in patches:
+            p.stop()
+
+
+def test_active_channel_adapters_fall_back_to_builtin_transports_when_none_are_active(tmp_path):
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
     original_workspace_dir = settings.workspace_dir
@@ -142,7 +319,41 @@ def test_active_channel_adapters_can_disable_all_packaged_transports(tmp_path):
                 }
             }
         )
-        assert _active_channel_adapters() == set()
+        assert _active_channel_adapters() == {"websocket", "native_notification"}
+    finally:
+        settings.workspace_dir = original_workspace_dir
+
+
+def test_active_channel_adapters_keep_builtin_transport_for_unclaimed_route(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    original_workspace_dir = settings.workspace_dir
+    settings.workspace_dir = str(workspace_dir)
+    try:
+        save_extension_state_payload({"extensions": {}})
+        with (
+            patch(
+                "src.extensions.channels.select_active_channel_adapters",
+                return_value=[
+                    type("Adapter", (), {"transport": "native_notification"})(),
+                ],
+            ),
+            patch(
+                "src.extensions.registry.ExtensionRegistry",
+                return_value=type(
+                    "Registry",
+                    (),
+                    {
+                        "snapshot": lambda self: type(
+                            "Snapshot",
+                            (),
+                            {"list_contributions": lambda _self, _kind: [object()]},
+                        )()
+                    },
+                )(),
+            ),
+        ):
+            assert _active_channel_adapters() == {"websocket", "native_notification"}
     finally:
         settings.workspace_dir = original_workspace_dir
 
@@ -325,7 +536,7 @@ async def test_queue_when_recent_negative_feedback(async_db):
     await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
 
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, use_actual_learning_signal=True)
     for p in patches:
         p.start()
     try:
@@ -378,7 +589,7 @@ async def test_learned_direct_delivery_overrides_high_interrupt_bundle(async_db)
         salience_reason="aligned_work_activity",
         interruption_cost="high",
     )
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, use_actual_learning_signal=True)
     for p in patches:
         p.start()
     try:
@@ -425,7 +636,7 @@ async def test_acknowledged_native_feedback_can_lower_notification_threshold(asy
         await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="acknowledged")
 
     ctx = _make_context()
-    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, use_actual_learning_signal=True)
     mock_cm.is_daemon_connected.return_value = True
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
     for p in patches:

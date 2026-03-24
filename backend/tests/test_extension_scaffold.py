@@ -17,6 +17,10 @@ def test_scaffold_capability_pack_creates_valid_manifest_and_files(tmp_path: Pat
     assert (package.package_root / "skills" / "research-pack.md").exists()
     assert (package.package_root / "workflows" / "research-pack.md").exists()
     assert (package.package_root / "runbooks" / "research-pack.yaml").exists()
+    workflow_contents = (package.package_root / "workflows" / "research-pack.md").read_text(encoding="utf-8")
+    runbook_contents = (package.package_root / "runbooks" / "research-pack.yaml").read_text(encoding="utf-8")
+    assert "name: research-pack" in workflow_contents
+    assert "workflow: research-pack" in runbook_contents
 
     report = validate_extension_package(package.package_root)
 

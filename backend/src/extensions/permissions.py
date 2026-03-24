@@ -100,6 +100,18 @@ def _tools_accept_secret_refs(tool_names: list[str]) -> bool:
     return False
 
 
+def _password_config_fields_present(metadata: dict[str, Any]) -> bool:
+    config_fields = metadata.get("config_fields")
+    if not isinstance(config_fields, list):
+        return False
+    for field in config_fields:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("input") or "") == "password":
+            return True
+    return False
+
+
 def _runtime_approval_behavior(*, boundaries: list[str], risk_level: str) -> tuple[str, bool]:
     if "external_mcp" in boundaries:
         return "mcp_policy", True
@@ -122,9 +134,13 @@ def _merge_explicit_boundaries_into_profile(
         for boundary in required_boundaries
         if declared_boundaries and boundary not in declared_boundaries
     ]
-    requires_network = any(boundary in NETWORK_BOUNDARIES for boundary in required_boundaries)
+    requires_network = bool(profile.get("requires_network")) or any(
+        boundary in NETWORK_BOUNDARIES for boundary in required_boundaries
+    )
     network_declared = profile.get("network")
-    missing_network = bool(network_declared is False and requires_network)
+    missing_network = bool(profile.get("missing_network")) or bool(
+        network_declared is False and requires_network
+    )
     lifecycle_boundaries = [
         boundary
         for boundary in required_boundaries
@@ -254,9 +270,12 @@ def evaluate_contribution_permissions(
             extension,
             tool_names=_dedupe_strings(metadata.get("include_tools")),
         )
+        explicit_boundaries = _dedupe_strings(metadata.get("execution_boundaries"))
+        if _dedupe_strings(metadata.get("include_mcp_servers")) and "external_mcp" not in explicit_boundaries:
+            explicit_boundaries.append("external_mcp")
         return _merge_explicit_boundaries_into_profile(
             profile,
-            explicit_boundaries=_dedupe_strings(metadata.get("execution_boundaries")),
+            explicit_boundaries=explicit_boundaries,
         )
 
     if contribution_type == "mcp_servers":
@@ -292,6 +311,66 @@ def evaluate_contribution_permissions(
         tool_profile["ok"] = not tool_profile["missing_execution_boundaries"] and not tool_profile["missing_network"]
         tool_profile["status"] = "granted" if tool_profile["ok"] else "insufficient"
         return tool_profile
+
+    if contribution_type in {
+        "managed_connectors",
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "node_adapters",
+    }:
+        profile = {
+            "status": "granted",
+            "ok": True,
+            "declared_tools": (
+                _dedupe_strings(extension.manifest.permissions.tools)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "required_tools": [],
+            "missing_tools": [],
+            "declared_execution_boundaries": (
+                _dedupe_strings(extension.manifest.permissions.execution_boundaries)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "required_execution_boundaries": [],
+            "missing_execution_boundaries": [],
+            "network": (
+                bool(extension.manifest.permissions.network)
+                if extension is not None and extension.manifest is not None
+                else None
+            ),
+            "requires_network": bool(metadata.get("requires_network")),
+            "missing_network": bool(
+                extension is not None
+                and extension.manifest is not None
+                and metadata.get("requires_network")
+                and not extension.manifest.permissions.network
+            ),
+            "secrets": (
+                _dedupe_strings(extension.manifest.permissions.secrets)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "env": (
+                _dedupe_strings(extension.manifest.permissions.env)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "accepts_secret_refs": False,
+            "risk_level": "low",
+            "approval_behavior": "never",
+            "requires_approval": False,
+            "lifecycle_approval_boundaries": [],
+        }
+        explicit_boundaries: list[str] = []
+        if _password_config_fields_present(metadata):
+            explicit_boundaries.append("secret_management")
+        return _merge_explicit_boundaries_into_profile(
+            profile,
+            explicit_boundaries=explicit_boundaries,
+        )
 
     requires_network = bool(metadata.get("requires_network"))
     missing_network = bool(

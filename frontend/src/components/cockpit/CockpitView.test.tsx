@@ -3844,6 +3844,200 @@ describe("CockpitView", () => {
     await waitFor(() => expect(within(studio).getAllByText("Test Installable").length).toBeGreaterThan(0));
   }, 15000);
 
+  it("scaffolds a new skill pack from extension studio", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/scaffold") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "scaffolded",
+          path: "/tmp/seraph-test/extensions/research-pack",
+          created_files: ["manifest.yaml", "skills/research-pack.md"],
+          preview: {
+            path: "/tmp/seraph-test/extensions/research-pack",
+            extension_id: "seraph.research-pack",
+            display_name: "Research Pack",
+            ok: true,
+            results: [],
+          },
+        }, true, 201));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({ extensions: [] }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.change(within(studio).getByLabelText("New extension package name"), {
+      target: { value: "research-pack" },
+    });
+    fireEvent.change(within(studio).getByLabelText("New extension display name"), {
+      target: { value: "Research Pack" },
+    });
+    fireEvent.click(within(studio).getByRole("button", { name: "Scaffold skill pack" }));
+
+    await waitFor(() => {
+      const scaffoldCall = fetchMock.mock.calls.find(
+        ([input, callInit]) => String(input).includes("/api/extensions/scaffold") && (callInit as RequestInit | undefined)?.method === "POST",
+      );
+      expect(scaffoldCall).toBeDefined();
+      const body = JSON.parse(String((scaffoldCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as { package_name?: string; display_name?: string; contributions?: string[] };
+      expect(body.package_name).toBe("research-pack");
+      expect(body.display_name).toBe("Research Pack");
+      expect(body.contributions).toEqual(["skills"]);
+    });
+
+    await waitFor(() => {
+      expect(within(studio).getByLabelText("Extension package path")).toHaveValue("/tmp/seraph-test/extensions/research-pack");
+      expect(within(studio).getByText("Research Pack scaffolded with 2 files")).toBeInTheDocument();
+    });
+  }, 15000);
+
+  it("surfaces scaffolded-invalid responses as warnings in extension studio", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/scaffold") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "scaffolded_invalid",
+          path: "/tmp/seraph-test/extensions/research-pack",
+          created_files: ["manifest.yaml", "skills/research-pack.md"],
+          preview: {
+            path: "/tmp/seraph-test/extensions/research-pack",
+            extension_id: "seraph.research-pack",
+            display_name: "Research Pack",
+            ok: false,
+            results: [{ issues: [{ code: "invalid_frontmatter" }] }],
+          },
+        }, true, 201));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({ extensions: [] }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.change(within(studio).getByLabelText("New extension package name"), {
+      target: { value: "research-pack" },
+    });
+    fireEvent.change(within(studio).getByLabelText("New extension display name"), {
+      target: { value: "Research Pack" },
+    });
+    fireEvent.click(within(studio).getByRole("button", { name: "Scaffold skill pack" }));
+
+    await waitFor(() => {
+      expect(within(studio).getByText("Research Pack scaffolded but needs fixes (1 issue)")).toBeInTheDocument();
+    });
+  }, 15000);
+
   it("surfaces approval-required install responses in extension studio", async () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {

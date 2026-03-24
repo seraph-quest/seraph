@@ -222,6 +222,262 @@ def test_attach_workflow_actions_uses_extension_enable_for_packaged_disabled_wor
     ]
 
 
+def test_mcp_status_list_exposes_packaged_toolset_presets(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    package_dir = workspace_dir / "extensions" / "github-pack"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.github-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: GitHub Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/github-operator.yaml\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "github-operator.yaml").write_text(
+        "name: github-operator\n"
+        "description: GitHub MCP operator preset\n"
+        "include_mcp_servers:\n"
+        "  - github\n"
+        "execution_boundaries:\n"
+        "  - external_mcp\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("src.api.capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch(
+            "src.api.capabilities.mcp_manager.get_config",
+            return_value=[
+                {
+                    "name": "github",
+                    "enabled": True,
+                    "status": "connected",
+                    "tool_count": 2,
+                    "description": "GitHub MCP",
+                }
+            ],
+        ),
+        patch(
+            "src.api.capabilities.mcp_manager.get_server_tools",
+            return_value=[
+                SimpleNamespace(name="github_list_issues"),
+                SimpleNamespace(name="github_get_pull_request"),
+            ],
+        ),
+    ):
+        from src.api.capabilities import _mcp_status_list
+
+        servers = _mcp_status_list("full")
+
+    assert servers[0]["tool_names"] == ["github_get_pull_request", "github_list_issues"]
+    assert servers[0]["toolset_presets"] == [
+        {
+            "name": "github-operator",
+            "description": "GitHub MCP operator preset",
+            "reference": "presets/toolset/github-operator.yaml",
+            "extension_id": "seraph.github-pack",
+            "extension_display_name": "GitHub Pack",
+        }
+    ]
+
+
+def test_doctor_reports_missing_mcp_server_reference_for_toolset_preset(tmp_path):
+    package_dir = tmp_path / "extensions" / "github-pack"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.github-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: GitHub Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/github-operator.yaml\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "github-operator.yaml").write_text(
+        "name: github-operator\n"
+        "description: GitHub MCP operator preset\n"
+        "include_mcp_servers:\n"
+        "  - github-typo\n"
+        "execution_boundaries:\n"
+        "  - external_mcp\n",
+        encoding="utf-8",
+    )
+
+    from src.extensions.doctor import doctor_snapshot
+    from src.extensions.registry import ExtensionRegistry
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    report = doctor_snapshot(snapshot)
+
+    result = next(item for item in report.results if item.extension_id == "seraph.github-pack")
+    assert any(issue.code == "missing_mcp_server_reference" for issue in result.issues)
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_includes_catalog_extension_packs(client):
+    catalog_payload = {
+        "skills": [],
+        "mcp_servers": [],
+        "extension_packages": [
+            {
+                "name": "Hermes Session Memory",
+                "catalog_id": "seraph.hermes-session-memory",
+                "type": "extension_pack",
+                "description": "Optional Hermes-style session recall and checklist skills.",
+                "category": "capability-pack",
+                "installed": False,
+                "bundled": True,
+                "trust": "bundled",
+                "version": "2026.3.23",
+                "installed_version": None,
+                "update_available": False,
+                "contribution_types": ["context_packs", "skills"],
+            }
+        ],
+    }
+
+    with (
+        patch("src.api.capabilities.load_catalog_items", return_value=catalog_payload),
+        patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
+        patch("src.api.capabilities._tool_status_list", return_value=[]),
+        patch("src.api.capabilities._skill_status_map", return_value=([], {})),
+        patch("src.api.capabilities._workflow_status_map", return_value=([], {})),
+        patch("src.api.capabilities._mcp_status_list", return_value=[]),
+        patch("src.api.capabilities._starter_pack_statuses", return_value=[]),
+        patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
+        patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
+    ):
+        response = await client.get("/api/capabilities/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["catalog_items"] == [
+        {
+            "name": "Hermes Session Memory",
+            "catalog_id": "seraph.hermes-session-memory",
+            "type": "extension_pack",
+            "description": "Optional Hermes-style session recall and checklist skills.",
+            "category": "capability-pack",
+            "bundled": True,
+            "installed": False,
+            "update_available": False,
+            "version": "2026.3.23",
+            "installed_version": None,
+            "trust": "bundled",
+            "contribution_types": ["context_packs", "skills"],
+            "status": "ready",
+            "doctor_ok": True,
+            "issues": [],
+            "load_errors": [],
+            "recommended_actions": [
+                {
+                    "type": "install_catalog_item",
+                    "label": "Install pack",
+                    "name": "seraph.hermes-session-memory",
+                }
+            ],
+        }
+    ]
+    assert payload["recommendations"] == [
+        {
+            "id": "catalog-extension:seraph.hermes-session-memory",
+            "label": "Install pack Hermes Session Memory",
+            "description": "Optional Hermes-style session recall and checklist skills.",
+            "action": {
+                "type": "install_catalog_item",
+                "label": "Install pack",
+                "name": "seraph.hermes-session-memory",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_id(client):
+    catalog_payload = {
+        "skills": [],
+        "mcp_servers": [],
+        "extension_packages": [
+            {
+                "name": "Hermes Session Memory",
+                "catalog_id": "seraph.hermes-session-memory",
+                "type": "extension_pack",
+                "description": "Optional Hermes-style session recall and checklist skills.",
+                "category": "capability-pack",
+                "installed": True,
+                "bundled": True,
+                "trust": "bundled",
+                "version": "2026.3.23",
+                "installed_version": "2026.3.19",
+                "update_available": True,
+                "contribution_types": ["context_packs", "skills"],
+                "status": "ready",
+                "doctor_ok": True,
+                "issues": [],
+                "load_errors": [],
+            }
+        ],
+    }
+
+    with (
+        patch("src.api.capabilities.load_catalog_items", return_value=catalog_payload),
+        patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
+        patch("src.api.capabilities._tool_status_list", return_value=[]),
+        patch("src.api.capabilities._skill_status_map", return_value=([], {})),
+        patch("src.api.capabilities._workflow_status_map", return_value=([], {})),
+        patch("src.api.capabilities._mcp_status_list", return_value=[]),
+        patch("src.api.capabilities._starter_pack_statuses", return_value=[]),
+        patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
+        patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
+    ):
+        response = await client.get("/api/capabilities/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["catalog_items"][0]["recommended_actions"] == [
+        {
+            "type": "install_catalog_item",
+            "label": "Update pack",
+            "name": "seraph.hermes-session-memory",
+        }
+    ]
+    assert payload["recommendations"] == [
+        {
+            "id": "catalog-extension:seraph.hermes-session-memory",
+            "label": "Update pack Hermes Session Memory",
+            "description": "Optional Hermes-style session recall and checklist skills.",
+            "action": {
+                "type": "install_catalog_item",
+                "label": "Update pack",
+                "name": "seraph.hermes-session-memory",
+            },
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs(client):
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")

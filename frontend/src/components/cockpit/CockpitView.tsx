@@ -411,6 +411,13 @@ interface ExtensionPathPreview {
   lifecycle_plan?: ExtensionLifecyclePlan | null;
 }
 
+interface ExtensionScaffoldResponse {
+  status: string;
+  path: string;
+  created_files: string[];
+  preview: ExtensionPathPreview;
+}
+
 interface ExtensionLifecycleApprovalDetail {
   type: "approval_required";
   approval_id: string;
@@ -423,12 +430,22 @@ type LoggedOperatorError = Error & { operatorLogged?: boolean };
 
 interface CatalogItemInfo {
   name: string;
-  type: "skill" | "mcp_server";
+  catalog_id?: string;
+  type: "skill" | "mcp_server" | "extension_pack";
   description: string;
   category?: string;
   bundled?: boolean;
   installed: boolean;
   missing_tools?: string[];
+  contribution_types?: string[];
+  trust?: string;
+  version?: string | null;
+  installed_version?: string | null;
+  update_available?: boolean;
+  status?: string;
+  doctor_ok?: boolean;
+  issues?: unknown[];
+  load_errors?: unknown[];
   recommended_actions?: CapabilityAction[];
 }
 
@@ -1827,6 +1844,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [studioMcpUrl, setStudioMcpUrl] = useState("");
   const [studioMcpDescription, setStudioMcpDescription] = useState("");
   const [studioExtensionPath, setStudioExtensionPath] = useState("");
+  const [studioScaffoldName, setStudioScaffoldName] = useState("");
+  const [studioScaffoldDisplayName, setStudioScaffoldDisplayName] = useState("");
   const [studioExtensionConfigDraft, setStudioExtensionConfigDraft] = useState("{}");
   const [studioExtensionConfigDirty, setStudioExtensionConfigDirty] = useState(false);
   const [pendingLifecycleApprovalId, setPendingLifecycleApprovalId] = useState<string | null>(null);
@@ -2807,13 +2826,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       });
     });
     catalogItems.forEach((item) => {
-      if (item.installed) return;
+      if (item.installed && !item.update_available) return;
+      if (item.type === "extension_pack" && item.status && item.status !== "ready") return;
+      const itemKind = item.type === "extension_pack"
+        ? (item.installed && item.update_available ? "update pack" : "install pack")
+        : `install ${item.type}`;
+      const detailParts = [item.description];
+      if (item.missing_tools?.length) detailParts.push(`missing tools ${item.missing_tools.join(", ")}`);
+      if (item.type === "extension_pack" && item.contribution_types?.length) {
+        detailParts.push(item.contribution_types.join(", "));
+      }
       items.push({
         id: `catalog:${item.type}:${item.name}`,
-        kind: `install ${item.type}`,
+        kind: itemKind,
         label: item.name,
-        detail: `${item.description}${item.missing_tools?.length ? ` · missing tools ${item.missing_tools.join(", ")}` : ""}`,
-        action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: "Install", name: item.name },
+        detail: detailParts.filter(Boolean).join(" · "),
+        action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: item.installed && item.update_available ? "Update" : "Install", name: item.catalog_id ?? item.name },
       });
     });
 
@@ -3277,6 +3305,65 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } catch {
       setStudioPackagePreview(null);
       setStudioPackageStatus(`Failed to validate ${path}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function scaffoldStudioSkillPack() {
+    const packageName = studioScaffoldName.trim();
+    const displayName = studioScaffoldDisplayName.trim() || packageName;
+    if (!packageName) {
+      setStudioPackageStatus("Enter a package slug before scaffolding");
+      return;
+    }
+    setStudioBusy("extension-scaffold");
+    setStudioPackagePreview(null);
+    setStudioPackageStatus(`Scaffolding ${displayName}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/scaffold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          package_name: packageName,
+          display_name: displayName,
+          kind: "capability-pack",
+          contributions: ["skills"],
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setStudioPackageStatus(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : `Failed to scaffold ${displayName}`,
+        );
+        return;
+      }
+      const scaffold = payload as ExtensionScaffoldResponse;
+      setStudioExtensionPath(scaffold.path);
+      setStudioPackagePreview(scaffold.preview);
+      const scaffoldLabel = scaffold.preview.display_name ?? displayName;
+      const invalidScaffold = scaffold.status !== "scaffolded" || scaffold.preview.ok === false;
+      if (invalidScaffold) {
+        const issueCount = Array.isArray(scaffold.preview.results)
+          ? scaffold.preview.results.reduce((count, result) => count + (Array.isArray(result.issues) ? result.issues.length : 0), 0)
+          : 0;
+        setStudioPackageStatus(
+          `${scaffoldLabel} scaffolded but needs fixes${issueCount > 0 ? ` (${issueCount} issue${issueCount === 1 ? "" : "s"})` : ""}`,
+        );
+        appendOperatorFeed(
+          `Scaffolded extension package needs fixes: ${scaffoldLabel}`,
+          "info",
+        );
+        return;
+      }
+      setStudioPackageStatus(
+        `${scaffoldLabel} scaffolded with ${scaffold.created_files.length} file${scaffold.created_files.length === 1 ? "" : "s"}`,
+      );
+      appendOperatorFeed(`Scaffolded extension package: ${scaffoldLabel}`, "success");
+    } catch {
+      setStudioPackageStatus(`Failed to scaffold ${displayName}`);
     } finally {
       setStudioBusy(null);
     }
@@ -3804,7 +3891,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       executionBoundaries: [],
     });
     try {
-      const response = await fetch(`${API_URL}/api/catalog/install/${item.name}`, {
+      const identifier = item.catalog_id ?? item.name;
+      const response = await fetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, {
         method: "POST",
       });
       const payload = await response.json().catch(() => null);
@@ -3919,7 +4007,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }
         return true;
       case "install_catalog_item": {
-        const item = catalogItems.find((entry) => entry.name === action.name);
+        const item = catalogItems.find((entry) => entry.name === action.name || entry.catalog_id === action.name);
         if (item) await installCatalogItem(item);
         return true;
       }
@@ -6121,11 +6209,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">installable now</span>
                       <span className="cockpit-operator-link">
-                        {catalogItems.filter((item) => !item.installed).length} missing
+                        {
+                          catalogItems.filter((item) =>
+                            (!item.installed || item.update_available)
+                            && (item.type !== "extension_pack" || !item.status || item.status === "ready"),
+                          ).length
+                        } missing
                       </span>
                     </div>
-                    {catalogItems.filter((item) => !item.installed).map((item) => (
-                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
+                    {catalogItems.filter((item) =>
+                      (!item.installed || item.update_available)
+                      && (item.type !== "extension_pack" || !item.status || item.status === "ready"),
+                    ).map((item) => (
+                      <div key={item.catalog_id ?? `${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -6133,14 +6229,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             setSelectedInspector({
                               kind: "operator",
                               entity: {
-                                entityType: item.type === "skill" ? "skill" : "mcp",
+                                entityType:
+                                  item.type === "skill"
+                                    ? "skill"
+                                    : item.type === "mcp_server"
+                                      ? "mcp"
+                                      : "extension_manifest",
                                 name: item.name,
-                                meta: `install ${item.type.replace("_", " ")}`,
+                                meta: `${item.installed && item.update_available ? "update" : "install"} ${item.type.replace("_", " ")}`,
                                 summary: item.description,
                                 details: {
+                                  catalog_id: item.catalog_id ?? item.name,
                                   category: item.category ?? "",
                                   bundled: item.bundled ?? false,
                                   missing_tools: item.missing_tools ?? [],
+                                  contribution_types: item.contribution_types ?? [],
+                                  trust: item.trust ?? "",
+                                  version: item.version ?? "",
+                                  installed_version: item.installed_version ?? "",
+                                  update_available: item.update_available ?? false,
+                                  status: item.status ?? "ready",
+                                  doctor_ok: item.doctor_ok ?? true,
+                                  issues: item.issues ?? [],
+                                  load_errors: item.load_errors ?? [],
                                 },
                               },
                             })
@@ -6155,7 +6266,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             className="cockpit-operator-button"
                             onClick={() => void installCatalogItem(item)}
                           >
-                            install
+                            {item.installed && item.update_available ? "update" : "install"}
                           </button>
                           {item.recommended_actions?.length ? (
                             <button
@@ -6496,6 +6607,41 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 <div className="cockpit-operator-row">
                   <span className="cockpit-key">extensions</span>
                   <span className="cockpit-operator-link">{studioEntries.length} loaded</span>
+                </div>
+                <div className="cockpit-studio-sidebar-group">
+                  <div className="cockpit-operator-row">
+                    <span className="cockpit-key">new skill pack</span>
+                    <span className="cockpit-row-age">workspace scaffold</span>
+                  </div>
+                  <input
+                    className="cockpit-input"
+                    aria-label="New extension package name"
+                    value={studioScaffoldName}
+                    onChange={(event) => setStudioScaffoldName(event.target.value)}
+                    placeholder="research-pack"
+                  />
+                  <input
+                    className="cockpit-input"
+                    aria-label="New extension display name"
+                    value={studioScaffoldDisplayName}
+                    onChange={(event) => setStudioScaffoldDisplayName(event.target.value)}
+                    placeholder="Research Pack"
+                  />
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void scaffoldStudioSkillPack()}
+                      disabled={
+                        !studioScaffoldName.trim()
+                        || studioBusy === "extension-scaffold"
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-validate"
+                        || studioBusy === "extension-update"
+                      }
+                    >
+                      Scaffold skill pack
+                    </button>
+                  </div>
                 </div>
                 <div className="cockpit-studio-sidebar-group">
                   <div className="cockpit-operator-row">

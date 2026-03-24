@@ -1,0 +1,17 @@
+name: slack
+description: Planned Slack bot relay definition for channels, direct messages, and thread delivery.
+platform: slack
+enabled: false
+delivery_modes:
+  - dm
+  - channel
+  - thread
+config_fields:
+  - key: bot_token
+    label: Bot Token
+    input: password
+    required: true
+  - key: app_token
+    label: App Token
+    input: password
+    required: false

@@ -80,7 +80,7 @@ def _placeholder_skill(slug: str, display_name: str) -> str:
     return (
         "---\n"
         f"name: {slug}\n"
-        f"description: {display_name} skill\n"
+        f"description: {json.dumps(f'{display_name} skill')}\n"
         "requires:\n"
         "  tools: []\n"
         "user_invocable: true\n"
@@ -92,8 +92,8 @@ def _placeholder_skill(slug: str, display_name: str) -> str:
 def _placeholder_workflow(slug: str, display_name: str) -> str:
     return (
         "---\n"
-        f"name: {display_name}\n"
-        f"description: {display_name} workflow\n"
+        f"name: {slug}\n"
+        f"description: {json.dumps(f'{display_name} workflow')}\n"
         "requires:\n"
         "  tools: [read_file]\n"
         "inputs:\n"

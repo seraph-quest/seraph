@@ -52,6 +52,16 @@ async def test_tools_api_safe_mode_keeps_session_search_available(client):
 
 
 @pytest.mark.asyncio
+async def test_tools_api_safe_mode_keeps_browser_session_available(client):
+    ctx = CurrentContext(tool_policy_mode="safe")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "browser_session" in names
+
+
+@pytest.mark.asyncio
 async def test_tools_api_safe_mode_keeps_get_scheduled_jobs_available(client):
     ctx = CurrentContext(tool_policy_mode="safe")
     with patch("src.tools.policy.context_manager.get_context", return_value=ctx):

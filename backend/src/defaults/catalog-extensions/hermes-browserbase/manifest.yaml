@@ -1,0 +1,22 @@
+id: seraph.hermes-browserbase
+version: 2026.3.23
+display_name: Hermes Browserbase
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Managed Browserbase-style browser provider package with local-fallback browsing until remote transport lands.
+contributes:
+  browser_providers:
+    - connectors/browser/browserbase.yaml
+  toolset_presets:
+    - presets/toolset/browserbase-ops.yaml
+permissions:
+  tools:
+    - browse_webpage
+    - browser_session
+  execution_boundaries:
+    - external_read
+  network: true

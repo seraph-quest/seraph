@@ -1,21 +1,29 @@
-"""Discover catalog API — browse and install skills/MCP servers."""
+"""Discover catalog API — browse and install skills, MCP servers, and packages."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+from dataclasses import asdict
 from pathlib import Path
 import tempfile
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from packaging.version import InvalidVersion, Version
 import yaml
 
 from config.settings import settings
-from src.extensions.lifecycle import install_extension_path
+from src.extensions.doctor import doctor_snapshot
+from src.extensions.lifecycle import install_extension_path, update_extension_path, validate_extension_path
 from src.extensions.permissions import evaluate_tool_permissions
-from src.extensions.registry import ExtensionRegistry, bundled_manifest_root
+from src.extensions.registry import (
+    ExtensionRecord,
+    ExtensionRegistry,
+    bundled_manifest_root,
+    default_manifest_roots_for_workspace,
+)
 from src.extensions.scaffold import validate_extension_package
 from src.skills.loader import parse_skill_content, scan_skill_paths
 from src.skills.manager import skill_manager
@@ -27,23 +35,158 @@ router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
 _CATALOG_PATH = os.path.join(_DEFAULTS_DIR, "skill-catalog.json")
+_CATALOG_EXTENSION_ROOT = os.path.join(_DEFAULTS_DIR, "catalog-extensions")
 
 
 def load_catalog_items() -> dict[str, list[dict[str, Any]]]:
     """Load catalog JSON and normalize top-level collections."""
     path = os.path.normpath(_CATALOG_PATH)
     if not os.path.isfile(path):
-        return {"skills": [], "mcp_servers": []}
-    with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
+        payload: dict[str, Any] = {}
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
     return {
         "skills": payload.get("skills", []) if isinstance(payload.get("skills"), list) else [],
         "mcp_servers": payload.get("mcp_servers", []) if isinstance(payload.get("mcp_servers"), list) else [],
+        "extension_packages": _load_catalog_extension_packages(),
     }
 
 
 def _load_catalog() -> dict[str, list[dict[str, Any]]]:
     return load_catalog_items()
+
+
+def _catalog_extension_registry() -> ExtensionRegistry:
+    return ExtensionRegistry(
+        manifest_roots=[_CATALOG_EXTENSION_ROOT],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+
+
+def _runtime_extension_registry() -> ExtensionRegistry:
+    return ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+
+
+def _catalog_extension_records() -> list[ExtensionRecord]:
+    if not os.path.isdir(_CATALOG_EXTENSION_ROOT):
+        return []
+    return _catalog_extension_registry().snapshot().extensions
+
+
+def _contribution_types_for_extension(extension: ExtensionRecord) -> list[str]:
+    if extension.manifest is None:
+        return sorted({item.contribution_type for item in extension.contributions})
+    return sorted(extension.manifest.contributed_types())
+
+
+def _safe_version(value: str | None) -> Version | None:
+    if not value:
+        return None
+    try:
+        return Version(value)
+    except InvalidVersion:
+        return None
+
+
+def _extension_catalog_entry(
+    extension: ExtensionRecord,
+    *,
+    doctor_result: Any | None = None,
+    load_errors: list[Any] | None = None,
+) -> dict[str, Any]:
+    installed = _runtime_extension_registry().snapshot().get_extension(extension.id)
+    installed_version = (
+        installed.manifest.version
+        if installed is not None and installed.manifest is not None
+        else None
+    )
+    catalog_version = extension.manifest.version if extension.manifest is not None else None
+    update_available = False
+    if installed_version and catalog_version:
+        installed_parsed = _safe_version(installed_version)
+        catalog_parsed = _safe_version(catalog_version)
+        update_available = (
+            installed_parsed is not None
+            and catalog_parsed is not None
+            and catalog_parsed > installed_parsed
+        )
+
+    contribution_types = _contribution_types_for_extension(extension)
+    issues = [asdict(issue) for issue in getattr(doctor_result, "issues", [])] if doctor_result is not None else []
+    related_load_errors = [
+        {
+            "source": getattr(error, "source", ""),
+            "phase": getattr(error, "phase", ""),
+            "message": getattr(error, "message", ""),
+            "details": list(getattr(error, "details", []) or []),
+        }
+        for error in (load_errors or [])
+        if extension.root_path
+        and getattr(error, "source", None)
+        and (
+            str(getattr(error, "source", "")) == str(extension.manifest_path)
+            or (
+                os.path.commonpath([os.path.abspath(str(getattr(error, "source", ""))), os.path.abspath(extension.root_path)])
+                == os.path.abspath(extension.root_path)
+            )
+        )
+    ]
+    status = "ready" if not issues and not related_load_errors else "degraded"
+    return {
+        "name": extension.display_name,
+        "catalog_id": extension.id,
+        "type": "extension_pack",
+        "description": (
+            extension.manifest.summary
+            if extension.manifest is not None and extension.manifest.summary
+            else extension.manifest.description
+            if extension.manifest is not None and extension.manifest.description
+            else ""
+        ),
+        "category": extension.kind,
+        "requires_tools": [],
+        "installed": installed is not None,
+        "bundled": True,
+        "extension_id": extension.id,
+        "version": catalog_version,
+        "installed_version": installed_version,
+        "update_available": update_available,
+        "publisher": (
+            extension.manifest.publisher.name
+            if extension.manifest is not None
+            else ""
+        ),
+        "trust": extension.trust,
+        "contribution_types": contribution_types,
+        "kind": extension.kind,
+        "status": status,
+        "doctor_ok": status == "ready",
+        "issues": issues,
+        "load_errors": related_load_errors,
+    }
+
+
+def _load_catalog_extension_packages() -> list[dict[str, Any]]:
+    registry = _catalog_extension_registry()
+    snapshot = registry.snapshot()
+    doctor = doctor_snapshot(snapshot)
+    doctor_by_id = {result.extension_id: result for result in doctor.results}
+    return [
+        _extension_catalog_entry(
+            extension,
+            doctor_result=doctor_by_id.get(extension.id),
+            load_errors=snapshot.load_errors,
+        )
+        for extension in snapshot.extensions
+    ]
 
 
 def _skill_installed(name: str) -> bool:
@@ -106,6 +249,29 @@ def catalog_mcp_by_name() -> dict[str, dict[str, Any]]:
     }
 
 
+def catalog_extension_by_id() -> dict[str, dict[str, Any]]:
+    return {
+        str(item["catalog_id"]): item
+        for item in _load_catalog().get("extension_packages", [])
+        if isinstance(item, dict) and isinstance(item.get("catalog_id"), str)
+    }
+
+
+def _find_catalog_extension(identifier: str) -> dict[str, Any] | None:
+    candidate = identifier.strip()
+    if not candidate:
+        return None
+    by_id = catalog_extension_by_id()
+    if candidate in by_id:
+        return by_id[candidate]
+    lowered = candidate.casefold()
+    for item in by_id.values():
+        display_name = str(item.get("name") or "").strip()
+        if display_name and display_name.casefold() == lowered:
+            return item
+    return None
+
+
 def _slugify(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "-" for char in value).strip("-") or "connector"
 
@@ -116,6 +282,13 @@ def _catalog_mcp_extension_id(name: str) -> str:
 
 def _catalog_skill_extension_id(name: str) -> str:
     return f"seraph.catalog-skill-{_slugify(name)}"
+
+
+def _catalog_extension_source_path(extension_id: str) -> str | None:
+    for extension in _catalog_extension_records():
+        if extension.id == extension_id and extension.root_path:
+            return extension.root_path
+    return None
 
 
 def _write_catalog_skill_package(root: str, item: dict[str, Any], source_path: str) -> str:
@@ -210,6 +383,87 @@ def _validation_detail(report: Any) -> str:
 
 def install_catalog_item_by_name(name: str) -> dict[str, Any]:
     """Install a bundled skill or MCP server from the catalog."""
+    catalog_extension = _find_catalog_extension(name)
+    if catalog_extension is not None:
+        extension_id = str(catalog_extension.get("catalog_id") or name)
+        package_path = _catalog_extension_source_path(extension_id)
+        if not package_path:
+            return {
+                "ok": False,
+                "status": "missing_bundle",
+                "name": str(catalog_extension.get("name") or extension_id),
+                "type": "extension_pack",
+                "bundled": True,
+            }
+        installed = _runtime_extension_registry().snapshot().get_extension(extension_id)
+        try:
+            if installed is not None and installed.root_path and installed.source == "manifest":
+                catalog_version = _safe_version(str(catalog_extension.get("version") or ""))
+                installed_version = _safe_version(
+                    installed.manifest.version if installed.manifest is not None else None,
+                )
+                if (
+                    catalog_version is not None
+                    and installed_version is not None
+                    and catalog_version > installed_version
+                ):
+                    update_extension_path(package_path)
+                    return {
+                        "ok": True,
+                        "status": "updated",
+                        "name": str(catalog_extension.get("name") or extension_id),
+                        "type": "extension_pack",
+                        "extension_id": extension_id,
+                        "bundled": True,
+                    }
+                return {
+                    "ok": False,
+                    "status": "already_installed",
+                    "name": str(catalog_extension.get("name") or extension_id),
+                    "type": "extension_pack",
+                    "extension_id": extension_id,
+                    "bundled": True,
+                }
+            install_extension_path(package_path)
+            return {
+                "ok": True,
+                "status": "installed",
+                "name": str(catalog_extension.get("name") or extension_id),
+                "type": "extension_pack",
+                "extension_id": extension_id,
+                "bundled": True,
+            }
+        except FileExistsError:
+            return {
+                "ok": False,
+                "status": "already_installed",
+                "name": str(catalog_extension.get("name") or extension_id),
+                "type": "extension_pack",
+                "extension_id": extension_id,
+                "bundled": True,
+            }
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": "validation_failed",
+                "name": str(catalog_extension.get("name") or extension_id),
+                "type": "extension_pack",
+                "extension_id": extension_id,
+                "bundled": True,
+                "detail": str(exc),
+            }
+        except OSError as exc:
+            logger.warning("Failed to install catalog extension '%s'", name, exc_info=True)
+            return {
+                "ok": False,
+                "status": "install_failed",
+                "name": str(catalog_extension.get("name") or extension_id),
+                "type": "extension_pack",
+                "extension_id": extension_id,
+                "bundled": True,
+                "detail": str(exc),
+            }
+
     catalog_skill = catalog_skill_by_name().get(name)
     if catalog_skill is not None:
         if _skill_loaded(name):
@@ -390,6 +644,29 @@ def install_catalog_item_by_name(name: str) -> dict[str, Any]:
     }
 
 
+def _catalog_extension_lifecycle_action(catalog_extension: dict[str, Any]) -> tuple[str, str] | None:
+    extension_id = str(catalog_extension.get("catalog_id") or catalog_extension.get("name") or "")
+    if not extension_id:
+        return None
+    package_path = _catalog_extension_source_path(extension_id)
+    if not package_path:
+        return None
+    installed = _runtime_extension_registry().snapshot().get_extension(extension_id)
+    if installed is not None and installed.root_path and installed.source == "manifest":
+        catalog_version = _safe_version(str(catalog_extension.get("version") or ""))
+        installed_version = _safe_version(
+            installed.manifest.version if installed.manifest is not None else None,
+        )
+        if (
+            catalog_version is not None
+            and installed_version is not None
+            and catalog_version > installed_version
+        ):
+            return "update", package_path
+        return None
+    return "install", package_path
+
+
 @router.get("/catalog")
 async def get_catalog():
     """Return catalog items enriched with install status."""
@@ -418,12 +695,25 @@ async def get_catalog():
             "bundled": server.get("bundled", False),
         })
 
+    for extension in catalog.get("extension_packages", []):
+        items.append(dict(extension))
+
     return {"items": items}
 
 
 @router.post("/catalog/install/{name}", status_code=201)
 async def install_item(name: str):
     """Install a skill or MCP server from the catalog."""
+    catalog_extension = _find_catalog_extension(name)
+    if catalog_extension is not None:
+        lifecycle_action = _catalog_extension_lifecycle_action(catalog_extension)
+        if lifecycle_action is not None:
+            action, package_path = lifecycle_action
+            preview = validate_extension_path(package_path)
+            if preview.get("ok"):
+                from src.api.extensions import _require_extension_lifecycle_approval
+
+                await _require_extension_lifecycle_approval(action, preview)
     result = install_catalog_item_by_name(name)
     if result["ok"]:
         payload = {"status": result["status"], "name": name, "type": result["type"]}
@@ -431,11 +721,12 @@ async def install_item(name: str):
             payload["extension_id"] = result["extension_id"]
         return payload
     if result["status"] == "already_installed":
-        detail = (
-            f"Skill '{name}' is already installed"
-            if result["type"] == "skill"
-            else f"MCP server '{name}' is already installed"
-        )
+        if result["type"] == "skill":
+            detail = f"Skill '{name}' is already installed"
+        elif result["type"] == "mcp_server":
+            detail = f"MCP server '{name}' is already installed"
+        else:
+            detail = f"Extension package '{name}' is already installed"
         raise HTTPException(status_code=409, detail=detail)
     if result["status"] == "not_bundled":
         raise HTTPException(
@@ -443,10 +734,14 @@ async def install_item(name: str):
             detail=f"Skill '{name}' is not bundled and cannot be auto-installed",
         )
     if result["status"] == "missing_bundle":
-        raise HTTPException(
-            status_code=404,
-            detail=f"Bundled skill file for '{name}' not found",
+        missing_label = (
+            "skill file"
+            if result["type"] == "skill"
+            else "extension package"
+            if result["type"] == "extension_pack"
+            else "connector package"
         )
+        raise HTTPException(status_code=404, detail=f"Bundled {missing_label} for '{name}' not found")
     if result["status"] == "installed_file_invalid":
         raise HTTPException(
             status_code=422,

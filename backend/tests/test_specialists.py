@@ -27,7 +27,7 @@ class TestToolDomainMapping:
             "view_soul", "update_soul",
             "store_secret", "get_secret", "get_secret_ref", "list_secrets", "delete_secret",
             "create_goal", "update_goal", "get_goals", "get_goal_progress",
-            "web_search", "browse_webpage",
+            "web_search", "browse_webpage", "browser_session",
             "read_file", "write_file", "fill_template", "execute_code",
         }
         assert set(TOOL_DOMAINS.keys()) == expected_tools
@@ -176,7 +176,7 @@ class TestNamedFactories:
         create_web_researcher(tools_by_name)
         agent_kwargs = mock_agent_cls.call_args[1]
         tool_names = {t.name for t in agent_kwargs["tools"]}
-        assert tool_names == {"web_search", "browse_webpage"}
+        assert tool_names == {"web_search", "browse_webpage", "browser_session"}
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")

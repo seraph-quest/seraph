@@ -1,0 +1,12 @@
+name: github-operator
+description: Operator preset for the packaged GitHub MCP connector.
+mode: balanced
+include_mcp_servers:
+  - github
+capabilities:
+  - pull_requests
+  - issues
+  - repository_ops
+execution_boundaries:
+  - external_mcp
+enabled: true

@@ -1,0 +1,16 @@
+id: seraph.hermes-discord-relay
+version: 2026.3.23
+display_name: Hermes Discord Relay
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Discord messaging connector definition for future Seraph operator notifications and continuations.
+description: Packages Discord relay metadata and configuration so Seraph can stage guarded delivery into Discord as the messaging runtime matures.
+permissions:
+  network: true
+contributes:
+  messaging_connectors:
+    - connectors/messaging/discord.yaml

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import os
@@ -76,17 +77,19 @@ _STUDIO_TYPE_ORDER = {
     "starter_packs": 4,
     "toolset_presets": 5,
     "context_packs": 6,
-    "speech_profiles": 7,
-    "mcp_servers": 8,
-    "managed_connectors": 9,
-    "automation_triggers": 10,
-    "browser_providers": 11,
-    "messaging_connectors": 12,
-    "observer_definitions": 13,
-    "observer_connectors": 14,
-    "channel_adapters": 15,
-    "node_adapters": 16,
-    "workspace_adapters": 17,
+    "prompt_packs": 7,
+    "speech_profiles": 8,
+    "provider_presets": 9,
+    "mcp_servers": 10,
+    "managed_connectors": 11,
+    "automation_triggers": 12,
+    "browser_providers": 13,
+    "messaging_connectors": 14,
+    "observer_definitions": 15,
+    "observer_connectors": 16,
+    "channel_adapters": 17,
+    "node_adapters": 18,
+    "workspace_adapters": 19,
 }
 _CONNECTOR_CONTRIBUTION_TYPES = {
     "mcp_servers",
@@ -100,6 +103,7 @@ _CONNECTOR_CONTRIBUTION_TYPES = {
     "node_adapters",
     "workspace_adapters",
 }
+_REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
 _PLANNED_CONNECTOR_CONTRIBUTION_TYPES = {
     "automation_triggers",
     "browser_providers",
@@ -117,8 +121,10 @@ _PASSIVE_TYPED_CONTRIBUTION_FIELDS = {
         "execution_boundaries",
         "default_enabled",
     ),
+    "prompt_packs": ("name", "title", "description", "instructions"),
     "context_packs": ("name", "description", "instructions", "memory_tags", "profile_fields", "prompt_refs", "domains"),
     "speech_profiles": ("name", "description", "provider", "voice", "supports_tts", "supports_stt", "wake_word"),
+    "provider_presets": ("name", "label", "default_model", "notes"),
 }
 
 
@@ -333,6 +339,92 @@ def _contribution_config(
     if not isinstance(config_entry, dict):
         return {}
     return config_entry
+
+
+def _sensitive_config_field_keys(metadata: dict[str, Any]) -> set[str]:
+    config_fields = metadata.get("config_fields")
+    if not isinstance(config_fields, list):
+        return set()
+    keys: set[str] = set()
+    for field in config_fields:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("input") or "") != "password":
+            continue
+        key = field.get("key")
+        if isinstance(key, str) and key.strip():
+            keys.add(key)
+    return keys
+
+
+def _redact_config_entry(metadata: dict[str, Any], config_entry: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(config_entry, dict):
+        return {}
+    redacted = deepcopy(config_entry)
+    for key in _sensitive_config_field_keys(metadata):
+        value = redacted.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        redacted[key] = _REDACTED_CONFIG_SENTINEL
+    return redacted
+
+
+def _redact_extension_config(extension: ExtensionRecord, raw_config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw_config, dict):
+        return {}
+    redacted = deepcopy(raw_config)
+    for contribution in extension.contributions:
+        contribution_type = contribution.contribution_type
+        contribution_name = _contribution_name(contribution)
+        if contribution_type not in _CONNECTOR_CONTRIBUTION_TYPES or not contribution_name:
+            continue
+        type_config = redacted.get(contribution_type)
+        if not isinstance(type_config, dict):
+            continue
+        config_entry = type_config.get(contribution_name)
+        if not isinstance(config_entry, dict):
+            continue
+        type_config[contribution_name] = _redact_config_entry(contribution.metadata, config_entry)
+    return redacted
+
+
+def _preserve_secret_placeholders(
+    extension: ExtensionRecord,
+    *,
+    incoming_config: dict[str, Any],
+    existing_config: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(incoming_config)
+    for contribution in extension.contributions:
+        contribution_type = contribution.contribution_type
+        contribution_name = _contribution_name(contribution)
+        if contribution_type not in _CONNECTOR_CONTRIBUTION_TYPES or not contribution_name:
+            continue
+        sensitive_keys = _sensitive_config_field_keys(contribution.metadata)
+        if not sensitive_keys:
+            continue
+        type_config = merged.get(contribution_type)
+        if not isinstance(type_config, dict):
+            continue
+        contribution_config = type_config.get(contribution_name)
+        if not isinstance(contribution_config, dict):
+            continue
+        existing_type_config = existing_config.get(contribution_type)
+        existing_entry = (
+            existing_type_config.get(contribution_name)
+            if isinstance(existing_type_config, dict)
+            else None
+        )
+        for key in sensitive_keys:
+            if contribution_config.get(key) != _REDACTED_CONFIG_SENTINEL:
+                continue
+            if isinstance(existing_entry, dict) and key in existing_entry:
+                contribution_config[key] = existing_entry[key]
+            else:
+                contribution_config.pop(key, None)
+    return merged
 
 
 def _contribution_config_errors(
@@ -1721,7 +1813,7 @@ def _extension_payload(
             )
         ),
         "enabled": enabled,
-        "config": state_entry.get("config", {}),
+        "config": _redact_extension_config(extension, state_entry.get("config", {})),
         "connector_summary": connector_summary,
         "contributions": contributions,
         "studio_files": _studio_files(extension, indexes=indexes),
@@ -2519,7 +2611,14 @@ def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, 
     payload = _state_payload()
     extensions = payload.setdefault("extensions", {})
     entry = extensions.setdefault(extension_id, {})
-    entry["config"] = config
+    existing_config = entry.get("config")
+    if not isinstance(existing_config, dict):
+        existing_config = {}
+    entry["config"] = _preserve_secret_placeholders(
+        extension,
+        incoming_config=config,
+        existing_config=existing_config,
+    )
     _save_state(payload)
     return get_extension(extension_id)
 

@@ -649,6 +649,76 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
 
 
 @pytest.mark.asyncio
+async def test_scaffold_extension_package_creates_workspace_skill_pack(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:
+        response = await client.post(
+            "/api/extensions/scaffold",
+            json={
+                "package_name": "skill-lab",
+                "display_name": "Skill Lab",
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "scaffolded"
+    assert payload["path"].endswith("/extensions/skill-lab")
+    assert "manifest.yaml" in payload["created_files"]
+    assert "skills/skill-lab.md" in payload["created_files"]
+    assert payload["preview"]["extension_id"] == "seraph.skill-lab"
+    assert payload["preview"]["ok"] is True
+    assert Path(extension_runtime, "extensions", "skill-lab", "manifest.yaml").is_file()
+    assert log_event.await_count == 1
+    assert log_event.await_args.kwargs["outcome"] == "succeeded"
+    assert log_event.await_args.kwargs["details"]["status"] == "scaffold"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_extension_package_rejects_existing_workspace_package(client, extension_runtime):
+    existing_root = Path(extension_runtime, "extensions", "skill-lab")
+    existing_root.mkdir(parents=True)
+    (existing_root / "manifest.yaml").write_text("id: seraph.existing\n", encoding="utf-8")
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:
+        response = await client.post(
+            "/api/extensions/scaffold",
+            json={
+                "package_name": "skill-lab",
+                "display_name": "Skill Lab",
+            },
+        )
+
+    assert response.status_code == 409
+    assert "manifest already exists" in response.json()["detail"]
+    assert log_event.await_count == 1
+    assert log_event.await_args.kwargs["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_extension_package_quotes_display_name_for_frontmatter(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        response = await client.post(
+            "/api/extensions/scaffold",
+            json={
+                "package_name": "quoted-pack",
+                "display_name": "Quoted: Pack",
+                "contributions": ["skills", "workflows"],
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "scaffolded"
+    assert payload["preview"]["ok"] is True
+
+    skill_file = Path(extension_runtime, "extensions", "quoted-pack", "skills", "quoted-pack.md").read_text(encoding="utf-8")
+    workflow_file = Path(extension_runtime, "extensions", "quoted-pack", "workflows", "quoted-pack.md").read_text(encoding="utf-8")
+    assert 'description: "Quoted: Pack skill"' in skill_file
+    assert 'description: "Quoted: Pack workflow"' in workflow_file
+    assert "name: quoted-pack" in workflow_file
+
+
+@pytest.mark.asyncio
 async def test_validate_extension_reports_lifecycle_approval_for_boundary_only_toolset(client, tmp_path):
     package_dir = _write_toolset_boundary_extension(tmp_path, boundary="secret_read")
 
@@ -1321,6 +1391,14 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         AsyncMock(),
     ):
         install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        approval_detail = install_response.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve_response = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve_response.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
         assert install_response.status_code == 201
         installed = install_response.json()["extension"]
         assert installed["id"] == "seraph.wave2-pack"
@@ -1353,12 +1431,51 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         assert connectors["messaging_connectors"]["status"] == "requires_config"
         assert connectors["node_adapters"]["status"] == "requires_config"
 
+        invalid_secret_config = {
+            "messaging_connectors": {"telegram": {"bot_token": None}}
+        }
+        invalid_secret_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": invalid_secret_config},
+        )
+        assert invalid_secret_response.status_code == 409
+        invalid_secret_detail = invalid_secret_response.json()["detail"]
+        assert invalid_secret_detail["type"] == "approval_required"
+
+        approve_invalid_secret = await client.post(
+            f"/api/approvals/{invalid_secret_detail['approval_id']}/approve"
+        )
+        assert approve_invalid_secret.status_code == 200
+
+        invalid_secret_retry = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": invalid_secret_config},
+        )
+        assert invalid_secret_retry.status_code == 422
+        assert "missing required config field 'bot_token'" in invalid_secret_retry.json()["detail"]
+
         enable_before_config = await client.post(
             "/api/extensions/seraph.wave2-pack/connectors/enabled",
             json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},
         )
         assert enable_before_config.status_code == 422
         assert "requires valid configuration" in enable_before_config.json()["detail"]
+
+        configure_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    "browser_providers": {"browserbase": {"api_key": "secret"}},
+                    "messaging_connectors": {"telegram": {"bot_token": "secret"}},
+                    "automation_triggers": {"daily-brief": {"signing_secret": "secret"}},
+                    "node_adapters": {"companion": {"node_url": "https://nodes.example.test"}},
+                }
+            },
+        )
+        assert configure_response.status_code == 409
+        configure_approval_id = configure_response.json()["detail"]["approval_id"]
+        approve_response = await client.post(f"/api/approvals/{configure_approval_id}/approve")
+        assert approve_response.status_code == 200
 
         configure_response = await client.post(
             "/api/extensions/seraph.wave2-pack/configure",
@@ -1383,6 +1500,12 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         assert configured_connectors["messaging_connectors"]["config_keys"] == ["bot_token"]
         assert configured_connectors["automation_triggers"]["config_keys"] == ["signing_secret"]
         assert configured_connectors["node_adapters"]["config_keys"] == ["node_url"]
+
+        redacted_reconfigure = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": configured["config"]},
+        )
+        assert redacted_reconfigure.status_code == 200
 
         enable_browser = await client.post(
             "/api/extensions/seraph.wave2-pack/connectors/enabled",

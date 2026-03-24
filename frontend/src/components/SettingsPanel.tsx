@@ -56,12 +56,16 @@ function SkillRow({
 
 interface CatalogItem {
   name: string;
-  type: "skill" | "mcp_server";
+  catalog_id?: string;
+  type: "skill" | "mcp_server" | "extension_pack";
   description: string;
   category: string;
   requires_tools: string[];
   installed: boolean;
   bundled: boolean;
+  contribution_types?: string[];
+  update_available?: boolean;
+  status?: string;
 }
 
 function CatalogRow({
@@ -70,11 +74,14 @@ function CatalogRow({
   installing,
 }: {
   item: CatalogItem;
-  onInstall: (name: string) => void;
+  onInstall: (item: CatalogItem) => void;
   installing: string | null;
 }) {
   const statusColor = item.installed ? "bg-green-400" : "bg-retro-text/30";
-  const typeBadge = item.type === "skill" ? "skill" : "mcp";
+  const itemKey = item.catalog_id ?? item.name;
+  const typeBadge = item.type === "skill" ? "skill" : item.type === "mcp_server" ? "mcp" : "pack";
+  const actionable = item.type !== "extension_pack" || item.status === undefined || item.status === "ready";
+  const installLabel = item.installed && item.update_available ? "update" : "install";
 
   return (
     <div className="flex items-center gap-1 px-1 py-0.5 border-b border-retro-text/10 last:border-b-0">
@@ -89,17 +96,22 @@ function CatalogRow({
           {item.requires_tools.length > 0 && (
             <span> · needs: {item.requires_tools.join(", ")}</span>
           )}
+          {item.type === "extension_pack" && item.contribution_types?.length ? (
+            <span> · {item.contribution_types.join(", ")}</span>
+          ) : null}
         </div>
       </div>
-      {item.installed ? (
+      {item.installed && !item.update_available ? (
         <span className="text-[9px] text-green-400/60 px-0.5">installed</span>
+      ) : !actionable ? (
+        <span className="text-[9px] text-red-400/60 px-0.5">invalid</span>
       ) : (
         <button
-          onClick={() => onInstall(item.name)}
-          disabled={installing === item.name}
+          onClick={() => onInstall(item)}
+          disabled={installing === itemKey}
           className="text-[9px] text-retro-highlight hover:text-retro-text px-0.5 disabled:text-retro-text/20"
         >
-          {installing === item.name ? "..." : "install"}
+          {installing === itemKey ? "..." : installLabel}
         </button>
       )}
     </div>
@@ -479,10 +491,11 @@ export function SettingsPanel() {
     }
   };
 
-  const handleInstall = async (name: string) => {
-    setInstalling(name);
+  const handleInstall = async (item: CatalogItem) => {
+    const identifier = item.catalog_id ?? item.name;
+    setInstalling(identifier);
     try {
-      const res = await fetch(`${API_URL}/api/catalog/install/${name}`, { method: "POST" });
+      const res = await fetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, { method: "POST" });
       if (res.ok) {
         fetchCatalog();
         fetchSkills();
@@ -643,7 +656,7 @@ export function SettingsPanel() {
               <div className="border border-retro-text/10 rounded mb-1">
                 {catalogItems.map((item) => (
                   <CatalogRow
-                    key={item.name}
+                    key={item.catalog_id ?? `${item.type}:${item.name}`}
                     item={item}
                     onInstall={handleInstall}
                     installing={installing}

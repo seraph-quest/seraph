@@ -1431,6 +1431,29 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         assert connectors["messaging_connectors"]["status"] == "requires_config"
         assert connectors["node_adapters"]["status"] == "requires_config"
 
+        invalid_secret_config = {
+            "messaging_connectors": {"telegram": {"bot_token": None}}
+        }
+        invalid_secret_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": invalid_secret_config},
+        )
+        assert invalid_secret_response.status_code == 409
+        invalid_secret_detail = invalid_secret_response.json()["detail"]
+        assert invalid_secret_detail["type"] == "approval_required"
+
+        approve_invalid_secret = await client.post(
+            f"/api/approvals/{invalid_secret_detail['approval_id']}/approve"
+        )
+        assert approve_invalid_secret.status_code == 200
+
+        invalid_secret_retry = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": invalid_secret_config},
+        )
+        assert invalid_secret_retry.status_code == 422
+        assert "missing required config field 'bot_token'" in invalid_secret_retry.json()["detail"]
+
         enable_before_config = await client.post(
             "/api/extensions/seraph.wave2-pack/connectors/enabled",
             json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},
@@ -1477,6 +1500,12 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         assert configured_connectors["messaging_connectors"]["config_keys"] == ["bot_token"]
         assert configured_connectors["automation_triggers"]["config_keys"] == ["signing_secret"]
         assert configured_connectors["node_adapters"]["config_keys"] == ["node_url"]
+
+        redacted_reconfigure = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": configured["config"]},
+        )
+        assert redacted_reconfigure.status_code == 200
 
         enable_browser = await client.post(
             "/api/extensions/seraph.wave2-pack/connectors/enabled",

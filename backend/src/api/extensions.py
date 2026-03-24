@@ -184,13 +184,14 @@ def _configure_request_uses_new_secret_values(
             key = field.get("key")
             if not isinstance(key, str) or not key:
                 continue
+            if key not in incoming_config:
+                continue
             value = incoming_config.get(key)
-            if (
-                isinstance(value, str)
-                and value.strip()
-                and value != _REDACTED_CONFIG_SENTINEL
-            ):
+            if isinstance(value, str):
+                if not value.strip() or value == _REDACTED_CONFIG_SENTINEL:
+                    continue
                 return True
+            return True
     return False
 
 

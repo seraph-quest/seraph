@@ -238,6 +238,113 @@ def _entry_metric_count(items: list[dict[str, Any]], key: str) -> float:
     return total
 
 
+def _request_metadata_value(details: dict[str, Any], key: str) -> str | None:
+    value = details.get(key)
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if trimmed:
+            return trimmed
+    return None
+
+
+def _capability_family_for_runtime(
+    runtime_path: str | None,
+    source: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    normalized_path = str(runtime_path or "").strip().lower()
+    normalized_source = str(source or "").strip().lower()
+    metadata = metadata if isinstance(metadata, dict) else {}
+    selected_source = str(metadata.get("selected_source") or "").strip().lower()
+
+    if normalized_path in {"agent_generate", "chat_agent", "session_runtime", "rest_chat", "websocket_chat"}:
+        return "conversation"
+    if normalized_path in {
+        "onboarding_agent",
+        "session_title_generation",
+        "session_consolidation",
+        "context_window_summary",
+    } or normalized_path.startswith("session_") or normalized_path.startswith("context_window"):
+        return "memory"
+    if normalized_path in {"orchestrator_agent", "delegate_task"} or normalized_path.startswith("delegate") or normalized_path.startswith("specialist"):
+        return "delegation"
+    if normalized_path.startswith("workflow") or normalized_path.startswith("openprose") or normalized_path.startswith("lobster"):
+        return "workflow"
+    if normalized_path.startswith("browser") or normalized_source.startswith("browser") or selected_source in {"browser_provider", "browserbase"}:
+        return "browser"
+    if normalized_path.startswith("mcp_") or selected_source == "mcp":
+        return "integration"
+    if normalized_path.startswith("strategist") or normalized_path in {
+        "daily_briefing",
+        "evening_review",
+        "weekly_activity_review",
+        "activity_digest",
+    } or normalized_source in {"strategist_tick", "daily_briefing", "evening_review", "weekly_activity_review", "activity_digest"}:
+        return "guardian"
+    if normalized_path.startswith("automation") or normalized_source in {"webhook", "poll", "pubsub"}:
+        return "automation"
+    if normalized_path.startswith("speech") or normalized_source in {"speech", "voice"}:
+        return "speech"
+    if normalized_path.startswith("session_search"):
+        return "memory"
+    if normalized_path.endswith("_agent"):
+        return "conversation"
+    if normalized_source in {
+        "webhook",
+        "poll",
+        "pubsub",
+        "speech",
+        "voice",
+        "strategist_tick",
+        "daily_briefing",
+        "evening_review",
+        "weekly_activity_review",
+        "activity_digest",
+    }:
+        return _capability_family_for_runtime(normalized_path or normalized_source, normalized_source, metadata)
+    return "unattributed"
+
+
+def _aggregate_llm_breakdown(
+    llm_items: list[dict[str, Any]],
+    *,
+    metadata_key: str,
+    fallback: str,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in llm_items:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        bucket_key = metadata.get(metadata_key) if isinstance(metadata, dict) else None
+        if isinstance(bucket_key, str):
+            bucket_key = bucket_key.strip()
+        if not isinstance(bucket_key, str) or not bucket_key:
+            bucket_key = fallback
+        entry = buckets.setdefault(
+            bucket_key,
+            {
+                "key": bucket_key,
+                "calls": 0,
+                "cost_usd": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
+        )
+        entry["calls"] += 1
+        entry["cost_usd"] += float(item.get("cost_usd") or 0.0)
+        entry["input_tokens"] += int(item.get("prompt_tokens") or 0)
+        entry["output_tokens"] += int(item.get("completion_tokens") or 0)
+    return sorted(
+        [
+            {
+                **entry,
+                "cost_usd": round(float(entry["cost_usd"]), 6),
+            }
+            for entry in buckets.values()
+        ],
+        key=lambda entry: (-float(entry["cost_usd"]), -int(entry["calls"]), str(entry["key"])),
+    )
+
+
 def _slice_visible_groups(items: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int]:
     visible: list[dict[str, Any]] = []
     seen_groups: set[str] = set()
@@ -530,6 +637,38 @@ async def get_activity_ledger(
         })
 
     request_summaries: dict[str, str] = {}
+    request_metadata: dict[str, dict[str, Any]] = {}
+    for event in sorted(
+        audit_events,
+        key=lambda entry: _parse_iso(str(entry.get("created_at") or "")),
+    ):
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        request_id = details.get("request_id") if isinstance(details.get("request_id"), str) else None
+        if not request_id:
+            continue
+        metadata_entry = request_metadata.setdefault(request_id, {})
+        for key in (
+            "runtime_path",
+            "runtime_profile",
+            "selected_model",
+            "selected_profile",
+            "selected_source",
+            "required_task_class",
+            "max_budget_class",
+            "max_cost_tier",
+            "max_latency_tier",
+        ):
+            value = _request_metadata_value(details, key)
+            if value is not None:
+                metadata_entry[key] = value
+        required_policy_intents = details.get("required_policy_intents")
+        if isinstance(required_policy_intents, list) and required_policy_intents:
+            metadata_entry["required_policy_intents"] = [
+                str(intent)
+                for intent in required_policy_intents
+                if str(intent).strip()
+            ]
+
     for event in audit_events:
         details = event.get("details") if isinstance(event.get("details"), dict) else {}
         request_id = details.get("request_id") if isinstance(details.get("request_id"), str) else None
@@ -590,6 +729,13 @@ async def get_activity_ledger(
         title, summary = _llm_title_and_summary(call, session_titles)
         request_id = call.get("request_id") if isinstance(call.get("request_id"), str) else None
         related_summary = request_summaries.get(request_id or "")
+        routing_metadata = request_metadata.get(request_id or "", {})
+        runtime_path = _request_metadata_value(routing_metadata, "runtime_path")
+        capability_family = _capability_family_for_runtime(
+            runtime_path,
+            str(call.get("source") or "background"),
+            routing_metadata,
+        )
         items.append({
             "id": f"llm:{request_id or index}:{created_at}",
             "kind": "llm_call",
@@ -621,6 +767,15 @@ async def get_activity_ledger(
                 "total_tokens": int((call.get("tokens") or {}).get("total", 0)),
                 "actor": call.get("actor"),
                 "error": call.get("error"),
+                "runtime_path": runtime_path,
+                "runtime_profile": _request_metadata_value(routing_metadata, "runtime_profile"),
+                "selected_source": _request_metadata_value(routing_metadata, "selected_source"),
+                "max_budget_class": _request_metadata_value(routing_metadata, "max_budget_class"),
+                "required_task_class": _request_metadata_value(routing_metadata, "required_task_class"),
+                "max_cost_tier": _request_metadata_value(routing_metadata, "max_cost_tier"),
+                "max_latency_tier": _request_metadata_value(routing_metadata, "max_latency_tier"),
+                "required_policy_intents": routing_metadata.get("required_policy_intents", []),
+                "capability_family": capability_family,
             },
         })
 
@@ -670,6 +825,16 @@ async def get_activity_ledger(
         "autonomous_llm_calls": sum(
             1 for item in llm_items
             if item["kind"] == "llm_call" and item["source"] not in {"rest_chat", "websocket_chat"}
+        ),
+        "llm_cost_by_runtime_path": _aggregate_llm_breakdown(
+            llm_items,
+            metadata_key="runtime_path",
+            fallback="unattributed",
+        ),
+        "llm_cost_by_capability_family": _aggregate_llm_breakdown(
+            llm_items,
+            metadata_key="capability_family",
+            fallback="unattributed",
         ),
         "categories": {
             "llm": sum(1 for item in items if item["category"] == "llm"),

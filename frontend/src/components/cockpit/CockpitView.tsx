@@ -357,6 +357,87 @@ interface ExtensionToggleTargetInfo {
   name: string;
 }
 
+interface ExtensionPermissionSummary {
+  status: string;
+  ok: boolean;
+  required: Record<string, unknown>;
+  missing: Record<string, unknown>;
+  risk_level: string;
+}
+
+interface ExtensionApprovalProfile {
+  requires_runtime_approval: boolean;
+  runtime_behavior: string;
+  requires_lifecycle_approval: boolean;
+  lifecycle_boundaries: string[];
+  risk_level: string;
+}
+
+interface ExtensionContributionPermissionProfile {
+  status: string;
+  requires_network: boolean;
+  missing_network: boolean;
+  requires_approval: boolean;
+  approval_behavior: string;
+  missing_tools: string[];
+  missing_execution_boundaries: string[];
+}
+
+interface ExtensionContributionHealth {
+  state: string;
+  summary?: string | null;
+  ready?: boolean;
+  enabled?: boolean;
+  configured?: boolean;
+  connected?: boolean;
+  error?: string | null;
+}
+
+interface ExtensionContributionInfo {
+  type: string;
+  reference: string;
+  resolved_path?: string | null;
+  name?: string | null;
+  description?: string | null;
+  status?: string | null;
+  loaded: boolean;
+  enabled?: boolean | null;
+  configured?: boolean | null;
+  default_enabled?: boolean | null;
+  availability?: string | null;
+  source?: string | null;
+  platform?: string | null;
+  provider_kind?: string | null;
+  trigger_type?: string | null;
+  schedule?: string | null;
+  endpoint?: string | null;
+  topic?: string | null;
+  adapter_kind?: string | null;
+  transport?: string | null;
+  source_type?: string | null;
+  runtime_profile?: string | null;
+  surface_kind?: string | null;
+  preferred_panel?: string | null;
+  output_surface?: string | null;
+  effective_output_surface?: string | null;
+  health?: ExtensionContributionHealth | null;
+  permission_profile?: ExtensionContributionPermissionProfile | null;
+  config_fields: Array<Record<string, unknown>>;
+  config_keys: string[];
+  capabilities: string[];
+  delivery_modes: string[];
+  requires_network: boolean;
+  requires_daemon: boolean;
+  approval_behavior?: string | null;
+  requires_approval?: boolean;
+}
+
+interface ExtensionConnectorSummary {
+  total: number;
+  ready: number;
+  states: Record<string, number>;
+}
+
 interface ExtensionPackageInfo {
   id: string;
   display_name: string;
@@ -384,6 +465,10 @@ interface ExtensionPackageInfo {
   config_scope: string;
   enabled?: boolean | null;
   config: Record<string, unknown>;
+  permission_summary?: ExtensionPermissionSummary | null;
+  approval_profile?: ExtensionApprovalProfile | null;
+  connector_summary?: ExtensionConnectorSummary | null;
+  contributions: ExtensionContributionInfo[];
   studio_files: ExtensionStudioFileInfo[];
 }
 
@@ -514,6 +599,20 @@ interface ActivityLedgerSummary {
   output_tokens: number;
   user_triggered_llm_calls: number;
   autonomous_llm_calls: number;
+  llm_cost_by_runtime_path?: Array<{
+    key: string;
+    calls: number;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+  }>;
+  llm_cost_by_capability_family?: Array<{
+    key: string;
+    calls: number;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+  }>;
   categories: Record<string, number>;
 }
 
@@ -570,6 +669,31 @@ interface ActivityLedgerGroup {
   children: ActivityLedgerGroupChild[];
 }
 
+interface ImportedCapabilityFamilySummary {
+  type: string;
+  label: string;
+  total: number;
+  installed: number;
+  ready: number;
+  attention: number;
+  approval: number;
+  packages: string[];
+  entries: Array<{
+    packageId: string;
+    packageLabel: string;
+    contribution: ExtensionContributionInfo;
+  }>;
+}
+
+interface ExtensionGovernanceSummary {
+  packageId: string;
+  label: string;
+  riskLevel: string;
+  status: string;
+  detail: string;
+  packageInfo: ExtensionPackageInfo;
+}
+
 type ToolPolicyMode = "safe" | "balanced" | "full";
 type McpPolicyMode = "disabled" | "approval" | "full";
 type ApprovalMode = "off" | "high_risk";
@@ -617,6 +741,59 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   const detail = typeof action.detail === "string" ? action.detail : null;
   const target = (typeof action.target === "string" ? action.target : null) ?? name ?? mode ?? detail ?? "";
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
+}
+
+const IMPORTED_CAPABILITY_FAMILY_DEFS = [
+  { type: "toolset_presets", label: "toolsets" },
+  { type: "context_packs", label: "context packs" },
+  { type: "browser_providers", label: "browser providers" },
+  { type: "automation_triggers", label: "automation triggers" },
+  { type: "messaging_connectors", label: "messaging" },
+  { type: "speech_profiles", label: "speech" },
+  { type: "node_adapters", label: "node adapters" },
+  { type: "canvas_outputs", label: "canvas outputs" },
+  { type: "workflow_runtimes", label: "workflow runtimes" },
+  { type: "channel_adapters", label: "channel adapters" },
+  { type: "observer_definitions", label: "observer sources" },
+] as const;
+
+function activitySpendBucketLabel(value: string): string {
+  return value.replace(/[_-]+/g, " ");
+}
+
+function summarizeMissingPermissions(summary: ExtensionPermissionSummary | null | undefined): string[] {
+  if (!summary) return [];
+  const parts: string[] = [];
+  if (summary.missing.network === true) {
+    parts.push("network");
+  }
+  if (Array.isArray(summary.missing.tools) && summary.missing.tools.length) {
+    parts.push(`${summary.missing.tools.length} tool${summary.missing.tools.length === 1 ? "" : "s"}`);
+  }
+  if (
+    Array.isArray(summary.missing.execution_boundaries)
+    && summary.missing.execution_boundaries.length
+  ) {
+    parts.push(`${summary.missing.execution_boundaries.length} ${summary.missing.execution_boundaries.length === 1 ? "boundary" : "boundaries"}`);
+  }
+  return parts;
+}
+
+function isContributionActive(contribution: ExtensionContributionInfo): boolean {
+  const status = (contribution.status ?? contribution.health?.state ?? "").trim().toLowerCase();
+  if (contribution.loaded === false) return false;
+  if (contribution.enabled === false) return false;
+  if (contribution.health?.enabled === false) return false;
+  if (contribution.configured === false || contribution.health?.configured === false) return false;
+  return ![
+    "planned",
+    "requires_config",
+    "invalid",
+    "invalid_config",
+    "overridden",
+    "disabled",
+    "unloaded",
+  ].includes(status);
 }
 
 function readActionList(value: unknown): CapabilityAction[] {
@@ -721,6 +898,146 @@ function normalizeExtensionToggleTarget(value: Record<string, unknown>): Extensi
   };
 }
 
+function normalizeExtensionPermissionSummary(value: unknown): ExtensionPermissionSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : "unknown",
+    ok: Boolean(record.ok),
+    required: record.required && typeof record.required === "object" && !Array.isArray(record.required)
+      ? record.required as Record<string, unknown>
+      : {},
+    missing: record.missing && typeof record.missing === "object" && !Array.isArray(record.missing)
+      ? record.missing as Record<string, unknown>
+      : {},
+    risk_level: typeof record.risk_level === "string" ? record.risk_level : "low",
+  };
+}
+
+function normalizeExtensionApprovalProfile(value: unknown): ExtensionApprovalProfile | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    requires_runtime_approval: Boolean(record.requires_runtime_approval),
+    runtime_behavior: typeof record.runtime_behavior === "string" ? record.runtime_behavior : "never",
+    requires_lifecycle_approval: Boolean(record.requires_lifecycle_approval),
+    lifecycle_boundaries: Array.isArray(record.lifecycle_boundaries)
+      ? record.lifecycle_boundaries.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    risk_level: typeof record.risk_level === "string" ? record.risk_level : "low",
+  };
+}
+
+function normalizeContributionPermissionProfile(value: unknown): ExtensionContributionPermissionProfile | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : "unknown",
+    requires_network: Boolean(record.requires_network),
+    missing_network: Boolean(record.missing_network),
+    requires_approval: Boolean(record.requires_approval),
+    approval_behavior: typeof record.approval_behavior === "string" ? record.approval_behavior : "never",
+    missing_tools: Array.isArray(record.missing_tools)
+      ? record.missing_tools.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    missing_execution_boundaries: Array.isArray(record.missing_execution_boundaries)
+      ? record.missing_execution_boundaries.filter((entry): entry is string => typeof entry === "string")
+      : [],
+  };
+}
+
+function normalizeContributionHealth(value: unknown): ExtensionContributionHealth | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    state: typeof record.state === "string" ? record.state : "unknown",
+    summary: typeof record.summary === "string" ? record.summary : null,
+    ready: typeof record.ready === "boolean" ? record.ready : undefined,
+    enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
+    configured: typeof record.configured === "boolean" ? record.configured : undefined,
+    connected: typeof record.connected === "boolean" ? record.connected : undefined,
+    error: typeof record.error === "string" ? record.error : null,
+  };
+}
+
+function normalizeExtensionConnectorSummary(value: unknown): ExtensionConnectorSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    total: typeof record.total === "number" ? record.total : 0,
+    ready: typeof record.ready === "number" ? record.ready : 0,
+    states: record.states && typeof record.states === "object" && !Array.isArray(record.states)
+      ? Object.fromEntries(
+        Object.entries(record.states as Record<string, unknown>).flatMap(([key, entry]) => (
+          typeof entry === "number" ? [[key, entry]] : []
+        )),
+      )
+      : {},
+  };
+}
+
+function normalizeExtensionContribution(value: Record<string, unknown>): ExtensionContributionInfo | null {
+  if (typeof value.type !== "string" || typeof value.reference !== "string") {
+    return null;
+  }
+  const readString = (field: string) => (typeof value[field] === "string" ? value[field] as string : null);
+  const readStringList = (field: string) => (
+    Array.isArray(value[field]) ? value[field].filter((entry): entry is string => typeof entry === "string") : []
+  );
+  return {
+    type: value.type,
+    reference: value.reference,
+    resolved_path: readString("resolved_path"),
+    name: readString("name"),
+    description: readString("description"),
+    status: readString("status"),
+    loaded: typeof value.loaded === "boolean" ? value.loaded : true,
+    enabled: typeof value.enabled === "boolean" ? value.enabled : null,
+    configured: typeof value.configured === "boolean" ? value.configured : null,
+    default_enabled: typeof value.default_enabled === "boolean" ? value.default_enabled : null,
+    availability: readString("availability"),
+    source: readString("source"),
+    platform: readString("platform"),
+    provider_kind: readString("provider_kind"),
+    trigger_type: readString("trigger_type"),
+    schedule: readString("schedule"),
+    endpoint: readString("endpoint"),
+    topic: readString("topic"),
+    adapter_kind: readString("adapter_kind"),
+    transport: readString("transport"),
+    source_type: readString("source_type"),
+    runtime_profile: readString("runtime_profile"),
+    surface_kind: readString("surface_kind"),
+    preferred_panel: readString("preferred_panel"),
+    output_surface: readString("output_surface"),
+    effective_output_surface: readString("effective_output_surface"),
+    health: normalizeContributionHealth(value.health),
+    permission_profile: normalizeContributionPermissionProfile(value.permission_profile),
+    config_fields: Array.isArray(value.config_fields)
+      ? value.config_fields.flatMap((entry) => (
+        entry && typeof entry === "object" && !Array.isArray(entry) ? [entry as Record<string, unknown>] : []
+      ))
+      : [],
+    config_keys: readStringList("config_keys"),
+    capabilities: readStringList("capabilities"),
+    delivery_modes: readStringList("delivery_modes"),
+    requires_network: Boolean(value.requires_network),
+    requires_daemon: Boolean(value.requires_daemon),
+    approval_behavior: readString("approval_behavior"),
+    requires_approval: typeof value.requires_approval === "boolean" ? value.requires_approval : undefined,
+  };
+}
+
 function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPackageInfo | null {
   if (
     typeof value.id !== "string"
@@ -758,6 +1075,13 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
     ? value.toggle_targets.flatMap((entry) => (
       entry && typeof entry === "object" && !Array.isArray(entry)
         ? [normalizeExtensionToggleTarget(entry as Record<string, unknown>)].filter(Boolean) as ExtensionToggleTargetInfo[]
+        : []
+    ))
+    : [];
+  const contributions = Array.isArray(value.contributions)
+    ? value.contributions.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionContribution(entry as Record<string, unknown>)].filter(Boolean) as ExtensionContributionInfo[]
         : []
     ))
     : [];
@@ -816,6 +1140,10 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
       value.config && typeof value.config === "object" && !Array.isArray(value.config)
         ? value.config as Record<string, unknown>
         : {},
+    permission_summary: normalizeExtensionPermissionSummary(value.permission_summary),
+    approval_profile: normalizeExtensionApprovalProfile(value.approval_profile),
+    connector_summary: normalizeExtensionConnectorSummary(value.connector_summary),
+    contributions,
     studio_files: studioFiles,
   };
 }
@@ -967,6 +1295,10 @@ function buildExtensionManifestEntity(extension: ExtensionPackageInfo): Operator
       config_scope: extension.config_scope,
       enabled: extension.enabled ?? null,
       config: extension.config,
+      permission_summary: extension.permission_summary ?? null,
+      approval_profile: extension.approval_profile ?? null,
+      connector_summary: extension.connector_summary ?? null,
+      contributions: extension.contributions,
     },
   };
 }
@@ -1412,6 +1744,12 @@ function activityRowMeta(value: ActivityLedgerEntry): string {
   }
   const parts: string[] = [activityStatusLabel(value)];
   if (value.thread_label) parts.push(value.thread_label);
+  if (typeof value.metadata?.capability_family === "string" && value.metadata.capability_family.trim()) {
+    parts.push(activitySpendBucketLabel(String(value.metadata.capability_family)));
+  }
+  if (typeof value.metadata?.runtime_path === "string" && value.metadata.runtime_path.trim()) {
+    parts.push(String(value.metadata.runtime_path));
+  }
   if (value.model) parts.push(_modelLabelForRow(value.model));
   if (value.provider) parts.push(value.provider);
   const duration = formatDuration(value.duration_ms);
@@ -1438,6 +1776,14 @@ function activityRoutingSummary(value: ActivityLedgerEntry): string {
 
 function activityLeadDetail(value: ActivityLedgerEntry): string | null {
   if (value.kind === "routing") return activityRoutingSummary(value);
+  if (value.kind === "llm_call") {
+    return [
+      typeof value.metadata?.runtime_path === "string" ? `runtime ${String(value.metadata.runtime_path)}` : null,
+      typeof value.metadata?.selected_source === "string" ? `target ${String(value.metadata.selected_source)}` : null,
+      typeof value.metadata?.max_budget_class === "string" ? `budget ${String(value.metadata.max_budget_class)}` : null,
+      typeof value.metadata?.required_task_class === "string" ? `task ${String(value.metadata.required_task_class)}` : null,
+    ].filter(Boolean).join(" · ") || null;
+  }
   if (value.kind === "extension" && typeof value.metadata?.error === "string" && value.metadata.error.trim()) {
     return value.metadata.error;
   }
@@ -1445,6 +1791,17 @@ function activityLeadDetail(value: ActivityLedgerEntry): string | null {
 }
 
 function activityChildMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "llm_call") {
+    const baseMeta = activityRowMeta(value);
+    const llmMeta = [
+      Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
+        ? `intents ${value.metadata.required_policy_intents.join(", ")}`
+        : null,
+      typeof value.metadata?.max_cost_tier === "string" ? `cost ${String(value.metadata.max_cost_tier)}` : null,
+      typeof value.metadata?.max_latency_tier === "string" ? `latency ${String(value.metadata.max_latency_tier)}` : null,
+    ].filter(Boolean).join(" · ");
+    return [baseMeta, llmMeta].filter(Boolean).join(" · ");
+  }
   if (value.kind !== "routing") return activityRowMeta(value);
   return [
     Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
@@ -1620,6 +1977,24 @@ function canOpenLedgerThread(
 
 function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSummary {
   const llmItems = items.filter((item) => item.kind === "llm_call");
+  const normalizedBucketKey = (value: unknown, fallback: string) => {
+    if (typeof value !== "string") return fallback;
+    const normalized = value.trim();
+    return normalized || fallback;
+  };
+  const bucketBy = (field: "runtime_path" | "capability_family", fallback: string) => {
+    const buckets = new Map<string, { key: string; calls: number; cost_usd: number; input_tokens: number; output_tokens: number }>();
+    llmItems.forEach((item) => {
+      const key = normalizedBucketKey(item.metadata?.[field], fallback);
+      const current = buckets.get(key) ?? { key, calls: 0, cost_usd: 0, input_tokens: 0, output_tokens: 0 };
+      current.calls += 1;
+      current.cost_usd += item.cost_usd ?? 0;
+      current.input_tokens += item.prompt_tokens ?? 0;
+      current.output_tokens += item.completion_tokens ?? 0;
+      buckets.set(key, current);
+    });
+    return Array.from(buckets.values()).sort((left, right) => right.cost_usd - left.cost_usd || right.calls - left.calls);
+  };
   return {
     window_hours: 24,
     started_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
@@ -1635,6 +2010,8 @@ function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSumm
     output_tokens: llmItems.reduce((sum, item) => sum + (item.completion_tokens ?? 0), 0),
     user_triggered_llm_calls: llmItems.filter((item) => ["rest_chat", "websocket_chat"].includes(item.source)).length,
     autonomous_llm_calls: llmItems.filter((item) => !["rest_chat", "websocket_chat"].includes(item.source)).length,
+    llm_cost_by_runtime_path: bucketBy("runtime_path", "unattributed"),
+    llm_cost_by_capability_family: bucketBy("capability_family", "unattributed"),
     categories: {
       llm: items.filter((item) => item.category === "llm").length,
       workflow: items.filter((item) => item.category === "workflow").length,
@@ -1825,6 +2202,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
+  const activityLedgerScopeRef = useRef<string>("");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -2056,6 +2434,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } else {
       setExtensionPackages([]);
     }
+    const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
       && activityLedgerResult.payload
@@ -2077,24 +2456,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
           : derivedSummary,
       );
-    } else {
-      const fallbackTimelineResult = await fetchJson(
-        `${API_URL}/api/operator/timeline?limit=16${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`,
-      );
-      if (fallbackTimelineResult.ok && fallbackTimelineResult.payload && typeof fallbackTimelineResult.payload === "object") {
-        const items = Array.isArray((fallbackTimelineResult.payload as { items?: unknown }).items)
-          ? ((fallbackTimelineResult.payload as { items?: unknown }).items as unknown[]).flatMap((item) => (
-            item && typeof item === "object" && !Array.isArray(item)
-              ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
-              : []
-          ))
-          : [];
-        setActivityLedger(items);
-        setActivitySummary(deriveActivitySummary(items));
-      } else {
-        setActivityLedger([]);
-        setActivitySummary(deriveActivitySummary([]));
-      }
+      activityLedgerScopeRef.current = activityLedgerScope;
+    } else if (activityLedgerScopeRef.current !== activityLedgerScope) {
+      setActivityLedger([]);
+      setActivitySummary(deriveActivitySummary([]));
+      activityLedgerScopeRef.current = activityLedgerScope;
     }
     if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
       const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
@@ -2376,6 +2742,110 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const extensionPackagesById = useMemo(
     () => new Map(extensionPackages.map((item) => [item.id, item])),
     [extensionPackages],
+  );
+  const importedCapabilityFamilies = useMemo<ImportedCapabilityFamilySummary[]>(
+    () => IMPORTED_CAPABILITY_FAMILY_DEFS.map((definition) => {
+      const entries = extensionPackages.flatMap((extensionPackage) => (
+        extensionPackage.contributions
+          .filter((contribution) => contribution.type === definition.type)
+          .map((contribution) => ({
+            packageId: extensionPackage.id,
+            packageLabel: extensionPackage.display_name,
+            contribution,
+          }))
+      ));
+      const packages = Array.from(new Set(entries.map((entry) => entry.packageLabel)));
+      const activeEntries = entries.filter((entry) => isContributionActive(entry.contribution));
+      const ready = activeEntries.filter((entry) => (
+        entry.contribution.health?.ready
+        || ["ready", "active"].includes(entry.contribution.status ?? "")
+      )).length;
+      const attention = entries.filter((entry) => {
+        const status = entry.contribution.status ?? entry.contribution.health?.state ?? "";
+        return [
+          "degraded",
+          "invalid",
+          "invalid_config",
+          "requires_config",
+          "planned",
+          "overridden",
+        ].includes(status)
+          || entry.contribution.permission_profile?.status === "missing_permissions";
+      }).length;
+      const approval = entries.filter((entry) => (
+        entry.contribution.permission_profile?.requires_approval
+        || entry.contribution.approval_behavior === "always"
+      )).length;
+      return {
+        type: definition.type,
+        label: definition.label,
+        total: activeEntries.length,
+        installed: entries.length,
+        ready,
+        attention,
+        approval,
+        packages,
+        entries,
+      };
+    }).filter((entry) => entry.installed > 0),
+    [extensionPackages],
+  );
+  const extensionGovernanceQueue = useMemo<ExtensionGovernanceSummary[]>(
+    () => extensionPackages
+      .flatMap((extensionPackage) => {
+        const details: string[] = [];
+        const missingPermissions = summarizeMissingPermissions(extensionPackage.permission_summary);
+        if (missingPermissions.length > 0) {
+          details.push(`missing ${missingPermissions.join(", ")}`);
+        }
+        if (extensionPackage.approval_profile?.requires_lifecycle_approval) {
+          const boundaries = extensionPackage.approval_profile.lifecycle_boundaries.length
+            ? extensionPackage.approval_profile.lifecycle_boundaries.join(", ")
+            : extensionPackage.approval_profile.runtime_behavior;
+          details.push(`lifecycle approval ${boundaries}`);
+        }
+        if (extensionPackage.approval_profile?.requires_runtime_approval) {
+          details.push(`runtime approval ${extensionPackage.approval_profile.runtime_behavior}`);
+        }
+        if (extensionPackage.connector_summary?.states) {
+          const degradedStates = Object.entries(extensionPackage.connector_summary.states)
+            .filter(([state, count]) => state !== "ready" && count > 0)
+            .map(([state, count]) => `${count} ${state}`);
+          if (degradedStates.length > 0) {
+            details.push(`connectors ${degradedStates.join(", ")}`);
+          }
+        }
+        if (extensionPackage.status === "degraded" && extensionPackage.issues[0]?.message) {
+          details.push(extensionPackage.issues[0].message);
+        }
+        if (details.length === 0) return [];
+        return [{
+          packageId: extensionPackage.id,
+          label: extensionPackage.display_name,
+          riskLevel: extensionPackage.permission_summary?.risk_level ?? extensionPackage.approval_profile?.risk_level ?? "low",
+          status: extensionPackage.status,
+          detail: details.join(" · "),
+          packageInfo: extensionPackage,
+        }];
+      })
+      .sort((left, right) => {
+        const severity = (value: ExtensionGovernanceSummary) => {
+          if (value.status === "degraded") return 0;
+          if (value.riskLevel === "high") return 1;
+          if (value.detail.includes("missing")) return 2;
+          return 3;
+        };
+        return severity(left) - severity(right) || left.label.localeCompare(right.label);
+      }),
+    [extensionPackages],
+  );
+  const activitySpendByCapabilityFamily = useMemo(
+    () => (activitySummary?.llm_cost_by_capability_family ?? []).slice(0, 3),
+    [activitySummary],
+  );
+  const activitySpendByRuntimePath = useMemo(
+    () => (activitySummary?.llm_cost_by_runtime_path ?? []).slice(0, 3),
+    [activitySummary],
   );
 
   const matchPackageFile = useCallback(
@@ -5102,6 +5572,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </span>
                   ) : null}
                 </div>
+                {activitySpendByCapabilityFamily.length > 0 ? (
+                  <div className="cockpit-ledger-summary">
+                    {activitySpendByCapabilityFamily.map((bucket) => (
+                      <span key={`family:${bucket.key}`} className="cockpit-ledger-badge">
+                        {activitySpendBucketLabel(bucket.key)} {formatUsd(bucket.cost_usd) ?? "$0.0000"} · {bucket.calls}x
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {activitySpendByRuntimePath.length > 0 ? (
+                  <div className="cockpit-ledger-summary">
+                    {activitySpendByRuntimePath.map((bucket) => (
+                      <span key={`runtime:${bucket.key}`} className="cockpit-ledger-badge">
+                        {bucket.key} {formatUsd(bucket.cost_usd) ?? "$0.0000"}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="cockpit-ledger-filter-row">
                   {ACTIVITY_LEDGER_FILTERS.map((filter) => (
                     <button
@@ -5796,6 +6284,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       {readyStarterPacks.length}/{starterPacks.length} ready
                     </div>
                   </div>
+                  <div>
+                    <div className="cockpit-key">extensions</div>
+                    <div className="cockpit-value">
+                      {extensionPackages.length} loaded · {extensionGovernanceQueue.length} governed
+                    </div>
+                  </div>
+                  <div>
+                    <div className="cockpit-key">imported reach</div>
+                    <div className="cockpit-value">
+                      {importedCapabilityFamilies.length} families · {importedCapabilityFamilies.reduce((sum, item) => sum + item.total, 0)} active / {importedCapabilityFamilies.reduce((sum, item) => sum + item.installed, 0)} installed
+                    </div>
+                  </div>
                 </div>
                 <div className="cockpit-sublist">
                   <div className="cockpit-operator-section">
@@ -5835,6 +6335,102 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-sublist-item">
                         Search commands, install missing capabilities, and run starter packs from one place.
                       </div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">imported capability reach</span>
+                      <span className="cockpit-operator-link">{importedCapabilityFamilies.length} families</span>
+                    </div>
+                    {importedCapabilityFamilies.map((family) => (
+                      <div key={family.type} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: "extension_manifest",
+                                name: family.label,
+                                meta: `${family.total} entries · ${family.packages.length} packages`,
+                                summary: family.entries[0]?.contribution.description ?? `${family.label} imported through the extension platform.`,
+                                details: {
+                                  family: family.type,
+                                  ready: family.ready,
+                                  attention: family.attention,
+                                  approval: family.approval,
+                                  packages: family.packages,
+                                  entries: family.entries.map((entry) => ({
+                                    package_id: entry.packageId,
+                                    package_label: entry.packageLabel,
+                                    type: entry.contribution.type,
+                                    name: entry.contribution.name,
+                                    status: entry.contribution.status,
+                                    health: entry.contribution.health,
+                                    permission_profile: entry.contribution.permission_profile,
+                                  })),
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{family.label}</div>
+                          <div className="cockpit-operator-note">
+                            {family.total} active
+                            {family.ready ? ` · ${family.ready} ready` : ""}
+                            {family.installed > family.total ? ` · ${family.installed - family.total} inactive` : ""}
+                            {family.attention ? ` · ${family.attention} attention` : ""}
+                            {family.approval ? ` · ${family.approval} approval` : ""}
+                            {family.packages.length ? ` · ${family.packages.join(", ")}` : ""}
+                          </div>
+                        </button>
+                      </div>
+                    ))}
+                    {importedCapabilityFamilies.length === 0 && (
+                      <div className="cockpit-empty">No packaged reach or imported capability families are active yet.</div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">extension boundaries</span>
+                      <span className="cockpit-operator-link">{extensionGovernanceQueue.length} requiring attention</span>
+                    </div>
+                    {extensionGovernanceQueue.map((item) => (
+                      <div key={item.packageId} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: buildExtensionManifestEntity(item.packageInfo),
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{item.label}</div>
+                          <div className="cockpit-operator-note">
+                            {item.riskLevel} risk · {item.detail}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => {
+                              setStudioSelectedId(`extension:${item.packageId}`);
+                              setStudioOpen(true);
+                            }}
+                          >
+                            inspect
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {extensionGovernanceQueue.length === 0 && (
+                      <div className="cockpit-empty">No extension approval, permission, or connector issues in the current workspace.</div>
                     )}
                   </div>
 

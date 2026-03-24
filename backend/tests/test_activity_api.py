@@ -134,6 +134,24 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
     assert payload["summary"]["user_triggered_llm_calls"] == 1
     assert payload["summary"]["categories"]["workflow"] == 1
     assert payload["summary"]["categories"]["approval"] == 1
+    assert payload["summary"]["llm_cost_by_runtime_path"] == [
+        {
+            "key": "chat_agent",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.0123),
+            "input_tokens": 1000,
+            "output_tokens": 250,
+        }
+    ]
+    assert payload["summary"]["llm_cost_by_capability_family"] == [
+        {
+            "key": "conversation",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.0123),
+            "input_tokens": 1000,
+            "output_tokens": 250,
+        }
+    ]
 
     llm_item = next(item for item in items if item["kind"] == "llm_call")
     assert llm_item["thread_label"] == "Research thread"
@@ -141,6 +159,9 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
     assert llm_item["prompt_tokens"] == 1000
     assert llm_item["completion_tokens"] == 250
     assert llm_item["cost_usd"] == pytest.approx(0.0123)
+    assert llm_item["metadata"]["runtime_path"] == "chat_agent"
+    assert llm_item["metadata"]["capability_family"] == "conversation"
+    assert llm_item["metadata"]["max_budget_class"] is None
 
     workflow_item = next(item for item in items if item["kind"] == "workflow_run")
     assert workflow_item["continue_message"] == "Continue from this workflow run."
@@ -417,6 +438,199 @@ async def test_activity_ledger_groups_request_scoped_tool_and_llm_events(client)
     assert group_keys["llm_call"] == "request:agent-ws:session-1:123"
     assert group_keys["tool_call"] == "request:agent-ws:session-1:123"
     assert group_keys["tool_result"] == "request:agent-ws:session-1:123"
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_family(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-routing-chat-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Initial routing candidate",
+                        "created_at": _iso_offset(minutes=-7),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:chat",
+                            "runtime_path": "session_runtime",
+                            "selected_source": "primary",
+                            "max_budget_class": "low",
+                        },
+                    },
+                    {
+                        "id": "audit-routing-chat-2",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Selected claude-sonnet-4 for websocket chat",
+                        "created_at": _iso_offset(minutes=-6),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:chat",
+                            "runtime_path": "chat_agent",
+                            "selected_source": "primary",
+                            "max_budget_class": "medium",
+                        },
+                    },
+                    {
+                        "id": "audit-routing-browser-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Selected grok-4.1-fast for browser tool",
+                        "created_at": _iso_offset(minutes=-5),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:browser",
+                            "runtime_path": "browser_agent",
+                            "selected_source": "browser_provider",
+                            "max_budget_class": "high",
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": _iso_offset(minutes=-6, seconds=10).replace("Z", "+00:00"),
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 500, "output": 150, "total": 650},
+                    "cost_usd": 0.01,
+                    "latency_ms": 610.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:chat",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+                {
+                    "timestamp": _iso_offset(minutes=-5, seconds=10).replace("Z", "+00:00"),
+                    "status": "success",
+                    "model": "openrouter/x-ai/grok-4.1-fast",
+                    "provider": "openrouter",
+                    "tokens": {"input": 250, "output": 60, "total": 310},
+                    "cost_usd": 0.025,
+                    "latency_ms": 880.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:browser",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    summary = payload["summary"]
+    llm_items = [item for item in payload["items"] if item["kind"] == "llm_call"]
+    by_request = {
+        item["metadata"]["request_id"]: item["metadata"]
+        for item in llm_items
+    }
+
+    assert summary["llm_cost_by_runtime_path"] == [
+        {
+            "key": "browser_agent",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.025),
+            "input_tokens": 250,
+            "output_tokens": 60,
+        },
+        {
+            "key": "chat_agent",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.01),
+            "input_tokens": 500,
+            "output_tokens": 150,
+        },
+    ]
+    assert summary["llm_cost_by_capability_family"] == [
+        {
+            "key": "browser",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.025),
+            "input_tokens": 250,
+            "output_tokens": 60,
+        },
+        {
+            "key": "conversation",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.01),
+            "input_tokens": 500,
+            "output_tokens": 150,
+        },
+    ]
+    assert by_request["agent-ws:session-1:chat"]["capability_family"] == "conversation"
+    assert by_request["agent-ws:session-1:chat"]["max_budget_class"] == "medium"
+    assert by_request["agent-ws:session-1:browser"]["capability_family"] == "browser"
+    assert by_request["agent-ws:session-1:browser"]["selected_source"] == "browser_provider"
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_marks_missing_routing_metadata_as_unattributed(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": _iso_offset(minutes=-6).replace("Z", "+00:00"),
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 120, "output": 30, "total": 150},
+                    "cost_usd": 0.0042,
+                    "latency_ms": 420.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:unknown",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                }
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    llm_item = next(item for item in payload["items"] if item["kind"] == "llm_call")
+
+    assert llm_item["metadata"]["runtime_path"] is None
+    assert llm_item["metadata"]["capability_family"] == "unattributed"
+    assert payload["summary"]["llm_cost_by_capability_family"] == [
+        {
+            "key": "unattributed",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.0042),
+            "input_tokens": 120,
+            "output_tokens": 30,
+        }
+    ]
 
 
 @pytest.mark.asyncio

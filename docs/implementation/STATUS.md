@@ -24,6 +24,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The guardian workspace is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
 - [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, retry-from-step recovery, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
+- [x] The capability import program is now complete through all five waves, including Hermes-style runtime primitives, packaged reach surfaces, selective OpenClaw imports, operator-surface visibility, and deterministic proof for the imported capability families.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -33,20 +34,18 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment.
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program.
 - [x] this file owns the fastest shipped snapshot on `develop`.
-- [x] `docs/implementation/00-master-roadmap.md` owns the live 10-PR queue.
+- [x] `docs/implementation/00-master-roadmap.md` owns the live ordered slice queue.
 - [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, and `docs/implementation/10-superiority-delivery.md` are the implementation-side mirrors of the research evidence/benchmark/program docs.
 - [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `10` are meta mirrors, not extra workstreams.
 
 ## Current Focus On `develop`
 
-- [x] The latest delivery batch is now complete for the current roadmap horizon: capability bootstrap v3, extension studio v1, workflow branching/resume v1, cockpit density v4, provider explainability/budgets v3, execution hardening v9, native-channel expansion v5, world-model fusion v9, guardian-learning policy v9, and guardian behavioral evals v9 all landed together.
-- [x] The roadmap has now refreshed to a new next-10 batch rather than leaving the just-shipped batch as future work.
-- [x] Guardian Intelligence remains central inside the current batch, but it is no longer the only active workstream.
-- [x] Runtime Reliability now has a strong baseline on `develop`, but it is not fully complete.
-- [x] The repo-wide 10-PR horizon is tracked in `docs/implementation/00-master-roadmap.md`.
-- [x] The next strategic focus is now the extension-platform transition beginning with `extension-model-terminology-v1`, `extension-manifest-schema-v1`, and `extension-registry-and-loader-v1`, because Seraph now needs one coherent extension architecture for skills, workflows, starter packs, runbooks, and MCP connectors before deeper marketplace or managed-connector work can land cleanly.
-- [x] `capability-pack-autoinstall-and-bootstrap-v3`, `extension-authoring-and-validation-studio-v1`, `workflow-step-branching-and-resume-v1`, `cockpit-density-and-live-operator-views-v4`, `provider-policy-explainability-and-budgets-v3`, `execution-safety-hardening-v9`, `native-channel-expansion-v5`, `world-model-memory-fusion-v9`, `guardian-learning-policy-v9`, and `guardian-behavioral-evals-v9` are now represented in the shipped state this branch is preparing to merge.
-- [x] The published 10-PR horizon should be refreshed whenever landed PR count from that queue is divisible by 5.
+- [x] The extension-platform transition and five-wave capability import program are now represented in the shipped state on `develop`.
+- [x] Seraph now ships Hermes-style runtime primitives (`execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`) plus packaged browser, messaging, automation, node, canvas, and workflow-runtime surfaces through the extension architecture.
+- [x] The workspace now makes imported capability reach, extension governance, and runtime-path/capability-family spend attribution visible inside the operator surface instead of leaving the new breadth opaque.
+- [x] Runtime Reliability now has deterministic proof for activity-ledger attribution and imported capability surfaces in addition to the earlier guardian/runtime contracts.
+- [x] The repo-wide roadmap is tracked in `docs/implementation/00-master-roadmap.md` as one ordered slice queue, not a rotating 10-PR horizon.
+- [x] The next strategic focus is now post-import hardening: deeper execution isolation, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
 
 ## Current Target Shape
 
@@ -57,6 +56,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] first browser reload and reconnect continuity for the active thread, with explicit fresh-thread semantics and background-activity badges
 - [x] explicit cross-surface thread model that links approvals, workflow runs, notifications, queued interventions, and recent interventions back to browser threads
 - [x] activity-ledger routing summaries, native thread metadata, and LLM spend attribution that make both live continuation state and day-scale budget use easier to inspect
+- [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel-routing surfaces that stay visible and governed through the same extension lifecycle
 - [x] typed longitudinal memory and explicit guardian state
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
 - [x] non-browser presence through a first coherent desktop surface, notifications, native reach, and action-card continuation payloads
@@ -92,9 +92,11 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] browser automation foundation
 - [x] filesystem, guardian-record, goals, vault, and web-search tool foundations
 - [x] MCP server management and runtime-managed server configuration
+- [x] execute-code, clarify, todo, session-search, and first-class delegation runtime primitives for deeper Hermes-style operator work
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
 - [x] starter packs that bundle default skills and workflows into directly activatable operator-facing packages
+- [x] skill registry flows, optional skill packs, packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel-routing-managed reach through the extension platform
 - [x] forced approval wrapping for high-risk and approval-mode MCP workflow paths
 - [x] first operator workflow-control layer with workflow list/toggle/reload plus draft-to-cockpit support
 - [x] workflow loader/runtime metadata now derive from actual step tools and reject underdeclared workflow definitions
@@ -118,6 +120,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with explicit degrade-open audit semantics when no compliant target exists
 - [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, guardian-record file, vault repository, filesystem, browser, sandbox, and web search flows
 - [x] deterministic runtime eval harness for fallback, routing, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, workflow composition behavior, storage, observer, and integration seam contracts, including vault repository, the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
+- [x] deterministic runtime eval coverage for activity-ledger attribution and imported capability surfaces, so runtime-path spend, packaged reach visibility, and extension-governance surfaces stay pinned on `develop`
 
 ### Guardian intelligence and proactive behavior
 
@@ -150,6 +153,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] the cockpit now also includes a searchable capability palette plus a denser operator terminal for recommendations, repair actions, installable items, reusable runbooks, capability preflight, live operator-feed status, and saved runbook macros
 - [x] the workspace now includes a separate Activity Ledger window that links workflow runs, approvals, queued continuity, recent interventions, surfaced failures, tool steps, and attributed LLM calls back to one browser thread model
 - [x] activity ledger rows now group request-scoped work into compact parent rows with emoji/icon scanability, child tool or routing rows, and completion summaries so operators can skim what Seraph did without opening raw trace panes
+- [x] the operator terminal now also surfaces imported capability reach and extension-governance state, while the activity ledger now shows top runtime-path and capability-family spend buckets for attributed LLM use
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
 - [x] larger more readable settings and priorities overlays now support the guardian workspace directly
 - [x] capability state, workflow history, the activity ledger, and live status are now visible in the current cockpit surface
@@ -168,9 +172,9 @@ When this file is updated on an open feature branch, it reflects the intended po
 ### Runtime and execution
 
 - [ ] richer provider selection policy beyond the shipped weighted scoring, required capability safeguards, tier guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
-- [ ] broader eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, salience/confidence delivery, strategist-learning continuity, consolidation, proactive, tool/MCP guardrail, delegated workflow, and workflow-composition behavioral contracts
-- [ ] stronger execution isolation and privileged-path hardening beyond the first workflow/tool boundary pass
-- [ ] richer capability installation, recommendation, and recovery beyond the new starter-pack repair guidance, catalog-install, runbook preflight, bounded bootstrap flow, and first cockpit-native extension studio
+- [ ] broader live-provider and long-running integration eval coverage beyond the shipped deterministic REST, WebSocket, observer, delivery, activity-ledger, imported-capability, tool/MCP guardrail, delegated workflow, and workflow-composition contracts
+- [ ] stronger execution isolation and privileged-path hardening beyond the current workflow/tool, browser-mode, and connector-boundary pass
+- [ ] richer capability installation, recommendation, and recovery beyond the shipped catalog/install, runbook preflight, bounded bootstrap flow, extension studio, and imported-reach governance surfaces
 
 ### Guardian intelligence
 
@@ -180,8 +184,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Interface and presence
 
-- [ ] richer cockpit density and broader keyboard/operator control beyond the first dedicated workflow-run shell
-- [ ] richer cross-surface continuity and broader non-browser presence beyond the new continuity snapshot, action-card continuation model, and first actionable desktop-shell/browser-native control layer
+- [ ] richer cockpit density and broader keyboard/operator control beyond the current workflow, activity-ledger, imported-reach, and governance surfaces
+- [ ] richer cross-surface continuity and broader non-browser presence beyond the current desktop presence shell, channel routing, messaging connectors, browser mode matrix, automation triggers, node adapters, and canvas outputs
 - [ ] stronger explicit threading between ambient observation, workflow runs, native notifications, approvals, and deliberate interaction beyond the new shared thread metadata and continue/open-thread layer
 
 ### Workflow and leverage
@@ -193,8 +197,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 - [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are versioned capability distribution, deeper extension-studio ergonomics, visual workflow branch debugging, deeper execution hardening, stronger intervention learning beyond the new world-model plus timing/suppression/thread layer, and broader native reach.
-- [ ] The next major step is to deepen the new cockpit shell into a denser, more legible, more stateful guardian workspace without losing the existing trust and memory foundations.
+- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser workflow/operator debugging, stronger intervention learning beyond the current world-model plus timing/suppression/thread layer, and production-grade hardening for the broadened reach surface.
+- [ ] The next major step is to harden and deepen the imported capability surface without losing the existing guardian trust and memory foundations.
 
 ## Workstream View
 

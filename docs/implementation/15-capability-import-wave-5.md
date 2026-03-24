@@ -205,9 +205,9 @@ legacy operator seams that no longer need to exist.
 
 ### Review 5
 
-- reviewer: `Darwin`
+- reviewer: `Helmholtz`
 - scope:
-  - full Wave 5 diff after the 34-36 follow-up fixes
+  - full Wave 5 diff after the 34-36 follow-up fixes and final validation pass
 - findings:
   - no findings
 - resolution:

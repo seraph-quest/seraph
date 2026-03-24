@@ -2127,7 +2127,7 @@ function CockpitWorkspaceWindow({
   minWidth?: number;
   minHeight?: number;
   onClose?: () => void;
-  children: ReactNode;
+  children: ReactNode | ((state: { isFront: boolean }) => ReactNode);
 }) {
   const resolvedMinWidth = PANEL_MIN_SIZES[panelId]?.width ?? minWidth ?? 240;
   const resolvedMinHeight = PANEL_MIN_SIZES[panelId]?.height ?? minHeight ?? 160;
@@ -2168,7 +2168,9 @@ function CockpitWorkspaceWindow({
         </div>
       </div>
       {showHint && hint ? <div className="cockpit-window-hint">{hint}</div> : null}
-      <div className="cockpit-window-body">{children}</div>
+      <div className="cockpit-window-body">
+        {typeof children === "function" ? children({ isFront }) : children}
+      </div>
     </section>
   );
 }
@@ -6035,7 +6037,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 minHeight={256}
                 onClose={() => closeWindowPane("presence_pane")}
               >
-                <SeraphPresencePane snapshot={seraphPresenceSnapshot} />
+                {({ isFront }) => <SeraphPresencePane snapshot={seraphPresenceSnapshot} isSelected={isFront} />}
               </CockpitWorkspaceWindow>
             )}
 

@@ -15,6 +15,8 @@ interface SeraphProps {
   detail?: string;
   telemetry?: SeraphTelemetryEntry[];
   statusLabel?: string;
+  dividerColor?: string;
+  edgeColor?: string;
 }
 
 const Seraph: React.FC<SeraphProps> = ({
@@ -22,6 +24,8 @@ const Seraph: React.FC<SeraphProps> = ({
   detail,
   telemetry,
   statusLabel,
+  dividerColor,
+  edgeColor,
 }) => {
   const [frame, setFrame] = useState(0);
 
@@ -231,15 +235,22 @@ const Seraph: React.FC<SeraphProps> = ({
 
   return (
     <div
-      className="seraph-surface relative flex h-full w-full min-h-0 flex-col overflow-hidden"
+      className="relative flex h-full w-full min-h-0 flex-col overflow-hidden bg-[#05090d] text-[#dbefff]"
       style={{
         boxShadow: `inset 0 1px 0 rgba(255,255,255,0.02), 0 0 24px ${glow}`,
       }}
     >
-      <div className="seraph-stage scanline relative flex min-h-0 flex-1 items-center justify-center overflow-hidden px-3 pb-3 pt-3">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-20"
+        style={{
+          boxShadow: `inset 1px 0 0 ${edgeColor ?? "rgba(141,226,255,0.12)"}, inset -1px 0 0 ${edgeColor ?? "rgba(141,226,255,0.12)"}, inset 0 -1px 0 ${edgeColor ?? "rgba(141,226,255,0.12)"}`,
+        }}
+      />
+      <div className="scanline relative flex min-h-0 flex-1 items-center justify-center overflow-hidden px-3 pb-3 pt-3">
         <div className="absolute inset-0 opacity-30 pointer-events-none" style={{
           backgroundImage:
-            'linear-gradient(var(--seraph-grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--seraph-grid-line) 1px, transparent 1px)',
+            'linear-gradient(rgba(141,226,255,0.018) 1px, transparent 1px), linear-gradient(90deg, rgba(141,226,255,0.018) 1px, transparent 1px)',
           backgroundSize: '28px 28px',
         }} />
         <div
@@ -263,7 +274,10 @@ const Seraph: React.FC<SeraphProps> = ({
         </div>
       </div>
 
-      <div className="seraph-footer px-4 py-2.5 backdrop-blur-xl">
+      <div
+        className="border-t bg-[linear-gradient(180deg,rgba(7,19,29,0.9),rgba(6,16,25,0.97))] px-4 py-2.5 backdrop-blur-xl"
+        style={{ borderColor: dividerColor ?? 'rgba(141,226,255,0.12)' }}
+      >
         <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
           <div className="min-w-0 flex-1">
             <div className={`text-[18px] font-bold uppercase tracking-[-0.04em] glow-text ${colorMap[state]}`}>
@@ -275,21 +289,21 @@ const Seraph: React.FC<SeraphProps> = ({
                   key={i}
                   className="h-1 w-3 rounded-full transition-all duration-300"
                   style={{
-                    background: i < (frame % 10) ? barColor : 'var(--seraph-empty-bar)',
+                    background: i < (frame % 10) ? barColor : 'rgba(255,255,255,0.05)',
                     boxShadow: i < (frame % 10) ? `0 0 8px ${barColor}` : 'none',
                   }}
                 />
               ))}
             </div>
-            <div className="seraph-detail mt-1.5 max-w-[420px] text-[10px] leading-5">{displayDetail}</div>
+            <div className="mt-1.5 max-w-[420px] text-[10px] leading-5 text-[#7a98ad]">{displayDetail}</div>
           </div>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
             {displayTelemetry.map((entry) => (
-              <div key={entry.label} className="seraph-telemetry min-w-[88px] border-l pl-3">
-                <div className="seraph-telemetry-label text-[8px] uppercase tracking-[0.22em]">{entry.label}</div>
-                <div className="seraph-telemetry-value mt-0.5 text-[13px] font-bold tracking-[-0.03em]">{entry.value}</div>
-                <div className="seraph-telemetry-hint text-[8px] uppercase tracking-[0.1em]">{entry.hint ?? 'live'}</div>
+              <div key={entry.label} className="min-w-[88px] border-l border-[#1f4358] pl-3">
+                <div className="text-[8px] uppercase tracking-[0.22em] text-[#55758a]">{entry.label}</div>
+                <div className="mt-0.5 text-[13px] font-bold tracking-[-0.03em] text-[#e3f4ff]">{entry.value}</div>
+                <div className="text-[8px] uppercase tracking-[0.1em] text-[#6d8ba0]">{entry.hint ?? 'live'}</div>
               </div>
             ))}
           </div>

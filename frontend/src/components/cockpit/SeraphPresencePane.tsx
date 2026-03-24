@@ -9,6 +9,7 @@ import {
 
 interface SeraphPresencePaneProps {
   snapshot: SeraphPresenceSnapshot;
+  isSelected?: boolean;
 }
 
 function toSeraphState(state: SeraphPresenceState): SeraphState {
@@ -39,7 +40,7 @@ function queueLabel(snapshot: SeraphPresenceSnapshot): string {
   return total > 0 ? total.toString().padStart(2, "0") : "CLEAR";
 }
 
-export function SeraphPresencePane({ snapshot }: SeraphPresencePaneProps) {
+export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPresencePaneProps) {
   const descriptor = useMemo(() => deriveSeraphPresenceState(snapshot), [snapshot]);
   const telemetry = useMemo<SeraphTelemetryEntry[]>(
     () => [
@@ -69,6 +70,8 @@ export function SeraphPresencePane({ snapshot }: SeraphPresencePaneProps) {
         detail={descriptor.detail}
         telemetry={telemetry}
         statusLabel={descriptor.label.toUpperCase()}
+        dividerColor={isSelected ? "rgba(141,226,255,0.2)" : "rgba(141,226,255,0.12)"}
+        edgeColor={isSelected ? "rgba(141,226,255,0.2)" : "rgba(141,226,255,0.12)"}
       />
     </section>
   );

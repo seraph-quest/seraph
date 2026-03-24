@@ -127,6 +127,8 @@ body {
 }
 
 .seraph-surface {
+  --app-glass-bg: var(--seraph-core-bg);
+  --app-glass-border: rgba(255, 255, 255, 0.04);
   background: var(--seraph-shell-bg);
   color: var(--seraph-shell-text);
 }
@@ -324,6 +326,8 @@ body {
   --seraph-telemetry-value: #e3f4ff;
   --seraph-telemetry-hint: #6d8ba0;
   --seraph-empty-bar: rgba(255, 255, 255, 0.05);
+  --seraph-core-bg: rgba(14, 20, 28, 0.88);
+  --seraph-core-inner-ring: rgba(255, 255, 255, 0.05);
   --cockpit-tone-bg: rgba(7, 20, 31, 0.74);
   --cockpit-tone-border-soft: rgba(141, 226, 255, 0.12);
   --cockpit-tone-border: rgba(141, 226, 255, 0.18);
@@ -492,18 +496,20 @@ body {
   --cockpit-chip-text: #476274;
   --cockpit-composer-bg: linear-gradient(180deg, rgba(244, 248, 251, 0), rgba(233, 240, 245, 0.94) 22%, rgba(227, 236, 243, 1) 100%);
   --cockpit-send-text: #f8fcff;
-  --seraph-shell-bg: linear-gradient(180deg, rgba(248, 251, 253, 0.98), rgba(241, 246, 250, 0.99));
-  --seraph-shell-text: #173245;
-  --seraph-stage-bg: #0a1016;
-  --seraph-grid-line: rgba(131, 162, 181, 0.08);
-  --seraph-footer-bg: linear-gradient(180deg, rgba(243, 248, 251, 0.98), rgba(233, 240, 245, 0.96));
-  --seraph-footer-border: rgba(41, 96, 126, 0.18);
-  --seraph-detail-text: #5b7486;
-  --seraph-telemetry-border: rgba(41, 96, 126, 0.22);
-  --seraph-telemetry-label: #5f7788;
-  --seraph-telemetry-value: #173245;
-  --seraph-telemetry-hint: #6e8698;
-  --seraph-empty-bar: rgba(93, 118, 136, 0.16);
+  --seraph-shell-bg: linear-gradient(180deg, rgba(5, 9, 13, 0.98), rgba(5, 9, 13, 0.995));
+  --seraph-shell-text: #dbefff;
+  --seraph-stage-bg: #05090d;
+  --seraph-grid-line: rgba(141, 226, 255, 0.018);
+  --seraph-footer-bg: linear-gradient(180deg, rgba(7, 19, 29, 0.9), rgba(6, 16, 25, 0.97));
+  --seraph-footer-border: #173547;
+  --seraph-detail-text: #7a98ad;
+  --seraph-telemetry-border: #1f4358;
+  --seraph-telemetry-label: #55758a;
+  --seraph-telemetry-value: #e3f4ff;
+  --seraph-telemetry-hint: #6d8ba0;
+  --seraph-empty-bar: rgba(255, 255, 255, 0.05);
+  --seraph-core-bg: rgba(14, 20, 28, 0.88);
+  --seraph-core-inner-ring: rgba(255, 255, 255, 0.05);
   --cockpit-tone-bg: rgba(234, 241, 246, 0.92);
   --cockpit-tone-border-soft: rgba(31, 116, 162, 0.12);
   --cockpit-tone-border: rgba(31, 116, 162, 0.18);
@@ -1855,6 +1861,7 @@ body {
 .cockpit-message-body {
   font-size: 12px;
   line-height: 1.6;
+  color: var(--cockpit-text);
 }
 
 .cockpit-response-body {
@@ -2355,20 +2362,19 @@ body {
 
 .cockpit-row,
 .cockpit-message {
-  border: 1px solid rgba(141, 226, 255, 0.08);
+  border: 1px solid var(--cockpit-border);
   border-radius: 0;
   padding: 8px;
-  background: rgba(10, 26, 40, 0.34);
+  background: var(--cockpit-soft-button-bg);
+  color: var(--cockpit-text);
 }
 
 .cockpit-message--pending,
 .cockpit-pending-response {
-  border: 1px solid rgba(141, 226, 255, 0.18);
+  border: 1px solid var(--cockpit-state-selected-border);
   border-radius: 0;
   padding: 8px;
-  background:
-    linear-gradient(180deg, rgba(13, 33, 52, 0.52), rgba(13, 33, 52, 0.38)),
-    radial-gradient(circle at top right, rgba(141, 226, 255, 0.12), transparent 48%);
+  background: var(--cockpit-panel-response-bg);
 }
 
 .cockpit-pending-copy {
@@ -2424,10 +2430,10 @@ body {
 }
 
 .cockpit-feedback-button {
-  border: 1px solid rgba(141, 226, 255, 0.14);
+  border: 1px solid var(--cockpit-border);
   border-radius: 0;
-  background: rgba(8, 22, 33, 0.78);
-  color: var(--cockpit-text);
+  background: var(--cockpit-soft-button-bg);
+  color: var(--cockpit-soft-button-text);
   padding: 6px 8px;
   font: inherit;
   font-size: 10px;
@@ -2438,7 +2444,8 @@ body {
 
 .cockpit-feedback-button:hover {
   border-color: var(--cockpit-state-selected-border);
-  background: var(--cockpit-state-selected-fill);
+  background: var(--cockpit-soft-button-hover-bg);
+  color: var(--cockpit-text);
 }
 
 .cockpit-operator-section {
@@ -2479,11 +2486,11 @@ body {
 }
 
 .cockpit-operator-details--button {
-  border: 1px solid rgba(141, 226, 255, 0.08);
+  border: 1px solid var(--cockpit-border);
   border-radius: 0;
   padding: 8px 10px;
-  background: rgba(10, 27, 41, 0.42);
-  color: inherit;
+  background: var(--cockpit-soft-button-bg);
+  color: var(--cockpit-text);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -2491,7 +2498,7 @@ body {
 
 .cockpit-operator-details--button:hover {
   border-color: var(--cockpit-state-selected-border);
-  background: rgba(17, 47, 72, 0.62);
+  background: var(--cockpit-soft-button-hover-bg);
 }
 
 .cockpit-operator-note {
@@ -2582,16 +2589,16 @@ body {
   grid-template-columns: 120px minmax(0, 1fr);
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid rgba(141, 226, 255, 0.08);
+  border: 1px solid var(--cockpit-border);
   border-radius: 0;
-  background: rgba(13, 33, 52, 0.3);
+  background: var(--cockpit-soft-button-bg);
 }
 
 .cockpit-inspector-detail {
-  border: 1px solid rgba(141, 226, 255, 0.08);
+  border: 1px solid var(--cockpit-border);
   border-radius: 0;
   padding: 10px 12px;
-  background: rgba(13, 33, 52, 0.38);
+  background: var(--cockpit-soft-button-bg);
 }
 
 .cockpit-chip-row {

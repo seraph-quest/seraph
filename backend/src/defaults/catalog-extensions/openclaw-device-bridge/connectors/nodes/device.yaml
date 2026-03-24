@@ -1,0 +1,12 @@
+name: openclaw-device
+description: Device adapter for staged hardware and companion-bridge reach.
+adapter_kind: device
+enabled: false
+capabilities:
+  - capture
+  - notify
+config_fields:
+  - key: node_url
+    label: Node URL
+    input: url
+    required: true

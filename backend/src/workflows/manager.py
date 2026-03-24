@@ -73,6 +73,71 @@ def _summarize_workflow_result(workflow: Workflow, step_results: dict[str, dict[
     return "\n".join(lines)
 
 
+def _build_canvas_output(
+    workflow: Workflow,
+    *,
+    result_text: str,
+    step_records: list[dict[str, Any]],
+    artifact_paths: list[str],
+) -> dict[str, Any] | None:
+    if not workflow.output_surface:
+        return None
+    step_items = [
+        f"{step['id']} · {step['tool']} · {step['status']}"
+        + (f" · {step['result_summary']}" if step.get("result_summary") else "")
+        for step in step_records
+    ]
+    configured_sections = workflow.output_surface_sections or ["Summary", "Steps"]
+    sections: list[dict[str, Any]] = []
+    for label in configured_sections:
+        normalized = label.strip().casefold()
+        if normalized == "summary":
+            items = [result_text]
+        elif normalized == "steps":
+            items = step_items
+        elif normalized == "artifacts":
+            items = list(artifact_paths)
+        else:
+            items = [result_text]
+        if items:
+            sections.append({"label": label, "items": items})
+    if artifact_paths and not any(section["label"].strip().casefold() == "artifacts" for section in sections):
+        sections.append({"label": "Artifacts", "items": list(artifact_paths)})
+    return {
+        "surface": workflow.output_surface,
+        "title": workflow.output_surface_title or workflow.name,
+        "summary": result_text,
+        "section_count": len(sections),
+        "sections": sections,
+    }
+
+
+def _redact_canvas_output(canvas_output: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(canvas_output, dict):
+        return None
+    redacted_sections: list[dict[str, Any]] = []
+    raw_sections = canvas_output.get("sections")
+    if isinstance(raw_sections, list):
+        for section in raw_sections:
+            if not isinstance(section, dict):
+                continue
+            items = section.get("items")
+            item_count = len(items) if isinstance(items, list) else 0
+            redacted_sections.append(
+                {
+                    "label": str(section.get("label") or ""),
+                    "item_count": item_count,
+                }
+            )
+    return {
+        "surface": str(canvas_output.get("surface") or ""),
+        "title": str(canvas_output.get("title") or ""),
+        "summary": "workflow content redacted",
+        "section_count": int(canvas_output.get("section_count") or len(redacted_sections)),
+        "sections": redacted_sections,
+    }
+
+
 def _collect_artifact_paths(value: Any) -> list[str]:
     paths: list[str] = []
 
@@ -226,6 +291,12 @@ class WorkflowTool(Tool):
             result_text = str(rendered)
         else:
             result_text = _summarize_workflow_result(self.workflow, context["steps"])
+        canvas_output = _build_canvas_output(
+            self.workflow,
+            result_text=result_text,
+            step_records=step_records,
+            artifact_paths=artifact_paths,
+        )
 
         status = "degraded" if continued_error_steps else "succeeded"
         summary = f"{self.name} {status} ({len(self.workflow.steps)} steps)"
@@ -255,6 +326,9 @@ class WorkflowTool(Tool):
                 "artifact_paths": artifact_paths,
                 "continued_error_steps": continued_error_steps,
                 "failed_step_ids": continued_error_steps,
+                "runtime_profile": self.workflow.runtime_profile,
+                "output_surface": self.workflow.output_surface,
+                "canvas_output": _redact_canvas_output(canvas_output),
                 "content_redacted": True,
             },
         )
@@ -329,6 +403,38 @@ class WorkflowManager:
 
     def _reload_from_registry(self) -> None:
         snapshot = self._snapshot()
+        runtime_defaults_by_name: dict[str, str] = {}
+        canvas_metadata_by_name: dict[str, dict[str, Any]] = {}
+        for contribution in snapshot.list_contributions("workflow_runtimes"):
+            if isinstance(contribution.metadata.get("registry_conflict"), dict):
+                continue
+            name = contribution.metadata.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            default_output_surface = contribution.metadata.get("default_output_surface")
+            if isinstance(default_output_surface, str) and default_output_surface.strip():
+                runtime_defaults_by_name[name.strip()] = default_output_surface.strip()
+        for contribution in snapshot.list_contributions("canvas_outputs"):
+            if isinstance(contribution.metadata.get("registry_conflict"), dict):
+                continue
+            name = contribution.metadata.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            raw_sections = contribution.metadata.get("sections")
+            raw_artifact_types = contribution.metadata.get("artifact_types")
+            canvas_metadata_by_name[name.strip()] = {
+                "title": str(contribution.metadata.get("title") or ""),
+                "sections": [
+                    str(item).strip()
+                    for item in raw_sections
+                    if isinstance(item, str) and item.strip()
+                ] if isinstance(raw_sections, list) else [],
+                "artifact_types": [
+                    str(item).strip()
+                    for item in raw_artifact_types
+                    if isinstance(item, str) and item.strip()
+                ] if isinstance(raw_artifact_types, list) else [],
+            }
         contribution_paths: list[str] = []
         contribution_index: dict[str, tuple[str, str | None, int]] = {}
         for contribution in snapshot.list_contributions("workflows"):
@@ -351,6 +457,13 @@ class WorkflowManager:
             )
             workflow.source = source
             workflow.extension_id = extension_id
+            if not workflow.output_surface and workflow.runtime_profile:
+                workflow.output_surface = runtime_defaults_by_name.get(workflow.runtime_profile, "")
+            if workflow.output_surface:
+                canvas_metadata = canvas_metadata_by_name.get(workflow.output_surface, {})
+                workflow.output_surface_title = str(canvas_metadata.get("title") or "")
+                workflow.output_surface_sections = list(canvas_metadata.get("sections") or [])
+                workflow.output_surface_artifact_types = list(canvas_metadata.get("artifact_types") or [])
             manifest_priority_by_path[os.path.abspath(workflow.file_path)] = manifest_root_index
 
         load_errors: list[dict[str, str]] = []
@@ -500,6 +613,18 @@ class WorkflowManager:
     ) -> list[dict[str, Any]]:
         snapshot = self._snapshot()
         extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
+        available_runtime_profiles = {
+            str(item.metadata.get("name"))
+            for item in snapshot.list_contributions("workflow_runtimes")
+            if not isinstance(item.metadata.get("registry_conflict"), dict)
+            if isinstance(item.metadata.get("name"), str) and str(item.metadata.get("name")).strip()
+        }
+        available_output_surfaces = {
+            str(item.metadata.get("name"))
+            for item in snapshot.list_contributions("canvas_outputs")
+            if not isinstance(item.metadata.get("registry_conflict"), dict)
+            if isinstance(item.metadata.get("name"), str) and str(item.metadata.get("name")).strip()
+        }
         workflows: list[dict[str, Any]] = []
         for workflow in self._workflows:
             permission_profile = evaluate_tool_permissions(
@@ -519,6 +644,11 @@ class WorkflowManager:
                 "file_path": workflow.file_path,
                 "source": workflow.source,
                 "extension_id": workflow.extension_id,
+                "runtime_profile": workflow.runtime_profile,
+                "output_surface": workflow.output_surface,
+                "output_surface_title": workflow.output_surface_title,
+                "output_surface_sections": list(workflow.output_surface_sections),
+                "output_surface_artifact_types": list(workflow.output_surface_artifact_types),
                 "policy_modes": self._infer_policy_modes(workflow),
                 "execution_boundaries": self._infer_execution_boundaries(workflow),
                 "risk_level": self._infer_risk_level(workflow),
@@ -537,6 +667,8 @@ class WorkflowManager:
                         workflow,
                         available_tool_names,
                         active_skill_names,
+                        available_runtime_profiles=available_runtime_profiles,
+                        available_output_surfaces=available_output_surfaces,
                         permission_profile=permission_profile,
                     )
                 )
@@ -598,6 +730,18 @@ class WorkflowManager:
         skill_set = set(active_skill_names)
         snapshot = self._snapshot()
         extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
+        available_runtime_profiles = {
+            str(item.metadata.get("name"))
+            for item in snapshot.list_contributions("workflow_runtimes")
+            if not isinstance(item.metadata.get("registry_conflict"), dict)
+            if isinstance(item.metadata.get("name"), str) and str(item.metadata.get("name")).strip()
+        }
+        available_output_surfaces = {
+            str(item.metadata.get("name"))
+            for item in snapshot.list_contributions("canvas_outputs")
+            if not isinstance(item.metadata.get("registry_conflict"), dict)
+            if isinstance(item.metadata.get("name"), str) and str(item.metadata.get("name")).strip()
+        }
         result: list[Workflow] = []
         for workflow in self._workflows:
             if not workflow.enabled:
@@ -606,15 +750,15 @@ class WorkflowManager:
                 extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
                 tool_names=workflow.step_tools,
             )
-            if not permission_profile["ok"]:
-                continue
-            if workflow.step_tools and not all(
-                canonical_tool_name(tool_name) in tool_set for tool_name in workflow.step_tools
-            ):
-                continue
-            if workflow.requires_skills and not all(
-                skill_name in skill_set for skill_name in workflow.requires_skills
-            ):
+            availability = self._get_runtime_availability(
+                workflow,
+                list(tool_set),
+                list(skill_set),
+                available_runtime_profiles=available_runtime_profiles,
+                available_output_surfaces=available_output_surfaces,
+                permission_profile=permission_profile,
+            )
+            if not permission_profile["ok"] or not availability["is_available"]:
                 continue
             result.append(workflow)
         return result
@@ -642,6 +786,11 @@ class WorkflowManager:
         return {
             "description": workflow.description,
             "inputs": workflow.inputs,
+            "runtime_profile": workflow.runtime_profile,
+            "output_surface": workflow.output_surface,
+            "output_surface_title": workflow.output_surface_title,
+            "output_surface_sections": list(workflow.output_surface_sections),
+            "output_surface_artifact_types": list(workflow.output_surface_artifact_types),
             "policy_modes": policy_modes,
             "requires_tools": _canonicalize_tool_names(workflow.requires_tools),
             "requires_skills": workflow.requires_skills,
@@ -657,18 +806,35 @@ class WorkflowManager:
         available_tool_names: list[str],
         active_skill_names: list[str],
         *,
+        available_runtime_profiles: set[str] | None = None,
+        available_output_surfaces: set[str] | None = None,
         permission_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tool_set = {canonical_tool_name(name) for name in available_tool_names}
         skill_set = set(active_skill_names)
+        runtime_profiles = available_runtime_profiles or set()
+        output_surfaces = available_output_surfaces or set()
+        required_runtime_tools = _canonicalize_tool_names(
+            list(workflow.requires_tools) + list(workflow.step_tools)
+        )
         missing_tools = [
-            canonical_tool_name(tool_name) for tool_name in workflow.requires_tools
-            if canonical_tool_name(tool_name) not in tool_set
+            tool_name for tool_name in required_runtime_tools
+            if tool_name not in tool_set
         ]
         missing_skills = [
             skill_name for skill_name in workflow.requires_skills
             if skill_name not in skill_set
         ]
+        missing_runtime_profiles = (
+            [workflow.runtime_profile]
+            if workflow.runtime_profile and workflow.runtime_profile not in runtime_profiles
+            else []
+        )
+        missing_output_surfaces = (
+            [workflow.output_surface]
+            if workflow.output_surface and workflow.output_surface not in output_surfaces
+            else []
+        )
         missing_manifest_tools = list((permission_profile or {}).get("missing_tools", []))
         missing_manifest_execution_boundaries = list(
             (permission_profile or {}).get("missing_execution_boundaries", [])
@@ -678,12 +844,16 @@ class WorkflowManager:
             "is_available": (
                 not missing_tools
                 and not missing_skills
+                and not missing_runtime_profiles
+                and not missing_output_surfaces
                 and not missing_manifest_tools
                 and not missing_manifest_execution_boundaries
                 and not missing_manifest_network
             ),
             "missing_tools": missing_tools,
             "missing_skills": missing_skills,
+            "missing_runtime_profiles": missing_runtime_profiles,
+            "missing_output_surfaces": missing_output_surfaces,
             "missing_manifest_tools": missing_manifest_tools,
             "missing_manifest_execution_boundaries": missing_manifest_execution_boundaries,
             "missing_manifest_network": missing_manifest_network,

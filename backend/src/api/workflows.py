@@ -21,7 +21,9 @@ from src.audit.repository import audit_repository
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import AuditEvent
+from src.extensions.registry import ExtensionRegistry
 from src.extensions.registry import default_manifest_roots_for_workspace
+from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
 from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
@@ -78,6 +80,54 @@ def _ensure_workflow_manager_workspace_extensions_loaded() -> None:
         workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
 
 
+def _workflow_extension_snapshot():
+    return ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+
+
+def _workflow_surface_maps(snapshot) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    runtime_defaults_by_name: dict[str, str] = {}
+    canvas_metadata_by_name: dict[str, dict[str, Any]] = {}
+    for contribution in snapshot.list_contributions("workflow_runtimes"):
+        if isinstance(contribution.metadata.get("registry_conflict"), dict):
+            continue
+        name = contribution.metadata.get("name")
+        default_output_surface = contribution.metadata.get("default_output_surface")
+        if (
+            isinstance(name, str)
+            and name.strip()
+            and isinstance(default_output_surface, str)
+            and default_output_surface.strip()
+        ):
+            runtime_defaults_by_name[name.strip()] = default_output_surface.strip()
+    for contribution in snapshot.list_contributions("canvas_outputs"):
+        if isinstance(contribution.metadata.get("registry_conflict"), dict):
+            continue
+        name = contribution.metadata.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        raw_sections = contribution.metadata.get("sections")
+        raw_artifact_types = contribution.metadata.get("artifact_types")
+        canvas_metadata_by_name[name.strip()] = {
+            "title": str(contribution.metadata.get("title") or ""),
+            "sections": [
+                str(item).strip()
+                for item in raw_sections
+                if isinstance(item, str) and item.strip()
+            ] if isinstance(raw_sections, list) else [],
+            "artifact_types": [
+                str(item).strip()
+                for item in raw_artifact_types
+                if isinstance(item, str) and item.strip()
+            ] if isinstance(raw_artifact_types, list) else [],
+        }
+    return runtime_defaults_by_name, canvas_metadata_by_name
+
+
 def _validate_workflow_content(content: str, *, path: str = "<draft>") -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     workflow = parse_workflow_content(content, path=path, errors=errors)
@@ -101,6 +151,37 @@ def _validate_workflow_content(content: str, *, path: str = "<draft>") -> dict[s
         skill_name for skill_name in workflow.requires_skills
         if skill_name not in set(active_skill_names)
     ]
+    snapshot = _workflow_extension_snapshot()
+    runtime_defaults_by_name, canvas_metadata_by_name = _workflow_surface_maps(snapshot)
+    available_runtime_profiles = {
+        str(item.metadata.get("name"))
+        for item in snapshot.list_contributions("workflow_runtimes")
+        if not isinstance(item.metadata.get("registry_conflict"), dict)
+        if isinstance(item.metadata.get("name"), str) and str(item.metadata.get("name")).strip()
+    }
+    available_output_surfaces = {
+        str(item.metadata.get("name"))
+        for item in snapshot.list_contributions("canvas_outputs")
+        if not isinstance(item.metadata.get("registry_conflict"), dict)
+        if isinstance(item.metadata.get("name"), str) and str(item.metadata.get("name")).strip()
+    }
+    missing_runtime_profiles = (
+        [workflow.runtime_profile]
+        if workflow.runtime_profile and workflow.runtime_profile not in available_runtime_profiles
+        else []
+    )
+    declared_output_surface = workflow.output_surface
+    effective_output_surface = workflow.output_surface or (
+        runtime_defaults_by_name.get(workflow.runtime_profile, "")
+        if workflow.runtime_profile
+        else ""
+    )
+    canvas_metadata = canvas_metadata_by_name.get(effective_output_surface, {})
+    missing_output_surfaces = (
+        [effective_output_surface]
+        if effective_output_surface and effective_output_surface not in available_output_surfaces
+        else []
+    )
     execution_boundaries = workflow_manager._infer_execution_boundaries(workflow)
     risk_level = workflow_manager._infer_risk_level(workflow)
     policy_modes = workflow_manager._infer_policy_modes(workflow)
@@ -118,6 +199,13 @@ def _validate_workflow_content(content: str, *, path: str = "<draft>") -> dict[s
             "inputs": workflow.inputs,
             "requires_tools": workflow.requires_tools,
             "requires_skills": workflow.requires_skills,
+            "runtime_profile": workflow.runtime_profile,
+            "output_surface": effective_output_surface,
+            "declared_output_surface": declared_output_surface,
+            "effective_output_surface": effective_output_surface,
+            "output_surface_title": str(canvas_metadata.get("title") or ""),
+            "output_surface_sections": list(canvas_metadata.get("sections") or []),
+            "output_surface_artifact_types": list(canvas_metadata.get("artifact_types") or []),
             "user_invocable": workflow.user_invocable,
             "enabled": workflow.enabled,
             "file_path": workflow.file_path,
@@ -127,9 +215,17 @@ def _validate_workflow_content(content: str, *, path: str = "<draft>") -> dict[s
             "risk_level": risk_level,
             "accepts_secret_refs": workflow_manager._accepts_secret_refs(workflow),
         },
-        "runtime_ready": not missing_tools and not missing_skills and workflow.enabled,
+        "runtime_ready": (
+            not missing_tools
+            and not missing_skills
+            and not missing_runtime_profiles
+            and not missing_output_surfaces
+            and workflow.enabled
+        ),
         "missing_tools": missing_tools,
         "missing_skills": missing_skills,
+        "missing_runtime_profiles": missing_runtime_profiles,
+        "missing_output_surfaces": missing_output_surfaces,
         "requires_approval": requires_approval,
     }
 
@@ -800,6 +896,21 @@ async def _list_workflow_runs(
                 value for value in details.get("continued_error_steps", [])
                 if isinstance(value, str)
             ] or run.get("continued_error_steps", []),
+            "runtime_profile": (
+                str(details.get("runtime_profile"))
+                if details.get("runtime_profile") is not None
+                else workflow_meta.get("runtime_profile", "")
+            ),
+            "output_surface": (
+                str(details.get("output_surface"))
+                if details.get("output_surface") is not None
+                else workflow_meta.get("output_surface", "")
+            ),
+            "canvas_output": (
+                details.get("canvas_output")
+                if isinstance(details.get("canvas_output"), dict)
+                else run.get("canvas_output")
+            ),
             "risk_level": workflow_meta.get("risk_level", "high"),
             "execution_boundaries": workflow_meta.get("execution_boundaries", ["unknown"]),
             "accepts_secret_refs": bool(workflow_meta.get("accepts_secret_refs", False)),
@@ -1075,6 +1186,28 @@ async def list_workflows():
 async def workflow_diagnostics():
     diagnostics = workflow_manager.get_diagnostics()
     return diagnostics
+
+
+@router.get("/workflows/runtimes")
+async def list_workflow_runtimes():
+    snapshot = _workflow_extension_snapshot()
+    inventory = list_workflow_runtime_inventory(snapshot.list_contributions("workflow_runtimes"))
+    return {
+        "runtimes": [
+            {
+                "extension_id": item.extension_id,
+                "name": item.name,
+                "engine_kind": item.engine_kind,
+                "description": item.description,
+                "delegation_mode": item.delegation_mode,
+                "checkpoint_policy": item.checkpoint_policy,
+                "structured_output": item.structured_output,
+                "default_output_surface": item.default_output_surface,
+                "reference": item.reference,
+            }
+            for item in inventory
+        ]
+    }
 
 
 @router.get("/workflows/{name}/source")

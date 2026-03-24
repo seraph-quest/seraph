@@ -95,6 +95,26 @@ def _parse_config_fields(payload: Any, *, source: str, field_name: str = "config
     return tuple(fields)
 
 
+def _ensure_config_field(
+    fields: tuple[ContributionConfigField, ...],
+    *,
+    key: str,
+    label: str,
+    input_kind: str,
+    required: bool = True,
+) -> tuple[ContributionConfigField, ...]:
+    if any(field.key == key for field in fields):
+        return fields
+    return fields + (
+        ContributionConfigField(
+            key=key,
+            label=label,
+            required=required,
+            input=input_kind,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class ToolsetPresetDefinition:
     name: str
@@ -272,6 +292,50 @@ class ProviderPresetDefinition:
 
 
 @dataclass(frozen=True)
+class CanvasOutputDefinition:
+    name: str
+    title: str
+    description: str = ""
+    surface_kind: str = "board"
+    sections: tuple[str, ...] = ()
+    artifact_types: tuple[str, ...] = ()
+    preferred_panel: str = ""
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "surface_kind": self.surface_kind,
+            "sections": list(self.sections),
+            "artifact_types": list(self.artifact_types),
+            "preferred_panel": self.preferred_panel,
+        }
+
+
+@dataclass(frozen=True)
+class WorkflowRuntimeDefinition:
+    name: str
+    engine_kind: str
+    description: str = ""
+    delegation_mode: str = ""
+    checkpoint_policy: str = ""
+    structured_output: bool = False
+    default_output_surface: str = ""
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "engine_kind": self.engine_kind,
+            "description": self.description,
+            "delegation_mode": self.delegation_mode,
+            "checkpoint_policy": self.checkpoint_policy,
+            "structured_output": self.structured_output,
+            "default_output_surface": self.default_output_surface,
+        }
+
+
+@dataclass(frozen=True)
 class NodeAdapterDefinition:
     name: str
     adapter_kind: str
@@ -432,17 +496,35 @@ def parse_automation_trigger_definition(payload: Any, *, source: str) -> Automat
     for field_name, value in {"schedule": raw_schedule, "endpoint": raw_endpoint, "topic": raw_topic}.items():
         if value is not None and not isinstance(value, str):
             raise ConnectorDefinitionError(f"{source}: automation {field_name} must be a string")
+    normalized_endpoint = raw_endpoint.strip() if isinstance(raw_endpoint, str) else ""
+    if trigger_type == "webhook":
+        canonical_endpoint = f"/api/automation/webhooks/{name}"
+        if normalized_endpoint and normalized_endpoint != canonical_endpoint:
+            raise ConnectorDefinitionError(
+                f"{source}: webhook endpoint must be '{canonical_endpoint}'"
+            )
+        normalized_endpoint = canonical_endpoint
+    else:
+        normalized_endpoint = ""
     requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    config_fields = _parse_config_fields(payload.get("config_fields"), source=source)
+    if trigger_type == "webhook":
+        config_fields = _ensure_config_field(
+            config_fields,
+            key="signing_secret",
+            label="Signing Secret",
+            input_kind="password",
+        )
     return AutomationTriggerDefinition(
         name=name,
         trigger_type=trigger_type,
         description=description,
         enabled=False if raw_enabled is None else raw_enabled,
         schedule=raw_schedule.strip() if isinstance(raw_schedule, str) else "",
-        endpoint=raw_endpoint.strip() if isinstance(raw_endpoint, str) else "",
+        endpoint=normalized_endpoint,
         topic=raw_topic.strip() if isinstance(raw_topic, str) else "",
         capabilities=_parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities"),
-        config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
+        config_fields=config_fields,
         requires_network=(trigger_type in {"webhook", "poll", "pubsub"}) if requires_network is None else requires_network,
     )
 
@@ -558,6 +640,83 @@ def parse_provider_preset_definition(payload: Any, *, source: str) -> ProviderPr
     )
 
 
+def parse_canvas_output_definition(payload: Any, *, source: str) -> CanvasOutputDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="canvas output")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: canvas output definition must be an object")
+    raw_title = payload.get("title")
+    if not isinstance(raw_title, str) or not raw_title.strip():
+        raise ConnectorDefinitionError(f"{source}: canvas output must include a non-empty title")
+    raw_surface_kind = payload.get("surface_kind")
+    if raw_surface_kind is not None and not isinstance(raw_surface_kind, str):
+        raise ConnectorDefinitionError(f"{source}: canvas output surface_kind must be a string")
+    surface_kind = raw_surface_kind.strip() if isinstance(raw_surface_kind, str) and raw_surface_kind.strip() else "board"
+    if surface_kind not in {"board", "report", "checklist", "gallery"}:
+        raise ConnectorDefinitionError(f"{source}: canvas output surface_kind '{surface_kind}' is not supported")
+    raw_preferred_panel = payload.get("preferred_panel")
+    if raw_preferred_panel is not None and not isinstance(raw_preferred_panel, str):
+        raise ConnectorDefinitionError(f"{source}: canvas output preferred_panel must be a string")
+    sections = _parse_string_list(payload.get("sections"), source=source, field_name="sections")
+    artifact_types = _parse_string_list(payload.get("artifact_types"), source=source, field_name="artifact_types")
+    if not any((description, sections, artifact_types)):
+        raise ConnectorDefinitionError(
+            f"{source}: canvas output must declare description, sections, or artifact_types"
+        )
+    return CanvasOutputDefinition(
+        name=name,
+        title=raw_title.strip(),
+        description=description,
+        surface_kind=surface_kind,
+        sections=sections,
+        artifact_types=artifact_types,
+        preferred_panel=raw_preferred_panel.strip() if isinstance(raw_preferred_panel, str) else "",
+    )
+
+
+def parse_workflow_runtime_definition(payload: Any, *, source: str) -> WorkflowRuntimeDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="workflow runtime")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: workflow runtime definition must be an object")
+    raw_engine_kind = payload.get("engine_kind")
+    if not isinstance(raw_engine_kind, str) or not raw_engine_kind.strip():
+        raise ConnectorDefinitionError(f"{source}: workflow runtime must include a non-empty engine_kind")
+    engine_kind = raw_engine_kind.strip()
+    if engine_kind not in {"openprose", "lobster", "llm_task"}:
+        raise ConnectorDefinitionError(f"{source}: workflow runtime engine_kind '{engine_kind}' is not supported")
+    raw_delegation_mode = payload.get("delegation_mode")
+    raw_checkpoint_policy = payload.get("checkpoint_policy")
+    raw_default_output_surface = payload.get("default_output_surface")
+    for field_name, value in {
+        "delegation_mode": raw_delegation_mode,
+        "checkpoint_policy": raw_checkpoint_policy,
+        "default_output_surface": raw_default_output_surface,
+    }.items():
+        if value is not None and not isinstance(value, str):
+            raise ConnectorDefinitionError(f"{source}: workflow runtime {field_name} must be a string")
+    delegation_mode = raw_delegation_mode.strip() if isinstance(raw_delegation_mode, str) else ""
+    if delegation_mode and delegation_mode not in {"inline", "delegate", "multi_agent"}:
+        raise ConnectorDefinitionError(
+            f"{source}: workflow runtime delegation_mode '{delegation_mode}' is not supported"
+        )
+    checkpoint_policy = raw_checkpoint_policy.strip() if isinstance(raw_checkpoint_policy, str) else ""
+    if checkpoint_policy and checkpoint_policy not in {"manual", "step", "approval"}:
+        raise ConnectorDefinitionError(
+            f"{source}: workflow runtime checkpoint_policy '{checkpoint_policy}' is not supported"
+        )
+    raw_structured_output = payload.get("structured_output")
+    if raw_structured_output is not None and not isinstance(raw_structured_output, bool):
+        raise ConnectorDefinitionError(f"{source}: workflow runtime structured_output must be a boolean")
+    return WorkflowRuntimeDefinition(
+        name=name,
+        engine_kind=engine_kind,
+        description=description,
+        delegation_mode=delegation_mode,
+        checkpoint_policy=checkpoint_policy,
+        structured_output=bool(raw_structured_output),
+        default_output_surface=raw_default_output_surface.strip() if isinstance(raw_default_output_surface, str) else "",
+    )
+
+
 def parse_node_adapter_definition(payload: Any, *, source: str) -> NodeAdapterDefinition:
     name, description = _parse_named_object(payload, source=source, noun="node adapter")
     if not isinstance(payload, dict):
@@ -580,7 +739,7 @@ def parse_node_adapter_definition(payload: Any, *, source: str) -> NodeAdapterDe
         enabled=False if raw_enabled is None else raw_enabled,
         capabilities=_parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities"),
         config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
-        requires_network=False if requires_network is None else requires_network,
+        requires_network=(adapter_kind != "canvas") if requires_network is None else requires_network,
         requires_daemon=(adapter_kind != "canvas") if requires_daemon is None else requires_daemon,
     )
 
@@ -615,6 +774,14 @@ def load_speech_profile_definition(path: Path) -> SpeechProfileDefinition:
 
 def load_provider_preset_definition(path: Path) -> ProviderPresetDefinition:
     return parse_provider_preset_definition(load_connector_payload(path), source=str(path))
+
+
+def load_canvas_output_definition(path: Path) -> CanvasOutputDefinition:
+    return parse_canvas_output_definition(load_connector_payload(path), source=str(path))
+
+
+def load_workflow_runtime_definition(path: Path) -> WorkflowRuntimeDefinition:
+    return parse_workflow_runtime_definition(load_connector_payload(path), source=str(path))
 
 
 def load_node_adapter_definition(path: Path) -> NodeAdapterDefinition:

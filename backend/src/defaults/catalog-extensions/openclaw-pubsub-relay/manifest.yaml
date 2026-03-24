@@ -1,0 +1,16 @@
+id: seraph.openclaw-pubsub-relay
+version: 2026.3.24
+display_name: OpenClaw PubSub Relay
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: PubSub-trigger package for staged OpenClaw event-stream automations.
+description: Packages pubsub-trigger metadata so Seraph can stage topic-driven external automation without adopting a raw OpenClaw plugin transport.
+permissions:
+  network: true
+contributes:
+  automation_triggers:
+    - automation/pubsub-relay.yaml

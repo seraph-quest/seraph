@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import os
@@ -15,6 +15,7 @@ from config.settings import settings
 from src.extensions.capability_contributions import (
     load_automation_trigger_definition,
     load_browser_provider_definition,
+    load_canvas_output_definition,
     load_context_pack_definition,
     load_messaging_connector_definition,
     load_node_adapter_definition,
@@ -22,6 +23,7 @@ from src.extensions.capability_contributions import (
     load_provider_preset_definition,
     load_speech_profile_definition,
     load_toolset_preset_definition,
+    load_workflow_runtime_definition,
 )
 from src.extensions.channels import load_channel_adapter_definition
 from src.extensions.connectors import load_managed_connector_definition, load_mcp_server_definition
@@ -162,8 +164,13 @@ class ExtensionRegistry:
         load_errors: list[ExtensionLoadErrorRecord] = []
 
         manifest_extensions, manifest_errors = self._scan_manifest_extensions()
+        manifest_extensions, manifest_conflict_errors = self._annotate_named_contribution_conflicts(
+            manifest_extensions
+        )
+        manifest_extensions = self._enrich_workflow_contribution_metadata(manifest_extensions)
         extensions.extend(manifest_extensions)
         load_errors.extend(manifest_errors)
+        load_errors.extend(manifest_conflict_errors)
 
         manifest_claims = self._manifest_claims(manifest_extensions)
 
@@ -295,18 +302,20 @@ class ExtensionRegistry:
                             errors=[],
                         )
                         if workflow is not None:
-                            metadata.update(
-                                {
-                                    "name": workflow.name,
-                                    "description": workflow.description,
-                                    "requires_tools": list(workflow.requires_tools),
-                                    "requires_skills": list(workflow.requires_skills),
-                                    "step_tools": list(workflow.step_tools),
-                                    "user_invocable": workflow.user_invocable,
-                                    "default_enabled": workflow.enabled,
-                                    "tool_name": workflow.tool_name,
-                                }
-                            )
+                                metadata.update(
+                                    {
+                                        "name": workflow.name,
+                                        "description": workflow.description,
+                                        "requires_tools": list(workflow.requires_tools),
+                                        "requires_skills": list(workflow.requires_skills),
+                                        "step_tools": list(workflow.step_tools),
+                                        "runtime_profile": workflow.runtime_profile,
+                                        "output_surface": workflow.output_surface,
+                                        "user_invocable": workflow.user_invocable,
+                                        "default_enabled": workflow.enabled,
+                                        "tool_name": workflow.tool_name,
+                                    }
+                                )
                     except Exception:
                         pass
                 if contribution_type == "managed_connectors":
@@ -352,6 +361,16 @@ class ExtensionRegistry:
                 if contribution_type == "channel_adapters":
                     try:
                         metadata.update(load_channel_adapter_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "canvas_outputs":
+                    try:
+                        metadata.update(load_canvas_output_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
+                if contribution_type == "workflow_runtimes":
+                    try:
+                        metadata.update(load_workflow_runtime_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
                 if contribution_type == "speech_profiles":
@@ -409,6 +428,180 @@ class ExtensionRegistry:
                     if isinstance(connector_name, str) and connector_name:
                         claims.setdefault("mcp_server_names", set()).add(connector_name)
         return claims
+
+    def _enrich_workflow_contribution_metadata(
+        self,
+        extensions: list[ExtensionRecord],
+    ) -> list[ExtensionRecord]:
+        runtime_defaults_by_name: dict[str, str] = {}
+        canvas_metadata_by_name: dict[str, dict[str, Any]] = {}
+        for extension in extensions:
+            for contribution in extension.contributions:
+                if isinstance(contribution.metadata.get("registry_conflict"), dict):
+                    continue
+                if contribution.contribution_type == "workflow_runtimes":
+                    name = contribution.metadata.get("name")
+                    default_output_surface = contribution.metadata.get("default_output_surface")
+                    if (
+                        isinstance(name, str)
+                        and name.strip()
+                        and isinstance(default_output_surface, str)
+                        and default_output_surface.strip()
+                    ):
+                        runtime_defaults_by_name[name.strip()] = default_output_surface.strip()
+                elif contribution.contribution_type == "canvas_outputs":
+                    name = contribution.metadata.get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+                    raw_sections = contribution.metadata.get("sections")
+                    raw_artifact_types = contribution.metadata.get("artifact_types")
+                    canvas_metadata_by_name[name.strip()] = {
+                        "title": str(contribution.metadata.get("title") or ""),
+                        "sections": [
+                            str(item).strip()
+                            for item in raw_sections
+                            if isinstance(item, str) and item.strip()
+                        ] if isinstance(raw_sections, list) else [],
+                        "artifact_types": [
+                            str(item).strip()
+                            for item in raw_artifact_types
+                            if isinstance(item, str) and item.strip()
+                        ] if isinstance(raw_artifact_types, list) else [],
+                    }
+
+        updated_extensions: list[ExtensionRecord] = []
+        for extension in extensions:
+            updated_contributions: list[ExtensionContributionRecord] = []
+            for contribution in extension.contributions:
+                if contribution.contribution_type != "workflows":
+                    updated_contributions.append(contribution)
+                    continue
+                metadata = dict(contribution.metadata)
+                runtime_profile = metadata.get("runtime_profile")
+                declared_output_surface = (
+                    str(metadata.get("output_surface") or "").strip()
+                    if metadata.get("output_surface") is not None
+                    else ""
+                )
+                effective_output_surface = declared_output_surface
+                if (
+                    not effective_output_surface
+                    and isinstance(runtime_profile, str)
+                    and runtime_profile.strip()
+                ):
+                    effective_output_surface = runtime_defaults_by_name.get(runtime_profile.strip(), "")
+                if effective_output_surface:
+                    metadata["output_surface"] = effective_output_surface
+                    metadata["effective_output_surface"] = effective_output_surface
+                    if declared_output_surface:
+                        metadata["declared_output_surface"] = declared_output_surface
+                    canvas_metadata = canvas_metadata_by_name.get(effective_output_surface, {})
+                    if canvas_metadata:
+                        metadata["output_surface_title"] = str(canvas_metadata.get("title") or "")
+                        metadata["output_surface_sections"] = list(canvas_metadata.get("sections") or [])
+                        metadata["output_surface_artifact_types"] = list(canvas_metadata.get("artifact_types") or [])
+                updated_contributions.append(replace(contribution, metadata=metadata))
+            updated_extensions.append(replace(extension, contributions=updated_contributions))
+        return updated_extensions
+
+    def _annotate_named_contribution_conflicts(
+        self,
+        extensions: list[ExtensionRecord],
+    ) -> tuple[list[ExtensionRecord], list[ExtensionLoadErrorRecord]]:
+        unique_name_types = {
+            "automation_triggers": {"label": "automation trigger", "conflict_mode": "all"},
+            "browser_providers": {"label": "browser provider", "conflict_mode": "winner"},
+            "workflow_runtimes": {"label": "workflow runtime", "conflict_mode": "winner"},
+            "canvas_outputs": {"label": "canvas output", "conflict_mode": "winner"},
+        }
+        grouped: dict[tuple[str, str], list[tuple[ExtensionRecord, ExtensionContributionRecord]]] = {}
+        prioritized_extensions = sorted(extensions, key=_extension_priority)
+        for extension in prioritized_extensions:
+            for contribution in extension.contributions:
+                policy = unique_name_types.get(contribution.contribution_type)
+                if policy is None:
+                    continue
+                name = contribution.metadata.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                key = (contribution.contribution_type, name.strip().casefold())
+                grouped.setdefault(key, []).append((extension, contribution))
+
+        updated_extensions: list[ExtensionRecord] = []
+        load_errors: list[ExtensionLoadErrorRecord] = []
+        for extension in extensions:
+            updated_contributions: list[ExtensionContributionRecord] = []
+            for contribution in extension.contributions:
+                policy = unique_name_types.get(contribution.contribution_type)
+                if policy is None:
+                    updated_contributions.append(contribution)
+                    continue
+                name = contribution.metadata.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    updated_contributions.append(contribution)
+                    continue
+                duplicates = grouped.get((contribution.contribution_type, name.strip().casefold()), [])
+                if len(duplicates) <= 1:
+                    updated_contributions.append(contribution)
+                    continue
+                label = str(policy["label"])
+                conflict_mode = str(policy["conflict_mode"])
+                winner_extension, winner_contribution = duplicates[0]
+                if (
+                    conflict_mode == "winner"
+                    and (winner_extension.id, winner_contribution.reference)
+                    == (extension.id, contribution.reference)
+                ):
+                    updated_contributions.append(contribution)
+                    continue
+                conflicting_peers = [
+                    {
+                        "extension_id": peer_extension.id,
+                        "reference": peer_contribution.reference,
+                        "display_name": peer_extension.display_name,
+                    }
+                    for peer_extension, peer_contribution in duplicates
+                    if (peer_extension.id, peer_contribution.reference)
+                    != (extension.id, contribution.reference)
+                ]
+                metadata = dict(contribution.metadata)
+                metadata["registry_conflict"] = {
+                    "kind": "duplicate_name",
+                    "name": name.strip(),
+                    "winner_extension_id": winner_extension.id,
+                    "winner_reference": winner_contribution.reference,
+                    "winner_display_name": winner_extension.display_name,
+                    "conflict_mode": conflict_mode,
+                    "conflicting_peers": conflicting_peers,
+                }
+                updated_contributions.append(replace(contribution, metadata=metadata))
+                if conflict_mode == "all":
+                    message = (
+                        f"Duplicate {label} name '{name.strip()}' in {contribution.reference}; "
+                        "all matching definitions are disabled until the collision is removed"
+                    )
+                else:
+                    message = (
+                        f"Duplicate {label} name '{name.strip()}' in {contribution.reference}; "
+                        f"keeping {winner_extension.display_name} ({winner_contribution.reference})"
+                    )
+                load_errors.append(
+                    ExtensionLoadErrorRecord(
+                        source=str(extension.manifest_path or metadata.get("resolved_path") or contribution.reference),
+                        message=message,
+                        phase=f"duplicate-{contribution.contribution_type.removesuffix('s')}-name",
+                        details=[
+                            {
+                                "name": name.strip(),
+                                "winner_extension_id": winner_extension.id,
+                                "winner_reference": winner_contribution.reference,
+                                "conflict_mode": conflict_mode,
+                            }
+                        ],
+                    )
+                )
+            updated_extensions.append(replace(extension, contributions=updated_contributions))
+        return updated_extensions, load_errors
 
     def _scan_legacy_skill_extensions(
         self,

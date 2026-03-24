@@ -31,7 +31,7 @@ async def test_runtime_status_exposes_release_and_model(client):
 
 
 @pytest.mark.asyncio
-async def test_browser_session_api_is_not_publicly_exposed(client):
-    response = await client.get("/api/browser/sessions")
+async def test_browser_provider_api_is_publicly_exposed(client):
+    response = await client.get("/api/browser/providers")
 
-    assert response.status_code == 404
+    assert response.status_code == 200

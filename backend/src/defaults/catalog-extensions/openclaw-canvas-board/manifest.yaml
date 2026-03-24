@@ -1,0 +1,17 @@
+id: seraph.openclaw-canvas-board
+version: 2026.3.24
+display_name: OpenClaw Canvas Board
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Structured canvas-output surfaces for richer operator-visible workflow results.
+description: Packages board-style output definitions so workflows and later operator surfaces can present summaries, steps, and artifact lineages in a structured canvas form.
+permissions:
+  tools: []
+  network: false
+contributes:
+  canvas_outputs:
+    - canvas/guardian-board.yaml

@@ -9,12 +9,14 @@ from typing import Any
 from src.extensions.capability_contributions import (
     parse_automation_trigger_definition,
     parse_browser_provider_definition,
+    parse_canvas_output_definition,
     parse_context_pack_definition,
     parse_messaging_connector_definition,
     parse_node_adapter_definition,
     parse_provider_preset_definition,
     parse_speech_profile_definition,
     parse_toolset_preset_definition,
+    parse_workflow_runtime_definition,
 )
 from src.extensions.connectors import (
     ConnectorDefinitionError,
@@ -53,6 +55,8 @@ _DEFINITION_PARSERS = {
     "automation_triggers": ("invalid_automation_trigger", "automation trigger", parse_automation_trigger_definition),
     "browser_providers": ("invalid_browser_provider", "browser provider", parse_browser_provider_definition),
     "messaging_connectors": ("invalid_messaging_connector", "messaging connector", parse_messaging_connector_definition),
+    "canvas_outputs": ("invalid_canvas_output", "canvas output", parse_canvas_output_definition),
+    "workflow_runtimes": ("invalid_workflow_runtime", "workflow runtime", parse_workflow_runtime_definition),
     "speech_profiles": ("invalid_speech_profile", "speech profile", parse_speech_profile_definition),
     "provider_presets": ("invalid_provider_preset", "provider preset", parse_provider_preset_definition),
     "node_adapters": ("invalid_node_adapter", "node adapter", parse_node_adapter_definition),

@@ -32,6 +32,12 @@ def test_browser_session_lists_empty_runtime(browser_runtime_session):
     assert browser_session(action="list") == "No browser sessions are open."
 
 
+def test_browser_session_lists_provider_inventory_when_no_packaged_providers_are_configured(browser_runtime_session):
+    providers = browser_session(action="providers")
+
+    assert "local-browser · local · ready · local_runtime · selected" in providers
+
+
 def test_browser_session_open_snapshot_read_and_close_round_trip(browser_runtime_session):
     with patch("src.tools.browser_session_tool.browse_webpage", side_effect=["first capture", "second capture"]):
         opened = browser_session(action="open", url="https://example.com/docs")
@@ -119,6 +125,67 @@ def test_browser_session_uses_configured_browser_provider_with_local_fallback(tm
     latest_ref = opened.split("Latest ref: ")[1].split(".")[0]
     read_latest = browser_session(action="read", ref=latest_ref)
     assert "mode=local_fallback" in read_latest
+
+
+def test_browser_session_lists_staged_provider_inventory(tmp_path, browser_runtime_session):
+    workspace = tmp_path / "workspace"
+    extension_dir = workspace / "extensions" / "browserbase-pack"
+    state_path = workspace / "extensions-state.json"
+    (extension_dir / "connectors" / "browser").mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    (extension_dir / "manifest.yaml").write_text(
+        "id: seraph.hermes-browserbase\n"
+        "version: 2026.3.24\n"
+        "display_name: Hermes Browserbase\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  browser_providers:\n"
+        "    - connectors/browser/browserbase.yaml\n",
+        encoding="utf-8",
+    )
+    (extension_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
+        "name: browserbase\n"
+        "description: Managed Browserbase-style browser provider.\n"
+        "provider_kind: browserbase\n"
+        "enabled: true\n"
+        "config_fields:\n"
+        "  - key: api_key\n"
+        "    label: Browserbase API Key\n"
+        "    input: password\n"
+        "    required: true\n",
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "extensions": {
+                    "seraph.hermes-browserbase": {
+                        "config": {
+                            "browser_providers": {
+                                "browserbase": {"api_key": "secret"},
+                            }
+                        },
+                        "connector_state": {
+                            "connectors/browser/browserbase.yaml": {"enabled": True},
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.object(settings, "workspace_dir", str(workspace)):
+        providers = browser_session(action="providers")
+
+    assert "local-browser · local · ready · local_runtime · enabled" in providers
+    assert "browserbase · browserbase · staged_local_fallback · local_fallback · selected" in providers
+    assert "Managed Browserbase-style browser provider" in providers
 
 
 def test_browser_session_errors_for_missing_requested_provider(tmp_path, browser_runtime_session):

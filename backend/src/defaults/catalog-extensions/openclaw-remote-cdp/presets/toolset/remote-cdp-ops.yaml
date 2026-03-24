@@ -1,0 +1,11 @@
+name: remote-cdp-ops
+description: Use staged remote CDP browser sessions for cross-site inspection and replay-friendly captures.
+mode: balanced
+include_tools:
+  - browser_session
+  - browse_webpage
+capabilities:
+  - browser
+  - remote-debugging
+execution_boundaries:
+  - external_read

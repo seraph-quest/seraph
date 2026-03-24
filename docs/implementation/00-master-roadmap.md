@@ -410,17 +410,17 @@ See [Capability Import Wave 2](./12-capability-import-wave-2.md) for the impleme
 
 ### Wave 4: Selective OpenClaw Imports
 
-25. [ ] `openclaw-browser-mode-matrix-v1`:
+25. [x] `openclaw-browser-mode-matrix-v1`:
     add the browser mode matrix of managed browser, browser-extension relay, and remote CDP so Seraph can choose the right browser surface per task and trust boundary
-26. [ ] `openclaw-channel-routing-bindings-v1`:
+26. [x] `openclaw-channel-routing-bindings-v1`:
     add per-channel routing, bindings, and delivery rules so multi-channel reach behaves predictably instead of as independent connector silos
-27. [ ] `openclaw-webhook-poll-pubsub-v1`:
+27. [x] `openclaw-webhook-poll-pubsub-v1`:
     import higher-value automation breadth through typed trigger surfaces instead of one-off cron-only automation
-28. [ ] `openclaw-node-device-adapters-v1`:
+28. [x] `openclaw-node-device-adapters-v1`:
     add device and node companion surfaces through adapters so Seraph can reach phones, desktops, or later embodied surfaces without adopting OpenClaw’s raw plugin model
-29. [ ] `openclaw-canvas-output-v1`:
+29. [x] `openclaw-canvas-output-v1`:
     add richer structured output or canvas surfaces for operator-visible results, generated UIs, and tool-produced artifacts where text-only panes are too limiting
-30. [ ] `openclaw-workflow-engine-imports-v1`:
+30. [x] `openclaw-workflow-engine-imports-v1`:
     selectively reinterpret OpenClaw runtime ideas such as OpenProse, Lobster, or LLM-task style typed runtimes into Seraph’s workflow and execution architecture
 
 ### Wave 5: Operator Surface, Proof, And Hardening

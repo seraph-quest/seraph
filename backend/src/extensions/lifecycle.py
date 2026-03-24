@@ -88,8 +88,10 @@ _STUDIO_TYPE_ORDER = {
     "observer_definitions": 15,
     "observer_connectors": 16,
     "channel_adapters": 17,
-    "node_adapters": 18,
-    "workspace_adapters": 19,
+    "canvas_outputs": 18,
+    "workflow_runtimes": 19,
+    "node_adapters": 20,
+    "workspace_adapters": 21,
 }
 _CONNECTOR_CONTRIBUTION_TYPES = {
     "mcp_servers",
@@ -125,6 +127,23 @@ _PASSIVE_TYPED_CONTRIBUTION_FIELDS = {
     "context_packs": ("name", "description", "instructions", "memory_tags", "profile_fields", "prompt_refs", "domains"),
     "speech_profiles": ("name", "description", "provider", "voice", "supports_tts", "supports_stt", "wake_word"),
     "provider_presets": ("name", "label", "default_model", "notes"),
+    "canvas_outputs": ("name", "title", "description", "surface_kind", "sections", "artifact_types", "preferred_panel"),
+    "workflow_runtimes": (
+        "name",
+        "engine_kind",
+        "description",
+        "delegation_mode",
+        "checkpoint_policy",
+        "structured_output",
+        "default_output_surface",
+    ),
+}
+
+_PLANNED_CONNECTOR_REQUIRED_FIELDS = {
+    "automation_triggers": ("name", "trigger_type"),
+    "browser_providers": ("name", "provider_kind"),
+    "messaging_connectors": ("name", "platform"),
+    "node_adapters": ("name", "adapter_kind"),
 }
 
 
@@ -1226,6 +1245,26 @@ def _contribution_indexes(
     }
 
 
+def _planned_connector_definition_errors(contribution: ExtensionContributionRecord) -> list[str]:
+    errors: list[str] = []
+    required_fields = _PLANNED_CONNECTOR_REQUIRED_FIELDS.get(contribution.contribution_type, ())
+    for field_name in required_fields:
+        value = contribution.metadata.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(
+                f"{contribution.contribution_type.removesuffix('s').replace('_', ' ')} definition is invalid and cannot load"
+            )
+            break
+    conflict = contribution.metadata.get("registry_conflict")
+    if isinstance(conflict, dict):
+        name = str(conflict.get("name") or contribution.metadata.get("name") or contribution.reference)
+        winner = str(conflict.get("winner_display_name") or conflict.get("winner_extension_id") or "another extension")
+        errors.append(
+            f"{contribution.contribution_type.removesuffix('s').replace('_', ' ')} '{name}' conflicts with {winner}"
+        )
+    return errors
+
+
 def _contribution_payload(
     extension: ExtensionRecord,
     contribution: ExtensionContributionRecord,
@@ -1363,22 +1402,40 @@ def _contribution_payload(
         contribution_name = _contribution_name(contribution)
         config_entry = _contribution_config(state_entry, contribution.contribution_type, contribution_name)
         config_errors = _contribution_config_errors(contribution.metadata, config_entry) if config_entry else []
+        definition_errors = _planned_connector_definition_errors(contribution)
         requires_config = bool(contribution.metadata.get("config_fields"))
         configured = bool(config_entry) if requires_config else True
         if config_entry:
             payload["config_keys"] = sorted(config_entry.keys())
         if config_errors:
             payload["config_errors"] = config_errors
-        health = planned_configurable_connector_health(
-            "Runtime support for this connector surface lands in the later capability-reach waves.",
-            enabled=enabled,
-            configured=configured,
-            config_errors=config_errors,
-            supports_test=False,
-        )
-        payload["configured"] = configured and not config_errors
-        payload["health"] = health.as_payload()
-        payload["status"] = str(payload["health"].get("state") or "planned")
+        if definition_errors:
+            payload["configured"] = False
+            payload["health"] = ConnectorHealthSnapshot(
+                state="invalid",
+                summary=definition_errors[0],
+                ready=False,
+                enabled=enabled,
+                configured=False,
+                connected=False,
+                error="; ".join(definition_errors),
+                supports_test=False,
+                supports_configure=True,
+                supports_enable=True,
+                supports_disable=True,
+            ).as_payload()
+            payload["status"] = "invalid"
+        else:
+            health = planned_configurable_connector_health(
+                "Runtime support for this connector surface lands in the later capability-reach waves.",
+                enabled=enabled,
+                configured=configured,
+                config_errors=config_errors,
+                supports_test=False,
+            )
+            payload["configured"] = configured and not config_errors
+            payload["health"] = health.as_payload()
+            payload["status"] = str(payload["health"].get("state") or "planned")
         return payload
     if contribution.contribution_type == "observer_definitions":
         active_definition = (
@@ -1570,7 +1627,23 @@ def _contribution_payload(
             if field_name in item:
                 payload[field_name] = item[field_name]
     if contribution.contribution_type in {"skills", "workflows"}:
-        for field_name in ("name", "description", "requires_tools", "requires_skills", "step_tools", "tool_name", "user_invocable", "default_enabled"):
+        for field_name in (
+            "name",
+            "description",
+            "requires_tools",
+            "requires_skills",
+            "step_tools",
+            "tool_name",
+            "runtime_profile",
+            "output_surface",
+            "declared_output_surface",
+            "effective_output_surface",
+            "output_surface_title",
+            "output_surface_sections",
+            "output_surface_artifact_types",
+            "user_invocable",
+            "default_enabled",
+        ):
             field_value = contribution.metadata.get(field_name)
             if field_value not in (None, "", [], {}):
                 payload.setdefault(field_name, field_value)
@@ -1952,6 +2025,9 @@ def _set_planned_connector_enabled(
         raise ValueError(
             f"connector '{contribution.reference}' in extension '{extension.id}' is not a valid {changed_type} definition"
         )
+    definition_errors = _planned_connector_definition_errors(contribution)
+    if definition_errors:
+        raise ValueError(definition_errors[0])
     state_payload = _state_payload()
     state_by_id = state_payload.get("extensions")
     state_entry = (

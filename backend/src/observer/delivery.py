@@ -9,6 +9,8 @@ from src.observer.native_notification_queue import native_notification_queue
 
 logger = logging.getLogger(__name__)
 
+_BUILTIN_CHANNEL_TRANSPORTS = {"websocket", "native_notification"}
+
 
 def _transport_failure_reason(
     *,
@@ -23,6 +25,20 @@ def _transport_failure_reason(
     if failed_connections >= attempted_connections:
         return "all_connections_failed"
     return "unknown_transport_failure"
+
+
+def _prefer_delivery_error(current_error: str | None, next_error: str) -> str:
+    if not current_error or current_error in {"no_active_route_transport", "unknown_transport_failure"}:
+        return next_error
+    if next_error in {"daemon_unavailable", "no_active_route_transport"}:
+        return current_error
+    return next_error
+
+
+def _route_disabled_error(*, primary_transport: str | None) -> str:
+    if primary_transport == "websocket":
+        return "websocket_adapter_disabled"
+    return "no_active_route_transport"
 
 
 def _active_channel_adapters() -> set[str]:
@@ -44,11 +60,33 @@ def _active_channel_adapters() -> set[str]:
         contributions,
         enabled_overrides=connector_enabled_overrides(state_by_id),
     )
-    if active_adapters:
-        return {item.transport for item in active_adapters}
-    if contributions:
-        return set()
-    return {"websocket", "native_notification"}
+    active_transports = {item.transport for item in active_adapters}
+    return active_transports | (_BUILTIN_CHANNEL_TRANSPORTS - active_transports)
+
+
+def _delivery_route_name(*, message: WSResponse, is_scheduled: bool) -> str:
+    if is_scheduled:
+        return "scheduled_delivery"
+    if message.intervention_type == "alert":
+        return "alert_delivery"
+    return "live_delivery"
+
+
+def _route_transport_order(route_name: str, *, active_channel_adapters: set[str]) -> tuple[dict[str, str | None], list[str]]:
+    from src.extensions.channel_routing import ordered_route_transports
+    from src.extensions.state import load_extension_state_payload
+
+    state_payload = load_extension_state_payload()
+    binding, ordered = ordered_route_transports(
+        state_payload,
+        route=route_name,
+        active_transports=active_channel_adapters,
+    )
+    return {
+        "route": binding.route,
+        "primary_transport": binding.primary_transport,
+        "fallback_transport": binding.fallback_transport,
+    }, ordered
 
 
 def _should_offer_native_notification(
@@ -245,36 +283,74 @@ async def deliver_or_queue(
             event_details["intervention_id"] = intervention_id
 
         if policy_decision.action.value == "act":
-            websocket_enabled = "websocket" in active_channel_adapters
-            if websocket_enabled:
-                broadcast_result = await ws_manager.broadcast(message)
-            else:
-                from src.scheduler.connection_manager import BroadcastResult
-
-                broadcast_result = BroadcastResult(
-                    attempted_connections=0,
-                    delivered_connections=0,
-                    failed_connections=0,
-                )
+            route_name = _delivery_route_name(message=message, is_scheduled=is_scheduled)
+            route_binding, transport_order = _route_transport_order(
+                route_name,
+                active_channel_adapters=active_channel_adapters,
+            )
             event_details.update(
                 {
-                    "attempted_connections": broadcast_result.attempted_connections,
-                    "delivered_connections": broadcast_result.delivered_connections,
-                    "failed_connections": broadcast_result.failed_connections,
                     "active_channel_adapters": sorted(active_channel_adapters),
+                    "channel_route": route_binding["route"],
+                    "primary_transport": route_binding["primary_transport"],
+                    "fallback_transport": route_binding["fallback_transport"],
+                    "transport_order": transport_order,
                 }
             )
-            if broadcast_result.delivered_connections <= 0:
-                if (
-                    "native_notification" in active_channel_adapters
-                    and
-                    context_manager.is_daemon_connected()
-                    and _should_offer_native_notification(
-                        message,
-                        is_scheduled=is_scheduled,
-                        channel_bias=learning_signal.channel_bias,
+
+            last_error = _route_disabled_error(primary_transport=route_binding["primary_transport"])
+            for transport in transport_order:
+                if transport == "websocket":
+                    websocket_enabled = "websocket" in active_channel_adapters
+                    if websocket_enabled:
+                        broadcast_result = await ws_manager.broadcast(message)
+                    else:
+                        from src.scheduler.connection_manager import BroadcastResult
+
+                        broadcast_result = BroadcastResult(
+                            attempted_connections=0,
+                            delivered_connections=0,
+                            failed_connections=0,
+                        )
+                    event_details.update(
+                        {
+                            "attempted_connections": broadcast_result.attempted_connections,
+                            "delivered_connections": broadcast_result.delivered_connections,
+                            "failed_connections": broadcast_result.failed_connections,
+                        }
                     )
-                ):
+                    if broadcast_result.delivered_connections > 0:
+                        if policy_decision.should_cost_budget:
+                            context_manager.decrement_attention_budget()
+                        logger.info("Delivered proactive message (type=%s)", message.type)
+                        await _update_intervention_outcome(
+                            intervention_id,
+                            latest_outcome="delivered",
+                            transport="websocket",
+                        )
+                        await log_observer_delivery_event(
+                            decision="delivered",
+                            message_type=message.type,
+                            intervention_type=intervention_type,
+                            urgency=urgency,
+                            is_scheduled=is_scheduled,
+                            details={**event_details, "transport": "websocket"},
+                        )
+                        return policy_decision
+                    last_error = _prefer_delivery_error(
+                        last_error,
+                        _transport_failure_reason(
+                        attempted_connections=broadcast_result.attempted_connections,
+                        failed_connections=broadcast_result.failed_connections,
+                        websocket_enabled=websocket_enabled,
+                        ),
+                    )
+                    continue
+
+                if transport == "native_notification":
+                    if not context_manager.is_daemon_connected():
+                        last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
+                        continue
                     notification = await native_notification_queue.enqueue(
                         intervention_id=intervention_id,
                         title=_native_notification_title(message, is_scheduled=is_scheduled),
@@ -301,7 +377,7 @@ async def deliver_or_queue(
                         notification_id=notification.id,
                     )
                     logger.info(
-                        "Rerouted proactive message to native notification (type=%s, notification_id=%s)",
+                        "Delivered proactive message over native notification (type=%s, notification_id=%s)",
                         message.type,
                         notification.id,
                     )
@@ -322,53 +398,33 @@ async def deliver_or_queue(
                     )
                     return policy_decision
 
-                logger.warning(
-                    "Failed to deliver proactive message over WebSocket transport (attempted=%d failed=%d)",
-                    broadcast_result.attempted_connections,
-                    broadcast_result.failed_connections,
-                )
-                await _update_intervention_outcome(
-                    intervention_id,
-                    latest_outcome="failed",
-                    transport="websocket",
-                )
-                await log_observer_delivery_event(
-                    decision="failed",
-                    message_type=message.type,
-                    intervention_type=intervention_type,
-                    urgency=urgency,
-                    is_scheduled=is_scheduled,
-                    details={
-                        **event_details,
-                        "transport": "websocket",
-                        "delivery_decision": policy_decision.delivery_decision.value
-                        if policy_decision.delivery_decision is not None
-                        else None,
-                        "error": _transport_failure_reason(
-                            attempted_connections=broadcast_result.attempted_connections,
-                            failed_connections=broadcast_result.failed_connections,
-                            websocket_enabled=websocket_enabled,
-                        ),
-                    },
-                )
-                return policy_decision
-            # Decrement budget if this delivery costs budget
-            if policy_decision.should_cost_budget:
-                context_manager.decrement_attention_budget()
-            logger.info("Delivered proactive message (type=%s)", message.type)
+            logger.warning(
+                "Failed to deliver proactive message (type=%s, route=%s, error=%s)",
+                message.type,
+                route_name,
+                last_error,
+            )
             await _update_intervention_outcome(
                 intervention_id,
-                latest_outcome="delivered",
-                transport="websocket",
+                latest_outcome="failed",
+                transport=transport_order[0] if transport_order else None,
             )
             await log_observer_delivery_event(
-                decision="delivered",
+                decision="failed",
                 message_type=message.type,
                 intervention_type=intervention_type,
                 urgency=urgency,
                 is_scheduled=is_scheduled,
-                details={**event_details, "transport": "websocket"},
+                details={
+                    **event_details,
+                    "transport": transport_order[0] if transport_order else None,
+                    "delivery_decision": policy_decision.delivery_decision.value
+                    if policy_decision.delivery_decision is not None
+                    else None,
+                    "error": last_error,
+                },
             )
+            return policy_decision
 
         elif policy_decision.action.value == "bundle":
             await insight_queue.enqueue(
@@ -450,18 +506,40 @@ async def deliver_queued_bundle() -> int:
     if not items:
         return 0
     active_channel_adapters = _active_channel_adapters()
-    if "websocket" not in active_channel_adapters:
-        if (
-            "native_notification" in active_channel_adapters
-            and context_manager.is_daemon_connected()
-        ):
+    route_binding, transport_order = _route_transport_order(
+        "bundle_delivery",
+        active_channel_adapters=active_channel_adapters,
+    )
+    details = {
+        "bundle_item_count": len(items),
+        "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
+        "delivery_decision": "deliver",
+        "active_channel_adapters": sorted(active_channel_adapters),
+        "channel_route": route_binding["route"],
+        "primary_transport": route_binding["primary_transport"],
+        "fallback_transport": route_binding["fallback_transport"],
+        "transport_order": transport_order,
+    }
+    parts = [f"- {item.content}" for item in items]
+    bundle_content = f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
+    message = WSResponse(
+        type="proactive",
+        content=bundle_content,
+        intervention_type="proactive_bundle",
+        urgency=3,
+        reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
+    )
+
+    last_error = _route_disabled_error(primary_transport=route_binding["primary_transport"])
+    for transport in transport_order:
+        if transport == "native_notification":
+            if not context_manager.is_daemon_connected():
+                last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
+                continue
             notification = await native_notification_queue.enqueue(
                 intervention_id=None,
                 title="Seraph update",
-                body=(
-                    f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n"
-                    + "\n".join(f"- {item.content}" for item in items)
-                ),
+                body=bundle_content,
                 intervention_type="proactive_bundle",
                 urgency=3,
                 surface="action_card",
@@ -488,98 +566,62 @@ async def deliver_queued_bundle() -> int:
                 urgency=3,
                 is_scheduled=False,
                 details={
-                    "bundle_item_count": len(items),
-                    "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
-                    "delivery_decision": "deliver",
-                    "active_channel_adapters": sorted(active_channel_adapters),
+                    **details,
                     "transport": "native_notification",
                     "notification_id": notification.id,
                 },
             )
             return len(items)
-        await log_observer_delivery_event(
-            decision="failed",
-            message_type="proactive",
-            intervention_type="proactive_bundle",
-            urgency=3,
-            is_scheduled=False,
-            details={
-                "bundle_item_count": len(items),
-                "queue_retained": True,
-                "delivery_decision": "deliver",
-                "active_channel_adapters": sorted(active_channel_adapters),
-                "error": _transport_failure_reason(
-                    attempted_connections=0,
-                    failed_connections=0,
-                    websocket_enabled=False,
+
+        if transport == "websocket":
+            broadcast_result = await ws_manager.broadcast(message)
+            details.update(
+                {
+                    "attempted_connections": broadcast_result.attempted_connections,
+                    "delivered_connections": broadcast_result.delivered_connections,
+                    "failed_connections": broadcast_result.failed_connections,
+                }
+            )
+            if broadcast_result.delivered_connections > 0:
+                await insight_queue.delete_many(
+                    [item.id for item in items if getattr(item, "id", None)]
+                )
+                for item in items:
+                    await _update_intervention_outcome(
+                        item.intervention_id,
+                        latest_outcome="bundle_delivered",
+                        transport="websocket_bundle",
+                    )
+                logger.info("Delivered bundle of %d queued insight(s)", len(items))
+                await log_observer_delivery_event(
+                    decision="delivered",
+                    message_type=message.type,
+                    intervention_type=message.intervention_type,
+                    urgency=message.urgency,
+                    is_scheduled=False,
+                    details={**details, "transport": "websocket"},
+                )
+                return len(items)
+            last_error = _prefer_delivery_error(
+                last_error,
+                _transport_failure_reason(
+                attempted_connections=broadcast_result.attempted_connections,
+                failed_connections=broadcast_result.failed_connections,
+                websocket_enabled=True,
                 ),
-            },
-        )
-        return 0
+            )
 
-    # Format as a single bundle message
-    parts = []
-    for item in items:
-        parts.append(f"- {item.content}")
-    bundle_content = f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
-
-    message = WSResponse(
-        type="proactive",
-        content=bundle_content,
-        intervention_type="proactive_bundle",
-        urgency=3,
-        reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
-    )
-    broadcast_result = await ws_manager.broadcast(message)
-    details = {
-        "bundle_item_count": len(items),
-        "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
-        "attempted_connections": broadcast_result.attempted_connections,
-        "delivered_connections": broadcast_result.delivered_connections,
-        "failed_connections": broadcast_result.failed_connections,
-        "delivery_decision": "deliver",
-        "active_channel_adapters": sorted(active_channel_adapters),
-    }
-    if broadcast_result.delivered_connections <= 0:
-        logger.warning(
-            "Failed to deliver queued bundle over WebSocket transport (attempted=%d failed=%d)",
-            broadcast_result.attempted_connections,
-            broadcast_result.failed_connections,
-        )
-        await log_observer_delivery_event(
-            decision="failed",
-            message_type=message.type,
-            intervention_type=message.intervention_type,
-            urgency=message.urgency,
-            is_scheduled=False,
-            details={
-                **details,
-                "queue_retained": True,
-                "error": _transport_failure_reason(
-                    attempted_connections=broadcast_result.attempted_connections,
-                    failed_connections=broadcast_result.failed_connections,
-                    websocket_enabled=True,
-                ),
-            },
-        )
-        return 0
-
-    await insight_queue.delete_many(
-        [item.id for item in items if getattr(item, "id", None)]
-    )
-    for item in items:
-        await _update_intervention_outcome(
-            item.intervention_id,
-            latest_outcome="bundle_delivered",
-            transport="websocket_bundle",
-        )
-    logger.info("Delivered bundle of %d queued insight(s)", len(items))
     await log_observer_delivery_event(
-        decision="delivered",
+        decision="failed",
         message_type=message.type,
         intervention_type=message.intervention_type,
         urgency=message.urgency,
         is_scheduled=False,
-        details=details,
+        details={
+            **details,
+            "queue_retained": True,
+            "transport": transport_order[0] if transport_order else None,
+            "error": last_error,
+        },
     )
-    return len(items)
+    return 0

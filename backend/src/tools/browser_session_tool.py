@@ -7,7 +7,7 @@ from smolagents import tool
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.browser.sessions import browser_session_runtime
-from src.extensions.browser_providers import select_active_browser_provider
+from src.extensions.browser_providers import list_browser_provider_inventory, select_active_browser_provider
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
 from src.tools.browser_tool import browse_webpage
@@ -58,6 +58,67 @@ def _require_owner_session_id() -> str | None:
     return session_id
 
 
+def _browser_provider_inventory() -> list[dict[str, object]]:
+    state_payload = load_extension_state_payload()
+    state_by_id = state_payload.get("extensions")
+    snapshot = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    inventory = list_browser_provider_inventory(
+        snapshot.list_contributions("browser_providers"),
+        state_by_id=state_by_id if isinstance(state_by_id, dict) else None,
+        enabled_overrides=connector_enabled_overrides(state_by_id if isinstance(state_by_id, dict) else None),
+    )
+    return [
+        {
+            "name": item.name,
+            "provider_kind": item.provider_kind,
+            "enabled": item.enabled,
+            "configured": item.configured,
+            "selected": item.selected,
+            "execution_mode": item.execution_mode,
+            "runtime_state": item.runtime_state,
+            "config_keys": list(item.config_keys),
+            "requires_network": item.requires_network,
+            "requires_daemon": item.requires_daemon,
+            "capabilities": list(item.capabilities),
+            "description": item.description,
+        }
+        for item in inventory
+    ]
+
+
+def _render_provider_inventory() -> str:
+    inventory = _browser_provider_inventory()
+    if not inventory:
+        return (
+            "- local-browser · local · ready · local_runtime · selected\n"
+            "  Built-in local browser runtime. Remote providers are not configured."
+        )
+    lines: list[str] = []
+    for item in inventory:
+        state_bits = [
+            item["runtime_state"],
+            str(item["execution_mode"]),
+        ]
+        if item["selected"]:
+            state_bits.append("selected")
+        elif item["enabled"]:
+            state_bits.append("enabled")
+        else:
+            state_bits.append("disabled")
+        lines.append(
+            f"- {item['name']} · {item['provider_kind']} · {' · '.join(state_bits)}"
+        )
+        description = str(item.get("description") or "").strip()
+        if description:
+            lines.append(f"  {description}")
+    return "\n".join(lines)
+
+
 def _render_session_list(owner_session_id: str) -> str:
     sessions = browser_session_runtime.list_sessions(owner_session_id=owner_session_id)
     if not sessions:
@@ -83,7 +144,7 @@ def browser_session(
     """Manage structured browser sessions and page references.
 
     Args:
-        action: One of open, list, read, snapshot, or close.
+        action: One of providers, open, list, read, snapshot, or close.
         url: URL for open.
         session_id: Session id for read, snapshot, or close.
         ref: Snapshot reference for read.
@@ -98,6 +159,9 @@ def browser_session(
     owner_session_id = _require_owner_session_id()
     if owner_session_id is None:
         return "Error: browser_session requires an active session."
+
+    if normalized_action == "providers":
+        return _render_provider_inventory()
 
     if normalized_action == "list":
         return _render_session_list(owner_session_id)
@@ -185,4 +249,4 @@ def browser_session(
             return f"Error: Browser session '{session_id}' was not found."
         return f"Closed browser session {session_id}."
 
-    return "Error: Unsupported browser_session action. Use open, list, read, snapshot, or close."
+    return "Error: Unsupported browser_session action. Use providers, open, list, read, snapshot, or close."

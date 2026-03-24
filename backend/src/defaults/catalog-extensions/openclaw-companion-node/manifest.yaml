@@ -1,0 +1,16 @@
+id: seraph.openclaw-companion-node
+version: 2026.3.24
+display_name: OpenClaw Companion Node
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.3.19"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Companion-node package for staged OpenClaw-style device reach.
+description: Packages a guarded companion node adapter so Seraph can stage device and desktop reach through typed node adapters.
+permissions:
+  network: true
+contributes:
+  node_adapters:
+    - connectors/nodes/companion.yaml

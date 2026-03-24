@@ -11,7 +11,7 @@ import pytest
 
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
-from src.workflows.manager import WorkflowManager, WorkflowTool
+from src.workflows.manager import WorkflowManager, WorkflowTool, workflow_manager
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import get_tools
@@ -85,6 +85,82 @@ def _write_manifest_workflow_package(
     workflows_path = package_dir / "workflows"
     workflows_path.mkdir(exist_ok=True)
     (workflows_path / workflow_file_name).write_text(workflow_content, encoding="utf-8")
+    return package_dir
+
+
+def _write_manifest_canvas_package(
+    root,
+    *,
+    package_name: str = "canvas-pack",
+    extension_id: str = "seraph.canvas-pack",
+    display_name: str = "Canvas Pack",
+    title: str = "Guardian Board",
+):
+    package_dir = root / "extensions" / package_name
+    (package_dir / "canvas").mkdir(parents=True, exist_ok=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: " + extension_id + "\n"
+        "version: 2026.3.24\n"
+        f"display_name: {display_name}\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  canvas_outputs:\n"
+        "    - canvas/guardian-board.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "canvas" / "guardian-board.yaml").write_text(
+        "name: guardian-board\n"
+        f"title: {title}\n"
+        "description: Structured workflow board.\n"
+        "surface_kind: board\n"
+        "sections:\n"
+        "  - Summary\n"
+        "  - Steps\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_manifest_workflow_runtime_package(
+    root,
+    *,
+    package_name: str = "runtime-pack",
+    extension_id: str = "seraph.runtime-pack",
+    display_name: str = "Runtime Pack",
+    default_output_surface: str = "guardian-board",
+):
+    package_dir = root / "extensions" / package_name
+    (package_dir / "runtimes").mkdir(parents=True, exist_ok=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: " + extension_id + "\n"
+        "version: 2026.3.24\n"
+        f"display_name: {display_name}\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  workflow_runtimes:\n"
+        "    - runtimes/openprose.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "runtimes" / "openprose.yaml").write_text(
+        "name: openprose\n"
+        "engine_kind: openprose\n"
+        "description: Narrative drafting runtime.\n"
+        "delegation_mode: inline\n"
+        "checkpoint_policy: step\n"
+        "structured_output: true\n"
+        f"default_output_surface: {default_output_surface}\n",
+        encoding="utf-8",
+    )
     return package_dir
 
 
@@ -206,6 +282,31 @@ class TestWorkflowLoader:
         assert workflow is not None
         assert workflow.step_tools == ["web_search", "write_file"]
 
+    def test_parse_workflow_tracks_runtime_profile_and_output_surface(self, tmp_path):
+        workflow_path = tmp_path / "runtime-aware.md"
+        workflow_path.write_text(
+            "---\n"
+            "name: runtime-aware\n"
+            "description: Runtime-aware workflow\n"
+            "runtime_profile: openprose\n"
+            "output_surface: guardian-board\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Runtime-aware workflow.\n",
+            encoding="utf-8",
+        )
+
+        workflow = _parse_workflow_file(str(workflow_path))
+
+        assert workflow is not None
+        assert workflow.runtime_profile == "openprose"
+        assert workflow.output_surface == "guardian-board"
+
 
 class TestWorkflowManager:
     def test_active_workflow_gating_uses_tools_and_skills(self, workflows_dir):
@@ -227,6 +328,25 @@ class TestWorkflowManager:
             "goal-snapshot-to-file",
         }
 
+    def test_active_workflow_gating_uses_step_tools_even_without_requires_tools(self, workflows_dir):
+        mgr = WorkflowManager()
+        mgr.init(workflows_dir)
+        workflow = mgr.get_workflow("web-brief-to-file")
+        assert workflow is not None
+        workflow.requires_tools = []
+
+        listed = next(
+            workflow
+            for workflow in mgr.list_workflows(
+                available_tool_names=["web_search"],
+                active_skill_names=[],
+            )
+            if workflow["name"] == "web-brief-to-file"
+        )
+        assert listed["is_available"] is False
+        assert listed["missing_tools"] == ["write_file"]
+        assert mgr.get_active_workflows(["web_search"], []) == []
+
     def test_enable_disable_persists(self, workflows_dir):
         mgr = WorkflowManager()
         mgr.init(workflows_dir)
@@ -238,11 +358,136 @@ class TestWorkflowManager:
             data = json.load(f)
         assert data["disabled"] == ["web-brief-to-file"]
 
-        mgr2 = WorkflowManager()
-        mgr2.init(workflows_dir)
-        assert mgr2.get_workflow("web-brief-to-file").enabled is False
-        assert mgr2.enable("web-brief-to-file") is True
-        assert mgr2.get_workflow("web-brief-to-file").enabled is True
+    def test_runtime_availability_tracks_runtime_profiles_and_output_surfaces(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "runtime-aware.md").write_text(
+            "---\n"
+            "name: runtime-aware\n"
+            "description: Runtime-aware workflow\n"
+            "runtime_profile: openprose\n"
+            "output_surface: guardian-board\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Runtime-aware workflow.\n",
+            encoding="utf-8",
+        )
+        _write_manifest_canvas_package(tmp_path)
+        manifest_roots = default_manifest_roots_for_workspace(str(tmp_path))
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=manifest_roots)
+
+        without_runtime = next(
+            item
+            for item in mgr.list_workflows(available_tool_names=["web_search"], active_skill_names=[])
+            if item["name"] == "runtime-aware"
+        )
+        assert without_runtime["is_available"] is False
+        assert without_runtime["missing_runtime_profiles"] == ["openprose"]
+        assert without_runtime["missing_output_surfaces"] == []
+
+        _write_manifest_workflow_runtime_package(tmp_path)
+        mgr.init(str(workflows_dir), manifest_roots=manifest_roots)
+        with_runtime = next(
+            item
+            for item in mgr.list_workflows(available_tool_names=["web_search"], active_skill_names=[])
+            if item["name"] == "runtime-aware"
+        )
+        assert with_runtime["is_available"] is True
+        assert with_runtime["runtime_profile"] == "openprose"
+        assert with_runtime["output_surface"] == "guardian-board"
+        assert with_runtime["missing_runtime_profiles"] == []
+        assert with_runtime["missing_output_surfaces"] == []
+
+    def test_runtime_profile_defaults_output_surface_and_gates_active_workflows(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "runtime-default.md").write_text(
+            "---\n"
+            "name: runtime-default\n"
+            "description: Runtime-default workflow\n"
+            "runtime_profile: openprose\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n\n"
+            "Runtime-default workflow.\n",
+            encoding="utf-8",
+        )
+        manifest_roots = default_manifest_roots_for_workspace(str(tmp_path))
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=manifest_roots)
+        assert mgr.get_active_workflows(["web_search"], []) == []
+
+        _write_manifest_workflow_runtime_package(tmp_path)
+        _write_manifest_canvas_package(tmp_path)
+        mgr.init(str(workflows_dir), manifest_roots=manifest_roots)
+
+        workflow_item = next(
+            item
+            for item in mgr.list_workflows(available_tool_names=["web_search"], active_skill_names=[])
+            if item["name"] == "runtime-default"
+        )
+        assert workflow_item["is_available"] is True
+        assert workflow_item["output_surface"] == "guardian-board"
+        active_workflows = mgr.get_active_workflows(["web_search"], [])
+        assert [item.name for item in active_workflows if item.name == "runtime-default"] == ["runtime-default"]
+
+        workflow_tool = next(
+            tool
+            for tool in mgr.build_workflow_tools(
+                [DummyTool("web_search", lambda: "runtime result")],
+                [],
+            )
+            if tool.name == "workflow_runtime_default"
+        )
+        result = workflow_tool()
+        audit_payload = workflow_tool.get_audit_result_payload({}, result)
+        assert audit_payload is not None
+        _summary, details = audit_payload
+        canvas_output = details["canvas_output"]
+        assert canvas_output["surface"] == "guardian-board"
+        assert canvas_output["title"] == "Guardian Board"
+        assert [section["label"] for section in canvas_output["sections"]] == ["Summary", "Steps"]
+        assert canvas_output["summary"] == "workflow content redacted"
+        assert canvas_output["sections"][0]["item_count"] == 1
+
+    def test_workflow_tool_audit_payload_includes_canvas_output(self):
+        workflow = Workflow(
+            name="runtime-aware",
+            description="Runtime-aware workflow",
+            inputs={"query": {"type": "string", "required": True}},
+            steps=[WorkflowStep(tool="web_search", arguments={"query": "{{ query }}"}, id="search")],
+            requires_tools=["web_search"],
+            result_template="Done for {{ query }}.",
+            output_surface="guardian-board",
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            tools_by_name={"web_search": DummyTool("web_search", lambda query: f"result for {query}")},
+        )
+
+        result = workflow_tool(query="seraph")
+        audit_payload = workflow_tool.get_audit_result_payload({"query": "seraph"}, result)
+
+        assert audit_payload is not None
+        _summary, details = audit_payload
+        canvas_output = details["canvas_output"]
+        assert canvas_output["surface"] == "guardian-board"
+        assert canvas_output["title"] == "runtime-aware"
+        assert canvas_output["section_count"] == 2
+        assert canvas_output["summary"] == "workflow content redacted"
+        assert all("items" not in section for section in canvas_output["sections"])
 
     def test_workflow_tool_resolves_legacy_shell_execute_alias(self):
         workflow = Workflow(
@@ -1612,6 +1857,134 @@ class TestWorkflowApi:
         assert payload["file_path"].endswith(
             "extensions/workspace-capabilities/workflows/retryable-save.md"
         )
+
+    @pytest.mark.asyncio
+    async def test_validate_workflow_draft_applies_runtime_default_output_surface(self, client, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "extensions").mkdir(parents=True)
+        _write_manifest_canvas_package(workspace)
+        _write_manifest_workflow_runtime_package(workspace)
+        content = (
+            "---\n"
+            "name: Runtime Default\n"
+            "description: Use runtime default output surface.\n"
+            "runtime_profile: openprose\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n"
+        )
+        with (
+            patch("src.api.workflows.settings.workspace_dir", str(workspace)),
+            patch(
+                "src.api.workflows.get_base_tools_and_active_skills",
+                return_value=([SimpleNamespace(name="web_search")], [], "disabled"),
+            ),
+        ):
+            resp = await client.post("/api/workflows/validate", json={"content": content})
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["workflow"]["runtime_profile"] == "openprose"
+        assert payload["workflow"]["output_surface"] == "guardian-board"
+        assert payload["workflow"]["output_surface_title"] == "Guardian Board"
+        assert payload["workflow"]["declared_output_surface"] == ""
+        assert payload["missing_output_surfaces"] == []
+
+    @pytest.mark.asyncio
+    async def test_workflow_source_surfaces_runtime_default_output_surface(self, client, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        _write_manifest_canvas_package(tmp_path)
+        _write_manifest_workflow_runtime_package(tmp_path)
+        content = (
+            "---\n"
+            "name: runtime-source\n"
+            "description: Use runtime default output surface.\n"
+            "runtime_profile: openprose\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n"
+        )
+        workflow_path = workflows_dir / "runtime-source.md"
+        workflow_path.write_text(content, encoding="utf-8")
+        with (
+            patch("src.api.workflows.settings.workspace_dir", str(tmp_path)),
+            patch(
+                "src.api.workflows.get_base_tools_and_active_skills",
+                return_value=([SimpleNamespace(name="web_search")], [], "disabled"),
+            ),
+        ):
+            workflow_manager.init(str(workflows_dir), manifest_roots=default_manifest_roots_for_workspace(str(tmp_path)))
+            resp = await client.get("/api/workflows/runtime-source/source")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["workflow"]["runtime_profile"] == "openprose"
+        assert payload["workflow"]["output_surface"] == "guardian-board"
+        assert payload["workflow"]["output_surface_title"] == "Guardian Board"
+
+    @pytest.mark.asyncio
+    async def test_runtime_default_and_canvas_metadata_ignore_lower_priority_duplicate_names(self, client, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        _write_manifest_canvas_package(
+            tmp_path,
+            package_name="canvas-a",
+            extension_id="seraph.canvas-a",
+            display_name="A Canvas Winner",
+            title="Winner Board",
+        )
+        _write_manifest_canvas_package(
+            tmp_path,
+            package_name="canvas-z",
+            extension_id="seraph.canvas-z",
+            display_name="Z Canvas Loser",
+            title="Loser Board",
+        )
+        _write_manifest_workflow_runtime_package(
+            tmp_path,
+            package_name="runtime-a",
+            extension_id="seraph.runtime-a",
+            display_name="A Runtime Winner",
+            default_output_surface="guardian-board",
+        )
+        _write_manifest_workflow_runtime_package(
+            tmp_path,
+            package_name="runtime-z",
+            extension_id="seraph.runtime-z",
+            display_name="Z Runtime Loser",
+            default_output_surface="loser-board",
+        )
+        content = (
+            "---\n"
+            "name: duplicate-runtime-surface\n"
+            "description: Use runtime default output surface.\n"
+            "runtime_profile: openprose\n"
+            "requires:\n"
+            "  tools: [web_search]\n"
+            "steps:\n"
+            "  - id: search\n"
+            "    tool: web_search\n"
+            "    arguments: {}\n"
+            "---\n"
+        )
+        workflow_path = workflows_dir / "duplicate-runtime-surface.md"
+        workflow_path.write_text(content, encoding="utf-8")
+
+        with patch("src.api.workflows.settings.workspace_dir", str(tmp_path)):
+            workflow_manager.init(str(workflows_dir), manifest_roots=default_manifest_roots_for_workspace(str(tmp_path)))
+            workflow = workflow_manager.get_workflow("duplicate-runtime-surface")
+            assert workflow is not None
+            assert workflow.output_surface == "guardian-board"
+            assert workflow.output_surface_title == "Winner Board"
 
 
 class TestWorkflowSurfaces:

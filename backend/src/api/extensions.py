@@ -13,6 +13,12 @@ from smolagents import MCPClient
 from config.settings import settings
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.audit.runtime import log_integration_event
+from src.extensions.channel_routing import (
+    SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
+    list_channel_route_bindings,
+    set_channel_route_binding,
+)
+from src.extensions.channels import select_active_channel_adapters
 from src.extensions.lifecycle import (
     configure_extension,
     disable_extension,
@@ -29,10 +35,31 @@ from src.extensions.lifecycle import (
     update_extension_path,
     validate_extension_path,
 )
+from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.scaffold import scaffold_extension_package
+from src.extensions.state import (
+    connector_enabled_overrides,
+    load_extension_state_payload,
+    save_extension_state_payload,
+)
 from src.tools.mcp_manager import mcp_manager
 
 router = APIRouter()
+
+_BUILTIN_CHANNEL_ADAPTERS = (
+    {
+        "extension_id": "seraph.builtin-channel-adapters",
+        "name": "websocket",
+        "transport": "websocket",
+        "reference": "builtin:websocket",
+    },
+    {
+        "extension_id": "seraph.builtin-channel-adapters",
+        "name": "native-notification",
+        "transport": "native_notification",
+        "reference": "builtin:native_notification",
+    },
+)
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
 
 
@@ -64,6 +91,59 @@ class ExtensionConnectorTestRequest(BaseModel):
 class ExtensionConnectorToggleRequest(BaseModel):
     reference: str
     enabled: bool
+
+
+class ChannelRoutingBindingUpdateRequest(BaseModel):
+    primary_transport: str
+    fallback_transport: str | None = None
+
+
+class ChannelRoutingUpdateRequest(BaseModel):
+    bindings: dict[str, ChannelRoutingBindingUpdateRequest] = Field(default_factory=dict)
+
+
+def _active_channel_adapter_payloads(state_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    state_by_id = state_payload.get("extensions")
+    snapshot = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    contributions = snapshot.list_contributions("channel_adapters")
+    adapters = select_active_channel_adapters(
+        contributions,
+        enabled_overrides=connector_enabled_overrides(state_by_id if isinstance(state_by_id, dict) else None),
+    )
+    payloads = [
+        {
+            "extension_id": item.extension_id,
+            "name": item.name,
+            "transport": item.transport,
+            "reference": item.reference,
+        }
+        for item in adapters
+    ]
+    active_transports = {
+        str(item.get("transport"))
+        for item in payloads
+        if isinstance(item.get("transport"), str) and str(item.get("transport")).strip()
+    }
+    for builtin in _BUILTIN_CHANNEL_ADAPTERS:
+        if builtin["transport"] in active_transports:
+            continue
+        payloads.append(dict(builtin))
+    return payloads
+
+
+def _channel_routing_response(state_payload: dict[str, Any]) -> dict[str, Any]:
+    adapters = _active_channel_adapter_payloads(state_payload)
+    return {
+        "bindings": [item.as_payload() for item in list_channel_route_bindings(state_payload)],
+        "supported_transports": list(SUPPORTED_CHANNEL_ROUTE_TRANSPORTS),
+        "active_transports": sorted({item["transport"] for item in adapters}),
+        "active_adapters": adapters,
+    }
 
 
 def _extension_issue_count(preview: dict[str, Any] | None) -> int:
@@ -429,6 +509,35 @@ async def scaffold_extension_package_in_workspace(req: ExtensionScaffoldRequest)
 @router.get("/extensions")
 async def list_extension_packages():
     return list_extensions()
+
+
+@router.get("/extensions/channel-routing")
+async def get_channel_routing():
+    state_payload = load_extension_state_payload()
+    return _channel_routing_response(state_payload)
+
+
+@router.put("/extensions/channel-routing")
+async def update_channel_routing(req: ChannelRoutingUpdateRequest):
+    state_payload = load_extension_state_payload()
+    try:
+        for route, binding in req.bindings.items():
+            set_channel_route_binding(
+                state_payload,
+                route=route,
+                primary_transport=binding.primary_transport,
+                fallback_transport=binding.fallback_transport,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    save_extension_state_payload(state_payload)
+    await log_integration_event(
+        integration_type="channel_routing",
+        name="observer_delivery",
+        outcome="updated",
+        details={"routes": sorted(req.bindings.keys())},
+    )
+    return _channel_routing_response(state_payload)
 
 
 @router.get("/extensions/{extension_id}")

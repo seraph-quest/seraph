@@ -49,6 +49,7 @@ def _make_guardian_state() -> GuardianState:
         ),
         bounded_memory_context="- Identity: Builder\n- Open todos: Ship guardian state",
         memory_context="- [goal] Ship guardian state\n- [pattern] Prefers dense dashboards",
+        episodic_memory_context="- [episode] Workflow brief-sync failed at write_file",
         current_session_history="User: What should Seraph improve next?\nAssistant: Build explicit guardian state.",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
         recent_intervention_feedback="- advisory delivered, feedback=helpful, reason=available_capacity: Stretch and refocus.",
@@ -99,7 +100,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
         patch(
-            "src.memory.vector_store.search_with_status",
+            "src.memory.hybrid_retrieval.search_with_status",
             return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
         ),
         patch(
@@ -182,7 +183,7 @@ async def test_build_guardian_state_lowers_overall_confidence_when_memory_is_deg
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], True)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], True)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -260,7 +261,7 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -345,7 +346,7 @@ async def test_build_guardian_state_pulls_project_linked_memories_for_active_pro
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -408,7 +409,7 @@ async def test_build_guardian_state_uses_unique_project_token_fallback_for_linke
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -423,6 +424,72 @@ async def test_build_guardian_state_uses_unique_project_token_fallback_for_linke
 
     assert "Atlas launch" in state.world_model.active_projects
     assert "Send the Atlas checklist before Friday" in state.world_model.active_commitments
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_routes_temporal_queries_into_episodic_context(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What happened with Atlas upload yesterday?")
+    await sm.add_message("current", "assistant", "Let me check the recent Atlas events.")
+
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type="project",
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        importance=0.8,
+        project_entity_id=atlas.id,
+    )
+    await memory_repository.create_episode(
+        session_id="current",
+        episode_type="workflow",
+        summary="Workflow Atlas deploy failed at upload step",
+        content="Workflow Atlas deploy failed at the upload artifact step.",
+        project_entity_id=atlas.id,
+        salience=0.9,
+        confidence=0.8,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas deploy logs",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What happened with Atlas upload yesterday?",
+        )
+
+    assert "[episode] Workflow Atlas deploy failed at upload step" in state.episodic_memory_context
+    assert "[project] Atlas launch" in state.memory_context
+    assert state.confidence.memory == "grounded"
 
 
 @pytest.mark.asyncio
@@ -475,7 +542,7 @@ async def test_build_guardian_state_uses_bounded_snapshot_with_todo_overlay(asyn
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -532,7 +599,7 @@ async def test_build_guardian_state_recomputes_structured_bounded_memory_when_sn
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -585,7 +652,7 @@ async def test_build_guardian_state_invalidates_bounded_snapshot_when_session_id
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -612,7 +679,7 @@ async def test_build_guardian_state_invalidates_bounded_snapshot_when_session_id
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
         patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -651,6 +718,7 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Observer snapshot:" in block
     assert "Bounded recall:" in block
     assert "Relevant memories:" in block
+    assert "Relevant episodes:" in block
     assert "Recent sessions:" in block
     assert "Recent intervention feedback:" in block
     assert "Recent execution:" in block

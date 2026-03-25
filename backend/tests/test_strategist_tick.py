@@ -47,6 +47,7 @@ def _make_guardian_state() -> GuardianState:
             intervention_receptivity="low",
         ),
         memory_context="- [goal] Ship guardian state",
+        episodic_memory_context="",
         current_session_history="",
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
         recent_intervention_feedback="- advisory delivered, feedback=helpful: Stretch and refocus.",

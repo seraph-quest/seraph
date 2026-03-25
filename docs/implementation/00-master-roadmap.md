@@ -470,8 +470,8 @@ This is the next major Guardian Intelligence execution program after the current
    upgrade session recall from plain text matching to FTS-backed session and event search with better bounded summaries
 9. [x] `hybrid-memory-retrieval-v1`:
    add lexical plus vector retrieval, reranking, recency weighting, and project or entity boosts across structured semantic memory and episodic memory
-10. [ ] `guardian-state-retrieval-planner-v1`:
-    route guardian-state synthesis between bounded, episodic, semantic, and procedural retrieval lanes instead of issuing one generic memory search
+10. [x] `guardian-state-retrieval-planner-v1`:
+    route guardian-state synthesis through one bounded, semantic, and episodic retrieval planner, while leaving procedural-memory routing for Batch C once outcome-derived procedural memory exists
 
 ### Batch C: Learning, consolidation, and decay
 

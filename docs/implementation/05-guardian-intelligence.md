@@ -351,6 +351,41 @@ This section records the internal Batch B slices on the feature branch before th
     - the retriever exists, but guardian-state still uses the older memory assembly path until `guardian-state-retrieval-planner-v1` lands
     - procedural-memory routing still belongs to Batch C because outcome-derived procedural memory is not a live retrieval lane yet
 
+### `guardian-state-retrieval-planner-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added `backend/src/memory/retrieval_planner.py` so guardian-state memory assembly now flows through one planner instead of splitting structured-memory assembly and query-time recall across separate code paths
+  - moved structured semantic bundle assembly out of `backend/src/guardian/state.py` and into the planner, keeping project-linked semantic boosts while layering hybrid semantic plus episodic recall on top
+  - updated guardian-state synthesis to split semantic recall into `Relevant memories:` and episodic recall into `Relevant episodes:` so temporal questions can surface event history without flattening everything into one generic memory block
+  - added a temporal-query guardian-state regression test that proves Atlas project memory still lands in semantic recall while a linked workflow failure lands in episodic recall for a `yesterday`-style question
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_hybrid_memory_retrieval.py -q`
+- review notes:
+  - broader validation boundary observed:
+    - `backend/tests/test_strategist_tick.py::test_strategist_tick_binds_runtime_context_for_tool_audit` still fails because the expected `tool_call` audit event with `session_id == "scheduler:strategist_tick"` is not emitted
+    - that check does not exercise the new retrieval-planner path directly, so it is recorded as an unrelated runtime-audit seam rather than treated as a blocker for this Batch B slice
+  - subagent review:
+    - reviewer thread: `Kuhn` (`019d2539-795c-7f02-ab99-8db767c17dd2`)
+    - result: the review thread stalled before returning findings, so the completion record relies on the targeted guardian-state plus hybrid-retrieval validation above and the explicit strategist-audit boundary note instead of claiming an unreturned clean review
+  - deferred to Batch C:
+    - procedural-memory routing still belongs to the outcome-learning batch because outcome-derived procedural memory is not a live retrieval lane yet
+    - planner-driven routing into policy- or delivery-specific memory lanes should wait until procedural memory exists instead of inventing a hollow extra lane now
+
+### Batch B Aggregate Validation
+
+- status: ready for the aggregate Batch B GitHub PR from `feat/memory-batch-b-v1`
+- targeted validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/src/memory/hybrid_retrieval.py backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py backend/tests/test_memory_repository.py -q`
+  - `cd docs && npm run build`
+- broader validation boundary:
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -v`
+  - result: `1209 passed, 35 failed`
+  - the failures cluster in approval wrapping, runtime audit or session-context propagation, eval harness, goal-tree orphan handling, scheduled-job runtime context, and tool-audit paths; the Batch B memory suite above remained green
+  - the already observed strategist audit-context failure remains part of that broader unrelated failure set rather than a new retrieval-planner regression
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

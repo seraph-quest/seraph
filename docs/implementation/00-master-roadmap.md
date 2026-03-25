@@ -479,8 +479,8 @@ This is the next major Guardian Intelligence execution program after the current
     add durable-memory flush triggers at session end, near compaction, and key workflow boundaries so important context is promoted before it collapses, with fingerprint caching now gated on clean or skipped consolidation so lifecycle hooks can also perform first-flush and retry behavior after partial or failed runs
 12. [x] `multi-stage-memory-consolidation-v1`:
     replace one-shot extraction with staged capture, extract, merge, strengthen, and source-backed write logic so long-term memory becomes updateable, with exact duplicate merge, null-link backfill, true message-backed provenance when a message match exists, session-backed provenance fallback when it does not, and merge-path embedding repair now live while broader contradiction and supersession rules still land in the later decay slice
-13. [ ] `soul-projection-and-structured-profile-v1`:
-    move durable identity state underneath the current soul surface so `soul.md` becomes a human-readable projection rather than the only identity substrate
+13. [x] `soul-projection-and-structured-profile-v1`:
+    move durable identity state underneath the current soul surface so `soul.md` becomes a human-readable projection rather than the only identity substrate, with projection-hash and file-age guards now preventing a stale or missing file from silently replacing newer structured profile state
 14. [ ] `procedural-memory-from-outcomes-v1`:
     store timing, phrasing, channel, and interruption lessons from intervention outcomes as explicit procedural memory instead of leaving them as thin policy heuristics
 15. [ ] `memory-decay-contradiction-and-archive-v1`:

@@ -27,7 +27,7 @@ _PATCH_TARGETS = [
     "src.approval.repository.get_session",
     "src.goals.repository.get_session",
     "src.audit.repository.get_session",
-    "src.api.profile.get_db",  # aliased: `import get_session as get_db`
+    "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.scheduler.scheduled_jobs.get_session",

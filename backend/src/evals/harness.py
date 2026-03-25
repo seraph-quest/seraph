@@ -2368,7 +2368,7 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
             patch("litellm.completion", side_effect=[title_response, consolidation_response]),
             patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
             patch("src.memory.consolidator.add_memory"),
-            patch("src.memory.consolidator.update_soul_section"),
+            patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()),
         ):
             await session_manager.generate_title("trace-session")
             await consolidate_session("trace-session")
@@ -3266,7 +3266,7 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
             patch("src.memory.consolidator.read_soul", return_value="# Soul\n\n## Goals\n- Keep the system grounded"),
             patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1") as mock_add_memory,
-            patch("src.memory.consolidator.update_soul_section") as mock_update_soul,
+            patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()) as mock_update_soul,
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
             await consolidate_session("guardian-session")

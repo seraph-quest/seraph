@@ -435,8 +435,8 @@ class TestConsolidateSession:
             "src.memory.consolidator.completion_with_fallback",
             AsyncMock(return_value=mock_resp),
         ), patch("src.memory.consolidator.add_memory", return_value="vec-1"), patch(
-            "src.memory.consolidator.read_soul",
-            return_value="# Soul\n\n## Identity\nBuilder",
+            "src.memory.consolidator.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
         ):
             await consolidate_session("s1")
 
@@ -489,10 +489,40 @@ class TestConsolidateSession:
             "src.memory.consolidator.completion_with_fallback",
             AsyncMock(return_value=mock_resp),
         ), patch("src.memory.consolidator.add_memory"), patch(
-            "src.memory.consolidator.update_soul_section"
+            "src.memory.consolidator.update_profile_soul_section",
+            AsyncMock(return_value="# Guardian Record\n\n## Goals\n- Build an AI startup"),
         ) as mock_soul:
             await consolidate_session("s1")
-            mock_soul.assert_called_once_with("Goals", "- Build an AI startup")
+            mock_soul.assert_awaited_once_with("Goals", "- Build an AI startup")
+
+    async def test_soul_updates_persist_structured_profile_projection(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "I want to build an AI startup.")
+        await sm.add_message("s1", "assistant", "I will record that as a durable goal.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {"Goals": "- Build an AI startup"},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch("src.memory.consolidator.add_memory"):
+            await consolidate_session("s1")
+
+        from src.api.profile import get_profile
+
+        profile = await get_profile()
+
+        assert profile["soul_sections"]["Goals"] == "- Build an AI startup"
+        assert "## Goals" in profile["soul_text"]
+        assert "- Build an AI startup" in profile["soul_text"]
 
     async def test_handles_markdown_fences(self, async_db, sm):
         await sm.get_or_create("s1")

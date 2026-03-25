@@ -475,6 +475,30 @@ This section records the internal Batch C slices on the feature branch before th
   - the soul surface is still file-backed rather than a projection from structured identity state
   - outcome-derived procedural memory is still separate from this consolidation pipeline until the later procedural-memory slice lands
 
+### `soul-projection-and-structured-profile-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `backend/src/profile/service.py` as the structured profile service for the singleton user record instead of leaving profile creation, onboarding state, and soul access split across API handlers and file utilities
+  - moved `soul.md` rendering and parsing into `backend/src/memory/soul.py` so the file becomes a readable projection surface while `user_profiles.preferences_json` plus `user_profiles.soul_text` hold the structured durable state underneath it
+  - updated `/api/user/profile` to return `soul_sections` and `soul_text` from the structured profile snapshot instead of exposing only a thin onboarding payload
+  - routed guardian-state synthesis and session consolidation through `sync_soul_file_to_profile()` before they read soul context, and routed consolidation soul writes through `update_profile_soul_section()` so durable soul updates land in the structured profile before they are projected back out to disk
+  - hardened projection sync so a missing `soul.md` is recreated from the stored profile state, while file edits that are newer than the last projected version still reconcile back into the structured profile
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/soul.py backend/src/profile/service.py backend/src/api/profile.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py -q`
+- local regressions fixed before subagent review:
+  - the first structured-profile cut left `read_soul()` falling back to defaults when `soul.md` was missing even if the profile already had stored identity state, so sync now re-projects the file from the structured profile before guardian-state or consolidation reads it again
+  - the first sync cut could also let an older projection file overwrite newer structured state, so the profile now tracks the last projected hash and the sync path restores structured state when the on-disk file is older than the stored profile version while still accepting genuinely newer manual file edits
+- subagent review:
+  - attempted twice on the branch and stalled without a returned finding payload:
+    - first on an existing reviewer thread reused for Slice 13
+    - then on a fresh explorer thread with a minimal file-scoped review request
+  - branch status is therefore based on the targeted regressions above plus the focused validation envelope, not on an invented clean review
+- deferred to later Batch C slices:
+  - outcome-derived procedural memory still needs its own explicit durable representation and retrieval lane instead of living only inside guardian feedback heuristics
+  - contradiction cleanup and archival still belong to `memory-decay-contradiction-and-archive-v1`
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

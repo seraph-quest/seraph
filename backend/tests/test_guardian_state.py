@@ -98,7 +98,10 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch(
             "src.memory.hybrid_retrieval.search_with_status",
             return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
@@ -127,7 +130,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     ):
         state = await build_guardian_state(session_id="current", user_message="What should Seraph improve next?")
 
-    assert state.soul_context == "# Soul\n\n## Identity\nBuilder"
+    assert "## Identity\nBuilder" in state.soul_context
     assert state.active_goals_summary == "Ship guardian state"
     assert state.confidence.overall == "grounded"
     assert state.confidence.observer == "grounded"
@@ -182,7 +185,10 @@ async def test_build_guardian_state_lowers_overall_confidence_when_memory_is_deg
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], True)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -260,7 +266,10 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -345,7 +354,10 @@ async def test_build_guardian_state_pulls_project_linked_memories_for_active_pro
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -408,7 +420,10 @@ async def test_build_guardian_state_uses_unique_project_token_fallback_for_linke
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -470,7 +485,10 @@ async def test_build_guardian_state_routes_temporal_queries_into_episodic_contex
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -541,7 +559,15 @@ async def test_build_guardian_state_uses_bounded_snapshot_with_todo_overlay(asyn
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(
+                return_value={
+                    "Identity": "Builder",
+                    "Goals": "- Keep the system grounded",
+                }
+            ),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -598,7 +624,10 @@ async def test_build_guardian_state_recomputes_structured_bounded_memory_when_sn
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -651,7 +680,10 @@ async def test_build_guardian_state_invalidates_bounded_snapshot_when_session_id
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
@@ -678,7 +710,10 @@ async def test_build_guardian_state_invalidates_bounded_snapshot_when_session_id
 
     with (
         patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
         patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(

@@ -12,8 +12,9 @@ from src.memory.pipeline.capture import capture_session_memory
 from src.memory.pipeline.extract import extract_session_memories
 from src.memory.pipeline.merge import persist_extracted_memories
 from src.memory.snapshots import refresh_bounded_guardian_snapshot
-from src.memory.soul import read_soul, update_soul_section
+from src.memory.soul import render_soul_text
 from src.memory.vector_store import add_memory
+from src.profile.service import sync_soul_file_to_profile, update_profile_soul_section
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ async def consolidate_session(
                 should_cache_fingerprint=True,
             )
 
-        soul = read_soul()
+        soul = render_soul_text(await sync_soul_file_to_profile())
 
         try:
             extraction = await extract_session_memories(
@@ -103,14 +104,16 @@ async def consolidate_session(
         snapshot_refresh_failed = False
         snapshot_partial_write_count = 0
 
+        refreshed_soul = soul
+
         # Apply soul updates if any
         for section, content in extraction.soul_updates.items():
             if isinstance(content, str) and content.strip():
-                update_soul_section(section, content)
+                refreshed_soul = await update_profile_soul_section(section, content)
                 logger.info("Soul updated: section '%s'", section)
 
         try:
-            await refresh_bounded_guardian_snapshot(soul_context=read_soul())
+            await refresh_bounded_guardian_snapshot(soul_context=refreshed_soul)
         except Exception:
             snapshot_refresh_failed = True
             snapshot_partial_write_count = 1

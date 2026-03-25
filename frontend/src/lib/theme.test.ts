@@ -21,6 +21,24 @@ describe("theme helpers", () => {
     vi.unstubAllGlobals();
   });
 
+  it("falls back to system when localStorage access throws", () => {
+    const windowStub = {
+      matchMedia: vi.fn(),
+    } as unknown as Window & typeof globalThis;
+
+    Object.defineProperty(windowStub, "localStorage", {
+      get() {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    });
+
+    vi.stubGlobal("window", windowStub);
+
+    expect(readThemePreference()).toBe("system");
+
+    vi.unstubAllGlobals();
+  });
+
   it("applies the resolved theme to the document root", () => {
     const root = document.createElement("div");
     const matchMedia = vi.fn().mockReturnValue({ matches: true });

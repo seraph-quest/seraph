@@ -13,7 +13,12 @@ export function readThemePreference(): ThemePreference {
   if (typeof window === "undefined") {
     return "system";
   }
-  const value = window.localStorage?.getItem("seraph_theme_preference");
+  let value: string | null = null;
+  try {
+    value = window.localStorage?.getItem("seraph_theme_preference") ?? null;
+  } catch {
+    return "system";
+  }
   if (value === "dark" || value === "light" || value === "system") {
     return value;
   }

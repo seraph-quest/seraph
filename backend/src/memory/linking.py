@@ -48,14 +48,9 @@ async def resolve_memory_links(item: ConsolidatedMemoryItem) -> MemoryLinkResolu
             subject_entity_id = subject_entity.id
 
     if project_name is not None:
-        aliases: list[str] = []
-        summary_name = _canonical_name(item.summary)
-        if summary_name is not None and summary_name != project_name:
-            aliases.append(summary_name)
         project_entity = await memory_repository.get_or_create_entity(
             canonical_name=project_name,
             entity_type=MemoryEntityType.project,
-            aliases=aliases,
         )
         project_entity_id = project_entity.id
 

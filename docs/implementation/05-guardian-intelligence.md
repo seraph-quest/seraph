@@ -209,6 +209,12 @@ This section records the internal Batch A slices on the feature branch before th
   - deferred to later slices:
     - guardian-state recall still does not consume subject-side entity ids, only project-linked ids
     - richer entity-driven retrieval beyond active-project boosts belongs in the later hybrid retrieval planner work
+  - aggregate PR follow-up:
+    - external PR review caught that project linking was also injecting memory summaries as project aliases, which could merge unrelated projects that share generic summaries
+    - fixed on the branch by removing summary-derived aliases from project entity creation and adding a regression test that proves two projects with the same summary still resolve to different project entities
+    - subagent recheck:
+      - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+      - result: no material findings after the alias-removal fix, regression test, and wording update
 
 ### `bounded-memory-snapshots-v1`
 

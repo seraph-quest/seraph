@@ -477,8 +477,8 @@ This is the next major Guardian Intelligence execution program after the current
 
 11. [x] `memory-flush-lifecycle-hooks-v1`:
     add durable-memory flush triggers at session end, near compaction, and key workflow boundaries so important context is promoted before it collapses, with the current non-primary hooks acting as safety nets after a primary flush rather than a standalone lightweight first-flush path
-12. [ ] `multi-stage-memory-consolidation-v1`:
-    replace one-shot extraction with staged capture, extract, merge, strengthen, and source-backed write logic so long-term memory becomes updateable
+12. [x] `multi-stage-memory-consolidation-v1`:
+    replace one-shot extraction with staged capture, extract, merge, strengthen, and source-backed write logic so long-term memory becomes updateable, with exact duplicate merge and source-backed updates now live while broader contradiction and supersession rules still land in the later decay slice
 13. [ ] `soul-projection-and-structured-profile-v1`:
     move durable identity state underneath the current soul surface so `soul.md` becomes a human-readable projection rather than the only identity substrate
 14. [ ] `procedural-memory-from-outcomes-v1`:

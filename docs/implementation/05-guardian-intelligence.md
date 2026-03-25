@@ -432,6 +432,33 @@ This section records the internal Batch C slices on the feature branch before th
   - broader first-flush behavior for non-primary triggers remains incomplete
   - higher-salience capture, staged extraction, and merge-strengthen logic belong in `multi-stage-memory-consolidation-v1`
 
+### `multi-stage-memory-consolidation-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - refactored `backend/src/memory/consolidator.py` into an explicit pipeline with `capture`, `extract`, `merge`, and `strengthen` stages under `backend/src/memory/pipeline/` instead of keeping all extraction and write behavior in one monolithic function
+  - added capture-stage source-message collection so structured memories can keep concrete message provenance instead of only a coarse session id
+  - added duplicate-aware structured memory merging in `backend/src/memory/repository.py` and `backend/src/memory/pipeline/merge.py` so exact repeated memories update confidence, importance, reinforcement, and source links instead of creating a new structured row and a new vector row every time
+  - kept the vector backend active for newly created semantic memories while intentionally skipping redundant vector writes when the pipeline merges into an existing durable memory row
+  - extended consolidation audit details with captured-source count plus created, merged, and source-link counts so the runtime can distinguish append-heavy runs from update-heavy runs
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/memory/pipeline/__init__.py backend/src/memory/pipeline/capture.py backend/src/memory/pipeline/extract.py backend/src/memory/pipeline/merge.py backend/src/memory/pipeline/strengthen.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_memory_flush.py -q`
+- review notes:
+  - local regressions caught and fixed before the slice stayed complete:
+    - exact-duplicate merge initially failed on offset-naive vs offset-aware `last_confirmed_at` comparisons, which left reinforcement unchanged and prevented merge-path audit counts from moving
+    - moving link resolution into the pipeline briefly broke the existing `src.memory.consolidator.resolve_memory_links` patch seam used by tests, so the consolidator now passes the resolver into the pipeline explicitly instead of silently changing that surface
+    - the entity-link-failure path originally kept the old test expectation of a dangling vector write, but the staged pipeline now resolves links before vector writes on new memories; the final tests document that narrower and safer behavior honestly instead of claiming the old partial-write shape is still live
+  - subagent review:
+    - review threads were started with `Nash` (`019d26bd-dbac-7c50-a42e-166ed2a9760c`), `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`), and a follow-up request to `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`)
+    - all three review threads stalled before returning findings, so the slice record relies on the targeted validation above plus the explicit local regression fixes instead of claiming an unreturned clean review
+  - remaining limitation carried forward intentionally:
+    - this slice merges exact duplicate memories by kind plus normalized summary/content and strengthens them with added provenance, but it does not yet perform contradiction detection, semantic dedupe, or supersession across near-duplicate statements
+- deferred to later Batch C slices:
+  - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+  - the soul surface is still file-backed rather than a projection from structured identity state
+  - outcome-derived procedural memory is still separate from this consolidation pipeline until the later procedural-memory slice lands
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

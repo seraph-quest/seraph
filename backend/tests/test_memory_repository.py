@@ -227,3 +227,61 @@ async def test_list_memories_for_entities_supports_project_filters(async_db):
     )
 
     assert [memory.content for memory in linked] == ["Review the Atlas brief tomorrow morning."]
+
+
+@pytest.mark.asyncio
+async def test_merge_memory_strengthens_existing_record_and_dedupes_sources(async_db):
+    created = await memory_repository.create_memory(
+        content="User prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        confidence=0.7,
+        importance=0.6,
+        reinforcement=1.0,
+        source_session_id="sess-1",
+    )
+
+    candidate = await memory_repository.find_merge_candidate(
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        content="User prefers concise morning briefings.",
+    )
+
+    assert candidate is not None
+    assert candidate.id == created.memory_id
+
+    await memory_repository.merge_memory(
+        created.memory_id,
+        summary="Prefers concise morning briefings",
+        confidence=0.9,
+        importance=0.8,
+        metadata={"writer": "merge-test"},
+    )
+    first_source = await memory_repository.add_memory_source(
+        memory_id=created.memory_id,
+        source_type="message",
+        source_session_id="sess-1",
+        source_message_id="msg-1",
+        snippet="Please keep briefings concise.",
+    )
+    second_source = await memory_repository.add_memory_source(
+        memory_id=created.memory_id,
+        source_type="message",
+        source_session_id="sess-1",
+        source_message_id="msg-1",
+        snippet="Please keep briefings concise.",
+    )
+
+    memories = await memory_repository.list_memories_by_kinds(
+        kinds=(MemoryKind.communication_preference,),
+        limit_per_kind=1,
+    )
+    sources = await memory_repository.list_sources(memory_id=created.memory_id)
+
+    assert memories["communication_preference"][0].confidence == pytest.approx(0.9)
+    assert memories["communication_preference"][0].importance == pytest.approx(0.8)
+    assert memories["communication_preference"][0].reinforcement == pytest.approx(1.25)
+    assert memories["communication_preference"][0].metadata_json == '{"writer": "merge-test"}'
+    assert first_source.created is True
+    assert second_source.created is False
+    assert [source.source_message_id for source in sources if source.source_message_id] == ["msg-1"]

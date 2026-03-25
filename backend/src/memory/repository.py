@@ -78,7 +78,19 @@ class MemoryWriteResult:
     project_entity_id: str | None = None
 
 
+@dataclass(frozen=True)
+class MemorySourceWriteResult:
+    source_id: str
+    created: bool
+
+
 class MemoryRepository:
+    @staticmethod
+    def _normalize_memory_text(value: str | None) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.strip().lower().split())
+
     @staticmethod
     def _normalize_episode_kwargs(
         *,
@@ -258,6 +270,175 @@ class MemoryRepository:
                 memory_id=memory.id,
                 subject_entity_id=subject_entity_id,
                 project_entity_id=project_entity_id,
+            )
+
+    async def add_memory_source(
+        self,
+        *,
+        memory_id: str,
+        source_type: str = "session",
+        source_session_id: str | None = None,
+        source_message_id: str | None = None,
+        snippet: str | None = None,
+    ) -> MemorySourceWriteResult:
+        normalized_source_type = source_type.strip() or "session"
+        normalized_snippet = (
+            " ".join(snippet.strip().split())[:240]
+            if isinstance(snippet, str) and snippet.strip()
+            else None
+        )
+        async with get_session() as db:
+            stmt = select(MemorySource).where(MemorySource.memory_id == memory_id)
+            if source_message_id:
+                stmt = stmt.where(MemorySource.source_message_id == source_message_id)
+            else:
+                stmt = stmt.where(MemorySource.source_message_id.is_(None))
+                if source_session_id is not None:
+                    stmt = stmt.where(MemorySource.source_session_id == source_session_id)
+                stmt = stmt.where(MemorySource.source_type == normalized_source_type)
+            existing = (await db.execute(stmt)).scalars().first()
+            if existing is not None:
+                db.expunge(existing)
+                return MemorySourceWriteResult(source_id=existing.id, created=False)
+
+            source = MemorySource(
+                memory_id=memory_id,
+                source_type=normalized_source_type,
+                source_session_id=source_session_id,
+                source_message_id=source_message_id,
+                snippet=normalized_snippet,
+            )
+            db.add(source)
+            await db.flush()
+            db.expunge(source)
+            return MemorySourceWriteResult(source_id=source.id, created=True)
+
+    async def list_sources(
+        self,
+        *,
+        memory_id: str,
+    ) -> list[MemorySource]:
+        async with get_session() as db:
+            result = await db.execute(
+                select(MemorySource)
+                .where(MemorySource.memory_id == memory_id)
+                .order_by(col(MemorySource.created_at).asc())
+            )
+            sources = result.scalars().all()
+            for source in sources:
+                db.expunge(source)
+            return list(sources)
+
+    async def find_merge_candidate(
+        self,
+        *,
+        kind: MemoryKind | str,
+        summary: str | None,
+        content: str,
+        subject_entity_id: str | None = None,
+        project_entity_id: str | None = None,
+        status: MemoryStatus | str = MemoryStatus.active,
+    ) -> Memory | None:
+        normalized_kind = _coerce_enum(kind, MemoryKind)
+        normalized_status = _coerce_enum(status, MemoryStatus)
+        normalized_summary = self._normalize_memory_text(summary)
+        normalized_content = self._normalize_memory_text(content)
+        if not normalized_summary and not normalized_content:
+            return None
+
+        async with get_session() as db:
+            stmt = (
+                select(Memory)
+                .where(Memory.kind == normalized_kind)
+                .where(Memory.status == normalized_status)
+                .order_by(
+                    col(Memory.reinforcement).desc(),
+                    col(Memory.importance).desc(),
+                    col(Memory.updated_at).desc(),
+                    col(Memory.created_at).desc(),
+                )
+            )
+            if subject_entity_id is not None:
+                stmt = stmt.where(Memory.subject_entity_id == subject_entity_id)
+            if project_entity_id is not None:
+                stmt = stmt.where(Memory.project_entity_id == project_entity_id)
+
+            candidates = (await db.execute(stmt)).scalars().all()
+            for memory in candidates:
+                candidate_summary = self._normalize_memory_text(memory.summary)
+                candidate_content = self._normalize_memory_text(memory.content)
+                if normalized_summary and candidate_summary == normalized_summary:
+                    db.expunge(memory)
+                    return memory
+                if normalized_content and candidate_content == normalized_content:
+                    db.expunge(memory)
+                    return memory
+            return None
+
+    async def merge_memory(
+        self,
+        memory_id: str,
+        *,
+        summary: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        reinforcement_delta: float = 0.25,
+        subject_entity_id: str | None = None,
+        project_entity_id: str | None = None,
+        embedding_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        last_confirmed_at: datetime | None = None,
+    ) -> MemoryWriteResult:
+        def _normalize_timestamp(value: datetime | None) -> datetime | None:
+            if value is None:
+                return None
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        async with get_session() as db:
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == memory_id))
+            ).scalars().first()
+            if memory is None:
+                raise ValueError(f"Unknown memory id: {memory_id}")
+
+            if summary and not memory.summary:
+                memory.summary = summary
+            if confidence is not None:
+                memory.confidence = max(memory.confidence, confidence)
+            if importance is not None:
+                memory.importance = max(memory.importance, importance)
+            memory.reinforcement = max(0.0, memory.reinforcement + reinforcement_delta)
+            if memory.subject_entity_id is None and subject_entity_id is not None:
+                memory.subject_entity_id = subject_entity_id
+            if memory.project_entity_id is None and project_entity_id is not None:
+                memory.project_entity_id = project_entity_id
+            if memory.embedding_id is None and embedding_id:
+                memory.embedding_id = embedding_id
+            if last_confirmed_at is not None:
+                normalized_existing = _normalize_timestamp(memory.last_confirmed_at)
+                normalized_candidate = _normalize_timestamp(last_confirmed_at)
+                if (
+                    normalized_candidate is not None
+                    and (
+                        normalized_existing is None
+                        or normalized_candidate > normalized_existing
+                    )
+                ):
+                    memory.last_confirmed_at = normalized_candidate
+            if metadata:
+                existing_metadata = json.loads(memory.metadata_json or "{}")
+                existing_metadata.update(metadata)
+                memory.metadata_json = json.dumps(existing_metadata, sort_keys=True)
+            memory.updated_at = _now()
+            db.add(memory)
+            await db.flush()
+            db.expunge(memory)
+            return MemoryWriteResult(
+                memory_id=memory.id,
+                subject_entity_id=memory.subject_entity_id,
+                project_entity_id=memory.project_entity_id,
             )
 
     async def create_episode(

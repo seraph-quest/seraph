@@ -102,6 +102,134 @@ class TestConsolidateSession:
             '"writer": "session_consolidation"}'
         )
 
+    async def test_duplicate_memory_merges_and_reuses_existing_vector_row(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message(
+            "s1",
+            "user",
+            "Please remember that I prefer concise morning briefings for status updates.",
+        )
+        await sm.add_message(
+            "s1",
+            "assistant",
+            "I will keep the morning briefing preference in memory.",
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "User prefers concise morning briefings.",
+                    "kind": "communication_preference",
+                    "summary": "Prefers concise morning briefings",
+                    "confidence": 0.9,
+                    "importance": 0.8,
+                }
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-1",
+        ) as mock_add_memory:
+            await consolidate_session("s1")
+            await sm.add_message(
+                "s1",
+                "user",
+                "One more time: keep those morning briefings concise.",
+            )
+            await consolidate_session("s1")
+
+        grouped = await memory_repository.list_memories_by_kinds(
+            kinds=(MemoryKind.communication_preference,),
+            limit_per_kind=2,
+        )
+        memory = grouped["communication_preference"][0]
+        sources = await memory_repository.list_sources(memory_id=memory.id)
+
+        assert len(grouped["communication_preference"]) == 1
+        assert memory.embedding_id == "vec-1"
+        assert memory.reinforcement == pytest.approx(1.25)
+        assert mock_add_memory.call_count == 1
+        assert len([source for source in sources if source.source_message_id]) >= 2
+
+    async def test_consolidation_audit_reports_created_and_merged_counts(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch is active and needs concise check-ins.")
+        await sm.add_message("s1", "assistant", "I will remember Atlas and the briefing preference.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the active release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.9,
+                    "importance": 0.9,
+                    "project": "Atlas",
+                },
+                {
+                    "text": "User prefers concise morning briefings.",
+                    "kind": "communication_preference",
+                    "summary": "Prefers concise morning briefings",
+                    "confidence": 0.9,
+                    "importance": 0.8,
+                },
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-1",
+        ):
+            await consolidate_session("s1")
+            await sm.add_message("s1", "user", "Again: concise morning briefings, please.")
+            await consolidate_session("s1")
+
+        from src.audit.repository import audit_repository
+
+        events = await audit_repository.list_events(limit=20)
+        consolidation_events = [
+            event
+            for event in events
+            if event["tool_name"] == "session_consolidation"
+            and event["event_type"] in {"background_task_succeeded", "background_task_partially_succeeded"}
+        ]
+
+        assert any(
+            event["details"]["created_memory_count"] == 2
+            and event["details"]["merged_memory_count"] == 0
+            and event["details"]["stored_memory_count"] == 2
+            and event["details"]["captured_source_message_count"] >= 2
+            for event in consolidation_events
+        )
+        assert any(
+            event["details"]["created_memory_count"] == 0
+            and event["details"]["merged_memory_count"] == 2
+            and event["details"]["stored_memory_count"] == 2
+            and event["details"]["source_link_count"] >= 1
+            for event in consolidation_events
+        )
+
     async def test_extracts_typed_memory_objects_with_provenance(self, async_db, sm):
         await sm.get_or_create("s1")
         await sm.add_message("s1", "user", "Alice owns investor updates, and I want concise morning briefings.")
@@ -269,7 +397,9 @@ class TestConsolidateSession:
             and event["tool_name"] == "session_consolidation"
             and event["session_id"] == "s1"
             and event["details"]["stored_memory_count"] == 0
-            and event["details"]["vector_memory_count"] == 1
+            and event["details"]["created_memory_count"] == 0
+            and event["details"]["merged_memory_count"] == 0
+            and event["details"]["vector_memory_count"] == 0
             and event["details"]["partial_write_count"] == 1
             and event["details"]["write_failure_count"] == 0
             and event["details"]["snapshot_refresh_failed"] is False

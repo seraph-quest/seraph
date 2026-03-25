@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsPanel } from "../SettingsPanel";
@@ -27,6 +27,7 @@ describe("cockpit overlays", () => {
     useChatStore.setState({
       settingsPanelOpen: false,
       questPanelOpen: false,
+      themePreference: "system",
       onboardingCompleted: true,
       sessions: [],
       sessionId: null,
@@ -64,10 +65,33 @@ describe("cockpit overlays", () => {
     expect(await screen.findByText("Settings")).toBeInTheDocument();
     expect(container.querySelector(".cockpit-modal-card")).not.toBeNull();
     expect(container.querySelector(".rpg-frame")).toBeNull();
+    expect(screen.getByRole("group", { name: "Theme preference" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "light" })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalled();
     });
+  });
+
+  it("updates the theme preference from settings", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/catalog")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/settings/")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/audit/log")) return Promise.resolve(mockResponse({ entries: [] }));
+      if (url.includes("/api/workflows")) return Promise.resolve(mockResponse({ workflows: [] }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    useChatStore.setState({ settingsPanelOpen: true, themePreference: "system" });
+    render(<SettingsPanel />);
+
+    const lightButton = await screen.findByRole("button", { name: "light" });
+    fireEvent.click(lightButton);
+
+    expect(useChatStore.getState().themePreference).toBe("light");
   });
 
   it("renders priorities and priority editor in cockpit modals", async () => {

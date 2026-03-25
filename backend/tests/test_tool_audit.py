@@ -182,6 +182,13 @@ def test_onboarding_agent_uses_audited_tools():
         assert isinstance(agent.tools[tool_name], AuditedTool)
 
 
+def test_onboarding_agent_instructions_clarify_tool_scope():
+    agent = create_onboarding_agent()
+
+    assert "Do NOT imply these are Seraph's only capabilities" in agent.instructions
+    assert "Tools available in this onboarding mode" in agent.instructions
+
+
 @patch("src.agent.onboarding.LiteLLMModel")
 def test_onboarding_agent_uses_local_profile_runtime_path(mock_model_cls):
     mock_model_cls.return_value = object()

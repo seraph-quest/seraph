@@ -407,6 +407,8 @@ export function SettingsPanel() {
   const setSettingsPanelOpen = useChatStore((s) => s.setSettingsPanelOpen);
   const cockpitHintsEnabled = useChatStore((s) => s.cockpitHintsEnabled);
   const setCockpitHintsEnabled = useChatStore((s) => s.setCockpitHintsEnabled);
+  const themePreference = useChatStore((s) => s.themePreference);
+  const setThemePreference = useChatStore((s) => s.setThemePreference);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
   const restartOnboarding = useChatStore((s) => s.restartOnboarding);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -590,6 +592,28 @@ export function SettingsPanel() {
                 Restart intro
               </button>
             )}
+            <div className="cockpit-settings-inline-row">
+              <div className="cockpit-settings-copy">
+                <div className="cockpit-settings-label">Theme</div>
+                <div className="cockpit-settings-note">
+                  Choose the guardian surface for this workspace, or follow the system appearance.
+                </div>
+              </div>
+              <div className="cockpit-settings-choice-group" role="group" aria-label="Theme preference">
+                {(["system", "dark", "light"] as const).map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className={`cockpit-settings-choice ${themePreference === option ? "is-active" : ""}`}
+                    onClick={() => setThemePreference(option)}
+                    aria-pressed={themePreference === option}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="cockpit-settings-inline-row">
               <div className="cockpit-settings-copy">
                 <div className="cockpit-settings-label">Workspace hints</div>

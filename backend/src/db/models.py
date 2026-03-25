@@ -40,6 +40,47 @@ class MemoryCategory(str, enum.Enum):
     reflection = "reflection"
 
 
+class MemoryKind(str, enum.Enum):
+    fact = "fact"
+    preference = "preference"
+    pattern = "pattern"
+    goal = "goal"
+    reflection = "reflection"
+    project = "project"
+    collaborator = "collaborator"
+    obligation = "obligation"
+    routine = "routine"
+    timeline = "timeline"
+    commitment = "commitment"
+    communication_preference = "communication_preference"
+
+
+class MemoryStatus(str, enum.Enum):
+    active = "active"
+    archived = "archived"
+    superseded = "superseded"
+
+
+class MemoryEntityType(str, enum.Enum):
+    person = "person"
+    project = "project"
+    routine = "routine"
+    obligation = "obligation"
+    organization = "organization"
+    thread = "thread"
+
+
+class MemorySnapshotKind(str, enum.Enum):
+    bounded_guardian_context = "bounded_guardian_context"
+
+
+class MemoryEdgeType(str, enum.Enum):
+    related = "related"
+    supports = "supports"
+    supersedes = "supersedes"
+    contradicts = "contradicts"
+
+
 # ─── Helper ──────────────────────────────────────────────
 
 def _uuid() -> str:
@@ -123,9 +164,67 @@ class Memory(SQLModel, table=True):
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     content: str
-    category: str = Field(default=MemoryCategory.fact)
+    category: MemoryCategory = Field(default=MemoryCategory.fact)
+    kind: MemoryKind = Field(default=MemoryKind.fact, index=True)
+    summary: Optional[str] = Field(default=None)
+    confidence: float = Field(default=0.5)
+    importance: float = Field(default=0.5)
+    reinforcement: float = Field(default=1.0)
+    status: MemoryStatus = Field(default=MemoryStatus.active, index=True)
+    subject_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
+    project_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
     source_session_id: Optional[str] = Field(default=None)
     embedding_id: Optional[str] = Field(default=None)
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+    last_confirmed_at: Optional[datetime] = Field(default=None)
+
+
+class MemoryEntity(SQLModel, table=True):
+    __tablename__ = "memory_entities"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    canonical_key: str = Field(index=True, unique=True)
+    canonical_name: str = Field(index=True)
+    entity_type: MemoryEntityType = Field(default=MemoryEntityType.person, index=True)
+    aliases_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MemorySource(SQLModel, table=True):
+    __tablename__ = "memory_sources"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    memory_id: str = Field(foreign_key="memories.id", index=True)
+    source_type: str = Field(default="session", index=True)
+    source_session_id: Optional[str] = Field(default=None, index=True)
+    source_message_id: Optional[str] = Field(default=None, index=True)
+    snippet: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class MemorySnapshot(SQLModel, table=True):
+    __tablename__ = "memory_snapshots"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    kind: MemorySnapshotKind = Field(default=MemorySnapshotKind.bounded_guardian_context, index=True, unique=True)
+    content: str = Field(default="")
+    source_hash: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MemoryEdge(SQLModel, table=True):
+    __tablename__ = "memory_edges"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    from_memory_id: str = Field(foreign_key="memories.id", index=True)
+    to_memory_id: str = Field(foreign_key="memories.id", index=True)
+    edge_type: MemoryEdgeType = Field(default=MemoryEdgeType.related, index=True)
+    weight: float = Field(default=1.0)
+    metadata_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
 
 

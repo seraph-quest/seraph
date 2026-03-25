@@ -2,6 +2,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -16,6 +17,15 @@ engine = create_async_engine(
     echo=settings.debug,
     connect_args={"check_same_thread": False},
 )
+
+
+def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 
 async_session_factory = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
@@ -50,6 +60,71 @@ async def _ensure_legacy_columns(conn) -> None:
     if queued_insight_columns and "session_id" not in queued_insight_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE queued_insights ADD COLUMN session_id VARCHAR"
+        )
+
+    memory_columns = await _table_columns("memories")
+    if memory_columns and "kind" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN kind VARCHAR DEFAULT 'fact'"
+        )
+    if memory_columns and "kind" in await _table_columns("memories"):
+        await conn.exec_driver_sql(
+            """
+            UPDATE memories
+            SET kind = CASE category
+                WHEN 'preference' THEN 'preference'
+                WHEN 'pattern' THEN 'pattern'
+                WHEN 'goal' THEN 'goal'
+                WHEN 'reflection' THEN 'reflection'
+                ELSE 'fact'
+            END
+            WHERE kind IS NULL
+               OR kind = ''
+               OR (kind = 'fact' AND category IN ('preference', 'pattern', 'goal', 'reflection'))
+            """
+        )
+    if memory_columns and "summary" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN summary VARCHAR"
+        )
+    if memory_columns and "confidence" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN confidence FLOAT DEFAULT 0.5"
+        )
+    if memory_columns and "importance" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN importance FLOAT DEFAULT 0.5"
+        )
+    if memory_columns and "reinforcement" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN reinforcement FLOAT DEFAULT 1.0"
+        )
+    if memory_columns and "status" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN status VARCHAR DEFAULT 'active'"
+        )
+    if memory_columns and "subject_entity_id" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN subject_entity_id VARCHAR"
+        )
+    if memory_columns and "project_entity_id" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN project_entity_id VARCHAR"
+        )
+    if memory_columns and "metadata_json" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN metadata_json VARCHAR"
+        )
+    if memory_columns and "updated_at" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN updated_at DATETIME"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL"
+        )
+    if memory_columns and "last_confirmed_at" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN last_confirmed_at DATETIME"
         )
 
 

@@ -7,6 +7,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.session import session_manager
 from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
+from src.memory.repository import memory_repository
 from src.memory.soul import read_soul, update_soul_section
 from src.memory.vector_store import add_memory
 
@@ -31,6 +32,13 @@ Current soul file:
 {soul}
 
 Return ONLY valid JSON, no markdown fences."""
+
+
+def _summary_for_memory(text: str, *, max_chars: int = 140) -> str:
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
 
 
 async def consolidate_session(session_id: str) -> None:
@@ -103,13 +111,19 @@ async def consolidate_session(session_id: str) -> None:
 
         # Store memories by category
         stored = 0
+        vector_stored = 0
+        partial_write_count = 0
+        write_failure_count = 0
         for category in ["facts", "patterns", "goals", "reflections"]:
             items = data.get(category, [])
             singular = category.rstrip("s") if category != "reflections" else "reflection"
             for item in items:
                 if isinstance(item, str) and len(item) > 10:
+                    embedding_id = ""
+                    vector_succeeded = False
+                    structured_succeeded = False
                     try:
-                        await asyncio.wait_for(
+                        embedding_id = await asyncio.wait_for(
                             asyncio.to_thread(
                                 add_memory,
                                 text=item,
@@ -118,9 +132,36 @@ async def consolidate_session(session_id: str) -> None:
                             ),
                             timeout=10,
                         )
-                        stored += 1
+                        vector_succeeded = isinstance(embedding_id, str) and bool(embedding_id.strip())
+                        if vector_succeeded:
+                            vector_stored += 1
                     except asyncio.TimeoutError:
                         logger.warning("add_memory timed out for session %s", session_id[:8])
+                    except Exception:
+                        logger.exception("add_memory failed for session %s", session_id[:8])
+                    try:
+                        await memory_repository.create_memory(
+                            content=item,
+                            category=singular,
+                            kind=singular,
+                            source_session_id=session_id,
+                            embedding_id=embedding_id or None,
+                            summary=_summary_for_memory(item),
+                            metadata={
+                                "writer": "session_consolidation",
+                                "source": "llm_extract",
+                            },
+                        )
+                        structured_succeeded = True
+                        stored += 1
+                    except Exception:
+                        logger.exception(
+                            "structured memory write failed for session %s", session_id[:8]
+                        )
+                    if vector_succeeded != structured_succeeded:
+                        partial_write_count += 1
+                    elif not vector_succeeded and not structured_succeeded:
+                        write_failure_count += 1
 
         # Apply soul updates if any
         soul_updates = data.get("soul_updates", {})
@@ -130,19 +171,30 @@ async def consolidate_session(session_id: str) -> None:
                 logger.info("Soul updated: section '%s'", section)
 
         logger.info(
-            "Consolidated session %s: %d memories stored, %d soul updates",
+            "Consolidated session %s: %d structured memories, %d vector memories, %d soul updates, %d partial writes, %d failed writes",
             session_id[:8],
             stored,
+            vector_stored,
             len(soul_updates),
+            partial_write_count,
+            write_failure_count,
+        )
+        outcome = (
+            "partially_succeeded"
+            if partial_write_count or write_failure_count
+            else "succeeded"
         )
         await log_background_task_event(
             task_name="session_consolidation",
-            outcome="succeeded",
+            outcome=outcome,
             session_id=session_id,
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "history_length": len(history),
                 "stored_memory_count": stored,
+                "vector_memory_count": vector_stored,
+                "partial_write_count": partial_write_count,
+                "write_failure_count": write_failure_count,
                 "soul_update_count": len(soul_updates),
             },
         )

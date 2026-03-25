@@ -420,6 +420,41 @@ class TestContextManagerRefresh:
         )
 
     @pytest.mark.asyncio
+    async def test_refresh_reuses_existing_project_entity_for_alias_like_observer_label(self, async_db):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing Atlas rollout notes")
+        existing_project = await memory_repository.get_or_create_entity(
+            canonical_name="Atlas launch",
+            entity_type="project",
+        )
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]):
+            await mgr.refresh()
+
+        episodes = await memory_repository.list_episodes(
+            episode_types=(MemoryEpisodeType.observer,),
+            limit=10,
+        )
+        resolved = await memory_repository.find_entities_by_names(
+            names=("Atlas", "Atlas launch"),
+            entity_type="project",
+        )
+
+        assert resolved["Atlas"].id == existing_project.id
+        assert resolved["Atlas launch"].id == existing_project.id
+        assert all(item.project_entity_id == existing_project.id for item in episodes)
+
+    @pytest.mark.asyncio
     async def test_refresh_logs_failure_runtime_audit_event(self, async_db):
         mgr = ContextManager()
 

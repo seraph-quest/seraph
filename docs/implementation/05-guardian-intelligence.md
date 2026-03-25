@@ -305,6 +305,10 @@ This section records the internal Batch B slices on the feature branch before th
   - deferred to later Batch B slices:
     - observer episodes are still lexical/temporal substrate only; retrieval and ranking belong to the later FTS and hybrid retrieval slices
     - richer observer-event semantics beyond project, focus, and blocked-state activity transitions still belong to later observer-memory refinement work
+  - aggregate PR follow-up:
+    - external PR review caught that observer transition writes could create a new project entity from a shortened observer label like `Atlas`, which would fragment recall away from existing memories linked to `Atlas launch`
+    - fixed on the branch by resolving observer project labels through existing project-entity lookup first, including the unique-token project fallback, before creating a new entity only when nothing resolves
+    - added a regression test that proves observer episodes reuse the existing `Atlas launch` project entity when the observer reports `Atlas`
 
 ### `session-search-fts-and-event-index-v1`
 
@@ -328,6 +332,10 @@ This section records the internal Batch B slices on the feature branch before th
   - deferred to later Batch B slices:
     - session recall is now lexical plus episodic, but cross-store hybrid ranking with semantic memory still belongs to `hybrid-memory-retrieval-v1`
     - query-type routing between session recall and guardian-state memory assembly still belongs to `guardian-state-retrieval-planner-v1`
+  - aggregate PR follow-up:
+    - external PR review caught that the LIKE fallback path only searched user and assistant messages, so episodic event recall disappeared for punctuation-heavy or FTS-ineligible queries
+    - fixed on the branch by teaching the fallback path to search non-conversation episodic events as well, mirroring the event coverage of the FTS path
+    - added a regression test that proves `upload?` still returns the workflow event match through the fallback lane
 
 ### `hybrid-memory-retrieval-v1`
 
@@ -385,6 +393,9 @@ This section records the internal Batch B slices on the feature branch before th
   - result: `1209 passed, 35 failed`
   - the failures cluster in approval wrapping, runtime audit or session-context propagation, eval harness, goal-tree orphan handling, scheduled-job runtime context, and tool-audit paths; the Batch B memory suite above remained green
   - the already observed strategist audit-context failure remains part of that broader unrelated failure set rather than a new retrieval-planner regression
+- PR review follow-up:
+  - a follow-up subagent review was started with `Einstein` (`019d2695-7bf7-7b10-97dd-6145a50ea090`) for the observer-entity reuse and fallback-event-search fixes
+  - that review thread stalled before returning findings, so the review record relies on the targeted regression tests for `backend/tests/test_observer_manager.py` and `backend/tests/test_session.py` instead of claiming an unreturned clean review
 
 ## Non-Goals
 

@@ -34,6 +34,33 @@ def _activity_signal(context: CurrentContext) -> str:
     return user_state
 
 
+async def _resolve_project_entity_id(
+    *,
+    active_project: str,
+    old_project: str,
+) -> str | None:
+    candidate_names = tuple(
+        dict.fromkeys(name for name in (active_project, old_project) if name)
+    )
+    if not candidate_names:
+        return None
+
+    resolved = await memory_repository.find_entities_by_names(
+        names=candidate_names,
+        entity_type=MemoryEntityType.project,
+    )
+    preferred_name = active_project or old_project
+    entity = resolved.get(preferred_name)
+    if entity is not None:
+        return entity.id
+
+    created = await memory_repository.get_or_create_entity(
+        canonical_name=preferred_name,
+        entity_type=MemoryEntityType.project,
+    )
+    return created.id
+
+
 def should_record_activity_transition(old: CurrentContext, new: CurrentContext) -> bool:
     if old.user_state != new.user_state and (
         old.user_state in _BLOCKED_STATES or new.user_state in _BLOCKED_STATES
@@ -54,14 +81,10 @@ async def record_observer_transition_episodes(
 ) -> int:
     project_name = _normalize(active_project)
     old_project = _normalize(old_context.active_project)
-    project_entity_id: str | None = None
-
-    if project_name or old_project:
-        project_entity = await memory_repository.get_or_create_entity(
-            canonical_name=project_name or old_project,
-            entity_type=MemoryEntityType.project,
-        )
-        project_entity_id = project_entity.id
+    project_entity_id = await _resolve_project_entity_id(
+        active_project=project_name,
+        old_project=old_project,
+    )
 
     episodes: list[dict[str, object]] = []
 

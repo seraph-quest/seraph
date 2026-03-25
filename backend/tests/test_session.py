@@ -226,6 +226,22 @@ class TestSearchSessions:
         assert results[0]["source"] == "event"
         assert "upload artifact step" in results[0]["snippet"].lower()
 
+    async def test_fallback_search_still_matches_episodic_event_content(self, async_db, sm):
+        await sm.get_or_create("ops")
+        await sm.add_message(
+            "ops",
+            "step",
+            "Workflow Atlas launch deploy failed at upload? artifact step.",
+            tool_used="workflow_runner",
+        )
+
+        results = await sm.search_sessions("upload?")
+
+        assert len(results) == 1
+        assert results[0]["session_id"] == "ops"
+        assert results[0]["source"] == "event"
+        assert "upload?" in results[0]["snippet"].lower()
+
     async def test_matches_titles_and_excludes_current(self, async_db, sm):
         await sm.get_or_create("weather-thread")
         await sm.update_title("weather-thread", "Weather planning")

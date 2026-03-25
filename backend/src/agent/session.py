@@ -13,7 +13,14 @@ from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
-from src.db.models import MemoryEpisode, Message, ScheduledJob, Session, SessionTodo
+from src.db.models import (
+    MemoryEpisode,
+    MemoryEpisodeType,
+    Message,
+    ScheduledJob,
+    Session,
+    SessionTodo,
+)
 from src.memory.episodes import build_message_episode
 
 logger = logging.getLogger(__name__)
@@ -304,6 +311,48 @@ class SessionManager:
                     snippet_chars=snippet_chars,
                 ),
                 "source": "message",
+                "rank": 1.0,
+            }
+
+        event_stmt = (
+            select(MemoryEpisode)
+            .where(MemoryEpisode.session_id.is_not(None))
+            .where(MemoryEpisode.episode_type != MemoryEpisodeType.conversation)
+            .where(
+                or_(
+                    func.lower(MemoryEpisode.summary).like(pattern, escape="\\"),
+                    func.lower(MemoryEpisode.content).like(pattern, escape="\\"),
+                )
+            )
+            .order_by(
+                col(MemoryEpisode.observed_at).desc(),
+                col(MemoryEpisode.created_at).desc(),
+            )
+        )
+        if exclude_session_id:
+            event_stmt = event_stmt.where(MemoryEpisode.session_id != exclude_session_id)
+        event_rows = await db.execute(event_stmt)
+        for episode in event_rows.scalars().all():
+            if not isinstance(episode.session_id, str) or episode.session_id in combined:
+                continue
+            session = session_map.get(episode.session_id)
+            if session is None:
+                continue
+            event_text = "\n".join(
+                part.strip()
+                for part in (episode.summary or "", episode.content or "")
+                if part.strip()
+            )
+            combined[episode.session_id] = {
+                "session_id": episode.session_id,
+                "title": session.title or "Untitled session",
+                "matched_at": episode.observed_at or episode.created_at,
+                "snippet": _matching_snippet(
+                    event_text,
+                    normalized_query,
+                    snippet_chars=snippet_chars,
+                ),
+                "source": "event",
                 "rank": 1.0,
             }
 

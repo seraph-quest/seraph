@@ -35,6 +35,7 @@ _PATCH_TARGETS = [
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",
+    "src.memory.hybrid_retrieval.get_session",
 ]
 
 

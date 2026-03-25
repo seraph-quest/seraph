@@ -329,6 +329,28 @@ This section records the internal Batch B slices on the feature branch before th
     - session recall is now lexical plus episodic, but cross-store hybrid ranking with semantic memory still belongs to `hybrid-memory-retrieval-v1`
     - query-type routing between session recall and guardian-state memory assembly still belongs to `guardian-state-retrieval-planner-v1`
 
+### `hybrid-memory-retrieval-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added `backend/src/memory/hybrid_retrieval.py` as a reusable retriever that combines lexical structured-memory hits, project-linked boosts, episodic hits, vector-store hits, dedupe, and reranking into one bounded memory bundle
+  - kept the retriever independent from guardian-state wiring so the later planner slice can consume one tested retrieval backbone instead of reimplementing ranking logic in multiple places
+  - added regression coverage for mixed semantic plus episodic plus vector recall, project-linked surfacing without lexical query overlap, and degraded-vector fallback behavior
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/hybrid_retrieval.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/conftest.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_repository.py backend/tests/test_memory_episodes.py -q`
+- review notes:
+  - local regressions caught and fixed before the slice stayed complete:
+    - the new retriever module initially bypassed the in-memory test DB because `src.memory.hybrid_retrieval.get_session` was not included in the shared test patch targets
+    - recency scoring initially mixed naive and timezone-aware datetimes, which broke ranking during test execution
+    - fixed by patching the new module into `backend/tests/conftest.py` and normalizing datetimes inside the hybrid recency scorer before ranking
+  - subagent review:
+    - reviewer thread: `Laplace` (`019d24da-bfeb-7360-8b3a-6e9bcef8fcb7`)
+    - result: the review thread stalled before returning findings, so the completion record relies on the targeted hybrid-retrieval test suite plus the local regressions above
+  - deferred to later Batch B slices:
+    - the retriever exists, but guardian-state still uses the older memory assembly path until `guardian-state-retrieval-planner-v1` lands
+    - procedural-memory routing still belongs to Batch C because outcome-derived procedural memory is not a live retrieval lane yet
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

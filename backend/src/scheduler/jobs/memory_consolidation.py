@@ -7,7 +7,7 @@ from sqlmodel import select, col
 from src.audit.runtime import log_scheduler_job_event
 from src.db.engine import get_session
 from src.db.models import Session, Message
-from src.memory.consolidator import consolidate_session
+from src.memory.flush import flush_session_memory
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +42,14 @@ async def run_memory_consolidation() -> None:
             )
             return
 
+        visited = 0
         consolidated = 0
         failed = 0
         for session in sessions:
             try:
-                await consolidate_session(session.id)
-                consolidated += 1
+                visited += 1
+                if await flush_session_memory(session.id, trigger="scheduled_catchup"):
+                    consolidated += 1
             except Exception:
                 failed += 1
                 logger.exception("Consolidation failed for session %s", session.id[:8])
@@ -59,6 +61,7 @@ async def run_memory_consolidation() -> None:
                 details={
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "recent_session_count": len(sessions),
+                    "visited_session_count": visited,
                     "consolidated_count": consolidated,
                     "failed_session_count": failed,
                 },
@@ -71,6 +74,7 @@ async def run_memory_consolidation() -> None:
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "recent_session_count": len(sessions),
+                "visited_session_count": visited,
                 "consolidated_count": consolidated,
                 "failed_session_count": failed,
             },

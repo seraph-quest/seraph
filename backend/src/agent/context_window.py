@@ -176,3 +176,24 @@ def build_context_window(
         _count_tokens(result),
     )
     return result
+
+
+def requires_middle_summary(
+    messages: list[dict],
+    token_budget: int | None = None,
+    keep_recent: int | None = None,
+    keep_first: int | None = None,
+) -> bool:
+    token_budget = token_budget if token_budget is not None else settings.context_window_token_budget
+    keep_recent = keep_recent if keep_recent is not None else settings.context_window_keep_recent
+    keep_first = keep_first if keep_first is not None else settings.context_window_keep_first
+
+    if not messages:
+        return False
+
+    if _count_tokens(_format_messages(messages)) <= token_budget:
+        return False
+
+    n = len(messages)
+    middle = messages[keep_first:max(keep_first, n - keep_recent)]
+    return bool(middle)

@@ -22,6 +22,7 @@ from src.db.models import (
     SessionTodo,
 )
 from src.memory.episodes import build_message_episode
+from src.memory.flush import flush_session_memory
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ class SessionManager:
             return session
 
     async def delete(self, session_id: str) -> bool:
+        await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
@@ -599,7 +601,11 @@ class SessionManager:
             return msg
 
     async def get_history_text(
-        self, session_id: str, limit: int = 50
+        self,
+        session_id: str,
+        limit: int = 50,
+        *,
+        allow_memory_flush: bool = True,
     ) -> str:
         async with get_session() as db:
             result = await db.execute(
@@ -619,7 +625,13 @@ class SessionManager:
             ]
 
             try:
-                from src.agent.context_window import build_context_window
+                from src.agent.context_window import build_context_window, requires_middle_summary
+                if allow_memory_flush and requires_middle_summary(msg_dicts):
+                    await flush_session_memory(
+                        session_id,
+                        trigger="pre_compaction",
+                        manager=self,
+                    )
                 return await asyncio.to_thread(
                     build_context_window,
                     msg_dicts,

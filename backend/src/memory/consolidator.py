@@ -53,14 +53,25 @@ def _summary_for_memory(text: str, *, max_chars: int = 140) -> str:
     return normalized[: max_chars - 3].rstrip() + "..."
 
 
-async def consolidate_session(session_id: str) -> None:
+async def consolidate_session(
+    session_id: str,
+    *,
+    trigger: str = "post_response",
+    workflow_name: str | None = None,
+    manager=None,
+) -> None:
     """Extract long-term memories from a conversation session.
 
     Runs as a background task after each conversation.
     """
     started_at = perf_counter()
+    session_manager_ref = manager or session_manager
     try:
-        history = await session_manager.get_history_text(session_id, limit=30)
+        history = await session_manager_ref.get_history_text(
+            session_id,
+            limit=30,
+            allow_memory_flush=False,
+        )
         if not history or len(history) < 50:
             await log_background_task_event(
                 task_name="session_consolidation",
@@ -70,6 +81,8 @@ async def consolidate_session(session_id: str) -> None:
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "reason": "insufficient_history",
                     "history_length": len(history),
+                    "trigger": trigger,
+                    "workflow_name": workflow_name,
                 },
             )
             return
@@ -101,6 +114,8 @@ async def consolidate_session(session_id: str) -> None:
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "timeout_seconds": settings.consolidation_llm_timeout,
                     "history_length": len(history),
+                    "trigger": trigger,
+                    "workflow_name": workflow_name,
                 },
             )
             return
@@ -232,6 +247,8 @@ async def consolidate_session(session_id: str) -> None:
                 "write_failure_count": write_failure_count,
                 "soul_update_count": len(soul_updates),
                 "snapshot_refresh_failed": snapshot_refresh_failed,
+                "trigger": trigger,
+                "workflow_name": workflow_name,
             },
         )
 
@@ -243,6 +260,8 @@ async def consolidate_session(session_id: str) -> None:
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "error": str(exc),
+                "trigger": trigger,
+                "workflow_name": workflow_name,
             },
         )
         logger.exception("Memory consolidation failed for session %s", session_id[:8])

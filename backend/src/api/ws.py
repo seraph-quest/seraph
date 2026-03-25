@@ -373,9 +373,12 @@ async def websocket_chat(websocket: WebSocket):
             # Trigger memory consolidation in background (only for assistant responses)
             if final_result:
                 try:
-                    from src.memory.consolidator import consolidate_session
+                    from src.memory.flush import flush_session_memory
                     from src.utils.background import track_task
-                    track_task(consolidate_session(session.id), name=f"consolidate-{session.id[:8]}")
+                    track_task(
+                        flush_session_memory(session.id, trigger="post_response"),
+                        name=f"consolidate-{session.id[:8]}",
+                    )
                 except Exception:
                     logger.debug("Failed to schedule memory consolidation", exc_info=True)
 

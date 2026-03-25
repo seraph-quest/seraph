@@ -12,8 +12,10 @@ from typing import Any
 
 from smolagents import Tool
 
+from src.approval.runtime import get_current_session_id
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
+from src.memory.flush import flush_session_memory_sync
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
 from src.workflows.loader import Workflow, scan_workflow_paths
@@ -216,6 +218,7 @@ class WorkflowTool(Tool):
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         workflow_inputs = self._normalize_inputs(args, kwargs)
         run_fingerprint = fingerprint_tool_call(self.name, workflow_inputs)
+        current_session_id = get_current_session_id()
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -332,6 +335,12 @@ class WorkflowTool(Tool):
                 "content_redacted": True,
             },
         )
+        if current_session_id:
+            flush_session_memory_sync(
+                session_id=current_session_id,
+                trigger="workflow_completed",
+                workflow_name=self.workflow.name,
+            )
         return result_text
 
     def get_audit_result_payload(

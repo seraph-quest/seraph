@@ -397,6 +397,41 @@ This section records the internal Batch B slices on the feature branch before th
   - a follow-up subagent review was started with `Einstein` (`019d2695-7bf7-7b10-97dd-6145a50ea090`) for the observer-entity reuse and fallback-event-search fixes
   - that review thread stalled before returning findings, so the review record relies on the targeted regression tests for `backend/tests/test_observer_manager.py` and `backend/tests/test_session.py` instead of claiming an unreturned clean review
 
+## Batch C Branch Review Log
+
+This section records the internal Batch C slices on the feature branch before the aggregate GitHub PR is opened.
+
+### `memory-flush-lifecycle-hooks-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `backend/src/memory/flush.py` as the centralized lifecycle flush entrypoint with session-fingerprint dedupe plus in-flight overlap protection so repeated triggers do not double-write the same unchanged session
+  - routed chat-response flushes, websocket-response flushes, and scheduler catch-up flushes through that helper instead of scheduling raw consolidation calls directly
+  - added pre-compaction flushing from the session history path when the context window is about to require a middle summary, while explicitly preventing recursive self-triggering from the consolidator history read
+  - added session-end flushing before session teardown and workflow-completion flushing on successful workflow completion, and carried trigger plus workflow metadata into consolidation audit records
+  - tightened scheduler telemetry so it records visited sessions separately from sessions that actually flushed instead of overstating consolidation count
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/flush.py backend/src/memory/consolidator.py backend/src/agent/context_window.py backend/src/agent/session.py backend/src/api/chat.py backend/src/api/ws.py backend/src/scheduler/jobs/memory_consolidation.py backend/src/workflows/manager.py backend/tests/conftest.py backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py -q`
+- subagent review:
+  - reviewer: `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`)
+  - review target: bug risk, regression risk, concurrency issues, and misleading implementation claims around the new lifecycle flush path
+  - initial findings:
+    - non-primary lifecycle hooks could not perform the first flush for a session because the helper currently arms `session_end`, `pre_compaction`, and `workflow_completed` only after a primary `post_response` or `scheduled_catchup` flush has happened
+    - overlapping flushes could race and double-write the same session state
+    - wording needed to stay explicit that workflow completion currently performs a synchronous full consolidation call, not a lightweight background flush
+    - scheduler telemetry originally counted visited sessions as consolidated sessions even when no flush happened
+  - fixed before the slice stayed marked complete:
+    - added in-flight fingerprint dedupe in `backend/src/memory/flush.py` so overlapping flush requests for the same session state collapse to one consolidation run
+    - changed scheduler telemetry to distinguish visited-session count from actual flush count
+    - narrowed the implementation wording in docs and review notes so the workflow hook is described as the synchronous consolidation path it actually is
+  - remaining limitation carried forward intentionally:
+    - non-primary hooks currently act as safety nets after a primary flush has armed the session; broader first-flush coverage and lighter staged capture still belong to the next consolidation slice instead of being overstated here
+- deferred to later Batch C slices:
+  - this slice still runs the existing full consolidation path rather than a lighter staged capture or merge pipeline
+  - broader first-flush behavior for non-primary triggers remains incomplete
+  - higher-salience capture, staged extraction, and merge-strengthen logic belong in `multi-stage-memory-consolidation-v1`
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

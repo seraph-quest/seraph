@@ -194,9 +194,12 @@ async def chat(request: ChatRequest):
     # Trigger memory consolidation in background
     if response_text:
         try:
-            from src.memory.consolidator import consolidate_session
+            from src.memory.flush import flush_session_memory
             from src.utils.background import track_task
-            track_task(consolidate_session(session.id), name=f"consolidate-{session.id[:8]}")
+            track_task(
+                flush_session_memory(session.id, trigger="post_response"),
+                name=f"consolidate-{session.id[:8]}",
+            )
         except ImportError:
             pass
 

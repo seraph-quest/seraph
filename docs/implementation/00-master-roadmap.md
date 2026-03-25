@@ -475,8 +475,8 @@ This is the next major Guardian Intelligence execution program after the current
 
 ### Batch C: Learning, consolidation, and decay
 
-11. [ ] `memory-flush-lifecycle-hooks-v1`:
-    add durable-memory flush triggers at session end, near compaction, and key workflow boundaries so important context is promoted before it collapses
+11. [x] `memory-flush-lifecycle-hooks-v1`:
+    add durable-memory flush triggers at session end, near compaction, and key workflow boundaries so important context is promoted before it collapses, with the current non-primary hooks acting as safety nets after a primary flush rather than a standalone lightweight first-flush path
 12. [ ] `multi-stage-memory-consolidation-v1`:
     replace one-shot extraction with staged capture, extract, merge, strengthen, and source-backed write logic so long-term memory becomes updateable
 13. [ ] `soul-projection-and-structured-profile-v1`:

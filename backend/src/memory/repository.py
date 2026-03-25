@@ -79,6 +79,46 @@ class MemoryWriteResult:
 
 
 class MemoryRepository:
+    @staticmethod
+    def _normalize_episode_kwargs(
+        *,
+        episode_type: MemoryEpisodeType | str,
+        summary: str,
+        content: str,
+        session_id: str | None,
+        source_message_id: str | None,
+        source_tool_name: str | None,
+        source_role: str | None,
+        subject_entity_id: str | None,
+        project_entity_id: str | None,
+        salience: float,
+        confidence: float,
+        metadata: dict[str, Any] | None,
+        observed_at: datetime | None,
+    ) -> dict[str, Any]:
+        normalized_summary = summary.strip()
+        normalized_content = content.strip()
+        if not normalized_summary:
+            raise ValueError("summary must be non-empty")
+        if not normalized_content:
+            raise ValueError("content must be non-empty")
+        normalized_episode_type = _coerce_enum(episode_type, MemoryEpisodeType)
+        return {
+            "session_id": session_id,
+            "episode_type": normalized_episode_type,
+            "summary": normalized_summary,
+            "content": normalized_content,
+            "source_message_id": source_message_id,
+            "source_tool_name": source_tool_name,
+            "source_role": source_role,
+            "subject_entity_id": subject_entity_id,
+            "project_entity_id": project_entity_id,
+            "salience": salience,
+            "confidence": confidence,
+            "metadata_json": json.dumps(metadata or {}, sort_keys=True),
+            "observed_at": observed_at or _now(),
+        }
+
     async def get_or_create_entity(
         self,
         *,
@@ -237,34 +277,63 @@ class MemoryRepository:
         metadata: dict[str, Any] | None = None,
         observed_at: datetime | None = None,
     ) -> MemoryEpisode:
-        normalized_summary = summary.strip()
-        normalized_content = content.strip()
-        if not normalized_summary:
-            raise ValueError("summary must be non-empty")
-        if not normalized_content:
-            raise ValueError("content must be non-empty")
-        normalized_episode_type = _coerce_enum(episode_type, MemoryEpisodeType)
+        episodes = await self.create_episode_batch(
+            items=[
+                {
+                    "episode_type": episode_type,
+                    "summary": summary,
+                    "content": content,
+                    "session_id": session_id,
+                    "source_message_id": source_message_id,
+                    "source_tool_name": source_tool_name,
+                    "source_role": source_role,
+                    "subject_entity_id": subject_entity_id,
+                    "project_entity_id": project_entity_id,
+                    "salience": salience,
+                    "confidence": confidence,
+                    "metadata": metadata,
+                    "observed_at": observed_at,
+                }
+            ]
+        )
+        return episodes[0]
+
+    async def create_episode_batch(
+        self,
+        *,
+        items: list[dict[str, Any]],
+    ) -> list[MemoryEpisode]:
+        if not items:
+            return []
+        normalized_items = [
+            self._normalize_episode_kwargs(
+                episode_type=item.get("episode_type", MemoryEpisodeType.conversation),
+                summary=str(item.get("summary", "")),
+                content=str(item.get("content", "")),
+                session_id=item.get("session_id"),
+                source_message_id=item.get("source_message_id"),
+                source_tool_name=item.get("source_tool_name"),
+                source_role=item.get("source_role"),
+                subject_entity_id=item.get("subject_entity_id"),
+                project_entity_id=item.get("project_entity_id"),
+                salience=float(item.get("salience", 0.5)),
+                confidence=float(item.get("confidence", 0.5)),
+                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
+                observed_at=item.get("observed_at"),
+            )
+            for item in items
+        ]
 
         async with get_session() as db:
-            episode = MemoryEpisode(
-                session_id=session_id,
-                episode_type=normalized_episode_type,
-                summary=normalized_summary,
-                content=normalized_content,
-                source_message_id=source_message_id,
-                source_tool_name=source_tool_name,
-                source_role=source_role,
-                subject_entity_id=subject_entity_id,
-                project_entity_id=project_entity_id,
-                salience=salience,
-                confidence=confidence,
-                metadata_json=json.dumps(metadata or {}, sort_keys=True),
-                observed_at=observed_at or _now(),
-            )
-            db.add(episode)
+            episodes: list[MemoryEpisode] = []
+            for episode_kwargs in normalized_items:
+                episode = MemoryEpisode(**episode_kwargs)
+                db.add(episode)
+                episodes.append(episode)
             await db.flush()
-            db.expunge(episode)
-            return episode
+            for episode in episodes:
+                db.expunge(episode)
+            return episodes
 
     async def find_entities_by_names(
         self,

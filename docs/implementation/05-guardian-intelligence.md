@@ -279,6 +279,33 @@ This section records the internal Batch B slices on the feature branch before th
     - decision-oriented episodic writes still need dedicated runtime hooks rather than only schema or repository support
     - episodic retrieval and ranking still belong to the later FTS, hybrid-retrieval, and retrieval-planner slices
 
+### `observer-episodic-fusion-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - extended `CurrentContext` with `active_project` so observer state carries explicit project focus instead of only goals plus window text
+  - added `backend/src/memory/observer_episodes.py` to derive conservative `observer` episodes for project, focus, and activity transitions with explicit provenance metadata
+  - taught `ContextManager.refresh()` to load the most recent screen-derived project, persist observer transitions into episodic memory, and fail open if that write path breaks
+  - added runtime-audit details for `active_project` and `observer_transition_count` so the observer refresh log shows what transition memory was produced
+  - added regression coverage for duplicate-suppression, write-failure survival, project-clear transitions, and audit details
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/tests/test_observer_manager.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_observer_manager.py backend/tests/test_memory_episodes.py -q`
+- subagent review:
+  - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+  - initial findings:
+    - observer transition writes were not atomic, so a refresh could partially commit episodes while still reporting `observer_transition_count == 0` after an exception path
+    - project exit transitions were skipped because the first cut only wrote project episodes when the new project name was non-empty
+  - fixed before the slice stayed marked complete:
+    - changed observer transition persistence to build one payload list and write it through `memory_repository.create_episode_batch(...)` so each refresh commits observer episodes atomically
+    - added project-clear transition support, including reuse of the prior project entity when focus drops from a project to none
+    - added regression tests for observer write failure, project-clear transitions, and runtime-audit transition details
+  - recheck attempts:
+    - follow-up reviewer threads were started with `Arendt`, `Fermat`, and `Kierkegaard`, but those tool runs stalled before returning findings, so the completion record relies on the fixed `Volta` findings plus targeted regression validation instead of claiming an unreturned clean review
+  - deferred to later Batch B slices:
+    - observer episodes are still lexical/temporal substrate only; retrieval and ranking belong to the later FTS and hybrid retrieval slices
+    - richer observer-event semantics beyond project, focus, and blocked-state activity transitions still belong to later observer-memory refinement work
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

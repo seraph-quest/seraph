@@ -464,7 +464,7 @@ This is the next major Guardian Intelligence execution program after the current
 
 6. [x] `episodic-memory-events-v1`:
    store typed episodic records for important conversation, workflow, tool, and decision boundaries so recall can reason over time instead of only semantic similarity
-7. [ ] `observer-episodic-fusion-v1`:
+7. [x] `observer-episodic-fusion-v1`:
    write observer project, focus, and activity transitions into episodic memory with conservative salience rules and clear provenance
 8. [ ] `session-search-fts-and-event-index-v1`:
    upgrade session recall from plain text matching to FTS-backed session and event search with better bounded summaries

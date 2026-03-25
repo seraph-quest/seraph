@@ -21,6 +21,7 @@ _KIND_TO_CATEGORY = {
     MemoryKind.commitment: MemoryCategory.goal,
     MemoryKind.preference: MemoryCategory.preference,
     MemoryKind.communication_preference: MemoryCategory.preference,
+    MemoryKind.procedural: MemoryCategory.preference,
     MemoryKind.reflection: MemoryCategory.reflection,
     MemoryKind.project: MemoryCategory.fact,
     MemoryKind.collaborator: MemoryCategory.fact,

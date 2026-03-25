@@ -529,6 +529,118 @@ class MemoryRepository:
                 session_source_created=session_source_created,
             )
 
+    async def sync_scoped_memory(
+        self,
+        *,
+        kind: MemoryKind | str,
+        scope: dict[str, Any],
+        content: str | None,
+        summary: str | None = None,
+        category: MemoryCategory | str | None = None,
+        confidence: float = 0.7,
+        importance: float = 0.7,
+        reinforcement: float = 1.0,
+        metadata: dict[str, Any] | None = None,
+        source_session_id: str | None = None,
+        last_confirmed_at: datetime | None = None,
+    ) -> MemoryWriteResult | None:
+        normalized_kind = _coerce_enum(kind, MemoryKind)
+        normalized_category = _coerce_enum(
+            category if category is not None else MemoryCategory.preference,
+            MemoryCategory,
+        )
+        normalized_scope = {
+            str(key): value
+            for key, value in (scope or {}).items()
+            if str(key).strip() and value is not None
+        }
+        if not normalized_scope:
+            raise ValueError("scope must contain at least one key")
+
+        normalized_content = content.strip() if isinstance(content, str) else ""
+        normalized_summary = (
+            summary.strip() if isinstance(summary, str) and summary.strip() else None
+        )
+        merged_metadata = dict(normalized_scope)
+        if isinstance(metadata, dict):
+            merged_metadata.update(metadata)
+
+        def _normalize_timestamp(value: datetime | None) -> datetime | None:
+            if value is None:
+                return None
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        def _matches_scope(memory: Memory) -> bool:
+            try:
+                payload = json.loads(memory.metadata_json or "{}")
+            except json.JSONDecodeError:
+                return False
+            return all(payload.get(key) == value for key, value in normalized_scope.items())
+
+        async with get_session() as db:
+            candidates = (
+                await db.execute(
+                    select(Memory)
+                    .where(Memory.kind == normalized_kind)
+                    .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+                )
+            ).scalars().all()
+            memory = next((item for item in candidates if _matches_scope(item)), None)
+
+            if not normalized_content:
+                if memory is None:
+                    return None
+                memory.status = MemoryStatus.archived
+                memory.updated_at = _now()
+                memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
+                db.add(memory)
+                await db.flush()
+                db.expunge(memory)
+                return None
+
+            if memory is None:
+                memory = Memory(
+                    content=normalized_content,
+                    category=normalized_category,
+                    kind=normalized_kind,
+                    source_session_id=source_session_id,
+                    summary=normalized_summary,
+                    confidence=confidence,
+                    importance=importance,
+                    reinforcement=reinforcement,
+                    metadata_json=json.dumps(merged_metadata, sort_keys=True),
+                    status=MemoryStatus.active,
+                    last_confirmed_at=_normalize_timestamp(last_confirmed_at),
+                )
+                db.add(memory)
+                await db.flush()
+                db.expunge(memory)
+                return MemoryWriteResult(memory_id=memory.id)
+
+            memory.content = normalized_content
+            memory.category = normalized_category
+            memory.summary = normalized_summary
+            memory.confidence = confidence
+            memory.importance = importance
+            memory.reinforcement = max(memory.reinforcement, reinforcement)
+            memory.status = MemoryStatus.active
+            if source_session_id:
+                memory.source_session_id = source_session_id
+            if last_confirmed_at is not None:
+                memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
+            memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
+            memory.updated_at = _now()
+            db.add(memory)
+            await db.flush()
+            db.expunge(memory)
+            return MemoryWriteResult(
+                memory_id=memory.id,
+                subject_entity_id=memory.subject_entity_id,
+                project_entity_id=memory.project_entity_id,
+            )
+
     async def create_episode(
         self,
         *,

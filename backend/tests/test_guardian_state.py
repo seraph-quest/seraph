@@ -249,6 +249,12 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
         summary="Prefers concise morning briefings",
         importance=0.78,
     )
+    await memory_repository.create_memory(
+        content="For advisory nudges, avoid direct interruption during deep-work windows.",
+        kind=MemoryKind.procedural,
+        summary="Advisory timing lesson",
+        importance=0.79,
+    )
 
     ctx = CurrentContext(
         time_of_day="morning",
@@ -289,6 +295,8 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
     assert "Weekly investor note goes out on Friday" in state.world_model.recurring_obligations
     assert "Atlas launch timeline ends on Friday" in state.world_model.project_timeline
     assert "Prefers concise morning briefings" in state.memory_context
+    assert "Advisory timing lesson" in state.memory_context
+    assert "Advisory timing lesson" in state.world_model.active_constraints
     assert "[commitment] Review the Atlas brief tomorrow morning" in state.memory_context
 
 

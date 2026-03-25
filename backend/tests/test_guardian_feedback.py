@@ -1,11 +1,15 @@
 """Tests for guardian intervention feedback persistence."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlmodel import select
 
-from src.db.models import GuardianIntervention
-from src.guardian.feedback import guardian_feedback_repository
+from src.agent.session import SessionManager
+from src.db.models import GuardianIntervention, MemoryKind
+from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+from src.memory.procedural import sync_learning_signal_memories
+from src.memory.repository import memory_repository
 
 
 async def test_create_intervention_and_feedback_summary(async_db):
@@ -206,6 +210,9 @@ async def test_learning_signal_keeps_blocked_state_async_bias_from_overriding_di
 
 async def test_list_recent_can_scope_to_single_session(async_db):
     base_time = datetime.now(timezone.utc)
+    sm = SessionManager()
+    await sm.get_or_create("session-1")
+    await sm.get_or_create("session-2")
 
     first = await guardian_feedback_repository.create_intervention(
         session_id="session-1",
@@ -259,3 +266,133 @@ async def test_list_recent_can_scope_to_single_session(async_db):
     recent_for_session = await guardian_feedback_repository.list_recent(limit=1, session_id="session-1")
 
     assert [item.id for item in recent_for_session] == [first.id]
+
+
+async def test_feedback_updates_materialize_procedural_memories(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("session-procedural")
+
+    for feedback_type, user_state, transport in (
+        ("not_helpful", "deep_work", "websocket"),
+        ("not_helpful", "in_meeting", "websocket"),
+        ("helpful", "away", "native_notification"),
+        ("acknowledged", "deep_work", "native_notification"),
+    ):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-procedural",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Respect the focus block.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state=user_state,
+            interruption_mode="focus" if user_state != "away" else "balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport=transport,
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+    memories = await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
+    procedural_by_lesson = {
+        json.loads(memory.metadata_json or "{}").get("lesson_type"): memory
+        for memory in memories
+    }
+
+    assert "timing" in procedural_by_lesson
+    assert "blocked_state" in procedural_by_lesson
+    assert "avoid direct interruption" in procedural_by_lesson["timing"].content.lower()
+    assert "prefer bundling" in procedural_by_lesson["blocked_state"].content.lower()
+
+
+async def test_procedural_memory_sync_updates_in_place_and_archives_neutral_lessons(async_db):
+    first_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=2,
+        acknowledged_count=0,
+        failed_count=0,
+        bias="reduce_interruptions",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="avoid_focus_windows",
+        blocked_state_bias="neutral",
+        suppression_bias="neutral",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=2,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=first_signal,
+        source_session_id="session-procedural",
+    )
+
+    initial_memories = await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
+    timing_memory = next(
+        memory
+        for memory in initial_memories
+        if json.loads(memory.metadata_json or "{}").get("lesson_type") == "timing"
+    )
+
+    second_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=2,
+        not_helpful_count=0,
+        acknowledged_count=0,
+        failed_count=0,
+        bias="neutral",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="prefer_available_windows",
+        blocked_state_bias="neutral",
+        suppression_bias="neutral",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=0,
+        blocked_native_success_count=0,
+        available_direct_success_count=2,
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=second_signal,
+        source_session_id="session-procedural",
+    )
+
+    active_memories = await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
+    updated_timing_memory = next(
+        memory
+        for memory in active_memories
+        if json.loads(memory.metadata_json or "{}").get("lesson_type") == "timing"
+    )
+
+    assert updated_timing_memory.id == timing_memory.id
+    assert "explicitly available" in updated_timing_memory.content.lower()
+
+    neutral_signal = GuardianLearningSignal.neutral("advisory")
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=neutral_signal,
+        source_session_id="session-procedural",
+    )
+
+    archived_memories = await memory_repository.list_memories(
+        kind=MemoryKind.procedural,
+        limit=20,
+        status="archived",
+    )
+    archived_lesson_types = {
+        json.loads(memory.metadata_json or "{}").get("lesson_type")
+        for memory in archived_memories
+    }
+
+    assert "timing" in archived_lesson_types

@@ -57,6 +57,7 @@ async def render_bounded_guardian_snapshot(
             MemoryKind.commitment,
             MemoryKind.preference,
             MemoryKind.communication_preference,
+            MemoryKind.procedural,
             MemoryKind.project,
             MemoryKind.collaborator,
             MemoryKind.obligation,
@@ -82,6 +83,9 @@ async def render_bounded_guardian_snapshot(
             for memory in grouped.get(kind, [])
         ]
     )
+    procedural_bits = _dedupe_preserve(
+        [(memory.summary or memory.content or "").strip() for memory in grouped.get("procedural", [])]
+    )
     project_bits = _dedupe_preserve(
         [(memory.summary or memory.content or "").strip() for memory in grouped.get("project", [])]
     )
@@ -103,6 +107,8 @@ async def render_bounded_guardian_snapshot(
         lines.append(f"- Goal memory: {' | '.join(goal_bits)}")
     if preference_bits:
         lines.append(f"- Preferences: {' | '.join(preference_bits)}")
+    if procedural_bits:
+        lines.append(f"- Delivery guidance: {' | '.join(procedural_bits)}")
     if project_bits:
         lines.append(f"- Active projects: {' | '.join(project_bits)}")
     if collaborator_bits:
@@ -114,11 +120,12 @@ async def render_bounded_guardian_snapshot(
         "identity": list(identity_bits),
         "goal_memory": list(goal_bits),
         "preferences": list(preference_bits),
+        "delivery_guidance": list(procedural_bits),
         "active_projects": list(project_bits),
         "collaborators": list(collaborator_bits),
         "routines_and_obligations": list(cadence_bits),
     }
-    content = "\n".join(lines[:6])
+    content = "\n".join(lines[:7])
     source_hash = hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
     ).hexdigest()

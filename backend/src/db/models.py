@@ -53,6 +53,7 @@ class MemoryKind(str, enum.Enum):
     timeline = "timeline"
     commitment = "commitment"
     communication_preference = "communication_preference"
+    procedural = "procedural"
 
 
 class MemoryStatus(str, enum.Enum):

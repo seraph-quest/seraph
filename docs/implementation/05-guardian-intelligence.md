@@ -502,6 +502,28 @@ This section records the internal Batch C slices on the feature branch before th
   - outcome-derived procedural memory still needs its own explicit durable representation and retrieval lane instead of living only inside guardian feedback heuristics
   - contradiction cleanup and archival still belong to `memory-decay-contradiction-and-archive-v1`
 
+### `procedural-memory-from-outcomes-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `MemoryKind.procedural` in `backend/src/db/models.py` and mapped it through `backend/src/memory/types.py` so outcome-derived lessons become first-class durable memory instead of piggybacking on generic preference text
+  - added `backend/src/memory/procedural.py` to materialize `GuardianLearningSignal` into scoped procedural memories for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread lessons
+  - added `memory_repository.sync_scoped_memory()` in `backend/src/memory/repository.py` so one lesson scope updates in place across retries, reactivates archived rows when the lesson returns, and archives the row when the signal goes neutral
+  - refreshed procedural memories from guardian feedback writes in `backend/src/guardian/feedback.py`, so explicit user feedback and failed outcomes update the durable lesson lane instead of leaving that learning only in ephemeral scoring logic
+  - surfaced procedural memories through the retrieval planner, bounded snapshot, and guardian world model in `backend/src/memory/retrieval_planner.py`, `backend/src/memory/snapshots.py`, and `backend/src/guardian/world_model.py`
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/models.py backend/src/memory/types.py backend/src/memory/repository.py backend/src/memory/procedural.py backend/src/guardian/feedback.py backend/src/memory/retrieval_planner.py backend/src/memory/snapshots.py backend/src/guardian/world_model.py backend/tests/test_guardian_feedback.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py -q`
+- local regressions fixed before the slice stayed complete:
+  - the new guardian-feedback tests initially created interventions against missing sessions, which violated the `guardian_interventions.session_id` foreign key and masked the actual procedural-memory assertions until the fixture setup was corrected
+- subagent review:
+  - review requests were started with `Galileo` (`019d2703-6e72-7b83-9d77-11c2bbc72165`) and `Rawls` (`019d2704-d877-7511-a4d5-ddcc014569d1`) against the procedural writer, refresh hooks, archival path, and guardian-state wiring
+  - both review threads stalled before returning findings, so this slice is recorded with the targeted validation above and the narrowed implementation wording here instead of an invented clean review
+- deferred to later Batch C slices:
+  - delivery planning still reads the live `GuardianLearningSignal` heuristics directly; this slice makes those lessons durable and prompt-visible, but direct policy-time retrieval from procedural memory should land with the later learning-quality follow-through
+  - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

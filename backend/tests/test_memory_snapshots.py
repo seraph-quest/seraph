@@ -28,6 +28,12 @@ async def test_refresh_bounded_guardian_snapshot_persists_structured_summary(asy
         summary="Prefers concise morning briefings",
         importance=0.85,
     )
+    await memory_repository.create_memory(
+        content="For advisory nudges, avoid direct interruption during deep-work windows.",
+        kind=MemoryKind.procedural,
+        summary="Advisory timing lesson",
+        importance=0.84,
+    )
 
     snapshot = await refresh_bounded_guardian_snapshot(
         soul_context=(
@@ -42,6 +48,7 @@ async def test_refresh_bounded_guardian_snapshot_persists_structured_summary(asy
     assert "Ship Batch A memory upgrades" in snapshot.content
     assert "Atlas launch" in snapshot.content
     assert "Prefers concise morning briefings" in snapshot.content
+    assert "Advisory timing lesson" in snapshot.content
     assert snapshot.source_hash == stored.source_hash
 
 

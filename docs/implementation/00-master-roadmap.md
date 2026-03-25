@@ -481,8 +481,8 @@ This is the next major Guardian Intelligence execution program after the current
     replace one-shot extraction with staged capture, extract, merge, strengthen, and source-backed write logic so long-term memory becomes updateable, with exact duplicate merge, null-link backfill, true message-backed provenance when a message match exists, session-backed provenance fallback when it does not, and merge-path embedding repair now live while broader contradiction and supersession rules still land in the later decay slice
 13. [x] `soul-projection-and-structured-profile-v1`:
     move durable identity state underneath the current soul surface so `soul.md` becomes a human-readable projection rather than the only identity substrate, with projection-hash plus soul-specific file-age guards preventing stale files from replacing newer structured state and optimistic compare-and-swap writes preventing concurrent section updates from erasing each other
-14. [ ] `procedural-memory-from-outcomes-v1`:
-    store timing, phrasing, channel, and interruption lessons from intervention outcomes as explicit procedural memory instead of leaving them as thin policy heuristics
+14. [x] `procedural-memory-from-outcomes-v1`:
+    store timing, phrasing, channel, and interruption lessons from intervention outcomes as explicit procedural memory instead of leaving them only as thin policy heuristics, with scoped upserts, archival of neutral lessons, and guardian-state plus bounded-snapshot visibility now live while direct policy-time retrieval still remains part of the later learning-quality work
 15. [ ] `memory-decay-contradiction-and-archive-v1`:
     add reinforcement, contradiction, supersession, and archive rules so stale or invalid memory stops accumulating forever
 16. [ ] `guardian-memory-behavioral-evals-v1`:

@@ -226,6 +226,7 @@ def build_guardian_world_model(
     goal_memory = list(memory_buckets.get("goal", ()))[:2] or _extract_tagged_memory(memory_context, "goal", limit=2)
     commitment_memory = list(memory_buckets.get("commitment", ()))[:2] or _extract_tagged_memory(memory_context, "commitment", limit=2)
     preference_constraints = list(memory_buckets.get("preference", ()))[:2] or _extract_tagged_memory(memory_context, "preference", limit=2)
+    procedural_constraints = list(memory_buckets.get("procedural", ()))[:2] or _extract_tagged_memory(memory_context, "procedural", limit=2)
     recurring_patterns = list(memory_buckets.get("pattern", ()))[:3] or _extract_tagged_memory(memory_context, "pattern", limit=3)
     project_memory = list(memory_buckets.get("project", ()))[:2] or _extract_tagged_memory(memory_context, "project", limit=2)
     active_routines = list(memory_buckets.get("routine", ()))[:3] or _extract_tagged_memory(memory_context, "routine", limit=3)
@@ -244,6 +245,7 @@ def build_guardian_world_model(
         + commitment_memory[:1]
         + recurring_patterns[:1]
         + preference_constraints[:1]
+        + procedural_constraints[:1]
         + active_routines[:1]
     )
     continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
@@ -297,6 +299,7 @@ def build_guardian_world_model(
             if "Current state:" not in line and "Attention budget" not in line
         ]
         + list(preference_constraints[:1])
+        + list(procedural_constraints[:1])
     )
     next_up = _dedupe(
         list(commitment_memory[:1])
@@ -319,6 +322,7 @@ def build_guardian_world_model(
     if observer_context.user_state in {"deep_work", "in_meeting", "away"}:
         active_constraints.append(f"Current state is {observer_context.user_state}")
     active_constraints.extend(preference_constraints)
+    active_constraints.extend(procedural_constraints)
     active_project_signals = _dedupe(project_memory[:2] + list(active_projects[:3]))
     project_state = _dedupe(list(active_project_signals) + execution_pressure[:2])
     has_observer_focus_signal = any(

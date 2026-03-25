@@ -100,6 +100,7 @@ async def build_structured_memory_context_bundle(
             MemoryKind.commitment,
             MemoryKind.preference,
             MemoryKind.communication_preference,
+            MemoryKind.procedural,
             MemoryKind.pattern,
             MemoryKind.project,
             MemoryKind.collaborator,

@@ -16,6 +16,7 @@ os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 
 from src.app import create_app
 from src.llm_runtime import _reset_target_health
+from src.db.engine import _ensure_search_indexes
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 
 # Every place get_session is imported — use the local attribute name.
@@ -34,6 +35,7 @@ _PATCH_TARGETS = [
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",
+    "src.memory.hybrid_retrieval.get_session",
 ]
 
 
@@ -62,6 +64,7 @@ async def async_db():
 
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_search_indexes(conn)
 
     @asynccontextmanager
     async def _get_session():

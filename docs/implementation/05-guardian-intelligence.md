@@ -80,7 +80,7 @@ The batch split is the right implementation shape because the dependencies are r
 - Batch B turns sessions and observer signals into usable episodic recall
 - Batch C makes that memory updateable, policy-relevant, and behaviorally testable
 
-Each Batch A internal slice should close with:
+Each internal slice in these memory batches should close with:
 
 - targeted validation commands
 - a subagent review pass for bugs, regressions, and misleading claims
@@ -243,6 +243,159 @@ This section records the internal Batch A slices on the feature branch before th
   - deferred to later slices:
     - snapshot promotion still runs from consolidation boundaries; broader lifecycle hooks near compaction and workflow boundaries belong in the later flush-lifecycle slice
     - bounded snapshot contents are still semantic-only and do not yet include procedural memory or episodic recall planning
+
+## Batch B Branch Review Log
+
+This section records the internal Batch B slices on the feature branch before the aggregate GitHub PR is opened.
+
+### `episodic-memory-events-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added a structured `memory_episodes` table plus `MemoryEpisodeType` so Seraph now has a first-class episodic substrate alongside semantic memory
+  - extended `memory_repository` with typed episode create and list helpers, including filtering by session, entity links, and episode type
+  - added a first live automatic writer path in `SessionManager.add_message(...)` that mirrors session `user` and `assistant` messages into `conversation` episodes and session `step` messages into `tool` or `workflow` episodes
+  - made episodic capture fail open so message persistence does not regress if the episodic write path fails
+  - updated session deletion to remove episodes linked either by `session_id` or `source_message_id` before message teardown so the new foreign keys do not block cleanup
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/models.py backend/src/memory/repository.py backend/src/memory/episodes.py backend/src/agent/session.py backend/tests/test_memory_episodes.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_episodes.py backend/tests/test_session.py backend/tests/test_memory_repository.py backend/tests/test_session_search_tool.py backend/tests/test_db_engine.py -q`
+- subagent review:
+  - reviewer: `Euclid` (`019d24ad-f0fa-7700-af86-85b79cd7aea5`)
+  - initial findings:
+    - episodic capture was inside the same message transaction without a fail-open boundary, so an episode-write failure could roll back chat message persistence
+    - session deletion only cleaned up episodes by `session_id`, so episodes linked only by `source_message_id` could block message or session deletion under foreign-key enforcement
+    - the first implementation wording needed to stay narrow because the live automatic writer path only emitted `conversation`, `tool`, and `workflow` episodes, while `decision` and `observer` remained substrate-ready types
+  - fixed before the slice stayed marked complete:
+    - wrapped episodic writes in a nested fail-open boundary so message persistence survives episodic-write failures
+    - updated session deletion to remove episodes matched either by `session_id` or by the deleted messages' `source_message_id`
+    - added regression tests for fail-open episode writes and for deletion of episodes linked only through `source_message_id`
+    - narrowed the scope wording so the live writer claims match the implemented automatic event types
+  - final recheck:
+    - reviewer: `Kierkegaard` (`019d2516-65dc-7820-8201-8123b496dcc9`)
+    - result: no material findings after the fail-open fix, the deletion fix, and the narrowed scope wording
+  - deferred to later Batch B slices:
+    - automatic observer-transition writes still belong to `observer-episodic-fusion-v1`
+    - decision-oriented episodic writes still need dedicated runtime hooks rather than only schema or repository support
+    - episodic retrieval and ranking still belong to the later FTS, hybrid-retrieval, and retrieval-planner slices
+
+### `observer-episodic-fusion-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - extended `CurrentContext` with `active_project` so observer state carries explicit project focus instead of only goals plus window text
+  - added `backend/src/memory/observer_episodes.py` to derive conservative `observer` episodes for project, focus, and activity transitions with explicit provenance metadata
+  - taught `ContextManager.refresh()` to load the most recent screen-derived project, persist observer transitions into episodic memory, and fail open if that write path breaks
+  - added runtime-audit details for `active_project` and `observer_transition_count` so the observer refresh log shows what transition memory was produced
+  - added regression coverage for duplicate-suppression, write-failure survival, project-clear transitions, and audit details
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/tests/test_observer_manager.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_observer_manager.py backend/tests/test_memory_episodes.py -q`
+- subagent review:
+  - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+  - initial findings:
+    - observer transition writes were not atomic, so a refresh could partially commit episodes while still reporting `observer_transition_count == 0` after an exception path
+    - project exit transitions were skipped because the first cut only wrote project episodes when the new project name was non-empty
+  - fixed before the slice stayed marked complete:
+    - changed observer transition persistence to build one payload list and write it through `memory_repository.create_episode_batch(...)` so each refresh commits observer episodes atomically
+    - added project-clear transition support, including reuse of the prior project entity when focus drops from a project to none
+    - added regression tests for observer write failure, project-clear transitions, and runtime-audit transition details
+  - recheck attempts:
+    - follow-up reviewer threads were started with `Arendt`, `Fermat`, and `Kierkegaard`, but those tool runs stalled before returning findings, so the completion record relies on the fixed `Volta` findings plus targeted regression validation instead of claiming an unreturned clean review
+  - deferred to later Batch B slices:
+    - observer episodes are still lexical/temporal substrate only; retrieval and ranking belong to the later FTS and hybrid retrieval slices
+    - richer observer-event semantics beyond project, focus, and blocked-state activity transitions still belong to later observer-memory refinement work
+  - aggregate PR follow-up:
+    - external PR review caught that observer transition writes could create a new project entity from a shortened observer label like `Atlas`, which would fragment recall away from existing memories linked to `Atlas launch`
+    - fixed on the branch by resolving observer project labels through existing project-entity lookup first, including the unique-token project fallback, before creating a new entity only when nothing resolves
+    - added a regression test that proves observer episodes reuse the existing `Atlas launch` project entity when the observer reports `Atlas`
+
+### `session-search-fts-and-event-index-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added a SQLite `session_recall_fts` index that backfills existing rows and stays updated through triggers on sessions, user or assistant messages, and non-conversation episodic events
+  - upgraded `SessionManager.search_sessions(...)` to use the FTS index for normal text queries while keeping a bounded LIKE fallback for punctuation-heavy queries such as `%` and `_`
+  - expanded session recall so workflow and tool episodes can appear as `event` matches instead of limiting recall to titles plus user-facing chat messages
+  - kept session result ordering stable by ranking candidate hits with FTS first and then ordering sessions by conversation recency rather than todo churn or title-update timestamps
+  - added regression coverage for FTS backfill, episodic event hits, and title-update refresh behavior
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/tests/conftest.py backend/tests/test_db_engine.py backend/tests/test_session.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py -q`
+- review notes:
+  - local regression caught and fixed before the slice stayed complete:
+    - the first FTS cut indexed conversation episodes alongside the original chat messages, which let ordinary message searches surface `event` hits for the same text
+    - fixed by keeping the FTS event lane limited to non-conversation episodic rows, so chat recall stays on the message lane while workflow or tool recall still uses the event lane
+  - subagent review:
+    - reviewer thread: `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
+    - result: the review thread stalled before returning findings, so the completion record relies on targeted regression validation plus the locally caught conversation-versus-event indexing regression above
+  - deferred to later Batch B slices:
+    - session recall is now lexical plus episodic, but cross-store hybrid ranking with semantic memory still belongs to `hybrid-memory-retrieval-v1`
+    - query-type routing between session recall and guardian-state memory assembly still belongs to `guardian-state-retrieval-planner-v1`
+  - aggregate PR follow-up:
+    - external PR review caught that the LIKE fallback path only searched user and assistant messages, so episodic event recall disappeared for punctuation-heavy or FTS-ineligible queries
+    - fixed on the branch by teaching the fallback path to search non-conversation episodic events as well, mirroring the event coverage of the FTS path
+    - added a regression test that proves `upload?` still returns the workflow event match through the fallback lane
+
+### `hybrid-memory-retrieval-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added `backend/src/memory/hybrid_retrieval.py` as a reusable retriever that combines lexical structured-memory hits, project-linked boosts, episodic hits, vector-store hits, dedupe, and reranking into one bounded memory bundle
+  - kept the retriever independent from guardian-state wiring so the later planner slice can consume one tested retrieval backbone instead of reimplementing ranking logic in multiple places
+  - added regression coverage for mixed semantic plus episodic plus vector recall, project-linked surfacing without lexical query overlap, and degraded-vector fallback behavior
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/hybrid_retrieval.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/conftest.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_repository.py backend/tests/test_memory_episodes.py -q`
+- review notes:
+  - local regressions caught and fixed before the slice stayed complete:
+    - the new retriever module initially bypassed the in-memory test DB because `src.memory.hybrid_retrieval.get_session` was not included in the shared test patch targets
+    - recency scoring initially mixed naive and timezone-aware datetimes, which broke ranking during test execution
+    - fixed by patching the new module into `backend/tests/conftest.py` and normalizing datetimes inside the hybrid recency scorer before ranking
+  - subagent review:
+    - reviewer thread: `Laplace` (`019d24da-bfeb-7360-8b3a-6e9bcef8fcb7`)
+    - result: the review thread stalled before returning findings, so the completion record relies on the targeted hybrid-retrieval test suite plus the local regressions above
+  - deferred to later Batch B slices:
+    - the retriever exists, but guardian-state still uses the older memory assembly path until `guardian-state-retrieval-planner-v1` lands
+    - procedural-memory routing still belongs to Batch C because outcome-derived procedural memory is not a live retrieval lane yet
+
+### `guardian-state-retrieval-planner-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added `backend/src/memory/retrieval_planner.py` so guardian-state memory assembly now flows through one planner instead of splitting structured-memory assembly and query-time recall across separate code paths
+  - moved structured semantic bundle assembly out of `backend/src/guardian/state.py` and into the planner, keeping project-linked semantic boosts while layering hybrid semantic plus episodic recall on top
+  - updated guardian-state synthesis to split semantic recall into `Relevant memories:` and episodic recall into `Relevant episodes:` so temporal questions can surface event history without flattening everything into one generic memory block
+  - added a temporal-query guardian-state regression test that proves Atlas project memory still lands in semantic recall while a linked workflow failure lands in episodic recall for a `yesterday`-style question
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_hybrid_memory_retrieval.py -q`
+- review notes:
+  - broader validation boundary observed:
+    - `backend/tests/test_strategist_tick.py::test_strategist_tick_binds_runtime_context_for_tool_audit` still fails because the expected `tool_call` audit event with `session_id == "scheduler:strategist_tick"` is not emitted
+    - that check does not exercise the new retrieval-planner path directly, so it is recorded as an unrelated runtime-audit seam rather than treated as a blocker for this Batch B slice
+  - subagent review:
+    - reviewer thread: `Kuhn` (`019d2539-795c-7f02-ab99-8db767c17dd2`)
+    - result: the review thread stalled before returning findings, so the completion record relies on the targeted guardian-state plus hybrid-retrieval validation above and the explicit strategist-audit boundary note instead of claiming an unreturned clean review
+  - deferred to Batch C:
+    - procedural-memory routing still belongs to the outcome-learning batch because outcome-derived procedural memory is not a live retrieval lane yet
+    - planner-driven routing into policy- or delivery-specific memory lanes should wait until procedural memory exists instead of inventing a hollow extra lane now
+
+### Batch B Aggregate Validation
+
+- status: ready for the aggregate Batch B GitHub PR from `feat/memory-batch-b-v1`
+- targeted validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/src/memory/hybrid_retrieval.py backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py backend/tests/test_memory_repository.py -q`
+  - `cd docs && npm run build`
+- broader validation boundary:
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -v`
+  - result: `1209 passed, 35 failed`
+  - the failures cluster in approval wrapping, runtime audit or session-context propagation, eval harness, goal-tree orphan handling, scheduled-job runtime context, and tool-audit paths; the Batch B memory suite above remained green
+  - the already observed strategist audit-context failure remains part of that broader unrelated failure set rather than a new retrieval-planner regression
+- PR review follow-up:
+  - a follow-up subagent review was started with `Einstein` (`019d2695-7bf7-7b10-97dd-6145a50ea090`) for the observer-entity reuse and fallback-event-search fixes
+  - that review thread stalled before returning findings, so the review record relies on the targeted regression tests for `backend/tests/test_observer_manager.py` and `backend/tests/test_session.py` instead of claiming an unreturned clean review
 
 ## Non-Goals
 

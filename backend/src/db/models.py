@@ -61,6 +61,14 @@ class MemoryStatus(str, enum.Enum):
     superseded = "superseded"
 
 
+class MemoryEpisodeType(str, enum.Enum):
+    conversation = "conversation"
+    tool = "tool"
+    workflow = "workflow"
+    decision = "decision"
+    observer = "observer"
+
+
 class MemoryEntityType(str, enum.Enum):
     person = "person"
     project = "project"
@@ -226,6 +234,26 @@ class MemoryEdge(SQLModel, table=True):
     weight: float = Field(default=1.0)
     metadata_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
+
+
+class MemoryEpisode(SQLModel, table=True):
+    __tablename__ = "memory_episodes"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    episode_type: MemoryEpisodeType = Field(default=MemoryEpisodeType.conversation, index=True)
+    summary: str = Field(default="")
+    content: str = Field(default="")
+    source_message_id: Optional[str] = Field(default=None, foreign_key="messages.id", index=True)
+    source_tool_name: Optional[str] = Field(default=None, index=True)
+    source_role: Optional[str] = Field(default=None, index=True)
+    subject_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
+    project_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
+    salience: float = Field(default=0.5)
+    confidence: float = Field(default=0.5)
+    metadata_json: Optional[str] = Field(default=None)
+    observed_at: datetime = Field(default_factory=_now, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 # ─── Goal ────────────────────────────────────────────────

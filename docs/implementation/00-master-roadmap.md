@@ -462,16 +462,16 @@ This is the next major Guardian Intelligence execution program after the current
 
 ### Batch B: Episodic and observer-driven retrieval
 
-6. [ ] `episodic-memory-events-v1`:
+6. [x] `episodic-memory-events-v1`:
    store typed episodic records for important conversation, workflow, tool, and decision boundaries so recall can reason over time instead of only semantic similarity
-7. [ ] `observer-episodic-fusion-v1`:
+7. [x] `observer-episodic-fusion-v1`:
    write observer project, focus, and activity transitions into episodic memory with conservative salience rules and clear provenance
-8. [ ] `session-search-fts-and-event-index-v1`:
+8. [x] `session-search-fts-and-event-index-v1`:
    upgrade session recall from plain text matching to FTS-backed session and event search with better bounded summaries
-9. [ ] `hybrid-memory-retrieval-v1`:
+9. [x] `hybrid-memory-retrieval-v1`:
    add lexical plus vector retrieval, reranking, recency weighting, and project or entity boosts across structured semantic memory and episodic memory
-10. [ ] `guardian-state-retrieval-planner-v1`:
-    route guardian-state synthesis between bounded, episodic, semantic, and procedural retrieval lanes instead of issuing one generic memory search
+10. [x] `guardian-state-retrieval-planner-v1`:
+    route guardian-state synthesis through one bounded, semantic, and episodic retrieval planner, while leaving procedural-memory routing for Batch C once outcome-derived procedural memory exists
 
 ### Batch C: Learning, consolidation, and decay
 

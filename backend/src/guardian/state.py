@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -29,6 +28,7 @@ class GuardianState:
     observer_context: CurrentContext
     world_model: GuardianWorldModel
     memory_context: str
+    episodic_memory_context: str
     current_session_history: str
     recent_sessions_summary: str
     recent_intervention_feedback: str
@@ -66,6 +66,9 @@ class GuardianState:
 
         if self.memory_context:
             lines.extend(["", "Relevant memories:", self.memory_context])
+
+        if self.episodic_memory_context:
+            lines.extend(["", "Relevant episodes:", self.episodic_memory_context])
 
         if self.recent_sessions_summary:
             lines.extend(["", "Recent sessions:", self.recent_sessions_summary])
@@ -276,89 +279,6 @@ def _summarize_bounded_todos(*, todos: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def _append_structured_memory_line(
-    *,
-    bucketed: dict[str, list[str]],
-    lines: list[str],
-    text: str,
-    bucket_name: str,
-) -> None:
-    normalized = text.strip()
-    if not normalized:
-        return
-    bucket = bucketed.setdefault(bucket_name, [])
-    if normalized not in bucket:
-        bucket.append(normalized)
-    line = f"- [{bucket_name}] {normalized}"
-    if line not in lines:
-        lines.append(line)
-
-
-async def _structured_memory_context_bundle(
-    *,
-    active_projects: tuple[str, ...] = (),
-) -> tuple[str, dict[str, tuple[str, ...]]]:
-    from src.db.models import MemoryEntityType, MemoryKind
-    from src.memory.repository import memory_repository
-    from src.memory.types import bucket_name_for_kind
-
-    grouped = await memory_repository.list_memories_by_kinds(
-        kinds=(
-            MemoryKind.goal,
-            MemoryKind.commitment,
-            MemoryKind.preference,
-            MemoryKind.communication_preference,
-            MemoryKind.pattern,
-            MemoryKind.project,
-            MemoryKind.collaborator,
-            MemoryKind.obligation,
-            MemoryKind.routine,
-            MemoryKind.timeline,
-        ),
-        limit_per_kind=2,
-    )
-
-    bucketed: dict[str, list[str]] = {}
-    lines: list[str] = []
-    for kind_name, memories in grouped.items():
-        bucket_name = bucket_name_for_kind(kind_name)
-        for memory in memories:
-            text = (memory.summary or memory.content or "").strip()
-            _append_structured_memory_line(
-                bucketed=bucketed,
-                lines=lines,
-                text=text,
-                bucket_name=bucket_name,
-            )
-
-    linked_project_entities = await memory_repository.find_entities_by_names(
-        names=active_projects,
-        entity_type=MemoryEntityType.project,
-    )
-    if linked_project_entities:
-        linked_memories = await memory_repository.list_memories_for_entities(
-            project_entity_ids=tuple(entity.id for entity in linked_project_entities.values()),
-            kinds=(
-                MemoryKind.commitment,
-                MemoryKind.project,
-                MemoryKind.collaborator,
-                MemoryKind.obligation,
-                MemoryKind.routine,
-                MemoryKind.timeline,
-            ),
-            limit=8,
-        )
-        for memory in linked_memories:
-            _append_structured_memory_line(
-                bucketed=bucketed,
-                lines=lines,
-                text=(memory.summary or memory.content or "").strip(),
-                bucket_name=bucket_name_for_kind(memory.kind),
-            )
-
-    return "\n".join(lines[:8]), {key: tuple(values) for key, values in bucketed.items()}
-
-
 def _merge_memory_contexts(*contexts: str) -> str:
     lines: list[str] = []
     for context in contexts:
@@ -379,11 +299,11 @@ async def build_guardian_state(
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import read_soul
+    from src.memory.retrieval_planner import plan_memory_retrieval
     from src.memory.snapshots import (
         get_or_create_bounded_guardian_snapshot,
         render_bounded_guardian_snapshot,
     )
-    from src.memory.vector_store import search_with_status
     from src.audit.repository import audit_repository
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.manager import context_manager
@@ -422,23 +342,16 @@ async def build_guardian_state(
     except Exception:
         logger.debug("Failed to load recent projects for guardian state", exc_info=True)
         active_projects = ()
-    structured_memory_context, structured_memory_buckets = await _structured_memory_context_bundle(
-        active_projects=active_projects,
-    )
 
     query = user_message or memory_query or ""
     memory_requested = bool(query.strip())
-    memory_results: list[dict[str, object]] = []
-    memory_degraded = False
-    memory_buckets: dict[str, tuple[str, ...]] = {}
-    if memory_requested:
-        memory_results, memory_degraded = await asyncio.to_thread(search_with_status, query)
-    vector_memory_context = "\n".join(
-        f"- [{item['category']}] {item['text']}"
-        for item in memory_results
-        if isinstance(item.get("category"), str) and isinstance(item.get("text"), str)
+    retrieval = await plan_memory_retrieval(
+        query=query,
+        active_projects=active_projects,
     )
-    memory_context = _merge_memory_contexts(vector_memory_context, structured_memory_context)
+    memory_context = retrieval.semantic_context
+    episodic_memory_context = retrieval.episodic_context
+    memory_buckets = retrieval.memory_buckets
     try:
         snapshot_session_key = None
         if session_id is not None and session_record is not None:
@@ -462,21 +375,6 @@ async def build_guardian_state(
         todos=session_todos,
         ),
     )
-    grouped_memory: dict[str, list[str]] = {}
-    for item in memory_results:
-        category = item.get("category")
-        text = item.get("text")
-        if not isinstance(category, str) or not isinstance(text, str):
-            continue
-        grouped_memory.setdefault(category, [])
-        if text not in grouped_memory[category]:
-            grouped_memory[category].append(text)
-    for category, texts in structured_memory_buckets.items():
-        grouped_memory.setdefault(category, [])
-        for text in texts:
-            if text not in grouped_memory[category]:
-                grouped_memory[category].append(text)
-    memory_buckets = {key: tuple(values) for key, values in grouped_memory.items()}
     world_model = build_guardian_world_model(
         observer_context=observer_context,
         memory_context=memory_context,
@@ -491,8 +389,11 @@ async def build_guardian_state(
     world_model_status = _world_model_status(world_model)
     memory_status = (
         "degraded"
-        if memory_requested and memory_degraded
-        else _status_for_text(memory_context, requested=memory_requested)
+        if memory_requested and retrieval.degraded
+        else _status_for_text(
+            _merge_memory_contexts(memory_context, episodic_memory_context),
+            requested=memory_requested,
+        )
     )
 
     confidence = GuardianStateConfidence(
@@ -522,6 +423,7 @@ async def build_guardian_state(
         world_model=world_model,
         bounded_memory_context=bounded_memory_context,
         memory_context=memory_context,
+        episodic_memory_context=episodic_memory_context,
         current_session_history=current_session_history,
         recent_sessions_summary=recent_sessions_summary,
         recent_intervention_feedback=recent_intervention_feedback,

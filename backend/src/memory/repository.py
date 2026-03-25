@@ -248,6 +248,39 @@ class MemoryRepository:
                 db.expunge(memory)
             return list(memories)
 
+    async def list_memories_by_kinds(
+        self,
+        *,
+        kinds: tuple[MemoryKind | str, ...],
+        limit_per_kind: int = 3,
+        status: MemoryStatus | str = MemoryStatus.active,
+    ) -> dict[str, list[Memory]]:
+        normalized_status = _coerce_enum(status, MemoryStatus)
+        normalized_kinds = tuple(dict.fromkeys(_coerce_enum(kind, MemoryKind) for kind in kinds))
+        if not normalized_kinds:
+            return {}
+
+        async with get_session() as db:
+            stmt = (
+                select(Memory)
+                .where(Memory.status == normalized_status)
+                .where(col(Memory.kind).in_(normalized_kinds))
+                .order_by(
+                    col(Memory.importance).desc(),
+                    col(Memory.last_confirmed_at).desc(),
+                    col(Memory.created_at).desc(),
+                )
+            )
+            result = await db.execute(stmt)
+            grouped: dict[str, list[Memory]] = {kind.value: [] for kind in normalized_kinds}
+            for memory in result.scalars().all():
+                bucket = grouped.setdefault(memory.kind.value, [])
+                if len(bucket) >= limit_per_kind:
+                    continue
+                db.expunge(memory)
+                bucket.append(memory)
+            return {key: value for key, value in grouped.items() if value}
+
     async def create_edge(
         self,
         *,

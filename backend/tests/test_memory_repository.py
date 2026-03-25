@@ -130,3 +130,35 @@ async def test_create_memory_rejects_unknown_entity_links(async_db):
             kind=MemoryKind.collaborator,
             subject_entity_id="missing-entity",
         )
+
+
+@pytest.mark.asyncio
+async def test_list_memories_by_kinds_groups_richer_memory_types(async_db):
+    await memory_repository.create_memory(
+        content="Review the Atlas brief tomorrow morning.",
+        kind=MemoryKind.commitment,
+        importance=0.9,
+    )
+    await memory_repository.create_memory(
+        content="Alice owns the investor update thread.",
+        kind=MemoryKind.collaborator,
+        importance=0.8,
+    )
+    await memory_repository.create_memory(
+        content="Prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        importance=0.7,
+    )
+
+    grouped = await memory_repository.list_memories_by_kinds(
+        kinds=(
+            MemoryKind.commitment,
+            MemoryKind.collaborator,
+            MemoryKind.communication_preference,
+        ),
+        limit_per_kind=1,
+    )
+
+    assert grouped["commitment"][0].content == "Review the Atlas brief tomorrow morning."
+    assert grouped["collaborator"][0].content == "Alice owns the investor update thread."
+    assert grouped["communication_preference"][0].content == "Prefers concise morning briefings."

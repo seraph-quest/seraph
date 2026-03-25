@@ -7,8 +7,10 @@ import pytest
 from src.agent.factory import create_agent
 from src.agent.session import SessionManager
 from src.agent.strategist import create_strategist_agent
+from src.db.models import MemoryKind
 from src.guardian.state import GuardianState, GuardianStateConfidence, build_guardian_state
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
+from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
 
 
@@ -195,6 +197,89 @@ async def test_build_guardian_state_lowers_overall_confidence_when_memory_is_deg
 
     assert state.confidence.memory == "degraded"
     assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What should I focus on next?")
+    await sm.add_message("current", "assistant", "Let me ground that in recent memory.")
+
+    await memory_repository.create_memory(
+        content="Review the Atlas brief tomorrow morning.",
+        kind=MemoryKind.commitment,
+        summary="Review the Atlas brief tomorrow morning",
+        importance=0.95,
+    )
+    await memory_repository.create_memory(
+        content="Atlas investor brief",
+        kind=MemoryKind.project,
+        summary="Atlas investor brief",
+        importance=0.9,
+    )
+    await memory_repository.create_memory(
+        content="Alice owns the investor update thread.",
+        kind=MemoryKind.collaborator,
+        summary="Alice owns investor updates",
+        importance=0.85,
+    )
+    await memory_repository.create_memory(
+        content="Weekly investor note goes out on Friday.",
+        kind=MemoryKind.obligation,
+        summary="Weekly investor note goes out on Friday",
+        importance=0.82,
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch timeline ends on Friday.",
+        kind=MemoryKind.timeline,
+        summary="Atlas launch timeline ends on Friday",
+        importance=0.8,
+    )
+    await memory_repository.create_memory(
+        content="User prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        importance=0.78,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Prepare investor brief",
+        active_window="VS Code",
+        screen_context="Editing Atlas brief",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Guardian cockpit"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(session_id="current", user_message="What should I focus on next?")
+
+    assert "Review the Atlas brief tomorrow morning" in state.world_model.active_commitments
+    assert "Atlas investor brief" in state.world_model.active_projects
+    assert "Alice owns investor updates" in state.world_model.collaborators
+    assert "Weekly investor note goes out on Friday" in state.world_model.recurring_obligations
+    assert "Atlas launch timeline ends on Friday" in state.world_model.project_timeline
+    assert "Prefers concise morning briefings" in state.memory_context
+    assert "[commitment] Review the Atlas brief tomorrow morning" in state.memory_context
 
 
 def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():

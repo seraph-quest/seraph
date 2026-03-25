@@ -119,6 +119,29 @@ This section records the internal Batch A slices on the feature branch before th
     - entity and project linking in the live writer
     - bounded snapshot generation and consumption
 
+### `memory-kinds-and-provenance-v1`
+
+- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
+- scope:
+  - added `backend/src/memory/types.py` to normalize kind/category mapping, bucket mapping, and consolidation payload parsing
+  - upgraded session consolidation to accept typed memory objects with kind, summary, confidence, importance, and last-confirmed provenance while remaining backward-compatible with the legacy four lists
+  - started feeding richer structured memory kinds into guardian state and the world model instead of dropping everything back to coarse vector categories
+- validation:
+  - `python3 -m py_compile backend/src/memory/types.py backend/src/memory/consolidator.py backend/src/memory/repository.py backend/src/guardian/state.py backend/src/guardian/world_model.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_consolidation_reliability.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_consolidator.py backend/tests/test_memory_repository.py backend/tests/test_consolidation_reliability.py -q`
+- review notes:
+  - local regression caught and fixed before commit:
+    - project-memory enrichment briefly leaked execution-pressure lines into `world_model.active_projects`; the final slice keeps those lines in `project_state` while `active_projects` stays project-only
+  - subagent review attempts:
+    - requested from `Ptolemy` (`019d24c7-9a43-7860-8b66-b5d77adc3187`)
+    - requested from `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
+    - both review agents timed out within the turn window, so this slice currently relies on local validation plus the explicit regression fix above
+  - deferred to later Batch A slices:
+    - project/entity linking still relies on names embedded in metadata, not real entity ids
+    - bounded snapshot generation still does not project this richer memory into a stable session-start snapshot
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

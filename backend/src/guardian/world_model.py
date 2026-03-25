@@ -224,19 +224,28 @@ def build_guardian_world_model(
     feedback_lines = _extract_lines(recent_intervention_feedback, limit=2)
     memory_buckets = memory_buckets or {}
     goal_memory = list(memory_buckets.get("goal", ()))[:2] or _extract_tagged_memory(memory_context, "goal", limit=2)
+    commitment_memory = list(memory_buckets.get("commitment", ()))[:2] or _extract_tagged_memory(memory_context, "commitment", limit=2)
     preference_constraints = list(memory_buckets.get("preference", ()))[:2] or _extract_tagged_memory(memory_context, "preference", limit=2)
     recurring_patterns = list(memory_buckets.get("pattern", ()))[:3] or _extract_tagged_memory(memory_context, "pattern", limit=3)
+    project_memory = list(memory_buckets.get("project", ()))[:2] or _extract_tagged_memory(memory_context, "project", limit=2)
     active_routines = list(memory_buckets.get("routine", ()))[:3] or _extract_tagged_memory(memory_context, "routine", limit=3)
     collaborators = list(memory_buckets.get("collaborator", ()))[:3] or _extract_tagged_memory(memory_context, "collaborator", limit=3)
     recurring_obligations = list(memory_buckets.get("obligation", ()))[:3] or _extract_tagged_memory(memory_context, "obligation", limit=3)
     timeline_memory = list(memory_buckets.get("timeline", ()))[:3] or _extract_tagged_memory(memory_context, "timeline", limit=3)
     project_timeline = _dedupe(
         timeline_memory
+        + project_memory
         + list(active_projects[:1])
         + _extract_lines(recent_execution_summary, limit=2)
         + recent_session_lines[:1]
     )
-    memory_signals = _dedupe(goal_memory + recurring_patterns[:1] + preference_constraints[:1] + active_routines[:1])
+    memory_signals = _dedupe(
+        goal_memory
+        + commitment_memory[:1]
+        + recurring_patterns[:1]
+        + preference_constraints[:1]
+        + active_routines[:1]
+    )
     continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
 
     current_focus = "No clear focus signal"
@@ -266,6 +275,8 @@ def build_guardian_world_model(
             commitments.append(summary)
     if observer_context.active_goals_summary:
         commitments.append(observer_context.active_goals_summary)
+    commitments.extend(commitment_memory[:2])
+    commitments.extend(project_memory[:1])
     commitments.extend(memory_lines[:1])
     commitments.extend(active_projects[:2])
 
@@ -288,7 +299,9 @@ def build_guardian_world_model(
         + list(preference_constraints[:1])
     )
     next_up = _dedupe(
-        list(active_projects[:1])
+        list(commitment_memory[:1])
+        + project_memory[:1]
+        + list(active_projects[:1])
         + list(goal_memory[:1])
         + list(recent_session_lines[:1])
     )
@@ -306,8 +319,8 @@ def build_guardian_world_model(
     if observer_context.user_state in {"deep_work", "in_meeting", "away"}:
         active_constraints.append(f"Current state is {observer_context.user_state}")
     active_constraints.extend(preference_constraints)
-    project_state = list(active_projects[:3])
-    project_state.extend(execution_pressure[:2])
+    active_project_signals = _dedupe(project_memory[:2] + list(active_projects[:3]))
+    project_state = _dedupe(list(active_project_signals) + execution_pressure[:2])
     has_observer_focus_signal = any(
         (
             observer_context.current_event,
@@ -326,7 +339,7 @@ def build_guardian_world_model(
         corroboration_sources.append("current_session")
     if recent_session_lines:
         corroboration_sources.append("recent_sessions")
-    if active_projects:
+    if active_projects or project_memory:
         corroboration_sources.append("projects")
     if execution_pressure:
         corroboration_sources.append("execution")
@@ -340,12 +353,12 @@ def build_guardian_world_model(
         active_blockers=active_blockers,
         next_up=next_up,
         dominant_thread=dominant_thread,
-        active_projects=_dedupe(list(active_projects)),
+        active_projects=active_project_signals,
         execution_pressure=_dedupe(execution_pressure),
         active_constraints=_dedupe(active_constraints),
         recurring_patterns=_dedupe(recurring_patterns),
         active_routines=_dedupe(active_routines),
-        project_state=_dedupe(project_state),
+        project_state=project_state,
         memory_signals=memory_signals,
         continuity_threads=continuity_threads,
         collaborators=_dedupe(collaborators),

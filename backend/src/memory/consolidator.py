@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from time import perf_counter
 
 from config.settings import settings
@@ -9,6 +10,7 @@ from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
 from src.memory.repository import memory_repository
 from src.memory.soul import read_soul, update_soul_section
+from src.memory.types import parse_consolidated_memories
 from src.memory.vector_store import add_memory
 
 logger = logging.getLogger(__name__)
@@ -16,10 +18,18 @@ logger = logging.getLogger(__name__)
 _CONSOLIDATION_PROMPT = """Analyze this conversation and extract key information to remember long-term.
 
 Return a JSON object with these fields:
-- "facts": list of factual statements learned about the user (name, role, preferences, etc.)
-- "patterns": list of behavioral patterns observed
-- "goals": list of goals or intentions the user mentioned
-- "reflections": list of insights or decisions made
+- "memories": list of memory objects. Each object should include:
+  - "text": the memory statement
+  - "kind": one of fact, preference, pattern, goal, reflection, project, collaborator, obligation, routine, timeline, commitment, communication_preference
+  - "summary": short compressed form of the memory
+  - "confidence": float from 0 to 1
+  - "importance": float from 0 to 1
+  - optional "subject" and "project" fields when obvious
+  - optional "last_confirmed_at" ISO timestamp if the conversation makes timing explicit
+- "facts": optional legacy list of factual statements learned about the user (keep empty if using typed memories)
+- "patterns": optional legacy list of behavioral patterns observed
+- "goals": optional legacy list of goals or intentions the user mentioned
+- "reflections": optional legacy list of insights or decisions made
 - "soul_updates": dict of soul sections to update (only if significant new identity/goal info). Keys are section names like "Identity", "Values", "Goals". Values are the new content. Return empty dict if no updates needed.
 
 Be selective — only extract things worth remembering across future conversations.
@@ -110,58 +120,69 @@ async def consolidate_session(session_id: str) -> None:
         data = json.loads(text)
 
         # Store memories by category
+        extracted_memories = parse_consolidated_memories(
+            data,
+            fallback_confirmed_at=datetime.now(timezone.utc),
+        )
         stored = 0
         vector_stored = 0
         partial_write_count = 0
         write_failure_count = 0
-        for category in ["facts", "patterns", "goals", "reflections"]:
-            items = data.get(category, [])
-            singular = category.rstrip("s") if category != "reflections" else "reflection"
-            for item in items:
-                if isinstance(item, str) and len(item) > 10:
-                    embedding_id = ""
-                    vector_succeeded = False
-                    structured_succeeded = False
-                    try:
-                        embedding_id = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                add_memory,
-                                text=item,
-                                category=singular,
-                                source_session_id=session_id,
-                            ),
-                            timeout=10,
-                        )
-                        vector_succeeded = isinstance(embedding_id, str) and bool(embedding_id.strip())
-                        if vector_succeeded:
-                            vector_stored += 1
-                    except asyncio.TimeoutError:
-                        logger.warning("add_memory timed out for session %s", session_id[:8])
-                    except Exception:
-                        logger.exception("add_memory failed for session %s", session_id[:8])
-                    try:
-                        await memory_repository.create_memory(
-                            content=item,
-                            category=singular,
-                            kind=singular,
-                            source_session_id=session_id,
-                            embedding_id=embedding_id or None,
-                            summary=_summary_for_memory(item),
-                            metadata={
-                                "writer": "session_consolidation",
-                                "source": "llm_extract",
-                            },
-                        )
-                        structured_succeeded = True
-                        stored += 1
-                    except Exception:
-                        logger.exception(
-                            "structured memory write failed for session %s", session_id[:8]
-                        )
-                    if vector_succeeded != structured_succeeded:
-                        partial_write_count += 1
-                    elif not vector_succeeded and not structured_succeeded:
-                        write_failure_count += 1
+        for item in extracted_memories:
+            embedding_id = ""
+            vector_succeeded = False
+            structured_succeeded = False
+            try:
+                embedding_id = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        add_memory,
+                        text=item.text,
+                        category=item.category.value,
+                        source_session_id=session_id,
+                    ),
+                    timeout=10,
+                )
+                vector_succeeded = isinstance(embedding_id, str) and bool(embedding_id.strip())
+                if vector_succeeded:
+                    vector_stored += 1
+            except asyncio.TimeoutError:
+                logger.warning("add_memory timed out for session %s", session_id[:8])
+            except Exception:
+                logger.exception("add_memory failed for session %s", session_id[:8])
+            metadata = dict(item.metadata or {})
+            metadata.update(
+                {
+                    "writer": "session_consolidation",
+                    "source": "llm_extract",
+                }
+            )
+            if item.subject_name:
+                metadata["subject_name"] = item.subject_name
+            if item.project_name:
+                metadata["project_name"] = item.project_name
+            try:
+                await memory_repository.create_memory(
+                    content=item.text,
+                    category=item.category,
+                    kind=item.kind,
+                    source_session_id=session_id,
+                    embedding_id=embedding_id or None,
+                    summary=item.summary or _summary_for_memory(item.text),
+                    confidence=item.confidence,
+                    importance=item.importance,
+                    metadata=metadata,
+                    last_confirmed_at=item.last_confirmed_at,
+                )
+                structured_succeeded = True
+                stored += 1
+            except Exception:
+                logger.exception(
+                    "structured memory write failed for session %s", session_id[:8]
+                )
+            if vector_succeeded != structured_succeeded:
+                partial_write_count += 1
+            elif not vector_succeeded and not structured_succeeded:
+                write_failure_count += 1
 
         # Apply soul updates if any
         soul_updates = data.get("soul_updates", {})

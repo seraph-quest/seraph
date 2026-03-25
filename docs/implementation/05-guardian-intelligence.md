@@ -306,6 +306,29 @@ This section records the internal Batch B slices on the feature branch before th
     - observer episodes are still lexical/temporal substrate only; retrieval and ranking belong to the later FTS and hybrid retrieval slices
     - richer observer-event semantics beyond project, focus, and blocked-state activity transitions still belong to later observer-memory refinement work
 
+### `session-search-fts-and-event-index-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added a SQLite `session_recall_fts` index that backfills existing rows and stays updated through triggers on sessions, user or assistant messages, and non-conversation episodic events
+  - upgraded `SessionManager.search_sessions(...)` to use the FTS index for normal text queries while keeping a bounded LIKE fallback for punctuation-heavy queries such as `%` and `_`
+  - expanded session recall so workflow and tool episodes can appear as `event` matches instead of limiting recall to titles plus user-facing chat messages
+  - kept session result ordering stable by ranking candidate hits with FTS first and then ordering sessions by conversation recency rather than todo churn or title-update timestamps
+  - added regression coverage for FTS backfill, episodic event hits, and title-update refresh behavior
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/tests/conftest.py backend/tests/test_db_engine.py backend/tests/test_session.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py -q`
+- review notes:
+  - local regression caught and fixed before the slice stayed complete:
+    - the first FTS cut indexed conversation episodes alongside the original chat messages, which let ordinary message searches surface `event` hits for the same text
+    - fixed by keeping the FTS event lane limited to non-conversation episodic rows, so chat recall stays on the message lane while workflow or tool recall still uses the event lane
+  - subagent review:
+    - reviewer thread: `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
+    - result: the review thread stalled before returning findings, so the completion record relies on targeted regression validation plus the locally caught conversation-versus-event indexing regression above
+  - deferred to later Batch B slices:
+    - session recall is now lexical plus episodic, but cross-store hybrid ranking with semantic memory still belongs to `hybrid-memory-retrieval-v1`
+    - query-type routing between session recall and guardian-state memory assembly still belongs to `guardian-state-retrieval-planner-v1`
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

@@ -1,11 +1,12 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlmodel import select, col
 
 from config.settings import settings
@@ -43,6 +44,37 @@ def _matching_snippet(text: str, query: str, *, snippet_chars: int) -> str:
     if end < len(flattened):
         snippet = snippet + "..."
     return snippet
+
+
+def _build_fts_match_expression(query: str) -> str | None:
+    terms = [part for part in query.strip().split() if part]
+    if not terms:
+        return None
+    if any(any(char in term for char in {"%", "_"}) for term in terms):
+        return None
+    normalized_terms: list[str] = []
+    for term in terms:
+        if not re.search(r"[A-Za-z0-9]", term):
+            return None
+        if re.search(r"[^A-Za-z0-9'\\-]", term):
+            return None
+        escaped_term = term.replace('"', '""')
+        normalized_terms.append(f'"{escaped_term}"')
+    if not normalized_terms:
+        return None
+    return " AND ".join(normalized_terms)
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        normalized = value.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+    return None
 
 
 class SessionManager:
@@ -115,7 +147,6 @@ class SessionManager:
     async def list_sessions(self) -> list[dict]:
         async with get_session() as db:
             # Single query: fetch sessions with their latest message using window function
-            from sqlalchemy import text
             rows = (await db.execute(text(
                 """
                 SELECT
@@ -199,6 +230,103 @@ class SessionManager:
 
             return "\n".join(lines)
 
+    async def _conversation_recency_map(
+        self,
+        db,
+        *,
+        exclude_session_id: str | None = None,
+    ) -> dict[str, datetime]:
+        recency_stmt = (
+            select(Message.session_id, func.max(Message.created_at))
+            .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+            .group_by(Message.session_id)
+        )
+        if exclude_session_id:
+            recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
+        recency_rows = await db.execute(recency_stmt)
+        return {
+            session_id: latest_at
+            for session_id, latest_at in recency_rows.all()
+        }
+
+    async def _search_sessions_fallback(
+        self,
+        *,
+        db,
+        normalized_query: str,
+        session_map: dict[str, Session],
+        limit: int,
+        exclude_session_id: str | None,
+        snippet_chars: int,
+    ) -> list[dict]:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        message_recency = await self._conversation_recency_map(
+            db,
+            exclude_session_id=exclude_session_id,
+        )
+        sessions = list(session_map.values())
+
+        title_hits = {
+            session.id: {
+                "session_id": session.id,
+                "title": session.title or "Untitled session",
+                "matched_at": message_recency.get(session.id) or session.created_at,
+                "snippet": session.title or "Untitled session",
+                "source": "title",
+                "rank": 0.0,
+            }
+            for session in sessions
+            if normalized_query in (session.title or "").lower()
+        }
+
+        message_stmt = (
+            select(Message)
+            .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+            .where(func.lower(Message.content).like(pattern, escape="\\"))
+            .order_by(col(Message.created_at).desc())
+        )
+        if exclude_session_id:
+            message_stmt = message_stmt.where(Message.session_id != exclude_session_id)
+        message_rows = await db.execute(message_stmt)
+
+        combined = dict(title_hits)
+        for message in message_rows.scalars().all():
+            session = session_map.get(message.session_id)
+            if session is None or message.session_id in combined:
+                continue
+            combined[message.session_id] = {
+                "session_id": message.session_id,
+                "title": session.title or "Untitled session",
+                "matched_at": message.created_at,
+                "snippet": _matching_snippet(
+                    message.content,
+                    normalized_query,
+                    snippet_chars=snippet_chars,
+                ),
+                "source": "message",
+                "rank": 1.0,
+            }
+
+        ordered = sorted(
+            combined.values(),
+            key=lambda item: (
+                item["rank"],
+                -(message_recency.get(item["session_id"]) or item["matched_at"]).timestamp(),
+                -item["matched_at"].timestamp(),
+            ),
+        )
+
+        return [
+            {
+                "session_id": item["session_id"],
+                "title": item["title"],
+                "matched_at": item["matched_at"].isoformat(),
+                "snippet": item["snippet"],
+                "source": item["source"],
+            }
+            for item in ordered[:limit]
+        ]
+
     async def search_sessions(
         self,
         query: str,
@@ -221,62 +349,110 @@ class SessionManager:
                 return []
 
             session_map = {session.id: session for session in sessions}
-            pattern = f"%{_escape_like(normalized_query)}%"
-            recency_rows = await db.execute(
-                select(Message.session_id, func.max(Message.created_at))
-                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
-                .group_by(Message.session_id)
+            message_recency = await self._conversation_recency_map(
+                db,
+                exclude_session_id=exclude_session_id,
             )
-            message_recency = {
-                session_id: latest_at
-                for session_id, latest_at in recency_rows.all()
-            }
+            match_expression = _build_fts_match_expression(normalized_query)
+            if not match_expression:
+                return await self._search_sessions_fallback(
+                    db=db,
+                    normalized_query=normalized_query,
+                    session_map=session_map,
+                    limit=limit,
+                    exclude_session_id=exclude_session_id,
+                    snippet_chars=snippet_chars,
+                )
 
-            title_hits = {
-                session.id: {
-                    "session_id": session.id,
-                    "title": session.title or "Untitled session",
-                    "matched_at": message_recency.get(session.id) or session.created_at,
-                    "snippet": session.title or "Untitled session",
-                    "source": "title",
-                }
-                for session in sessions
-                if normalized_query in (session.title or "").lower()
-            }
+            try:
+                rows = (
+                    await db.execute(
+                        text(
+                            """
+                            SELECT
+                                entry_key,
+                                session_id,
+                                entry_type,
+                                source_label,
+                                text,
+                                created_at,
+                                bm25(session_recall_fts) AS rank
+                            FROM session_recall_fts
+                            WHERE session_recall_fts MATCH :match
+                              AND session_id IS NOT NULL
+                              AND (:exclude_session_id IS NULL OR session_id != :exclude_session_id)
+                            ORDER BY rank ASC, created_at DESC
+                            LIMIT :candidate_limit
+                            """
+                        ),
+                        {
+                            "match": match_expression,
+                            "exclude_session_id": exclude_session_id,
+                            "candidate_limit": max(limit * 4, 12),
+                        },
+                    )
+                ).mappings().all()
+            except Exception:
+                logger.debug("FTS session search failed; falling back to LIKE search", exc_info=True)
+                rows = []
 
-            message_stmt = (
-                select(Message)
-                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
-                .where(func.lower(Message.content).like(pattern, escape="\\"))
-                .order_by(col(Message.created_at).desc())
-            )
-            if exclude_session_id:
-                message_stmt = message_stmt.where(Message.session_id != exclude_session_id)
-            message_rows = await db.execute(message_stmt)
+            if not rows:
+                return await self._search_sessions_fallback(
+                    db=db,
+                    normalized_query=normalized_query,
+                    session_map=session_map,
+                    limit=limit,
+                    exclude_session_id=exclude_session_id,
+                    snippet_chars=snippet_chars,
+                )
 
-            combined = dict(title_hits)
-            for message in message_rows.scalars().all():
-                session = session_map.get(message.session_id)
+            combined: dict[str, dict[str, object]] = {}
+            for row in rows:
+                session_id = row.get("session_id")
+                if not isinstance(session_id, str):
+                    continue
+                session = session_map.get(session_id)
                 if session is None:
                     continue
-                if message.session_id in combined:
+                entry_type = str(row.get("entry_type") or "message")
+                source = "title" if entry_type == "title" else "event" if entry_type == "event" else "message"
+                raw_text = str(row.get("text") or "")
+                matched_at = _coerce_datetime(row.get("created_at"))
+                if matched_at is None:
                     continue
-                combined[message.session_id] = {
-                    "session_id": message.session_id,
+                rank = float(row.get("rank") or 0.0)
+                existing = combined.get(session_id)
+                if existing is not None:
+                    existing_rank = float(existing.get("rank") or 0.0)
+                    existing_matched_at = existing.get("matched_at")
+                    if rank > existing_rank:
+                        continue
+                    if rank == existing_rank and isinstance(existing_matched_at, datetime) and matched_at <= existing_matched_at:
+                        continue
+                combined[session_id] = {
+                    "session_id": session_id,
                     "title": session.title or "Untitled session",
-                    "matched_at": message.created_at,
-                    "snippet": _matching_snippet(
-                        message.content,
-                        normalized_query,
-                        snippet_chars=snippet_chars,
+                    "matched_at": matched_at,
+                    "snippet": (
+                        session.title or "Untitled session"
+                        if source == "title"
+                        else _matching_snippet(
+                            raw_text,
+                            normalized_query,
+                            snippet_chars=snippet_chars,
+                        )
                     ),
-                    "source": "message",
+                    "source": source,
+                    "rank": rank,
                 }
 
             ordered = sorted(
                 combined.values(),
-                key=lambda item: item["matched_at"],
-                reverse=True,
+                key=lambda item: (
+                    float(item["rank"]),
+                    -(message_recency.get(item["session_id"]) or item["matched_at"]).timestamp(),  # type: ignore[union-attr]
+                    -item["matched_at"].timestamp(),  # type: ignore[union-attr]
+                ),
             )
 
             return [

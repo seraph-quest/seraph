@@ -128,12 +128,166 @@ async def _ensure_legacy_columns(conn) -> None:
         )
 
 
+async def _ensure_search_indexes(conn) -> None:
+    await conn.exec_driver_sql(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_recall_fts USING fts5(
+            entry_key UNINDEXED,
+            session_id UNINDEXED,
+            entry_type UNINDEXED,
+            source_label UNINDEXED,
+            text,
+            created_at UNINDEXED
+        )
+        """
+    )
+
+    trigger_statements = (
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_sessions_ai
+        AFTER INSERT ON sessions
+        BEGIN
+            INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+            VALUES ('session:' || NEW.id, NEW.id, 'title', 'title', COALESCE(NEW.title, ''), COALESCE(NEW.updated_at, NEW.created_at));
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_sessions_au
+        AFTER UPDATE OF title, updated_at ON sessions
+        BEGIN
+            DELETE FROM session_recall_fts WHERE entry_key = 'session:' || OLD.id;
+            INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+            VALUES ('session:' || NEW.id, NEW.id, 'title', 'title', COALESCE(NEW.title, ''), COALESCE(NEW.updated_at, NEW.created_at));
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_sessions_ad
+        AFTER DELETE ON sessions
+        BEGIN
+            DELETE FROM session_recall_fts WHERE entry_key = 'session:' || OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_messages_ai
+        AFTER INSERT ON messages
+        WHEN NEW.role IN ('user', 'assistant')
+        BEGIN
+            INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+            VALUES ('message:' || NEW.id, NEW.session_id, 'message', NEW.role, COALESCE(NEW.content, ''), NEW.created_at);
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_messages_au
+        AFTER UPDATE OF role, content, session_id, created_at ON messages
+        BEGIN
+            DELETE FROM session_recall_fts WHERE entry_key = 'message:' || OLD.id;
+            INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+            SELECT 'message:' || NEW.id, NEW.session_id, 'message', NEW.role, COALESCE(NEW.content, ''), NEW.created_at
+            WHERE NEW.role IN ('user', 'assistant');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_messages_ad
+        AFTER DELETE ON messages
+        BEGIN
+            DELETE FROM session_recall_fts WHERE entry_key = 'message:' || OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_episodes_ai
+        AFTER INSERT ON memory_episodes
+        WHEN NEW.session_id IS NOT NULL AND NEW.episode_type != 'conversation'
+        BEGIN
+            INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+            VALUES (
+                'episode:' || NEW.id,
+                NEW.session_id,
+                'event',
+                COALESCE(NEW.episode_type, 'event'),
+                TRIM(COALESCE(NEW.summary, '') || CHAR(10) || COALESCE(NEW.content, '')),
+                COALESCE(NEW.observed_at, NEW.created_at)
+            );
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_episodes_au
+        AFTER UPDATE OF session_id, episode_type, summary, content, observed_at, created_at ON memory_episodes
+        BEGIN
+            DELETE FROM session_recall_fts WHERE entry_key = 'episode:' || OLD.id;
+            INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+            SELECT
+                'episode:' || NEW.id,
+                NEW.session_id,
+                'event',
+                COALESCE(NEW.episode_type, 'event'),
+                TRIM(COALESCE(NEW.summary, '') || CHAR(10) || COALESCE(NEW.content, '')),
+                COALESCE(NEW.observed_at, NEW.created_at)
+            WHERE NEW.session_id IS NOT NULL AND NEW.episode_type != 'conversation';
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS session_recall_episodes_ad
+        AFTER DELETE ON memory_episodes
+        BEGIN
+            DELETE FROM session_recall_fts WHERE entry_key = 'episode:' || OLD.id;
+        END
+        """,
+    )
+    for statement in trigger_statements:
+        await conn.exec_driver_sql(statement)
+
+    await conn.exec_driver_sql("DELETE FROM session_recall_fts")
+    await conn.exec_driver_sql(
+        """
+        INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+        SELECT
+            'session:' || id,
+            id,
+            'title',
+            'title',
+            COALESCE(title, ''),
+            COALESCE(updated_at, created_at)
+        FROM sessions
+        """
+    )
+    await conn.exec_driver_sql(
+        """
+        INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+        SELECT
+            'message:' || id,
+            session_id,
+            'message',
+            role,
+            COALESCE(content, ''),
+            created_at
+        FROM messages
+        WHERE role IN ('user', 'assistant')
+        """
+    )
+    await conn.exec_driver_sql(
+        """
+        INSERT INTO session_recall_fts (entry_key, session_id, entry_type, source_label, text, created_at)
+        SELECT
+            'episode:' || id,
+            session_id,
+            'event',
+            COALESCE(episode_type, 'event'),
+            TRIM(COALESCE(summary, '') || CHAR(10) || COALESCE(content, '')),
+            COALESCE(observed_at, created_at)
+        FROM memory_episodes
+        WHERE session_id IS NOT NULL
+          AND episode_type != 'conversation'
+        """
+    )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_legacy_columns(conn)
+        await _ensure_search_indexes(conn)
 
 
 async def close_db() -> None:

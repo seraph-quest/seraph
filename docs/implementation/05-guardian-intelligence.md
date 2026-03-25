@@ -483,18 +483,21 @@ This section records the internal Batch C slices on the feature branch before th
   - moved `soul.md` rendering and parsing into `backend/src/memory/soul.py` so the file becomes a readable projection surface while `user_profiles.preferences_json` plus `user_profiles.soul_text` hold the structured durable state underneath it
   - updated `/api/user/profile` to return `soul_sections` and `soul_text` from the structured profile snapshot instead of exposing only a thin onboarding payload
   - routed guardian-state synthesis and session consolidation through `sync_soul_file_to_profile()` before they read soul context, and routed consolidation soul writes through `update_profile_soul_section()` so durable soul updates land in the structured profile before they are projected back out to disk
-  - hardened projection sync so a missing `soul.md` is recreated from the stored profile state, while file edits that are newer than the last projected version still reconcile back into the structured profile
+  - hardened projection sync so a missing `soul.md` is recreated from the stored profile state, and the stale-file guard now uses a soul-specific timestamp stored inside the structured payload instead of the generic profile `updated_at`
+  - changed section updates to optimistic compare-and-swap writes on `preferences_json`, so concurrent soul updates retry against the latest structured state instead of silently dropping one section change
 - validation:
   - `backend/.venv/bin/python -m py_compile backend/src/memory/soul.py backend/src/profile/service.py backend/src/api/profile.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py`
   - `backend/.venv/bin/python -m pytest backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py -q`
 - local regressions fixed before subagent review:
   - the first structured-profile cut left `read_soul()` falling back to defaults when `soul.md` was missing even if the profile already had stored identity state, so sync now re-projects the file from the structured profile before guardian-state or consolidation reads it again
-  - the first sync cut could also let an older projection file overwrite newer structured state, so the profile now tracks the last projected hash and the sync path restores structured state when the on-disk file is older than the stored profile version while still accepting genuinely newer manual file edits
+  - the first sync cut could also let an older projection file overwrite newer structured state, so the profile now tracks the last projected hash plus a soul-specific update timestamp and restores structured state only when the on-disk file is older than that soul-specific marker
 - subagent review:
-  - attempted twice on the branch and stalled without a returned finding payload:
-    - first on an existing reviewer thread reused for Slice 13
-    - then on a fresh explorer thread with a minimal file-scoped review request
-  - branch status is therefore based on the targeted regressions above plus the focused validation envelope, not on an invented clean review
+  - `Chandrasekhar` (`019d26f3-954e-7db0-b9a8-9bae53a629e9`) returned two concrete findings after the initial slice commit:
+    - the stale-file guard was incorrectly using `profile.updated_at`, so unrelated onboarding writes could mark a newer manual `soul.md` edit as stale and overwrite it from older structured state
+    - concurrent `update_profile_soul_section()` calls could lose updates because each writer rewrote the full structured blob from one stale base state
+  - fixed before the slice stayed marked complete on the branch:
+    - the structured soul payload now stores its own soul-specific update timestamp, and sync compares file age against that marker instead of the generic profile row timestamp
+    - `backend/src/profile/service.py` now updates soul sections through an optimistic compare-and-swap loop keyed on the current `preferences_json`, so conflicting writers retry from the latest structured state instead of erasing each other
 - deferred to later Batch C slices:
   - outcome-derived procedural memory still needs its own explicit durable representation and retrieval lane instead of living only inside guardian feedback heuristics
   - contradiction cleanup and archival still belong to `memory-decay-contradiction-and-archive-v1`

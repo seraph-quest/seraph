@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import update
 from sqlmodel import select
 
 from src.db.engine import get_session as get_db
@@ -32,6 +33,19 @@ def _hash_soul_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _project_soul_file(soul_text: str) -> None:
     try:
         write_soul(soul_text)
@@ -40,19 +54,28 @@ def _project_soul_file(soul_text: str) -> None:
 
 
 def _serialize_soul_sections(
-    sections: dict[str, str], projected_hash: str | None
+    sections: dict[str, str],
+    projected_hash: str | None,
+    soul_updated_at: datetime | None,
 ) -> str:
     return json.dumps(
         {
             "schema_version": _SOUL_PROFILE_SCHEMA_VERSION,
             "soul_sections": sections,
             "projected_hash": projected_hash,
+            "soul_updated_at": (
+                soul_updated_at.astimezone(timezone.utc).isoformat()
+                if isinstance(soul_updated_at, datetime)
+                else None
+            ),
         },
         sort_keys=True,
     )
 
 
-def _load_soul_state(profile: UserProfile) -> tuple[dict[str, str], str | None]:
+def _load_soul_state(
+    profile: UserProfile,
+) -> tuple[dict[str, str], str | None, datetime | None]:
     if isinstance(profile.preferences_json, str) and profile.preferences_json.strip():
         try:
             payload = json.loads(profile.preferences_json)
@@ -61,6 +84,7 @@ def _load_soul_state(profile: UserProfile) -> tuple[dict[str, str], str | None]:
         if isinstance(payload, dict):
             raw_sections = payload.get("soul_sections")
             raw_hash = payload.get("projected_hash")
+            raw_updated_at = payload.get("soul_updated_at")
             if isinstance(raw_sections, dict):
                 parsed_sections = {
                     str(section): str(content)
@@ -71,11 +95,16 @@ def _load_soul_state(profile: UserProfile) -> tuple[dict[str, str], str | None]:
                     return (
                         parsed_sections,
                         str(raw_hash).strip() if isinstance(raw_hash, str) else None,
+                        _parse_timestamp(raw_updated_at),
                     )
     if isinstance(profile.soul_text, str) and profile.soul_text.strip():
-        return parse_soul_sections(profile.soul_text), _hash_soul_text(profile.soul_text)
+        return (
+            parse_soul_sections(profile.soul_text),
+            _hash_soul_text(profile.soul_text),
+            None,
+        )
     rendered_default = render_soul_text(default_soul_sections())
-    return default_soul_sections(), _hash_soul_text(rendered_default)
+    return default_soul_sections(), _hash_soul_text(rendered_default), None
 
 
 async def _get_or_create_profile_record(db) -> UserProfile:
@@ -99,15 +128,48 @@ async def _persist_profile_sections(
     sections: dict[str, str],
     soul_text: str,
     projected_hash: str | None = None,
+    soul_updated_at: datetime | None = None,
 ) -> None:
     profile.preferences_json = _serialize_soul_sections(
         sections,
         projected_hash or _hash_soul_text(soul_text),
+        soul_updated_at or _now(),
     )
     profile.soul_text = soul_text
     profile.updated_at = _now()
     db.add(profile)
     await db.flush()
+
+
+async def _compare_and_swap_soul_sections(
+    *,
+    db,
+    expected_preferences_json: str | None,
+    sections: dict[str, str],
+    soul_text: str,
+    projected_hash: str,
+    soul_updated_at: datetime,
+) -> bool:
+    statement = (
+        update(UserProfile)
+        .where(UserProfile.id == "singleton")
+        .values(
+            preferences_json=_serialize_soul_sections(
+                sections,
+                projected_hash,
+                soul_updated_at,
+            ),
+            soul_text=soul_text,
+            updated_at=_now(),
+        )
+    )
+    if expected_preferences_json is None:
+        statement = statement.where(UserProfile.preferences_json.is_(None))
+    else:
+        statement = statement.where(UserProfile.preferences_json == expected_preferences_json)
+    result = await db.execute(statement)
+    await db.flush()
+    return int(result.rowcount or 0) == 1
 
 
 async def get_or_create_profile() -> UserProfile:
@@ -141,7 +203,7 @@ async def sync_soul_file_to_profile() -> dict[str, str]:
 
     async with get_db() as db:
         profile = await _get_or_create_profile_record(db)
-        current_sections, projected_hash = _load_soul_state(profile)
+        current_sections, projected_hash, soul_updated_at = _load_soul_state(profile)
         stored_soul_text = profile.soul_text or render_soul_text(current_sections)
         stored_hash = projected_hash or _hash_soul_text(stored_soul_text)
 
@@ -153,6 +215,7 @@ async def sync_soul_file_to_profile() -> dict[str, str]:
                     sections=current_sections,
                     soul_text=stored_soul_text,
                     projected_hash=stored_hash,
+                    soul_updated_at=soul_updated_at,
                 )
             _project_soul_file(stored_soul_text)
             return current_sections
@@ -166,6 +229,7 @@ async def sync_soul_file_to_profile() -> dict[str, str]:
                     sections=parse_soul_sections(live_soul_text),
                     soul_text=live_soul_text,
                     projected_hash=live_hash,
+                    soul_updated_at=_now(),
                 )
             return parse_soul_sections(live_soul_text)
 
@@ -173,9 +237,9 @@ async def sync_soul_file_to_profile() -> dict[str, str]:
         if (
             (profile.soul_text is not None or profile.preferences_json is not None)
             and projected_hash is not None
+            and soul_updated_at is not None
             and live_soul_mtime is not None
-            and profile.updated_at is not None
-            and live_soul_mtime < profile.updated_at.timestamp()
+            and live_soul_mtime < soul_updated_at.timestamp()
         ):
             if profile.soul_text != stored_soul_text or projected_hash != stored_hash:
                 await _persist_profile_sections(
@@ -184,6 +248,7 @@ async def sync_soul_file_to_profile() -> dict[str, str]:
                     sections=current_sections,
                     soul_text=stored_soul_text,
                     projected_hash=stored_hash,
+                    soul_updated_at=soul_updated_at,
                 )
             _project_soul_file(stored_soul_text)
             return current_sections
@@ -195,6 +260,7 @@ async def sync_soul_file_to_profile() -> dict[str, str]:
                 sections=live_sections,
                 soul_text=live_soul_text,
                 projected_hash=live_hash,
+                soul_updated_at=_now(),
             )
         return live_sections
 
@@ -206,23 +272,27 @@ async def update_profile_soul_section(section: str, content: str) -> str:
         raise ValueError("section must be non-empty")
 
     await sync_soul_file_to_profile()
+    normalized_content = str(content).strip()
+    for _ in range(3):
+        async with get_db() as db:
+            profile = await _get_or_create_profile_record(db)
+            sections, _, _ = _load_soul_state(profile)
+            sections[normalized_section] = normalized_content
+            projected_soul = render_soul_text(sections)
+            projected_hash = _hash_soul_text(projected_soul)
+            soul_updated_at = _now()
+            if await _compare_and_swap_soul_sections(
+                db=db,
+                expected_preferences_json=profile.preferences_json,
+                sections=sections,
+                soul_text=projected_soul,
+                projected_hash=projected_hash,
+                soul_updated_at=soul_updated_at,
+            ):
+                _project_soul_file(projected_soul)
+                return projected_soul
 
-    async with get_db() as db:
-        profile = await _get_or_create_profile_record(db)
-        sections, _ = _load_soul_state(profile)
-        sections[normalized_section] = str(content).strip()
-        projected_soul = render_soul_text(sections)
-        await _persist_profile_sections(
-            db=db,
-            profile=profile,
-            sections=sections,
-            soul_text=projected_soul,
-            projected_hash=_hash_soul_text(projected_soul),
-        )
-
-    _project_soul_file(projected_soul)
-
-    return projected_soul
+    raise RuntimeError("Failed to update soul projection after concurrent modifications")
 
 
 async def get_profile_snapshot() -> dict[str, Any]:

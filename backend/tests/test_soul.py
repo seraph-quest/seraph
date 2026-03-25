@@ -11,6 +11,7 @@ import src.memory.soul as soul_mod
 from src.profile.service import (
     get_or_create_profile,
     get_profile_snapshot,
+    mark_onboarding_complete,
     sync_soul_file_to_profile,
     update_profile_soul_section,
 )
@@ -181,6 +182,66 @@ class TestStructuredProjection:
 
         assert sections["Goals"] == "- Structured goal"
         assert "- Structured goal" in soul_mod.read_soul()
+
+    @pytest.mark.asyncio
+    async def test_onboarding_updates_do_not_clobber_newer_manual_file_edits(self, soul_dir, async_db):
+        await update_profile_soul_section("Goals", "- Structured goal")
+
+        with open(soul_mod._soul_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "# Guardian Record\n\n"
+                "## Identity\nBuilder\n\n"
+                "## Hobbies\nClimbing"
+            )
+
+        await mark_onboarding_complete()
+        sections = await sync_soul_file_to_profile()
+
+        assert sections["Identity"] == "Builder"
+        assert sections["Hobbies"] == "Climbing"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_section_updates_retry_without_losing_prior_sections(self, soul_dir, async_db):
+        await get_or_create_profile()
+
+        first_ready = asyncio.Event()
+        second_ready = asyncio.Event()
+        first_done = asyncio.Event()
+        original_cas = None
+
+        from src.profile import service as profile_service
+
+        original_cas = profile_service._compare_and_swap_soul_sections
+        call_count = 0
+
+        async def gated_cas(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_ready.set()
+                await second_ready.wait()
+                result = await original_cas(**kwargs)
+                first_done.set()
+                return result
+            if call_count == 2:
+                await first_ready.wait()
+                second_ready.set()
+                await first_done.wait()
+            return await original_cas(**kwargs)
+
+        with patch(
+            "src.profile.service._compare_and_swap_soul_sections",
+            side_effect=gated_cas,
+        ):
+            await asyncio.gather(
+                update_profile_soul_section("Goals", "- Ship Batch C"),
+                update_profile_soul_section("Values", "Focus on compounding"),
+            )
+
+        profile = await get_profile_snapshot()
+
+        assert profile["soul_sections"]["Goals"] == "- Ship Batch C"
+        assert profile["soul_sections"]["Values"] == "Focus on compounding"
 
     @pytest.mark.asyncio
     async def test_projection_write_failure_does_not_drop_structured_profile(

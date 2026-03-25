@@ -60,6 +60,8 @@ from src.audit.repository import audit_repository
 from src.app import create_app
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.memory.embedder import _reset_embedder_state, embed
+from src.memory.repository import memory_repository
+from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
 from src.observer.sources.git_source import gather_git
@@ -366,7 +368,7 @@ async def _patched_async_db(*patch_targets: str):
 
     try:
         with ExitStack() as stack:
-            for target in patch_targets:
+            for target in dict.fromkeys((*patch_targets, "src.memory.repository.get_session")):
                 stack.enter_context(patch(target, _get_session))
             yield
     finally:
@@ -410,6 +412,7 @@ def _make_sync_client_with_db():
         "src.vault.repository.get_session",
         "src.api.profile.get_db",
         "src.api.settings.get_db",
+        "src.memory.repository.get_session",
     ]
     patches = [patch(target, _get_session) for target in targets]
     patches.append(patch("src.app.init_db", _test_init_db))
@@ -1173,22 +1176,29 @@ def _eval_provider_health_reroute() -> dict[str, Any]:
 
     _reset_target_health()
     try:
-        with (
-            patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-            patch.object(settings, "fallback_model", ""),
-            patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
-            patch.object(settings, "llm_api_key", "primary-key"),
-            patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-            patch.object(settings, "llm_target_cooldown_seconds", 300),
-            patch(
-                "litellm.completion",
-                side_effect=[
-                    RuntimeError("primary down"),
-                    first_fallback_response,
-                    rerouted_response,
-                ],
-            ) as mock_completion,
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
+            )
+            stack.enter_context(patch.object(settings, "fallback_model", ""))
+            stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini"))
+            stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
+            stack.enter_context(
+                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1")
+            )
+            stack.enter_context(
+                patch.object(settings, "llm_target_cooldown_seconds", 300)
+            )
+            mock_completion = stack.enter_context(
+                patch(
+                    "litellm.completion",
+                    side_effect=[
+                        RuntimeError("primary down"),
+                        first_fallback_response,
+                        rerouted_response,
+                    ],
+                )
+            )
             completion_with_fallback_sync(
                 messages=[{"role": "user", "content": "recover once"}],
                 temperature=0.2,
@@ -3211,14 +3221,15 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
         "soul_updates": {},
     }))
 
-    with (
-        patch.object(session_manager, "get_history_text", AsyncMock(return_value="User: I need reliability.\nAssistant: Let's harden it.")),
-        patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
-        patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
-        patch("src.memory.consolidator.add_memory"),
-        patch.object(audit_repository, "log_event", mock_log_event),
-    ):
-        await consolidate_session("eval-session")
+    async with _patched_async_db():
+        with (
+            patch.object(session_manager, "get_history_text", AsyncMock(return_value="User: I need reliability.\nAssistant: Let's harden it.")),
+            patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
+            patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
+            patch("src.memory.consolidator.add_memory", return_value="vec-memory-1"),
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            await consolidate_session("eval-session")
 
     success = _find_audit_call(
         mock_log_event,
@@ -3242,22 +3253,23 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
         "soul_updates": {"Goals": "- Ship the guardian workspace direction"},
     }))
 
-    with (
-        patch.object(
-            session_manager,
-            "get_history_text",
-            AsyncMock(return_value=(
-                "User: I want Seraph to become a dense guardian workspace.\n"
-                "Assistant: Then we need behavioral evals, stronger state, and better operator UX."
-            )),
-        ),
-        patch("src.memory.consolidator.read_soul", return_value="# Soul\n\n## Goals\n- Keep the system grounded"),
-        patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
-        patch("src.memory.consolidator.add_memory") as mock_add_memory,
-        patch("src.memory.consolidator.update_soul_section") as mock_update_soul,
-        patch.object(audit_repository, "log_event", mock_log_event),
-    ):
-        await consolidate_session("guardian-session")
+    async with _patched_async_db():
+        with (
+            patch.object(
+                session_manager,
+                "get_history_text",
+                AsyncMock(return_value=(
+                    "User: I want Seraph to become a dense guardian workspace.\n"
+                    "Assistant: Then we need behavioral evals, stronger state, and better operator UX."
+                )),
+            ),
+            patch("src.memory.consolidator.read_soul", return_value="# Soul\n\n## Goals\n- Keep the system grounded"),
+            patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
+            patch("src.memory.consolidator.add_memory", return_value="vec-memory-1") as mock_add_memory,
+            patch("src.memory.consolidator.update_soul_section") as mock_update_soul,
+            patch.object(audit_repository, "log_event", mock_log_event),
+        ):
+            await consolidate_session("guardian-session")
 
     success = _find_audit_call(
         mock_log_event,
@@ -3271,6 +3283,312 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
         "stored_texts": [call.kwargs["text"] for call in mock_add_memory.call_args_list],
         "updated_soul_section": mock_update_soul.call_args.args[0],
         "updated_soul_mentions_workspace": "guardian workspace" in mock_update_soul.call_args.args[1].lower(),
+    }
+
+
+async def _eval_memory_commitment_continuity_behavior() -> dict[str, Any]:
+    from src.guardian.state import _structured_memory_context_bundle
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("memory-current")
+        await session_manager.add_message("memory-current", "user", "What matters for Atlas right now?")
+        await session_manager.add_message("memory-current", "assistant", "Let me ground that in linked memory.")
+
+        atlas = await memory_repository.get_or_create_entity(
+            canonical_name="Project Atlas",
+            entity_type="project",
+            aliases=["Atlas"],
+        )
+        await memory_repository.create_memory(
+            content="Atlas launch is the active release project.",
+            kind="project",
+            summary="Atlas launch",
+            importance=0.9,
+            project_entity_id=atlas.id,
+        )
+        await memory_repository.create_memory(
+            content="Send the Atlas checklist before Friday.",
+            kind="commitment",
+            summary="Send the Atlas checklist before Friday",
+            importance=0.88,
+            project_entity_id=atlas.id,
+        )
+        await memory_repository.create_memory(
+            content="Renew the Nimbus enterprise contract.",
+            kind="commitment",
+            summary="Renew the Nimbus enterprise contract",
+            importance=0.99,
+        )
+        await memory_repository.create_memory(
+            content="Draft the Orion launch stakeholder update.",
+            kind="commitment",
+            summary="Draft the Orion launch stakeholder update",
+            importance=0.97,
+        )
+
+        baseline_context, baseline_buckets = await _structured_memory_context_bundle(active_projects=())
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_window="VS Code",
+            screen_context="Editing Atlas release notes",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="",
+            ),
+        ):
+            state = await build_guardian_state(
+                session_id="memory-current",
+                user_message="What matters for Atlas right now?",
+            )
+
+        return {
+            "baseline_bucket_excludes_linked_commitment": "Send the Atlas checklist before Friday"
+            not in baseline_buckets.get("commitment", ()),
+            "baseline_context_excludes_linked_commitment": "[commitment] Send the Atlas checklist before Friday"
+            not in baseline_context,
+            "linked_project_present": "Atlas launch" in state.world_model.active_projects,
+            "memory_context_has_commitment": "[commitment] Send the Atlas checklist before Friday" in state.memory_context,
+        }
+
+
+async def _eval_memory_collaborator_lookup_behavior() -> dict[str, Any]:
+    from src.guardian.state import _structured_memory_context_bundle
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("memory-current")
+        await session_manager.add_message("memory-current", "user", "Who owns Atlas communications?")
+        await session_manager.add_message("memory-current", "assistant", "Let me look up the collaborator context.")
+
+        atlas = await memory_repository.get_or_create_entity(
+            canonical_name="Project Atlas",
+            entity_type="project",
+            aliases=["Atlas"],
+        )
+        alice = await memory_repository.get_or_create_entity(
+            canonical_name="Alice",
+            entity_type="person",
+        )
+        await memory_repository.create_memory(
+            content="Atlas launch is the active release project.",
+            kind="project",
+            summary="Atlas launch",
+            importance=0.9,
+            project_entity_id=atlas.id,
+        )
+        await memory_repository.create_memory(
+            content="Alice owns Atlas launch communications.",
+            kind="collaborator",
+            summary="Alice owns Atlas launch communications",
+            importance=0.87,
+            subject_entity_id=alice.id,
+            project_entity_id=atlas.id,
+        )
+        await memory_repository.create_memory(
+            content="Morgan owns the Nimbus customer rollout.",
+            kind="collaborator",
+            summary="Morgan owns the Nimbus customer rollout",
+            importance=0.99,
+        )
+        await memory_repository.create_memory(
+            content="Priya owns the Orion executive brief.",
+            kind="collaborator",
+            summary="Priya owns the Orion executive brief",
+            importance=0.97,
+        )
+
+        baseline_context, baseline_buckets = await _structured_memory_context_bundle(active_projects=())
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_window="VS Code",
+            screen_context="Editing Atlas release notes",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="",
+            ),
+        ):
+            state = await build_guardian_state(
+                session_id="memory-current",
+                user_message="Who owns Atlas communications?",
+            )
+
+        return {
+            "baseline_bucket_excludes_linked_collaborator": "Alice owns Atlas launch communications"
+            not in baseline_buckets.get("collaborator", ()),
+            "baseline_context_excludes_linked_collaborator": "[collaborator] Alice owns Atlas launch communications"
+            not in baseline_context,
+            "collaborator_present": "Alice owns Atlas launch communications" in state.world_model.collaborators,
+            "memory_context_has_collaborator": "[collaborator] Alice owns Atlas launch communications" in state.memory_context,
+            "active_projects_has_atlas": "Atlas launch" in state.world_model.active_projects,
+        }
+
+
+async def _eval_bounded_memory_snapshot_behavior() -> dict[str, Any]:
+    from src.memory.snapshots import refresh_bounded_guardian_snapshot
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("snapshot-current")
+        await session_manager.add_message("snapshot-current", "user", "What should I focus on next?")
+        await session_manager.add_message("snapshot-current", "assistant", "Let me ground that in bounded recall.")
+        await session_manager.replace_todos(
+            "snapshot-current",
+            [
+                {"content": "Send the Atlas checklist", "completed": False},
+                {"content": "Review launch notes", "completed": True},
+            ],
+        )
+
+        await memory_repository.create_memory(
+            content="Atlas launch is the active release project.",
+            kind="project",
+            summary="Atlas launch",
+            importance=0.9,
+        )
+        await memory_repository.create_memory(
+            content="User prefers concise morning briefings.",
+            kind="communication_preference",
+            summary="Prefers concise morning briefings",
+            importance=0.85,
+        )
+        await refresh_bounded_guardian_snapshot(
+            soul_context="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded",
+        )
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_window="VS Code",
+            screen_context="Editing Atlas launch checklist",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded"),
+            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="",
+            ),
+        ):
+            first_state = await build_guardian_state(
+                session_id="snapshot-current",
+                user_message="What should I focus on next?",
+            )
+            await memory_repository.create_memory(
+                content="Hermes budget memo is now active.",
+                kind="project",
+                summary="Hermes budget memo",
+                importance=0.95,
+            )
+            await memory_repository.create_memory(
+                content="Neptune planning review is now active.",
+                kind="project",
+                summary="Neptune planning review",
+                importance=0.93,
+            )
+            await session_manager.get_or_create("snapshot-new")
+            await session_manager.add_message("snapshot-new", "user", "What should I focus on next?")
+            await session_manager.add_message("snapshot-new", "assistant", "Ground me in the latest bounded memory.")
+            second_state = await build_guardian_state(
+                session_id="snapshot-current",
+                user_message="What should I focus on next?",
+            )
+            fresh_state = await build_guardian_state(
+                session_id="snapshot-new",
+                user_message="What should I focus on next?",
+            )
+            fresh_session = await session_manager.get("snapshot-new")
+
+        return {
+            "bounded_snapshot_is_stable_within_session": (
+                first_state.bounded_memory_context == second_state.bounded_memory_context
+            ),
+            "bounded_snapshot_includes_todo_overlay": "Send the Atlas checklist" in first_state.bounded_memory_context,
+            "bounded_snapshot_line_count": max(
+                len(second_state.bounded_memory_context.splitlines()),
+                len(fresh_state.bounded_memory_context.splitlines()),
+            ),
+            "same_session_excludes_new_project": "Hermes budget memo" not in second_state.bounded_memory_context,
+            "new_session_sees_new_project": "Hermes budget memo" in fresh_state.bounded_memory_context,
+            "new_session_uses_real_session_record": fresh_session is not None,
+        }
+
+
+async def _eval_memory_supersession_filter_behavior() -> dict[str, Any]:
+    from src.memory.snapshots import render_bounded_guardian_snapshot
+
+    async with _patched_async_db():
+        await memory_repository.create_memory(
+            content="Atlas launch is delayed.",
+            kind="project",
+            summary="Atlas launch delayed",
+            importance=0.95,
+            status="superseded",
+        )
+        await memory_repository.create_memory(
+            content="Atlas launch is on track.",
+            kind="project",
+            summary="Atlas launch on track",
+            importance=0.9,
+        )
+        snapshot_content, _ = await render_bounded_guardian_snapshot(
+            soul_context="# Soul\n\n## Identity\nBuilder",
+        )
+
+    return {
+        "active_project_present": "Atlas launch on track" in snapshot_content,
+        "superseded_project_filtered": "Atlas launch delayed" not in snapshot_content,
     }
 
 
@@ -6163,6 +6481,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_session_consolidation_behavior,
     ),
     EvalScenario(
+        name="memory_commitment_continuity_behavior",
+        category="behavior",
+        description="Project-linked commitments are recoverable in guardian-state memory context for active work even when the global structured kind bucket would miss them.",
+        runner=_eval_memory_commitment_continuity_behavior,
+    ),
+    EvalScenario(
+        name="memory_collaborator_lookup_behavior",
+        category="behavior",
+        description="Project-linked collaborator memory is recoverable through guardian state for active work instead of staying as inert text.",
+        runner=_eval_memory_collaborator_lookup_behavior,
+    ),
+    EvalScenario(
+        name="bounded_memory_snapshot_behavior",
+        category="behavior",
+        description="Bounded recall stays session-stable, keeps todo overlay, and remains compact even as later memory changes land.",
+        runner=_eval_bounded_memory_snapshot_behavior,
+    ),
+    EvalScenario(
+        name="memory_supersession_filter_behavior",
+        category="behavior",
+        description="Superseded structured memories stay out of bounded recall so stale project state does not surface as current truth.",
+        runner=_eval_memory_supersession_filter_behavior,
+    ),
+    EvalScenario(
         name="session_title_generation_background_audit",
         category="observability",
         description="Session title generation records background-task audit success without live providers.",
@@ -6234,6 +6576,7 @@ def _select_scenarios(selected_names: Sequence[str] | None) -> list[EvalScenario
 
 async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     started = time.perf_counter()
+    _reset_bounded_guardian_snapshot_cache()
     try:
         output = scenario.runner()
         if asyncio.iscoroutine(output):
@@ -6257,6 +6600,8 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
             duration_ms=int((time.perf_counter() - started) * 1000),
             error=str(exc),
         )
+    finally:
+        _reset_bounded_guardian_snapshot_cache()
 
 
 async def run_runtime_evals(selected_names: Sequence[str] | None = None) -> EvalSummary:

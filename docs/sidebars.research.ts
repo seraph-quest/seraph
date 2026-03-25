@@ -13,6 +13,7 @@ const sidebars: SidebarsConfig = {
     'ecosystem-and-delegation',
     'plugin-system-and-mcp-strategy',
     'hermes-and-openclaw-capability-import-plan',
+    'seraph-memory-sota-roadmap',
     'reference-systems-and-evidence',
     'competitive-benchmark',
     'superiority-program',

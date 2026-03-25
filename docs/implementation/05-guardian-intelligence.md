@@ -80,7 +80,7 @@ The batch split is the right implementation shape because the dependencies are r
 - Batch B turns sessions and observer signals into usable episodic recall
 - Batch C makes that memory updateable, policy-relevant, and behaviorally testable
 
-Each Batch A internal slice should close with:
+Each internal slice in these memory batches should close with:
 
 - targeted validation commands
 - a subagent review pass for bugs, regressions, and misleading claims
@@ -243,6 +243,41 @@ This section records the internal Batch A slices on the feature branch before th
   - deferred to later slices:
     - snapshot promotion still runs from consolidation boundaries; broader lifecycle hooks near compaction and workflow boundaries belong in the later flush-lifecycle slice
     - bounded snapshot contents are still semantic-only and do not yet include procedural memory or episodic recall planning
+
+## Batch B Branch Review Log
+
+This section records the internal Batch B slices on the feature branch before the aggregate GitHub PR is opened.
+
+### `episodic-memory-events-v1`
+
+- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
+- scope:
+  - added a structured `memory_episodes` table plus `MemoryEpisodeType` so Seraph now has a first-class episodic substrate alongside semantic memory
+  - extended `memory_repository` with typed episode create and list helpers, including filtering by session, entity links, and episode type
+  - added a first live automatic writer path in `SessionManager.add_message(...)` that mirrors session `user` and `assistant` messages into `conversation` episodes and session `step` messages into `tool` or `workflow` episodes
+  - made episodic capture fail open so message persistence does not regress if the episodic write path fails
+  - updated session deletion to remove episodes linked either by `session_id` or `source_message_id` before message teardown so the new foreign keys do not block cleanup
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/models.py backend/src/memory/repository.py backend/src/memory/episodes.py backend/src/agent/session.py backend/tests/test_memory_episodes.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_episodes.py backend/tests/test_session.py backend/tests/test_memory_repository.py backend/tests/test_session_search_tool.py backend/tests/test_db_engine.py -q`
+- subagent review:
+  - reviewer: `Euclid` (`019d24ad-f0fa-7700-af86-85b79cd7aea5`)
+  - initial findings:
+    - episodic capture was inside the same message transaction without a fail-open boundary, so an episode-write failure could roll back chat message persistence
+    - session deletion only cleaned up episodes by `session_id`, so episodes linked only by `source_message_id` could block message or session deletion under foreign-key enforcement
+    - the first implementation wording needed to stay narrow because the live automatic writer path only emitted `conversation`, `tool`, and `workflow` episodes, while `decision` and `observer` remained substrate-ready types
+  - fixed before the slice stayed marked complete:
+    - wrapped episodic writes in a nested fail-open boundary so message persistence survives episodic-write failures
+    - updated session deletion to remove episodes matched either by `session_id` or by the deleted messages' `source_message_id`
+    - added regression tests for fail-open episode writes and for deletion of episodes linked only through `source_message_id`
+    - narrowed the scope wording so the live writer claims match the implemented automatic event types
+  - final recheck:
+    - reviewer: `Kierkegaard` (`019d2516-65dc-7820-8201-8123b496dcc9`)
+    - result: no material findings after the fail-open fix, the deletion fix, and the narrowed scope wording
+  - deferred to later Batch B slices:
+    - automatic observer-transition writes still belong to `observer-episodic-fusion-v1`
+    - decision-oriented episodic writes still need dedicated runtime hooks rather than only schema or repository support
+    - episodic retrieval and ranking still belong to the later FTS, hybrid-retrieval, and retrieval-planner slices
 
 ## Non-Goals
 

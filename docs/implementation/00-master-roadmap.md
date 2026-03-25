@@ -462,7 +462,7 @@ This is the next major Guardian Intelligence execution program after the current
 
 ### Batch B: Episodic and observer-driven retrieval
 
-6. [ ] `episodic-memory-events-v1`:
+6. [x] `episodic-memory-events-v1`:
    store typed episodic records for important conversation, workflow, tool, and decision boundaries so recall can reason over time instead of only semantic similarity
 7. [ ] `observer-episodic-fusion-v1`:
    write observer project, focus, and activity transitions into episodic memory with conservative salience rules and clear provenance

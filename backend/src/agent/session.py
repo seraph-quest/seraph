@@ -5,14 +5,15 @@ import uuid
 from datetime import datetime, timezone
 from time import perf_counter
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import select, col
 
 from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
-from src.db.models import Message, ScheduledJob, Session, SessionTodo
+from src.db.models import MemoryEpisode, Message, ScheduledJob, Session, SessionTodo
+from src.memory.episodes import build_message_episode
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,23 @@ class SessionManager:
             session = result.scalars().first()
             if not session:
                 return False
-            # Delete associated messages first
             msgs = await db.execute(
                 select(Message).where(Message.session_id == session_id)
             )
-            for msg in msgs.scalars().all():
+            session_messages = msgs.scalars().all()
+            message_ids = tuple(
+                dict.fromkeys(message.id for message in session_messages if message.id)
+            )
+            episode_filters = [MemoryEpisode.session_id == session_id]
+            if message_ids:
+                episode_filters.append(col(MemoryEpisode.source_message_id).in_(message_ids))
+            episodes = await db.execute(
+                select(MemoryEpisode).where(or_(*episode_filters))
+            )
+            for episode in episodes.scalars().all():
+                await db.delete(episode)
+            # Delete associated messages first
+            for msg in session_messages:
                 await db.delete(msg)
             todos = await db.execute(
                 select(SessionTodo).where(SessionTodo.session_id == session_id)
@@ -300,6 +313,14 @@ class SessionManager:
         # Truncate oversized content (50 KB)
         if len(content) > 50_000:
             content = content[:50_000] + "\n\n[truncated]"
+        episode_metadata: dict | None = None
+        if metadata_json:
+            try:
+                parsed_metadata = json.loads(metadata_json)
+            except json.JSONDecodeError:
+                parsed_metadata = None
+            if isinstance(parsed_metadata, dict):
+                episode_metadata = parsed_metadata
         async with get_session() as db:
             msg = Message(
                 session_id=session_id,
@@ -317,6 +338,38 @@ class SessionManager:
                 session.updated_at = datetime.now(timezone.utc)
                 db.add(session)
             await db.flush()
+            episode_draft = build_message_episode(
+                role=role,
+                content=content,
+                tool_used=tool_used,
+                metadata=episode_metadata,
+            )
+            if episode_draft is not None:
+                try:
+                    async with db.begin_nested():
+                        db.add(
+                            MemoryEpisode(
+                                session_id=session_id,
+                                episode_type=episode_draft.episode_type,
+                                summary=episode_draft.summary,
+                                content=episode_draft.content,
+                                source_message_id=msg.id,
+                                source_tool_name=episode_draft.source_tool_name,
+                                source_role=episode_draft.source_role,
+                                salience=episode_draft.salience,
+                                confidence=episode_draft.confidence,
+                                metadata_json=json.dumps(episode_draft.metadata or {}, sort_keys=True),
+                                observed_at=msg.created_at,
+                                created_at=msg.created_at,
+                            )
+                        )
+                        await db.flush()
+                except Exception:
+                    logger.debug(
+                        "Failed to persist episodic event for message %s",
+                        msg.id,
+                        exc_info=True,
+                    )
             db.expunge(msg)
             return msg
 

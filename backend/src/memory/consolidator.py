@@ -8,6 +8,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.session import session_manager
 from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
+from src.memory.linking import resolve_memory_links
 from src.memory.repository import memory_repository
 from src.memory.soul import read_soul, update_soul_section
 from src.memory.types import parse_consolidated_memories
@@ -161,6 +162,7 @@ async def consolidate_session(session_id: str) -> None:
             if item.project_name:
                 metadata["project_name"] = item.project_name
             try:
+                link_resolution = await resolve_memory_links(item)
                 await memory_repository.create_memory(
                     content=item.text,
                     category=item.category,
@@ -170,6 +172,8 @@ async def consolidate_session(session_id: str) -> None:
                     summary=item.summary or _summary_for_memory(item.text),
                     confidence=item.confidence,
                     importance=item.importance,
+                    subject_entity_id=link_resolution.subject_entity_id,
+                    project_entity_id=link_resolution.project_entity_id,
                     metadata=metadata,
                     last_confirmed_at=item.last_confirmed_at,
                 )

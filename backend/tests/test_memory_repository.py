@@ -162,3 +162,68 @@ async def test_list_memories_by_kinds_groups_richer_memory_types(async_db):
     assert grouped["commitment"][0].content == "Review the Atlas brief tomorrow morning."
     assert grouped["collaborator"][0].content == "Alice owns the investor update thread."
     assert grouped["communication_preference"][0].content == "Prefers concise morning briefings."
+
+
+@pytest.mark.asyncio
+async def test_find_entities_by_names_matches_aliases(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Project Atlas",
+        entity_type=MemoryEntityType.project,
+        aliases=["Atlas"],
+    )
+
+    resolved = await memory_repository.find_entities_by_names(
+        names=("Atlas", "Project Atlas", "Unknown"),
+        entity_type=MemoryEntityType.project,
+    )
+
+    assert resolved["Atlas"].id == atlas.id
+    assert resolved["Project Atlas"].id == atlas.id
+    assert "Unknown" not in resolved
+
+
+@pytest.mark.asyncio
+async def test_find_entities_by_names_supports_unique_project_token_fallback(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type=MemoryEntityType.project,
+    )
+
+    resolved = await memory_repository.find_entities_by_names(
+        names=("Atlas",),
+        entity_type=MemoryEntityType.project,
+    )
+
+    assert resolved["Atlas"].id == atlas.id
+
+
+@pytest.mark.asyncio
+async def test_list_memories_for_entities_supports_project_filters(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Project Atlas",
+        entity_type=MemoryEntityType.project,
+        aliases=["Atlas"],
+    )
+    other = await memory_repository.get_or_create_entity(
+        canonical_name="Project Hermes",
+        entity_type=MemoryEntityType.project,
+    )
+    await memory_repository.create_memory(
+        content="Review the Atlas brief tomorrow morning.",
+        kind=MemoryKind.commitment,
+        project_entity_id=atlas.id,
+        importance=0.9,
+    )
+    await memory_repository.create_memory(
+        content="Review the Hermes brief next week.",
+        kind=MemoryKind.commitment,
+        project_entity_id=other.id,
+        importance=0.95,
+    )
+
+    linked = await memory_repository.list_memories_for_entities(
+        project_entity_ids=(atlas.id,),
+        kinds=(MemoryKind.commitment,),
+    )
+
+    assert [memory.content for memory in linked] == ["Review the Atlas brief tomorrow morning."]

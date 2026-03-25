@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import select, col
+from sqlalchemy import or_
+from sqlmodel import col, select
 
 from src.db.engine import get_session
 from src.db.models import (
@@ -31,6 +32,21 @@ def _now() -> datetime:
 def _normalize_entity_key(name: str, entity_type: MemoryEntityType | str) -> str:
     normalized_type = _coerce_enum(entity_type, MemoryEntityType).value
     return f"{normalized_type}:{' '.join(name.strip().lower().split())}"
+
+
+def _normalize_entity_name(name: str) -> str:
+    return " ".join(name.strip().lower().split())
+
+
+def _name_contains_requested_tokens(candidate_name: str, requested_name: str) -> bool:
+    candidate_tokens = _normalize_entity_name(candidate_name).split()
+    requested_tokens = _normalize_entity_name(requested_name).split()
+    if not candidate_tokens or not requested_tokens or len(requested_tokens) > len(candidate_tokens):
+        return False
+    for index in range(len(candidate_tokens) - len(requested_tokens) + 1):
+        if candidate_tokens[index : index + len(requested_tokens)] == requested_tokens:
+            return True
+    return False
 
 
 def _coerce_enum(
@@ -201,6 +217,60 @@ class MemoryRepository:
                 project_entity_id=project_entity_id,
             )
 
+    async def find_entities_by_names(
+        self,
+        *,
+        names: tuple[str, ...],
+        entity_type: MemoryEntityType | str,
+    ) -> dict[str, MemoryEntity]:
+        normalized_entity_type = _coerce_enum(entity_type, MemoryEntityType)
+        requested = {
+            name: _normalize_entity_key(name, normalized_entity_type)
+            for name in dict.fromkeys(name.strip() for name in names if name.strip())
+        }
+        if not requested:
+            return {}
+
+        async with get_session() as db:
+            result = await db.execute(
+                select(MemoryEntity).where(MemoryEntity.entity_type == normalized_entity_type)
+            )
+            entities = result.scalars().all()
+            resolved: dict[str, MemoryEntity] = {}
+            for entity in entities:
+                candidate_keys = {
+                    _normalize_entity_key(entity.canonical_name, normalized_entity_type)
+                }
+                candidate_keys.update(
+                    _normalize_entity_key(alias, normalized_entity_type)
+                    for alias in json.loads(entity.aliases_json or "[]")
+                    if alias
+                )
+                for requested_name, requested_key in requested.items():
+                    if requested_key not in candidate_keys or requested_name in resolved:
+                        continue
+                    resolved[requested_name] = entity
+            unresolved_names = [name for name in requested if name not in resolved]
+            if unresolved_names and normalized_entity_type == MemoryEntityType.project:
+                for requested_name in unresolved_names:
+                    matches: list[MemoryEntity] = []
+                    for entity in entities:
+                        candidate_names = [entity.canonical_name]
+                        candidate_names.extend(
+                            alias for alias in json.loads(entity.aliases_json or "[]") if alias
+                        )
+                        if any(
+                            _name_contains_requested_tokens(candidate_name, requested_name)
+                            for candidate_name in candidate_names
+                        ):
+                            matches.append(entity)
+                    unique_matches = {entity.id: entity for entity in matches}
+                    if len(unique_matches) == 1:
+                        resolved[requested_name] = next(iter(unique_matches.values()))
+            for entity in {id(entity): entity for entity in resolved.values()}.values():
+                db.expunge(entity)
+            return resolved
+
     async def list_memories(
         self,
         *,
@@ -227,21 +297,43 @@ class MemoryRepository:
     async def list_memories_for_entities(
         self,
         *,
-        subject_entity_id: str | None = None,
-        project_entity_id: str | None = None,
+        subject_entity_ids: tuple[str, ...] = (),
+        project_entity_ids: tuple[str, ...] = (),
+        kinds: tuple[MemoryKind | str, ...] = (),
         limit: int = 20,
+        status: MemoryStatus | str = MemoryStatus.active,
     ) -> list[Memory]:
+        normalized_status = _coerce_enum(status, MemoryStatus)
+        normalized_subject_ids = tuple(
+            dict.fromkeys(entity_id.strip() for entity_id in subject_entity_ids if entity_id.strip())
+        )
+        normalized_project_ids = tuple(
+            dict.fromkeys(entity_id.strip() for entity_id in project_entity_ids if entity_id.strip())
+        )
+        normalized_kinds = tuple(
+            dict.fromkeys(_coerce_enum(kind, MemoryKind) for kind in kinds)
+        )
+        if not normalized_subject_ids and not normalized_project_ids:
+            return []
         async with get_session() as db:
             stmt = (
                 select(Memory)
-                .where(Memory.status == MemoryStatus.active)
-                .order_by(col(Memory.importance).desc(), col(Memory.created_at).desc())
+                .where(Memory.status == normalized_status)
+                .order_by(
+                    col(Memory.importance).desc(),
+                    col(Memory.last_confirmed_at).desc(),
+                    col(Memory.created_at).desc(),
+                )
                 .limit(limit)
             )
-            if subject_entity_id:
-                stmt = stmt.where(Memory.subject_entity_id == subject_entity_id)
-            if project_entity_id:
-                stmt = stmt.where(Memory.project_entity_id == project_entity_id)
+            filters = []
+            if normalized_subject_ids:
+                filters.append(col(Memory.subject_entity_id).in_(normalized_subject_ids))
+            if normalized_project_ids:
+                filters.append(col(Memory.project_entity_id).in_(normalized_project_ids))
+            stmt = stmt.where(or_(*filters))
+            if normalized_kinds:
+                stmt = stmt.where(col(Memory.kind).in_(normalized_kinds))
             result = await db.execute(stmt)
             memories = result.scalars().all()
             for memory in memories:

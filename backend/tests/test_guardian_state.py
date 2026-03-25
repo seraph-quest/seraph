@@ -282,6 +282,149 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
     assert "[commitment] Review the Atlas brief tomorrow morning" in state.memory_context
 
 
+@pytest.mark.asyncio
+async def test_build_guardian_state_pulls_project_linked_memories_for_active_project(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas right now?")
+    await sm.add_message("current", "assistant", "Let me ground that in active project memory.")
+
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Project Atlas",
+        entity_type="project",
+        aliases=["Atlas"],
+    )
+    alice = await memory_repository.get_or_create_entity(
+        canonical_name="Alice",
+        entity_type="person",
+    )
+
+    await memory_repository.create_memory(
+        content="Prepare the Hermes budget memo.",
+        kind=MemoryKind.commitment,
+        summary="Prepare the Hermes budget memo",
+        importance=0.99,
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        importance=0.35,
+        project_entity_id=atlas.id,
+    )
+    await memory_repository.create_memory(
+        content="Send the Atlas checklist before Friday.",
+        kind=MemoryKind.commitment,
+        summary="Send the Atlas checklist before Friday",
+        importance=0.3,
+        project_entity_id=atlas.id,
+    )
+    await memory_repository.create_memory(
+        content="Alice owns Atlas launch communications.",
+        kind=MemoryKind.collaborator,
+        summary="Alice owns Atlas launch communications",
+        importance=0.25,
+        subject_entity_id=alice.id,
+        project_entity_id=atlas.id,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Editing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(session_id="current", user_message="What matters for Atlas right now?")
+
+    assert "Atlas launch" in state.world_model.active_projects
+    assert "Send the Atlas checklist before Friday" in state.world_model.active_commitments
+    assert "Alice owns Atlas launch communications" in state.world_model.collaborators
+    assert "[project] Atlas launch" in state.memory_context
+    assert "[commitment] Send the Atlas checklist before Friday" in state.memory_context
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_uses_unique_project_token_fallback_for_linked_recall(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me pull the Atlas-linked memory.")
+
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type="project",
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        importance=0.4,
+        project_entity_id=atlas.id,
+    )
+    await memory_repository.create_memory(
+        content="Send the Atlas checklist before Friday.",
+        kind=MemoryKind.commitment,
+        summary="Send the Atlas checklist before Friday",
+        importance=0.35,
+        project_entity_id=atlas.id,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Editing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(session_id="current", user_message="What matters for Atlas today?")
+
+    assert "Atlas launch" in state.world_model.active_projects
+    assert "Send the Atlas checklist before Friday" in state.world_model.active_commitments
+
+
 def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     block = _make_guardian_state().to_prompt_block()
 

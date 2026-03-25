@@ -286,8 +286,29 @@ def _summarize_bounded_memory(*, soul_context: str, todos: list[dict[str, object
     return "\n".join(lines)
 
 
-async def _structured_memory_context_bundle() -> tuple[str, dict[str, tuple[str, ...]]]:
-    from src.db.models import MemoryKind
+def _append_structured_memory_line(
+    *,
+    bucketed: dict[str, list[str]],
+    lines: list[str],
+    text: str,
+    bucket_name: str,
+) -> None:
+    normalized = text.strip()
+    if not normalized:
+        return
+    bucket = bucketed.setdefault(bucket_name, [])
+    if normalized not in bucket:
+        bucket.append(normalized)
+    line = f"- [{bucket_name}] {normalized}"
+    if line not in lines:
+        lines.append(line)
+
+
+async def _structured_memory_context_bundle(
+    *,
+    active_projects: tuple[str, ...] = (),
+) -> tuple[str, dict[str, tuple[str, ...]]]:
+    from src.db.models import MemoryEntityType, MemoryKind
     from src.memory.repository import memory_repository
     from src.memory.types import bucket_name_for_kind
 
@@ -313,16 +334,39 @@ async def _structured_memory_context_bundle() -> tuple[str, dict[str, tuple[str,
         bucket_name = bucket_name_for_kind(kind_name)
         for memory in memories:
             text = (memory.summary or memory.content or "").strip()
-            if not text:
-                continue
-            bucket = bucketed.setdefault(bucket_name, [])
-            if text not in bucket:
-                bucket.append(text)
-            line = f"- [{bucket_name}] {text}"
-            if line not in lines:
-                lines.append(line)
+            _append_structured_memory_line(
+                bucketed=bucketed,
+                lines=lines,
+                text=text,
+                bucket_name=bucket_name,
+            )
 
-    return "\n".join(lines[:6]), {key: tuple(values) for key, values in bucketed.items()}
+    linked_project_entities = await memory_repository.find_entities_by_names(
+        names=active_projects,
+        entity_type=MemoryEntityType.project,
+    )
+    if linked_project_entities:
+        linked_memories = await memory_repository.list_memories_for_entities(
+            project_entity_ids=tuple(entity.id for entity in linked_project_entities.values()),
+            kinds=(
+                MemoryKind.commitment,
+                MemoryKind.project,
+                MemoryKind.collaborator,
+                MemoryKind.obligation,
+                MemoryKind.routine,
+                MemoryKind.timeline,
+            ),
+            limit=8,
+        )
+        for memory in linked_memories:
+            _append_structured_memory_line(
+                bucketed=bucketed,
+                lines=lines,
+                text=(memory.summary or memory.content or "").strip(),
+                bucket_name=bucket_name_for_kind(memory.kind),
+            )
+
+    return "\n".join(lines[:8]), {key: tuple(values) for key, values in bucketed.items()}
 
 
 def _merge_memory_contexts(*contexts: str) -> str:
@@ -370,7 +414,6 @@ async def build_guardian_state(
         intervention_type="advisory",
         limit=12,
     )
-    structured_memory_context, structured_memory_buckets = await _structured_memory_context_bundle()
     try:
         recent_execution_summary = _summarize_recent_execution(
             await audit_repository.list_events(limit=20, session_id=session_id)
@@ -384,6 +427,9 @@ async def build_guardian_state(
     except Exception:
         logger.debug("Failed to load recent projects for guardian state", exc_info=True)
         active_projects = ()
+    structured_memory_context, structured_memory_buckets = await _structured_memory_context_bundle(
+        active_projects=active_projects,
+    )
 
     query = user_message or memory_query or ""
     memory_requested = bool(query.strip())

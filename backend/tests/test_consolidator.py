@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.db.models import MemoryKind
 from src.agent.session import SessionManager
 from src.memory.consolidator import consolidate_session
 from src.memory.repository import memory_repository
@@ -150,6 +151,8 @@ class TestConsolidateSession:
         assert memories_by_kind["collaborator"].summary == "Alice owns investor updates"
         assert memories_by_kind["collaborator"].confidence == pytest.approx(0.92)
         assert memories_by_kind["collaborator"].importance == pytest.approx(0.88)
+        assert memories_by_kind["collaborator"].subject_entity_id is not None
+        assert memories_by_kind["collaborator"].project_entity_id is not None
         assert memories_by_kind["collaborator"].metadata_json == (
             '{"input_schema": "typed", "project_name": "Investor updates", '
             '"source": "llm_extract", "subject_name": "Alice", "writer": "session_consolidation"}'
@@ -159,6 +162,118 @@ class TestConsolidateSession:
         )
         assert memories_by_kind["communication_preference"].confidence == pytest.approx(0.95)
         assert memories_by_kind["communication_preference"].importance == pytest.approx(0.85)
+
+    async def test_typed_project_and_commitment_keep_structured_kinds_but_link_vector_categories(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch needs a project memory and a clear commitment.")
+        await sm.add_message("s1", "assistant", "I will store both the project and the commitment.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the current release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.91,
+                    "importance": 0.9,
+                    "project": "Atlas",
+                },
+                {
+                    "text": "Send the Atlas launch checklist before Friday.",
+                    "kind": "commitment",
+                    "summary": "Send Atlas checklist before Friday",
+                    "confidence": 0.88,
+                    "importance": 0.87,
+                    "project": "Atlas",
+                },
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            side_effect=["vec-project", "vec-commitment"],
+        ) as mock_add_memory:
+            await consolidate_session("s1")
+
+        memories = await memory_repository.list_memories_by_kinds(
+            kinds=(MemoryKind.project, MemoryKind.commitment),
+            limit_per_kind=2,
+        )
+
+        project_memory = memories["project"][0]
+        commitment_memory = memories["commitment"][0]
+
+        assert project_memory.kind == MemoryKind.project
+        assert commitment_memory.kind == MemoryKind.commitment
+        assert project_memory.project_entity_id == commitment_memory.project_entity_id
+        assert project_memory.project_entity_id is not None
+        assert [call.kwargs["category"] for call in mock_add_memory.call_args_list] == ["fact", "goal"]
+
+    async def test_entity_link_failure_does_not_abort_consolidation(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Alice owns Atlas launch communications.")
+        await sm.add_message("s1", "assistant", "I will keep that collaborator memory.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Alice owns Atlas launch communications.",
+                    "kind": "collaborator",
+                    "summary": "Alice owns Atlas launch communications",
+                    "confidence": 0.92,
+                    "importance": 0.85,
+                    "subject": "Alice",
+                    "project": "Atlas",
+                }
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-1",
+        ), patch(
+            "src.memory.consolidator.resolve_memory_links",
+            AsyncMock(side_effect=RuntimeError("entity linking down")),
+        ):
+            await consolidate_session("s1")
+
+        memories = await memory_repository.list_memories(limit=5)
+
+        assert memories == []
+
+        from src.audit.repository import audit_repository
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_partially_succeeded"
+            and event["tool_name"] == "session_consolidation"
+            and event["session_id"] == "s1"
+            and event["details"]["stored_memory_count"] == 0
+            and event["details"]["vector_memory_count"] == 1
+            and event["details"]["partial_write_count"] == 1
+            and event["details"]["write_failure_count"] == 0
+            for event in events
+        )
 
     async def test_extracts_facts_uses_session_consolidation_runtime_path(self, async_db, sm):
         await sm.get_or_create("s1")

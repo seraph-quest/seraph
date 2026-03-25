@@ -134,13 +134,53 @@ This section records the internal Batch A slices on the feature branch before th
 - review notes:
   - local regression caught and fixed before commit:
     - project-memory enrichment briefly leaked execution-pressure lines into `world_model.active_projects`; the final slice keeps those lines in `project_state` while `active_projects` stays project-only
-  - subagent review attempts:
-    - requested from `Ptolemy` (`019d24c7-9a43-7860-8b66-b5d77adc3187`)
-    - requested from `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
-    - both review agents timed out within the turn window, so this slice currently relies on local validation plus the explicit regression fix above
+  - subagent review:
+    - reviewer: `Ptolemy` (`019d24c7-9a43-7860-8b66-b5d77adc3187`)
+    - findings:
+      - caught the `project_state` / `active_projects` regression while guardian-state tests were failing
+      - flagged that richer kinds still collapse through the vector category lane, so only the structured bundle preserves typed recall behavior for now
+    - fixed before the slice stayed marked complete:
+      - separated `active_project_signals` from `project_state` so execution-pressure lines stay out of `active_projects`
+  - secondary review:
+    - reviewer: `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
+    - findings:
+      - confirmed the structured-memory bundle does change runtime behavior even though the vector layer still uses coarse categories
+      - requested a typed `commitment` / `project` test to prove structured kinds survive while vector writes keep coarse categories
+    - fixed after review:
+      - added a typed project-and-commitment consolidation test that proves structured `kind` values are preserved while vector writes still route through coarse `fact` / `goal` categories
   - deferred to later Batch A slices:
     - project/entity linking still relies on names embedded in metadata, not real entity ids
+    - the vector recall path still uses coarse categories until Batch B hybrid retrieval work lands
     - bounded snapshot generation still does not project this richer memory into a stable session-start snapshot
+
+### `entity-and-project-linking-v1`
+
+- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
+- scope:
+  - added `backend/src/memory/linking.py` to resolve conservative subject and project entity links during typed consolidation writes
+  - extended `memory_repository` with exact or alias entity resolution plus linked-memory lookup by project or subject ids
+  - upgraded guardian-state synthesis to boost project-linked structured memories for currently active projects instead of relying only on global importance ordering
+  - kept the runtime claim narrow: subject-side entity ids are now stored, but live guardian recall currently consumes project-linked recall only
+- validation:
+  - `python3 -m py_compile backend/src/memory/linking.py backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py -q`
+- subagent review:
+  - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+  - initial findings:
+    - entity linking had moved outside the per-item structured-write fault boundary, which would have let a single link failure abort the whole consolidation run
+    - the runtime slice only consumes project-linked recall today, so broader “entity recall” wording would overstate what is live
+    - the original tests proved project-link persistence but not the collaborator subject-link path
+    - project-linked recall could still fragment when a project memory landed without an explicit `project` field and the observer only exposed a shorter active-project token
+  - fixed before the slice stayed marked complete:
+    - moved `resolve_memory_links(...)` back inside the per-item structured-write `try` block so link failures are counted as partial writes instead of aborting the whole run
+    - added a consolidation test that forces entity-link failure and proves the audit outcome stays `background_task_partially_succeeded`
+    - added collaborator-link assertions so subject and project ids are both exercised in tests
+    - added a conservative unique project-token fallback in entity resolution plus a guardian-state test that proves `Atlas` can still resolve linked memories stored under `Atlas launch` when that match is unique
+  - final recheck:
+    - no remaining high-severity issue was found after the fault-isolation and unique-project-fallback fixes
+  - deferred to later slices:
+    - guardian-state recall still does not consume subject-side entity ids, only project-linked ids
+    - richer entity-driven retrieval beyond active-project boosts belongs in the later hybrid retrieval planner work
 
 ## Non-Goals
 

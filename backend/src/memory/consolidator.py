@@ -10,6 +10,7 @@ from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
 from src.memory.linking import resolve_memory_links
 from src.memory.repository import memory_repository
+from src.memory.snapshots import refresh_bounded_guardian_snapshot
 from src.memory.soul import read_soul, update_soul_section
 from src.memory.types import parse_consolidated_memories
 from src.memory.vector_store import add_memory
@@ -129,6 +130,7 @@ async def consolidate_session(session_id: str) -> None:
         vector_stored = 0
         partial_write_count = 0
         write_failure_count = 0
+        snapshot_refresh_failed = False
         for item in extracted_memories:
             embedding_id = ""
             vector_succeeded = False
@@ -195,14 +197,22 @@ async def consolidate_session(session_id: str) -> None:
                 update_soul_section(section, content)
                 logger.info("Soul updated: section '%s'", section)
 
+        try:
+            await refresh_bounded_guardian_snapshot(soul_context=read_soul())
+        except Exception:
+            snapshot_refresh_failed = True
+            partial_write_count += 1
+            logger.exception("bounded memory snapshot refresh failed for session %s", session_id[:8])
+
         logger.info(
-            "Consolidated session %s: %d structured memories, %d vector memories, %d soul updates, %d partial writes, %d failed writes",
+            "Consolidated session %s: %d structured memories, %d vector memories, %d soul updates, %d partial writes, %d failed writes, snapshot_failed=%s",
             session_id[:8],
             stored,
             vector_stored,
             len(soul_updates),
             partial_write_count,
             write_failure_count,
+            snapshot_refresh_failed,
         )
         outcome = (
             "partially_succeeded"
@@ -221,6 +231,7 @@ async def consolidate_session(session_id: str) -> None:
                 "partial_write_count": partial_write_count,
                 "write_failure_count": write_failure_count,
                 "soul_update_count": len(soul_updates),
+                "snapshot_refresh_failed": snapshot_refresh_failed,
             },
         )
 

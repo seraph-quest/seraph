@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.db.models import MemoryKind
+from src.db.models import MemoryKind, MemorySnapshotKind
 from src.agent.session import SessionManager
 from src.memory.consolidator import consolidate_session
 from src.memory.repository import memory_repository
@@ -272,8 +272,49 @@ class TestConsolidateSession:
             and event["details"]["vector_memory_count"] == 1
             and event["details"]["partial_write_count"] == 1
             and event["details"]["write_failure_count"] == 0
+            and event["details"]["snapshot_refresh_failed"] is False
             for event in events
         )
+
+    async def test_consolidation_refreshes_bounded_snapshot(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch is the active release project.")
+        await sm.add_message("s1", "assistant", "I will keep that project context in bounded recall.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the active release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.9,
+                    "importance": 0.88,
+                    "project": "Atlas",
+                }
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch("src.memory.consolidator.add_memory", return_value="vec-1"), patch(
+            "src.memory.consolidator.read_soul",
+            return_value="# Soul\n\n## Identity\nBuilder",
+        ):
+            await consolidate_session("s1")
+
+        snapshot = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
+
+        assert snapshot is not None
+        assert "Identity: Builder" in snapshot.content
+        assert "Atlas launch" in snapshot.content
 
     async def test_extracts_facts_uses_session_consolidation_runtime_path(self, async_db, sm):
         await sm.get_or_create("s1")

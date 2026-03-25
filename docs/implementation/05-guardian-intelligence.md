@@ -182,6 +182,34 @@ This section records the internal Batch A slices on the feature branch before th
     - guardian-state recall still does not consume subject-side entity ids, only project-linked ids
     - richer entity-driven retrieval beyond active-project boosts belongs in the later hybrid retrieval planner work
 
+### `bounded-memory-snapshots-v1`
+
+- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
+- scope:
+  - added `backend/src/memory/snapshots.py` to build a compact bounded guardian snapshot from soul identity plus structured memory kinds
+  - refreshes that snapshot after consolidation so durable semantic changes project into the always-on guardian prefix without rebuilding it ad hoc every call
+  - changed guardian-state synthesis to use a session-frozen bounded snapshot plus a live todo overlay, with structured-memory recomputation as the degraded fallback if snapshot load or save fails
+  - keyed the in-process session freeze by session lifecycle (`session_id + created_at`) so reused session ids do not keep serving stale bounded recall
+- validation:
+  - `python3 -m py_compile backend/src/memory/snapshots.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/conftest.py backend/tests/test_memory_snapshots.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_snapshots.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py -q`
+- subagent review:
+  - reviewer: `Laplace` (`019d24da-bfeb-7360-8b3a-6e9bcef8fcb7`)
+  - initial findings:
+    - the first cut reused one global snapshot blindly, so it was neither fresh on new sessions nor stable against unrelated snapshot churn
+    - the degraded path fell back to soul-only lines and silently dropped structured bounded recall when snapshot IO failed
+    - the first session-freeze pass still needed an invalidation path for reused session ids in the same process
+  - fixed before the slice stayed marked complete:
+    - `get_or_create_bounded_guardian_snapshot(...)` now recomputes source hash against live soul and structured memory, refreshes stale global snapshots, and freezes the resolved content per session
+    - guardian-state fallback now recomputes bounded recall from structured memory via `render_bounded_guardian_snapshot(...)` instead of collapsing to soul-only memory
+    - the session cache key now includes the session lifecycle (`created_at`) so deleting and recreating the same session id invalidates the frozen snapshot
+    - added tests for stale snapshot refresh, per-session freeze, session-id reuse invalidation, consolidation-triggered snapshot refresh, and structured-memory fallback when snapshot load fails
+  - final recheck:
+    - no remaining high-severity or medium-severity issue was reported after the session-lifecycle and degraded-fallback fixes
+  - deferred to later slices:
+    - snapshot promotion still runs from consolidation boundaries; broader lifecycle hooks near compaction and workflow boundaries belong in the later flush-lifecycle slice
+    - bounded snapshot contents are still semantic-only and do not yet include procedural memory or episodic recall planning
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

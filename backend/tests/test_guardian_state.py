@@ -1,6 +1,6 @@
 """Tests for explicit guardian-state synthesis."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -423,6 +423,210 @@ async def test_build_guardian_state_uses_unique_project_token_fallback_for_linke
 
     assert "Atlas launch" in state.world_model.active_projects
     assert "Send the Atlas checklist before Friday" in state.world_model.active_commitments
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_uses_bounded_snapshot_with_todo_overlay(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What should I focus on next?")
+    await sm.add_message("current", "assistant", "Let me ground that in bounded recall.")
+    await sm.replace_todos(
+        "current",
+        [
+            {"content": "Send the Atlas checklist", "completed": False},
+            {"content": "Review launch notes", "completed": True},
+        ],
+    )
+
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        importance=0.9,
+    )
+    await memory_repository.create_memory(
+        content="User prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        importance=0.8,
+    )
+
+    from src.memory.snapshots import refresh_bounded_guardian_snapshot
+
+    await refresh_bounded_guardian_snapshot(
+        soul_context="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded",
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Editing Atlas launch checklist",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(session_id="current", user_message="What should I focus on next?")
+
+    assert "Identity: Builder" in state.bounded_memory_context
+    assert "Atlas launch" in state.bounded_memory_context
+    assert "Prefers concise morning briefings" in state.bounded_memory_context
+    assert "Send the Atlas checklist" in state.bounded_memory_context
+    assert "Review launch notes" in state.bounded_memory_context
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_recomputes_structured_bounded_memory_when_snapshot_load_fails(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What should I focus on next?")
+    await sm.add_message("current", "assistant", "Let me ground that in bounded recall.")
+
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        importance=0.9,
+    )
+    await memory_repository.create_memory(
+        content="User prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        importance=0.8,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Editing Atlas launch checklist",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.memory.snapshots.get_or_create_bounded_guardian_snapshot",
+            AsyncMock(side_effect=RuntimeError("snapshot unavailable")),
+        ),
+    ):
+        state = await build_guardian_state(session_id="current", user_message="What should I focus on next?")
+
+    assert "Identity: Builder" in state.bounded_memory_context
+    assert "Atlas launch" in state.bounded_memory_context
+    assert "Prefers concise morning briefings" in state.bounded_memory_context
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_invalidates_bounded_snapshot_when_session_id_is_reused(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What should I focus on next?")
+    await sm.add_message("current", "assistant", "Let me ground that in bounded recall.")
+
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        importance=0.9,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Editing Atlas launch checklist",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        first_state = await build_guardian_state(session_id="current", user_message="What should I focus on next?")
+
+    await memory_repository.create_memory(
+        content="Hermes budget memo is now active.",
+        kind=MemoryKind.project,
+        summary="Hermes budget memo",
+        importance=0.95,
+    )
+    await sm.delete("current")
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What should I focus on next?")
+    await sm.add_message("current", "assistant", "Let me ground that in bounded recall.")
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+        patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        second_state = await build_guardian_state(session_id="current", user_message="What should I focus on next?")
+
+    assert "Hermes budget memo" not in first_state.bounded_memory_context
+    assert "Hermes budget memo" in second_state.bounded_memory_context
 
 
 def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():

@@ -16,6 +16,7 @@ os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 
 from src.app import create_app
 from src.llm_runtime import _reset_target_health
+from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
@@ -112,3 +113,10 @@ def reset_llm_target_health():
     _reset_target_health()
     yield
     _reset_target_health()
+
+
+@pytest.fixture(autouse=True)
+def reset_bounded_snapshot_cache():
+    _reset_bounded_guardian_snapshot_cache()
+    yield
+    _reset_bounded_guardian_snapshot_cache()

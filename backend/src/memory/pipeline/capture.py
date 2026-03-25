@@ -49,10 +49,11 @@ async def capture_session_memory(
     )
     recent_messages = await session_manager_ref.get_messages(
         session_id,
-        limit=max(message_window, history_limit),
+        limit=message_window,
+        newest_first=True,
     )
     source_messages: list[CapturedSessionMessage] = []
-    for message in recent_messages[-message_window:]:
+    for message in recent_messages:
         if not _is_candidate_message(message):
             continue
         source_messages.append(

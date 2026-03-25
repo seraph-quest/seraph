@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 
@@ -30,6 +32,26 @@ async def test_create_memory_persists_structured_fields(async_db):
     assert memories[0].reinforcement == pytest.approx(1.2)
     assert memories[0].source_session_id == "sess-1"
     assert memories[0].metadata_json == '{"writer": "test"}'
+
+
+@pytest.mark.asyncio
+async def test_create_memory_preserves_explicit_message_source_snippet(async_db):
+    result = await memory_repository.create_memory(
+        content="User prefers concise status updates.",
+        kind=MemoryKind.communication_preference,
+        source_session_id="sess-1",
+        source_message_id="msg-1",
+        source_type="message",
+        source_snippet="Please keep the status updates concise.",
+        summary="Prefers concise updates",
+    )
+
+    sources = await memory_repository.list_sources(memory_id=result.memory_id)
+
+    assert len(sources) == 1
+    assert sources[0].source_type == "message"
+    assert sources[0].source_message_id == "msg-1"
+    assert sources[0].snippet == "Please keep the status updates concise."
 
 
 @pytest.mark.asyncio
@@ -285,3 +307,82 @@ async def test_merge_memory_strengthens_existing_record_and_dedupes_sources(asyn
     assert first_source.created is True
     assert second_source.created is False
     assert [source.source_message_id for source in sources if source.source_message_id] == ["msg-1"]
+
+
+@pytest.mark.asyncio
+async def test_merge_memory_rolls_back_reinforcement_when_source_write_fails(async_db):
+    created = await memory_repository.create_memory(
+        content="User prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        reinforcement=1.0,
+    )
+
+    with patch(
+        "src.memory.repository.MemoryRepository._normalize_source_snippet",
+        side_effect=RuntimeError("source write failed"),
+    ):
+        with pytest.raises(RuntimeError, match="source write failed"):
+            await memory_repository.merge_memory(
+                created.memory_id,
+                reinforcement_delta=0.25,
+                message_sources=[
+                    {
+                        "source_session_id": "sess-1",
+                        "source_message_id": "msg-1",
+                        "snippet": "Please keep briefings concise.",
+                    }
+                ],
+            )
+
+    memories = await memory_repository.list_memories_by_kinds(
+        kinds=(MemoryKind.communication_preference,),
+        limit_per_kind=1,
+    )
+
+    assert memories["communication_preference"][0].reinforcement == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_find_merge_candidate_allows_backfilling_entity_links(async_db):
+    created = await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+    )
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas",
+        entity_type=MemoryEntityType.project,
+    )
+
+    candidate = await memory_repository.find_merge_candidate(
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        content="Atlas launch is the active release project.",
+        project_entity_id=atlas.id,
+    )
+
+    assert candidate is not None
+    assert candidate.id == created.memory_id
+
+
+@pytest.mark.asyncio
+async def test_find_merge_candidate_does_not_merge_unlinked_input_into_linked_memory(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas",
+        entity_type=MemoryEntityType.project,
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        project_entity_id=atlas.id,
+    )
+
+    candidate = await memory_repository.find_merge_candidate(
+        kind=MemoryKind.project,
+        summary="Atlas launch",
+        content="Atlas launch is the active release project.",
+    )
+
+    assert candidate is None

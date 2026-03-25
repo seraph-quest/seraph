@@ -45,6 +45,23 @@ class PersistedMemoryStats:
     write_failure_count: int = 0
 
 
+@dataclass(frozen=True)
+class EmbeddingWriteResult:
+    embedding_id: str | None = None
+    stored: bool = False
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class MergeProvenancePlan:
+    message_sources: tuple[CapturedSessionMessage, ...] = ()
+    session_source_needed: bool = False
+
+    @property
+    def has_new_provenance(self) -> bool:
+        return bool(self.message_sources) or self.session_source_needed
+
+
 def _summary_for_memory(text: str, *, max_chars: int = 140) -> str:
     normalized = " ".join(text.strip().split())
     if len(normalized) <= max_chars:
@@ -77,12 +94,7 @@ def _select_source_messages(
         role_bonus = 0.2 if message.role == "user" else 0.0
         scored.append((float(overlap) + role_bonus, index, message))
     if not scored:
-        fallback_candidates = [
-            message
-            for message in reversed(source_messages)
-            if message.role in {"user", "assistant"}
-        ]
-        return tuple(fallback_candidates[:1])
+        return ()
     scored.sort(key=lambda item: (-item[0], -item[1]))
     return tuple(item[2] for item in scored[:limit])
 
@@ -109,6 +121,71 @@ async def _link_sources(
             logger.exception("Failed to link memory source for memory %s", memory_id[:8])
             raise
     return created
+
+
+async def _write_embedding(
+    *,
+    item: ConsolidatedMemoryItem,
+    session_id: str,
+    vector_writer: Callable[..., str],
+) -> EmbeddingWriteResult:
+    try:
+        embedding_id = await asyncio.wait_for(
+            asyncio.to_thread(
+                vector_writer,
+                text=item.text,
+                category=item.category.value,
+                source_session_id=session_id,
+            ),
+            timeout=10,
+        )
+        normalized_embedding_id = (
+            embedding_id.strip()
+            if isinstance(embedding_id, str) and embedding_id.strip()
+            else None
+        )
+        return EmbeddingWriteResult(
+            embedding_id=normalized_embedding_id,
+            stored=normalized_embedding_id is not None,
+            failed=normalized_embedding_id is None,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("add_memory timed out for session %s", session_id[:8])
+    except Exception:
+        logger.exception("add_memory failed for session %s", session_id[:8])
+    return EmbeddingWriteResult(failed=True)
+
+
+async def _plan_merge_provenance(
+    *,
+    memory_id: str,
+    session_id: str,
+    selected_sources: tuple[CapturedSessionMessage, ...],
+) -> MergeProvenancePlan:
+    existing_sources = await memory_repository.list_sources(memory_id=memory_id)
+    existing_message_ids = {
+        source.source_message_id
+        for source in existing_sources
+        if source.source_message_id
+    }
+    existing_session_source = any(
+        source.source_type == "session"
+        and source.source_session_id == session_id
+        and source.source_message_id is None
+        for source in existing_sources
+    )
+    new_message_sources = tuple(
+        source
+        for source in selected_sources
+        if source.id and source.id not in existing_message_ids
+    )
+    session_source_needed = (
+        not selected_sources and not existing_session_source
+    )
+    return MergeProvenancePlan(
+        message_sources=new_message_sources,
+        session_source_needed=session_source_needed,
+    )
 
 
 async def persist_extracted_memories(
@@ -161,8 +238,22 @@ async def persist_extracted_memories(
         )
 
         if candidate is not None:
+            embedding_result = EmbeddingWriteResult()
+            if candidate.embedding_id is None:
+                embedding_result = await _write_embedding(
+                    item=item,
+                    session_id=session_id,
+                    vector_writer=vector_writer,
+                )
+                if embedding_result.stored:
+                    vector_stored += 1
+            provenance_plan = await _plan_merge_provenance(
+                memory_id=candidate.id,
+                session_id=session_id,
+                selected_sources=selected_sources,
+            )
             try:
-                await memory_repository.merge_memory(
+                merge_result = await memory_repository.merge_memory(
                     candidate.id,
                     summary=item.summary or _summary_for_memory(item.text),
                     confidence=strengthened_confidence(
@@ -173,20 +264,35 @@ async def persist_extracted_memories(
                         existing=candidate.importance,
                         candidate=item.importance,
                     ),
-                    reinforcement_delta=0.25,
+                    reinforcement_delta=0.25 if provenance_plan.has_new_provenance else 0.0,
                     subject_entity_id=link_resolution.subject_entity_id,
                     project_entity_id=link_resolution.project_entity_id,
+                    embedding_id=embedding_result.embedding_id,
                     metadata=metadata,
                     last_confirmed_at=latest_confirmation(
                         existing=candidate.last_confirmed_at,
                         candidate=item.last_confirmed_at,
                     ),
+                    message_sources=[
+                        {
+                            "source_session_id": session_id,
+                            "source_message_id": source.id or None,
+                            "snippet": source.content,
+                        }
+                        for source in provenance_plan.message_sources
+                    ],
+                    session_source=(
+                        {
+                            "source_session_id": session_id,
+                            "snippet": item.summary or item.text,
+                        }
+                        if provenance_plan.session_source_needed
+                        else None
+                    ),
                 )
-                source_link_count += await _link_sources(
-                    memory_id=candidate.id,
-                    session_id=session_id,
-                    sources=selected_sources,
-                )
+                source_link_count += merge_result.message_source_count
+                if candidate.embedding_id is None and embedding_result.failed:
+                    partial_write_count += 1
                 stored += 1
                 merged += 1
             except Exception:
@@ -195,27 +301,15 @@ async def persist_extracted_memories(
                 write_failure_count += 1
             continue
 
-        embedding_id = ""
-        vector_succeeded = False
+        embedding_result = await _write_embedding(
+            item=item,
+            session_id=session_id,
+            vector_writer=vector_writer,
+        )
         structured_succeeded = False
         primary_source = selected_sources[0] if selected_sources else None
-        try:
-            embedding_id = await asyncio.wait_for(
-                asyncio.to_thread(
-                    vector_writer,
-                    text=item.text,
-                    category=item.category.value,
-                    source_session_id=session_id,
-                ),
-                timeout=10,
-            )
-            vector_succeeded = isinstance(embedding_id, str) and bool(embedding_id.strip())
-            if vector_succeeded:
-                vector_stored += 1
-        except asyncio.TimeoutError:
-            logger.warning("add_memory timed out for session %s", session_id[:8])
-        except Exception:
-            logger.exception("add_memory failed for session %s", session_id[:8])
+        if embedding_result.stored:
+            vector_stored += 1
 
         try:
             created_memory = await memory_repository.create_memory(
@@ -224,7 +318,9 @@ async def persist_extracted_memories(
                 kind=item.kind,
                 source_session_id=session_id,
                 source_message_id=primary_source.id if primary_source is not None else None,
-                embedding_id=embedding_id or None,
+                source_type="message" if primary_source is not None else "session",
+                source_snippet=primary_source.content if primary_source is not None else None,
+                embedding_id=embedding_result.embedding_id,
                 summary=item.summary or _summary_for_memory(item.text),
                 confidence=item.confidence,
                 importance=item.importance,
@@ -251,9 +347,9 @@ async def persist_extracted_memories(
         except Exception:
             logger.exception("structured memory write failed for session %s", session_id[:8])
 
-        if vector_succeeded != structured_succeeded:
+        if embedding_result.stored != structured_succeeded:
             partial_write_count += 1
-        elif not vector_succeeded and not structured_succeeded:
+        elif embedding_result.failed and not structured_succeeded:
             write_failure_count += 1
 
     return PersistedMemoryStats(

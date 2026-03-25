@@ -76,6 +76,8 @@ class MemoryWriteResult:
     memory_id: str
     subject_entity_id: str | None = None
     project_entity_id: str | None = None
+    message_source_count: int = 0
+    session_source_created: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,12 @@ class MemoryRepository:
         if not isinstance(value, str):
             return ""
         return " ".join(value.strip().lower().split())
+
+    @staticmethod
+    def _normalize_source_snippet(value: str | None) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return " ".join(value.strip().split())[:240]
 
     @staticmethod
     def _normalize_episode_kwargs(
@@ -209,6 +217,8 @@ class MemoryRepository:
         kind: MemoryKind | str = MemoryKind.fact,
         source_session_id: str | None = None,
         source_message_id: str | None = None,
+        source_type: str = "session",
+        source_snippet: str | None = None,
         summary: str | None = None,
         confidence: float = 0.5,
         importance: float = 0.5,
@@ -229,6 +239,12 @@ class MemoryRepository:
         normalized_embedding_id = (
             embedding_id.strip()
             if isinstance(embedding_id, str) and embedding_id.strip()
+            else None
+        )
+        normalized_source_type = source_type.strip() or "session"
+        normalized_source_snippet = (
+            " ".join(source_snippet.strip().split())[:240]
+            if isinstance(source_snippet, str) and source_snippet.strip()
             else None
         )
 
@@ -257,10 +273,13 @@ class MemoryRepository:
                 db.add(
                     MemorySource(
                         memory_id=memory.id,
-                        source_type="session",
+                        source_type=normalized_source_type,
                         source_session_id=source_session_id,
                         source_message_id=source_message_id,
-                        snippet=(summary or normalized_content)[:240],
+                        snippet=(
+                            normalized_source_snippet
+                            or (summary or normalized_content)[:240]
+                        ),
                     )
                 )
                 await db.flush()
@@ -359,9 +378,23 @@ class MemoryRepository:
                 )
             )
             if subject_entity_id is not None:
-                stmt = stmt.where(Memory.subject_entity_id == subject_entity_id)
+                stmt = stmt.where(
+                    or_(
+                        Memory.subject_entity_id == subject_entity_id,
+                        Memory.subject_entity_id.is_(None),
+                    )
+                )
+            else:
+                stmt = stmt.where(Memory.subject_entity_id.is_(None))
             if project_entity_id is not None:
-                stmt = stmt.where(Memory.project_entity_id == project_entity_id)
+                stmt = stmt.where(
+                    or_(
+                        Memory.project_entity_id == project_entity_id,
+                        Memory.project_entity_id.is_(None),
+                    )
+                )
+            else:
+                stmt = stmt.where(Memory.project_entity_id.is_(None))
 
             candidates = (await db.execute(stmt)).scalars().all()
             for memory in candidates:
@@ -388,6 +421,8 @@ class MemoryRepository:
         embedding_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         last_confirmed_at: datetime | None = None,
+        message_sources: list[dict[str, str | None]] | None = None,
+        session_source: dict[str, str | None] | None = None,
     ) -> MemoryWriteResult:
         def _normalize_timestamp(value: datetime | None) -> datetime | None:
             if value is None:
@@ -402,6 +437,9 @@ class MemoryRepository:
             ).scalars().first()
             if memory is None:
                 raise ValueError(f"Unknown memory id: {memory_id}")
+
+            created_message_source_count = 0
+            session_source_created = False
 
             if summary and not memory.summary:
                 memory.summary = summary
@@ -433,12 +471,62 @@ class MemoryRepository:
                 memory.metadata_json = json.dumps(existing_metadata, sort_keys=True)
             memory.updated_at = _now()
             db.add(memory)
+
+            for source in message_sources or []:
+                source_message_id = source.get("source_message_id")
+                if not source_message_id:
+                    continue
+                existing = (
+                    await db.execute(
+                        select(MemorySource)
+                        .where(MemorySource.memory_id == memory_id)
+                        .where(MemorySource.source_message_id == source_message_id)
+                    )
+                ).scalars().first()
+                if existing is not None:
+                    continue
+                db.add(
+                    MemorySource(
+                        memory_id=memory_id,
+                        source_type="message",
+                        source_session_id=source.get("source_session_id"),
+                        source_message_id=source_message_id,
+                        snippet=self._normalize_source_snippet(source.get("snippet")),
+                    )
+                )
+                created_message_source_count += 1
+
+            if session_source:
+                source_session_id = session_source.get("source_session_id")
+                if source_session_id:
+                    existing = (
+                        await db.execute(
+                            select(MemorySource)
+                            .where(MemorySource.memory_id == memory_id)
+                            .where(MemorySource.source_type == "session")
+                            .where(MemorySource.source_session_id == source_session_id)
+                            .where(MemorySource.source_message_id.is_(None))
+                        )
+                    ).scalars().first()
+                    if existing is None:
+                        db.add(
+                            MemorySource(
+                                memory_id=memory_id,
+                                source_type="session",
+                                source_session_id=source_session_id,
+                                snippet=self._normalize_source_snippet(session_source.get("snippet")),
+                            )
+                        )
+                        session_source_created = True
+
             await db.flush()
             db.expunge(memory)
             return MemoryWriteResult(
                 memory_id=memory.id,
                 subject_entity_id=memory.subject_entity_id,
                 project_entity_id=memory.project_entity_id,
+                message_source_count=created_message_source_count,
+                session_source_created=session_source_created,
             )
 
     async def create_episode(

@@ -410,6 +410,7 @@ This section records the internal Batch C slices on the feature branch before th
   - added pre-compaction flushing from the session history path when the context window is about to require a middle summary, while explicitly preventing recursive self-triggering from the consolidator history read
   - added session-end flushing before session teardown and workflow-completion flushing on successful workflow completion, and carried trigger plus workflow metadata into consolidation audit records
   - tightened scheduler telemetry so it records visited sessions separately from sessions that actually flushed instead of overstating consolidation count
+  - follow-up hardening on the same branch now caches flush fingerprints only after clean or skipped consolidation outcomes, so non-primary lifecycle hooks can perform a real first flush or retry after a failed or partial consolidation instead of silently treating the session state as already flushed
 - validation:
   - `backend/.venv/bin/python -m py_compile backend/src/memory/flush.py backend/src/memory/consolidator.py backend/src/agent/context_window.py backend/src/agent/session.py backend/src/api/chat.py backend/src/api/ws.py backend/src/scheduler/jobs/memory_consolidation.py backend/src/workflows/manager.py backend/tests/conftest.py backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py`
   - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py -q`
@@ -425,11 +426,12 @@ This section records the internal Batch C slices on the feature branch before th
     - added in-flight fingerprint dedupe in `backend/src/memory/flush.py` so overlapping flush requests for the same session state collapse to one consolidation run
     - changed scheduler telemetry to distinguish visited-session count from actual flush count
     - narrowed the implementation wording in docs and review notes so the workflow hook is described as the synchronous consolidation path it actually is
-  - remaining limitation carried forward intentionally:
-    - non-primary hooks currently act as safety nets after a primary flush has armed the session; broader first-flush coverage and lighter staged capture still belong to the next consolidation slice instead of being overstated here
+  - follow-up review fixes after the next slice landed:
+    - `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`) returned concrete findings showing that failed or partial consolidations were still poisoning the flush fingerprint cache and that the helper still blocked non-primary hooks when no earlier flush had armed the session
+    - the branch now propagates consolidation outcome back into `backend/src/memory/flush.py`, caches fingerprints only for `succeeded` or `skipped` runs, and allows `session_end`, `pre_compaction`, and `workflow_completed` to act as genuine first-flush or retry hooks for unchanged session state
+    - the same follow-up exposed a delete-path regression once `session_end` flushes became real, so `backend/src/agent/session.py` now deletes session-scoped audit events, approval requests, queued insights, and guardian interventions before removing the session row
 - deferred to later Batch C slices:
   - this slice still runs the existing full consolidation path rather than a lighter staged capture or merge pipeline
-  - broader first-flush behavior for non-primary triggers remains incomplete
   - higher-salience capture, staged extraction, and merge-strengthen logic belong in `multi-stage-memory-consolidation-v1`
 
 ### `multi-stage-memory-consolidation-v1`
@@ -442,16 +444,30 @@ This section records the internal Batch C slices on the feature branch before th
   - kept the vector backend active for newly created semantic memories while intentionally skipping redundant vector writes when the pipeline merges into an existing durable memory row
   - extended consolidation audit details with captured-source count plus created, merged, and source-link counts so the runtime can distinguish append-heavy runs from update-heavy runs
 - validation:
-  - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/memory/pipeline/__init__.py backend/src/memory/pipeline/capture.py backend/src/memory/pipeline/extract.py backend/src/memory/pipeline/merge.py backend/src/memory/pipeline/strengthen.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py`
-  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_memory_flush.py -q`
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/memory/pipeline/__init__.py backend/src/memory/pipeline/capture.py backend/src/memory/pipeline/extract.py backend/src/memory/pipeline/merge.py backend/src/memory/pipeline/strengthen.py backend/src/agent/session.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_flush.py backend/tests/test_session.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_memory_repository.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_session.py -q`
 - review notes:
   - local regressions caught and fixed before the slice stayed complete:
     - exact-duplicate merge initially failed on offset-naive vs offset-aware `last_confirmed_at` comparisons, which left reinforcement unchanged and prevented merge-path audit counts from moving
     - moving link resolution into the pipeline briefly broke the existing `src.memory.consolidator.resolve_memory_links` patch seam used by tests, so the consolidator now passes the resolver into the pipeline explicitly instead of silently changing that surface
     - the entity-link-failure path originally kept the old test expectation of a dangling vector write, but the staged pipeline now resolves links before vector writes on new memories; the final tests document that narrower and safer behavior honestly instead of claiming the old partial-write shape is still live
   - subagent review:
-    - review threads were started with `Nash` (`019d26bd-dbac-7c50-a42e-166ed2a9760c`), `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`), and a follow-up request to `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`)
-    - all three review threads stalled before returning findings, so the slice record relies on the targeted validation above plus the explicit local regression fixes instead of claiming an unreturned clean review
+    - returned findings from `Nash` (`019d26bd-dbac-7c50-a42e-166ed2a9760c`) and `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`) showed that the first pipeline cut still had real correctness gaps:
+      - snapshot refresh failures crashed into the hard-failure path instead of staying partial because the old `partial_write_count` local was gone and the aggregate audit outcome ignored snapshot-only failures
+      - source capture pulled the oldest session window rather than the newest one, so long sessions could attribute new memories to stale early messages
+      - duplicate merge matching was entity-asymmetric, which blocked later backfill of missing links and also let an unlinked repeat merge into a linked row
+      - the primary source row for newly created memories used synthesized summary text under `source_type="session"`, which overstated true message provenance and suppressed later real message-source rows for the same `source_message_id`
+      - merge-path confirmations could not repair a previously missing `embedding_id`, so exact repeats would strengthen the structured row forever without restoring vector coverage
+    - fixed before this slice stayed marked complete on the branch:
+      - `backend/src/memory/consolidator.py` now returns explicit outcome metadata to the flush layer, counts snapshot refresh failure as a partial write, and keeps snapshot-only failure runs in `partially_succeeded` instead of crashing into `failed`
+      - `backend/src/memory/pipeline/capture.py` now reads the newest message window, not the oldest ascending page
+      - `backend/src/memory/repository.py` now matches linked extractions against same-id or unlinked rows while refusing to merge a later unlinked extraction into an already linked row, and it accepts explicit message-backed source snippets for primary provenance rows
+      - `backend/src/memory/pipeline/merge.py` now drops the zero-overlap fallback, counts source links only when a real message match exists, stores the primary source as an actual `message` source row with the message snippet, repairs missing embeddings on the merge path when a repeated confirmation can restore vector coverage, falls back to session-level provenance plus zero reinforcement delta when a same-session retry has no newly recorded evidence, and applies merge-strengthening plus merge-path provenance in one repository transaction so a failed provenance write cannot leave behind a stronger row that will strengthen again on retry
+      - `backend/src/agent/session.py` now deletes the extra session-scoped rows that became reachable once `session_end` flushes were allowed to run for real before session teardown
+    - review status still open:
+      - the follow-up request to `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`) did not return before this log update, so the recorded review evidence is the two returned subagent findings plus the targeted regressions above rather than an invented clean review
+    - final recheck:
+      - `Aquinas` (`019d26ce-8df7-73e2-9586-b3a068c6883c`) reviewed the finished follow-up changes after the retry-idempotence, session-provenance fallback, and atomic merge-provenance fixes landed and reported no material findings
   - remaining limitation carried forward intentionally:
     - this slice merges exact duplicate memories by kind plus normalized summary/content and strengthens them with added provenance, but it does not yet perform contradiction detection, semantic dedupe, or supersession across near-duplicate statements
 - deferred to later Batch C slices:

@@ -27,7 +27,6 @@ class SessionFlushFingerprint:
 _last_flushed_session_fingerprints: dict[str, str] = {}
 _inflight_flush_fingerprints: set[str] = set()
 _inflight_flush_guard = threading.Lock()
-_PRIMARY_FLUSH_TRIGGERS = {"post_response", "scheduled_catchup"}
 
 
 async def _build_session_flush_fingerprint(session_id: str) -> SessionFlushFingerprint | None:
@@ -65,8 +64,6 @@ async def flush_session_memory(
         return False
 
     previous = _last_flushed_session_fingerprints.get(fingerprint.cache_key)
-    if trigger not in _PRIMARY_FLUSH_TRIGGERS and previous is None:
-        return False
     if previous == fingerprint.fingerprint:
         return False
     inflight_key = f"{fingerprint.cache_key}:{fingerprint.fingerprint}"
@@ -78,14 +75,16 @@ async def flush_session_memory(
     from src.memory.consolidator import consolidate_session
 
     try:
-        await consolidate_session(
+        result = await consolidate_session(
             session_id,
             trigger=trigger,
             workflow_name=workflow_name,
             manager=manager,
         )
-        _last_flushed_session_fingerprints[fingerprint.cache_key] = fingerprint.fingerprint
-        return True
+        if result.should_cache_fingerprint:
+            _last_flushed_session_fingerprints[fingerprint.cache_key] = fingerprint.fingerprint
+            return True
+        return False
     finally:
         with _inflight_flush_guard:
             _inflight_flush_fingerprints.discard(inflight_key)

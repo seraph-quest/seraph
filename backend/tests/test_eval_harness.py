@@ -96,6 +96,10 @@ def test_main_lists_available_scenarios(capsys):
     assert "provider_routing_decision_audit" in captured.out
     assert "session_bound_llm_trace" in captured.out
     assert "session_consolidation_behavior" in captured.out
+    assert "memory_commitment_continuity_behavior" in captured.out
+    assert "memory_collaborator_lookup_behavior" in captured.out
+    assert "bounded_memory_snapshot_behavior" in captured.out
+    assert "memory_supersession_filter_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
@@ -200,6 +204,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "provider_routing_decision_audit",
                 "session_bound_llm_trace",
                 "session_consolidation_behavior",
+                "memory_commitment_continuity_behavior",
+                "memory_collaborator_lookup_behavior",
+                "bounded_memory_snapshot_behavior",
+                "memory_supersession_filter_behavior",
                 "scheduled_local_runtime_profile",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
@@ -919,6 +927,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["session_consolidation_behavior"]["updated_soul_section"] == "Goals"
     assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_workspace"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["baseline_bucket_excludes_linked_commitment"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["baseline_context_excludes_linked_commitment"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["linked_project_present"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["memory_context_has_commitment"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["baseline_bucket_excludes_linked_collaborator"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["baseline_context_excludes_linked_collaborator"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["collaborator_present"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["memory_context_has_collaborator"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["active_projects_has_atlas"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_is_stable_within_session"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_includes_todo_overlay"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_line_count"] <= 8
+    assert details_by_name["bounded_memory_snapshot_behavior"]["same_session_excludes_new_project"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["new_session_sees_new_project"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["new_session_uses_real_session_record"] is True
+    assert details_by_name["memory_supersession_filter_behavior"]["active_project_present"] is True
+    assert details_by_name["memory_supersession_filter_behavior"]["superseded_project_filtered"] is True
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",

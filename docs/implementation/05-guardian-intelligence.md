@@ -90,6 +90,34 @@ Each Batch A internal slice should close with:
 
 This section records the internal Batch A slices on the feature branch before the aggregate GitHub PR is opened.
 
+### `memory-eval-harness-v1`
+
+- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
+- scope:
+  - expanded `backend/src/evals/harness.py` with deterministic memory-behavior scenarios for linked commitment recall, linked collaborator recall, bounded snapshot stability, and supersession filtering
+  - taught the eval harness DB patch helpers about `src.memory.repository.get_session` and cleared the bounded snapshot cache around each scenario so the new memory scenarios run in isolated process state
+  - updated the existing session-consolidation evals so they still represent a clean successful dual-write path under the new structured-memory substrate instead of tripping `partially_succeeded` from mock-only vector writes
+  - extended `backend/tests/test_eval_harness.py` so the aggregate runtime-eval contracts now assert the new memory scenario details directly
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/evals/harness.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_eval_harness.py -q`
+- subagent review:
+  - reviewer: `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`)
+  - initial findings:
+    - the first linked commitment and collaborator scenarios could still pass from the generic structured kind buckets, so they did not actually prove the project-linked recall path
+    - the first bounded snapshot scenario built the “new session” state without creating that session first, so it could fall back to the global snapshot lane instead of exercising real per-session freezing
+    - the compactness check was measured before later memory changes landed, which made the “remains compact after later changes” claim weaker than intended
+  - fixed before the slice stayed marked complete:
+    - seeded higher-importance unrelated commitments and collaborators, captured a baseline no-active-project structured bundle, and then asserted the Atlas-linked items only reappear once active-project linking is in play
+    - created a real `snapshot-new` session before the fresh-state build and asserted that the scenario uses an actual session record
+    - moved the bounded line-count check to the post-change states so the compactness contract is evaluated after later memory writes land
+    - narrowed the commitment-continuity scenario description so it now claims only the memory-context recall behavior that the eval actually proves
+  - final recheck:
+    - no remaining material issue was found after the linked-recall proof, real-session snapshot path, and wording fixes
+
 ### `typed-memory-schema-v1`
 
 - status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR

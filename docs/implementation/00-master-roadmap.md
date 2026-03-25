@@ -438,6 +438,56 @@ See [Capability Import Wave 2](./12-capability-import-wave-2.md) for the impleme
 36. [x] `capability-cleanup-and-legacy-path-removal-v1`:
     remove transitional seams and legacy compatibility paths once the imported capability families are first-class, stable parts of Seraph’s architecture
 
+## Next Guardian Memory Upgrade Program
+
+This is the next major Guardian Intelligence execution program after the current first-pass world-model fusion, bounded memory layer, and learning-policy foundations.
+
+- the target product shape is defined in [14. Seraph Memory SOTA Roadmap](/research/seraph-memory-sota-roadmap)
+- [Workstream 05](./05-guardian-intelligence.md) summarizes the shipped-state gap and the same batch structure from the workstream perspective
+- each numbered item below is a PR-sized slice
+- the program is intentionally organized into dependency-ordered batches instead of one flat queue because the substrate, retrieval, and learning layers should land in sequence
+
+### Batch A: Structured memory foundation
+
+1. [x] `memory-eval-harness-v1`:
+   add deterministic memory eval coverage for recall, contradiction, commitment continuity, collaborator lookup, and bounded-cost memory behavior before major architecture rewrites begin
+2. [x] `typed-memory-schema-v1`:
+   introduce structured SQLite-backed memory tables for typed memory items, entities, sources, edges, and snapshots while keeping LanceDB as the vector backend
+3. [x] `memory-kinds-and-provenance-v1`:
+   replace coarse memory categories with richer typed kinds plus confidence, importance, and last-confirmed provenance metadata so durable memory becomes more than text blobs
+4. [x] `entity-and-project-linking-v1`:
+   add conservative collaborator, project, routine, obligation, and commitment linking so guardian continuity stops depending on plain-text matching alone
+5. [x] `bounded-memory-snapshots-v1`:
+   generate compact session-start memory snapshots from structured state so always-on guardian context stays cheap, stable, and explicit
+
+### Batch B: Episodic and observer-driven retrieval
+
+6. [ ] `episodic-memory-events-v1`:
+   store typed episodic records for important conversation, workflow, tool, and decision boundaries so recall can reason over time instead of only semantic similarity
+7. [ ] `observer-episodic-fusion-v1`:
+   write observer project, focus, and activity transitions into episodic memory with conservative salience rules and clear provenance
+8. [ ] `session-search-fts-and-event-index-v1`:
+   upgrade session recall from plain text matching to FTS-backed session and event search with better bounded summaries
+9. [ ] `hybrid-memory-retrieval-v1`:
+   add lexical plus vector retrieval, reranking, recency weighting, and project or entity boosts across structured semantic memory and episodic memory
+10. [ ] `guardian-state-retrieval-planner-v1`:
+    route guardian-state synthesis between bounded, episodic, semantic, and procedural retrieval lanes instead of issuing one generic memory search
+
+### Batch C: Learning, consolidation, and decay
+
+11. [ ] `memory-flush-lifecycle-hooks-v1`:
+    add durable-memory flush triggers at session end, near compaction, and key workflow boundaries so important context is promoted before it collapses
+12. [ ] `multi-stage-memory-consolidation-v1`:
+    replace one-shot extraction with staged capture, extract, merge, strengthen, and source-backed write logic so long-term memory becomes updateable
+13. [ ] `soul-projection-and-structured-profile-v1`:
+    move durable identity state underneath the current soul surface so `soul.md` becomes a human-readable projection rather than the only identity substrate
+14. [ ] `procedural-memory-from-outcomes-v1`:
+    store timing, phrasing, channel, and interruption lessons from intervention outcomes as explicit procedural memory instead of leaving them as thin policy heuristics
+15. [ ] `memory-decay-contradiction-and-archive-v1`:
+    add reinforcement, contradiction, supersession, and archive rules so stale or invalid memory stops accumulating forever
+16. [ ] `guardian-memory-behavioral-evals-v1`:
+    prove the new memory behavior with deterministic tests covering contradiction cleanup, adaptation quality, retrieval planning, and bounded-cost recall
+
 ## Delivery Order
 
 1. Trust Boundaries

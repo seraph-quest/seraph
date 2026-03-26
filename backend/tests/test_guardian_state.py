@@ -8,8 +8,10 @@ from src.agent.factory import create_agent
 from src.agent.session import SessionManager
 from src.agent.strategist import create_strategist_agent
 from src.db.models import MemoryKind
+from src.guardian.feedback import GuardianLearningSignal
 from src.guardian.state import GuardianState, GuardianStateConfidence, build_guardian_state
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
+from src.memory.procedural import sync_learning_signal_memories
 from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
 
@@ -314,6 +316,82 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
     assert "For advisory interventions, prefer async native continuation when the user is blocked." in state.world_model.active_constraints
     assert "For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately." in state.world_model.active_constraints
     assert "[commitment] Review the Atlas brief tomorrow morning" in state.memory_context
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_uses_procedural_memory_guidance_when_live_signal_is_neutral(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should this wait until I am available?")
+    await sm.add_message("current", "assistant", "Let me check the guardian guidance.")
+
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=1,
+            not_helpful_count=0,
+            acknowledged_count=2,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="prefer_native_notification",
+            escalation_bias="prefer_async_native",
+            timing_bias="neutral",
+            blocked_state_bias="prefer_async_for_blocked_state",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=2,
+            available_direct_success_count=0,
+        ),
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect focus time",
+        active_window="Calendar",
+        screen_context="In a long meeting block",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="deep_work",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should this wait until I am available?",
+        )
+
+    assert state.world_model.intervention_receptivity == "guarded_async"
+    assert "Async native delivery is usually tolerated better than browser interruption." in state.learning_guidance
+    assert "When the user is blocked, prefer async native continuation instead of browser interruption." in state.learning_guidance
 
 
 @pytest.mark.asyncio

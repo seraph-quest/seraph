@@ -8,6 +8,7 @@ from config.settings import settings
 from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
 from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+from src.memory.procedural import sync_learning_signal_memories
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
@@ -445,6 +446,160 @@ async def test_queue_when_blocked():
             session_id=None,
         )
     finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_neutral(async_db):
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=1,
+            not_helpful_count=0,
+            acknowledged_count=2,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="prefer_native_notification",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="prefer_async_for_blocked_state",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=2,
+            available_direct_success_count=0,
+        ),
+    )
+
+    ctx = _make_context(user_state="deep_work")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(
+            type="proactive",
+            content="Keep this as an async reminder.",
+            intervention_type="advisory",
+            urgency=3,
+        )
+        with patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ), patch(
+            "src.observer.delivery._active_channel_adapters",
+            return_value={"native_notification"},
+        ):
+            decision = await deliver_or_queue(msg)
+
+        intervention = await guardian_feedback_repository.get(msg.intervention_id)
+
+        assert decision.action == InterventionAction.act
+        assert decision.reason == "learned_blocked_state_async"
+        assert mock_ws.broadcast.call_count == 0
+        assert intervention is not None
+        assert intervention.policy_reason == "learned_blocked_state_async"
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Keep this as an async reminder."
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
+            and event["details"]["learning_channel_bias"] == "prefer_native_notification"
+            and event["details"]["learning_blocked_state_bias"] == "prefer_async_for_blocked_state"
+            and event["details"]["policy_reason"] == "learned_blocked_state_async"
+            and event["details"]["procedural_learning_lesson_types"] == ["channel", "blocked_state"]
+            for event in events
+        )
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery(async_db):
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=1,
+            not_helpful_count=0,
+            acknowledged_count=2,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="prefer_native_notification",
+            escalation_bias="prefer_async_native",
+            timing_bias="neutral",
+            blocked_state_bias="prefer_async_for_blocked_state",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=2,
+            available_direct_success_count=0,
+        ),
+    )
+
+    ctx = _make_context(user_state="deep_work")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_ws.broadcast = AsyncMock(
+        return_value=BroadcastResult(
+            attempted_connections=1,
+            delivered_connections=1,
+            failed_connections=0,
+        )
+    )
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(
+            type="proactive",
+            content="Keep this native even when the browser is connected.",
+            intervention_type="advisory",
+            urgency=3,
+        )
+        with patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ), patch(
+            "src.observer.delivery._active_channel_adapters",
+            return_value={"websocket", "native_notification"},
+        ):
+            decision = await deliver_or_queue(msg)
+
+        intervention = await guardian_feedback_repository.get(msg.intervention_id)
+
+        assert decision.action == InterventionAction.act
+        assert decision.reason == "learned_async_native_delivery"
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Keep this native even when the browser is connected."
+        assert intervention is not None
+        assert intervention.transport == "native_notification"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["details"]["transport"] == "native_notification"
+            and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
+            and event["details"]["transport_order"] == ["native_notification", "websocket"]
+            and event["details"]["transport_order_adjustment"] == "learned_native_channel_preference"
+            for event in events
+        )
+    finally:
+        await native_notification_queue.clear()
         for p in patches:
             p.stop()
 

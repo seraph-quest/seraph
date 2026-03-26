@@ -632,6 +632,8 @@ class MemoryRepository:
                 payload = json.loads(memory.metadata_json or "{}")
             except json.JSONDecodeError:
                 return False
+            if not isinstance(payload, dict):
+                return False
             return all(payload.get(key) == value for key, value in normalized_scope.items())
 
         lock = self._get_scoped_memory_lock(
@@ -896,6 +898,52 @@ class MemoryRepository:
             for memory in memories:
                 db.expunge(memory)
             return list(memories)
+
+    async def list_memories_for_scope(
+        self,
+        *,
+        kind: MemoryKind | str,
+        scope: dict[str, Any],
+        limit: int = 20,
+        status: MemoryStatus | str = MemoryStatus.active,
+    ) -> list[Memory]:
+        normalized_kind = _coerce_enum(kind, MemoryKind)
+        normalized_status = _coerce_enum(status, MemoryStatus)
+        normalized_scope = {
+            str(key): value
+            for key, value in (scope or {}).items()
+            if str(key).strip() and value is not None
+        }
+        if not normalized_scope:
+            raise ValueError("scope must contain at least one key")
+
+        matches: list[Memory] = []
+        async with get_session() as db:
+            stmt = (
+                select(Memory)
+                .where(Memory.kind == normalized_kind)
+                .where(Memory.status == normalized_status)
+                .order_by(
+                    col(Memory.importance).desc(),
+                    col(Memory.last_confirmed_at).desc(),
+                    col(Memory.created_at).desc(),
+                )
+            )
+            result = await db.execute(stmt)
+            for memory in result.scalars().all():
+                try:
+                    metadata = json.loads(memory.metadata_json or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                if not all(metadata.get(key) == value for key, value in normalized_scope.items()):
+                    continue
+                db.expunge(memory)
+                matches.append(memory)
+                if len(matches) >= limit:
+                    break
+        return matches
 
     async def list_memories_for_entities(
         self,

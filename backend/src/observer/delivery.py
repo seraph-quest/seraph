@@ -1,6 +1,7 @@
 """Delivery coordinator — single entry point for all proactive messages."""
 
 import logging
+from dataclasses import replace
 
 from src.audit.runtime import log_observer_delivery_event
 from src.models.schemas import WSResponse
@@ -87,6 +88,28 @@ def _route_transport_order(route_name: str, *, active_channel_adapters: set[str]
         "primary_transport": binding.primary_transport,
         "fallback_transport": binding.fallback_transport,
     }, ordered
+
+
+def _apply_native_channel_preference(
+    *,
+    transport_order: list[str],
+    message: WSResponse,
+    is_scheduled: bool,
+    channel_bias: str,
+) -> list[str]:
+    if (
+        channel_bias != "prefer_native_notification"
+        or "native_notification" not in transport_order
+        or not _should_offer_native_notification(
+            message,
+            is_scheduled=is_scheduled,
+            channel_bias=channel_bias,
+        )
+    ):
+        return transport_order
+    if transport_order[0] == "native_notification":
+        return transport_order
+    return ["native_notification", *[transport for transport in transport_order if transport != "native_notification"]]
 
 
 def _should_offer_native_notification(
@@ -198,6 +221,7 @@ async def deliver_or_queue(
     from src.observer.insight_queue import insight_queue
     from src.scheduler.connection_manager import ws_manager
     from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+    from src.memory.procedural_guidance import load_procedural_memory_guidance
 
     ctx = context_manager.get_context()
     active_channel_adapters = _active_channel_adapters()
@@ -205,6 +229,9 @@ async def deliver_or_queue(
     urgency = message.urgency or 0
     policy_decision: InterventionDecision | None = None
     learning_signal = GuardianLearningSignal.neutral(intervention_type)
+    effective_learning_signal = learning_signal
+    learning_signal_source = "heuristic_only"
+    procedural_lesson_types: tuple[str, ...] = ()
 
     try:
         try:
@@ -214,6 +241,20 @@ async def deliver_or_queue(
             )
         except Exception:
             logger.debug("Failed to compute guardian learning signal", exc_info=True)
+        try:
+            procedural_guidance = await load_procedural_memory_guidance(intervention_type)
+            if procedural_guidance.has_active_guidance:
+                effective_learning_signal = replace(
+                    learning_signal,
+                    **procedural_guidance.bias_overrides(),
+                )
+                learning_signal_source = "heuristic_plus_procedural_memory"
+                procedural_lesson_types = procedural_guidance.lesson_types
+            else:
+                effective_learning_signal = learning_signal
+        except Exception:
+            logger.debug("Failed to load procedural learning guidance", exc_info=True)
+            effective_learning_signal = learning_signal
 
         policy_decision = decide_intervention(
             message_type=message.type,
@@ -231,15 +272,15 @@ async def deliver_or_queue(
             salience_reason=ctx.salience_reason,
             interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
-            recent_feedback_bias=learning_signal.bias,
-            learning_phrasing_bias=learning_signal.phrasing_bias,
-            learning_cadence_bias=learning_signal.cadence_bias,
-            learning_channel_bias=learning_signal.channel_bias,
-            learning_escalation_bias=learning_signal.escalation_bias,
-            learning_timing_bias=learning_signal.timing_bias,
-            learning_blocked_state_bias=learning_signal.blocked_state_bias,
-            learning_suppression_bias=learning_signal.suppression_bias,
-            learning_thread_preference_bias=learning_signal.thread_preference_bias,
+            recent_feedback_bias=effective_learning_signal.bias,
+            learning_phrasing_bias=effective_learning_signal.phrasing_bias,
+            learning_cadence_bias=effective_learning_signal.cadence_bias,
+            learning_channel_bias=effective_learning_signal.channel_bias,
+            learning_escalation_bias=effective_learning_signal.escalation_bias,
+            learning_timing_bias=effective_learning_signal.timing_bias,
+            learning_blocked_state_bias=effective_learning_signal.blocked_state_bias,
+            learning_suppression_bias=effective_learning_signal.suppression_bias,
+            learning_thread_preference_bias=effective_learning_signal.thread_preference_bias,
         )
 
         event_details = {
@@ -252,15 +293,16 @@ async def deliver_or_queue(
             "salience_reason": ctx.salience_reason,
             "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
-            "learning_bias": learning_signal.bias,
-            "learning_phrasing_bias": learning_signal.phrasing_bias,
-            "learning_cadence_bias": learning_signal.cadence_bias,
-            "learning_channel_bias": learning_signal.channel_bias,
-            "learning_escalation_bias": learning_signal.escalation_bias,
-            "learning_timing_bias": learning_signal.timing_bias,
-            "learning_blocked_state_bias": learning_signal.blocked_state_bias,
-            "learning_suppression_bias": learning_signal.suppression_bias,
-            "learning_thread_preference_bias": learning_signal.thread_preference_bias,
+            "learning_signal_source": learning_signal_source,
+            "learning_bias": effective_learning_signal.bias,
+            "learning_phrasing_bias": effective_learning_signal.phrasing_bias,
+            "learning_cadence_bias": effective_learning_signal.cadence_bias,
+            "learning_channel_bias": effective_learning_signal.channel_bias,
+            "learning_escalation_bias": effective_learning_signal.escalation_bias,
+            "learning_timing_bias": effective_learning_signal.timing_bias,
+            "learning_blocked_state_bias": effective_learning_signal.blocked_state_bias,
+            "learning_suppression_bias": effective_learning_signal.suppression_bias,
+            "learning_thread_preference_bias": effective_learning_signal.thread_preference_bias,
             "learning_helpful_count": learning_signal.helpful_count,
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,
@@ -281,6 +323,8 @@ async def deliver_or_queue(
         message.intervention_id = intervention_id
         if intervention_id is not None:
             event_details["intervention_id"] = intervention_id
+        if procedural_lesson_types:
+            event_details["procedural_learning_lesson_types"] = list(procedural_lesson_types)
 
         if policy_decision.action.value == "act":
             route_name = _delivery_route_name(message=message, is_scheduled=is_scheduled)
@@ -288,15 +332,24 @@ async def deliver_or_queue(
                 route_name,
                 active_channel_adapters=active_channel_adapters,
             )
+            adjusted_transport_order = _apply_native_channel_preference(
+                transport_order=transport_order,
+                message=message,
+                is_scheduled=is_scheduled,
+                channel_bias=effective_learning_signal.channel_bias,
+            )
             event_details.update(
                 {
                     "active_channel_adapters": sorted(active_channel_adapters),
                     "channel_route": route_binding["route"],
                     "primary_transport": route_binding["primary_transport"],
                     "fallback_transport": route_binding["fallback_transport"],
-                    "transport_order": transport_order,
+                    "transport_order": adjusted_transport_order,
                 }
             )
+            if adjusted_transport_order != transport_order:
+                event_details["transport_order_adjustment"] = "learned_native_channel_preference"
+            transport_order = adjusted_transport_order
 
             last_error = _route_disabled_error(primary_transport=route_binding["primary_transport"])
             for transport in transport_order:
@@ -357,7 +410,11 @@ async def deliver_or_queue(
                         body=message.content,
                         intervention_type=intervention_type,
                         urgency=urgency,
-                        surface="action_card" if learning_signal.escalation_bias == "prefer_async_native" else "notification",
+                        surface=(
+                            "action_card"
+                            if effective_learning_signal.escalation_bias == "prefer_async_native"
+                            else "notification"
+                        ),
                         session_id=session_id,
                         thread_id=session_id,
                         thread_source="session" if session_id else "ambient",

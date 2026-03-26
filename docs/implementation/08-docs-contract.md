@@ -14,14 +14,15 @@ title: 08. Docs Contract
 
 ## Purpose
 
-This file explains how research claims become implementation truth.
+This file explains how research truth, implementation truth, and GitHub execution state fit together.
 
 It is a cross-cutting implementation mirror, not a workstream doc.
 
 Research and implementation should not compete with each other:
 
 - research owns target product shape, evidence rules, benchmark logic, and superiority logic
-- implementation owns shipped truth on `develop`, delivery ownership, and the live 10-PR queue
+- implementation owns shipped truth on `develop`, delivery ownership, and strategic implementation translation
+- GitHub owns active execution state, review state, and merge state
 
 If a major concept appears in research but not implementation, or vice versa, the docs are incomplete.
 
@@ -31,21 +32,59 @@ If a major concept appears in research but not implementation, or vice versa, th
 - [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program
 - [x] `docs/implementation/STATUS.md` owns the fastest shipped snapshot
-- [x] `docs/implementation/00-master-roadmap.md` owns the live 10-PR queue and refresh rule
+- [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program, completed-program record, and workstream-to-gap translation
 - [x] `docs/implementation/09-benchmark-status.md` mirrors the benchmark on shipped implementation terms
 - [x] `docs/implementation/10-superiority-delivery.md` mirrors the superiority program on delivery terms
+- [x] the GitHub Project owns execution state
+- [x] GitHub issues and PRs own active work tracking, review state, and merge state
+- [x] `docs/docs/` owns historical/archive material that is no longer current truth
 
 ## Update Rules
 
 - [x] If research adds a new benchmark or program layer, implementation needs a mirror doc in the same PR.
 - [x] If implementation changes shipped truth, update `STATUS.md`, the owning workstream file, and any affected mirror docs in the same PR.
-- [x] If the live queue changes, update the roadmap first, then any docs that summarize or justify that queue.
-- [x] Open PRs and stacked branch state belong in PR bodies, not in docs that claim to describe `develop`.
+- [x] If active execution state changes, update the GitHub Project, issue, or PR instead of mirroring that state in docs.
+- [x] If the strategic implementation program changes materially, update the roadmap and any affected mirror docs in the same PR.
+- [x] Open PRs, review state, and branch state belong in issues, PRs, and the GitHub Project, not in docs that claim to describe `develop`.
+
+## Project Workflow
+
+Project fields:
+
+- `Queue`: `Now`, `Next`, `Background`, `Blocked`
+- `Status`: `Todo`, `In Progress`, `Done`
+- `Lane`: `Trust Boundaries`, `Execution Plane`, `Runtime Reliability`, `Presence and Reach`, `Guardian Intelligence`, `Embodied UX`, `Ecosystem and Leverage`, `Docs / Meta`
+- `Priority`: `P0`, `P1`, `P2`
+- `Size`: `S`, `M`, `L`
+- `Code Review`: `Not Ready`, `Pending`, `Running`, `Passed`, `Changes Requested`
+- `Linked pull requests`: built-in GitHub linkage
+- `PR`: `Not Ready`, `Open`, `Merged`
+
+Expected flow:
+
+1. Create or refine the tracked issue.
+   - set `Queue`, `Lane`, `Priority`, `Size`
+   - set `Status=Todo`
+   - set `Code Review=Not Ready`
+   - set `PR=Not Ready`
+2. Start execution.
+   - set `Status=In Progress`
+   - move `Queue=Now` if the task is active now
+3. Open the PR.
+   - link the PR to the issue
+   - set `PR=Open`
+   - set `Code Review=Pending`
+4. Run review.
+   - set `Code Review=Running` while review is active
+   - move to `Changes Requested` or `Passed`
+5. Merge and close.
+   - set `PR=Merged`
+   - set `Status=Done`
 
 ## Parity Rules
 
 - [x] Every implementation workstream should link to its paired research doc or docs.
-- [x] Research should not carry a stale duplicate of the live PR queue.
+- [x] Research should not carry a stale duplicate of GitHub execution state.
 - [x] Implementation should not make benchmark or superiority claims without a research-side source.
 - [ ] The trees are only “in parity” when a reader can move from synthesis -> benchmark/program -> shipped implementation without guessing which file owns what.
 
@@ -53,5 +92,5 @@ If a major concept appears in research but not implementation, or vice versa, th
 
 - [x] The docs now explain where research truth ends and implementation truth begins.
 - [x] The benchmark/program layers have explicit implementation mirrors.
-- [x] The entry-point docs can link a reader to the right owner instead of repeating stale fragments.
+- [x] The entry-point docs can link a reader to the right owner instead of repeating stale fragments or stale board state.
 - [ ] Future PRs still need to follow this contract for the parity fix to hold.

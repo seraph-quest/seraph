@@ -24,7 +24,7 @@ This file explains:
 1. what parts of that program are already shipped on `develop`
 2. what still needs to be built
 3. which workstreams own each remaining gap
-4. where the live 10-PR queue is maintained
+4. how active execution should be tracked without duplicating this translation layer
 
 ## Docs Contract
 
@@ -32,7 +32,8 @@ This file explains:
 - [x] `docs/research/10-competitive-benchmark.md` owns the evidence-backed comparison.
 - [x] `docs/research/11-superiority-program.md` owns the design-level program of work.
 - [x] `docs/implementation/STATUS.md` owns the fastest shipped snapshot.
-- [x] `docs/implementation/00-master-roadmap.md` owns the rolling 10-PR queue and queue refresh rule.
+- [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record.
+- [x] the GitHub Project, issues, and PRs own live execution, review, and merge state.
 - [x] This file owns the translation from benchmark/program gaps into implementation workstreams and delivery ownership.
 
 ## Translation On `develop`
@@ -79,21 +80,16 @@ This file explains:
 - [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that operator-aware replay/native-resume hardening pass
 - owners: Workstream 01, Workstream 02
 
-## Queue Ownership
+## Execution Contract
 
-- [x] The live rolling 10-PR queue stays in [00-master-roadmap.md](./00-master-roadmap.md).
-- [x] This file should explain why the queue exists in its current order.
-- [x] The previous 10-item queue is now fully implemented in the current branch batch and becomes `develop` truth when this branch lands.
-- [x] `execution-safety-hardening-v6`, `threaded-operator-timeline-v1`, `workflow-runbooks-and-parameterized-replay-v1`, `capability-preflight-and-autorepair-v1`, `provider-policy-safeguards-v3`, `native-channel-expansion-v3`, `world-model-memory-fusion-v6`, `guardian-learning-policy-v6`, `cockpit-density-and-live-operator-views-v1`, and `guardian-behavioral-evals-v6` now remain preserved as the previous completed batch in the roadmap.
-- [x] `retire-village-and-editor-v1`, `execution-safety-hardening-v7`, `workflow-step-debugging-and-recovery-v1`, `cockpit-density-and-live-operator-views-v2`, `capability-bootstrap-and-pack-install-v1`, `provider-policy-explainability-and-budgets-v1`, `extension-debugging-and-authoring-v1`, `world-model-memory-fusion-v7`, `guardian-learning-policy-v7`, and `guardian-behavioral-evals-v7` now move into the latest completed batch in the roadmap.
-- [x] `capability-pack-autoinstall-and-bootstrap-v3`, `extension-authoring-and-validation-studio-v1`, `workflow-step-branching-and-resume-v1`, `cockpit-density-and-live-operator-views-v4`, `provider-policy-explainability-and-budgets-v3`, `execution-safety-hardening-v9`, `native-channel-expansion-v5`, `world-model-memory-fusion-v9`, `guardian-learning-policy-v9`, and `guardian-behavioral-evals-v9` now move into the latest completed batch in the roadmap.
-- [x] The roadmap now refreshes to the extension-platform transition, starting with `extension-model-terminology-v1`, `extension-manifest-schema-v1`, and `extension-registry-and-loader-v1`, because Seraph needs one coherent extension contract before capability-pack marketplace, managed connectors, or richer studio ergonomics can land safely.
-- [x] The refreshed queue keeps manifest/schema work, registry unification, authoring docs/tools, packaged declarative capability migration, lifecycle UI, connector normalization, managed connectors, observer/channel extension surfaces, and permission/audit hardening at the top because those are the structural prerequisites for every later marketplace or connector leverage gain.
-- [ ] If benchmark research materially changes priority, update this file and the roadmap in the same PR.
+- [x] Active execution state lives in the GitHub Project, issues, and PRs.
+- [x] The roadmap preserves completed implementation programs and strategic gap framing instead of active kanban state.
+- [x] This file explains why the remaining work belongs to the workstreams named above.
+- [ ] If benchmark research materially changes implementation priority, update this file and the roadmap in the same PR, then refresh the affected issues or project items.
 
 ## Acceptance Checklist
 
 - [x] Every superiority-program area has explicit implementation ownership.
 - [x] The docs now say where research truth ends and implementation truth begins.
 - [x] The master roadmap, status page, and synthesis can point to this file instead of duplicating the whole translation layer.
-- [ ] The implementation queue should continue to stay justified by the benchmark and superiority gaps named here.
+- [ ] The implementation strategy should continue to stay justified by the benchmark and superiority gaps named here.

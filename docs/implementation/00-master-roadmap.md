@@ -20,7 +20,7 @@ This implementation tree is the canonical delivery-side answer to four questions
 1. What is shipped on `develop`?
 2. How does the research-defined target product shape translate into delivery on `develop`?
 3. What is still left on `develop` before Seraph reaches that research-defined target?
-4. What are the next most valuable PRs?
+4. Which strategic gaps and completed implementation programs explain the remaining work?
 
 When these docs are updated on an open feature branch, they describe the intended post-merge `develop` state for that branch. Until merge, the open PR and its validation remain the integration truth.
 
@@ -28,12 +28,13 @@ When these docs are updated on an open feature branch, they describe the intende
 
 - `docs/research/` defines target product shape, evidence rules, benchmark logic, and superiority program logic.
 - `docs/implementation/STATUS.md` is the fastest shipped-state snapshot.
-- this roadmap owns the live implementation queue and queue refresh rule.
+- this roadmap owns the strategic implementation program, completed-program record, and workstream-to-gap translation.
 - `docs/implementation/08-docs-contract.md` explains the boundary between research truth and implementation truth.
 - `docs/implementation/09-benchmark-status.md` mirrors the benchmark axes from research as shipped implementation status.
 - `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
 - `docs/implementation/01` through `07` are the only workstream docs; `08` through `10` are cross-cutting implementation mirrors, not extra workstreams.
 - if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
+- active execution state belongs in the GitHub Project, issues, and PRs rather than this document
 
 ## Current Status
 
@@ -77,7 +78,7 @@ Legend for the checklist column:
 
 ## Completed 10-PR Batches
 
-Completed batches stay visible instead of being deleted on queue refresh.
+Completed batches stay visible instead of being deleted as later programs land.
 
 ### Latest Completed 10-PR Batch
 
@@ -263,14 +264,14 @@ Completed batches stay visible instead of being deleted on queue refresh.
 10. [x] `human-world-model-v1`:
    deepen guardian-state quality from retrieval-plus-heuristics into a stronger explicit human/world model that can support consistently better intervention quality
 
-## Current Extension Platform Transition Queue
+## Completed Extension Platform Transition Program
 
-This is the authoritative PR list for the implementation side.
-For this architecture migration, the roadmap keeps the full multi-batch transition queue visible instead of truncating it to 10 items.
+This section preserves the full delivered extension-platform transition program.
+It remains here because the migration was large, cross-workstream, and still explains the current shipped architecture.
 
-- every entry below is a numbered PR-sized slice
-- the queue below is the full canonical transition program; shipped slices stay visible here until the entire migration is complete
-- this roadmap is the canonical queue for the transition; [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set rather than restating every item
+- every entry below is a historical PR-sized slice that is already shipped on `develop`
+- [Workstream 07](./07-ecosystem-and-leverage.md) summarizes the same program by phase and deliverable set
+- active execution state for new extension work belongs in the GitHub Project, issues, and PRs
 
 1. [x] `extension-model-terminology-v1`:
    rename the misleading internal `plugins/` concept into clearer terms such as `native_tools`, `connector`, and `capability_pack` so the codebase and docs stop implying that Seraph already has a general arbitrary-code plugin runtime
@@ -323,22 +324,17 @@ For this architecture migration, the roadmap keeps the full multi-batch transiti
 25. [x] `trusted-code-plugins-rfc-v1`:
    explicitly decide whether privileged code plugins are needed at all, with the current RFC closing the question for this architecture: Seraph continues with typed extension packs, connector packs, MCP, managed connectors, and bundled native tools rather than a general arbitrary-code plugin runtime
 
-## Queue Maintenance Rule
+## Program Recording Rule
 
-- keep the full active queue for architecture-transition programs visible here until the transition is complete
-- keep the most recent completed 10-PR batch visible above with checkmarks
-- do not delete the immediately previous completed batch until a later cleanup pass
-- keep landed slices in the active queue marked `[x]` until a full 10-slice completed batch is ready to move into the completed-batches section
-- when 5 slices from the published queue have landed, rerank only the remaining open items while leaving the landed items in place
-- when 10 slices from the published queue have landed, move that completed set into the completed-batches history and renumber the remaining active queue
-- rerank earlier if new evidence from `docs/research/` materially changes the priority order
-- each internal slice must close with a subagent review pass against bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete or rolled into a final GitHub PR
-- the result of that subagent review must be recorded in the eventual GitHub PR `Validation` section before any slice is marked complete in these docs
+- keep the most recent completed multi-slice programs visible when they still explain the current architecture
+- do not treat this roadmap as a live task board or branch queue
+- each internal slice should close with a subagent review pass against bugs, missing tests, design drift, and hallucinated assumptions before it is marked complete
+- the result of that subagent review should be recorded in the eventual GitHub PR `Validation` section and in affected implementation docs when the slice changes shipped truth
 
-## Next Capability Import Program
+## Completed Capability Import Program
 
-This is the next major execution program after the extension-platform transition.
-It is intentionally organized by **waves** rather than one flat queue because each wave should land, stabilize, and rerank before the next wave begins.
+This was the major capability-import program after the extension-platform transition.
+It is preserved by **waves** because the shipped architecture still reflects that staged delivery.
 
 - the capability-import program is grounded in [13. Hermes And OpenClaw Capability Import Plan](/research/hermes-and-openclaw-capability-import-plan)
 - Hermes is the primary parity target for runtime breadth and operator-grade capability scaffolding
@@ -346,8 +342,7 @@ It is intentionally organized by **waves** rather than one flat queue because ea
 - imported runtime primitives stay core-owned
 - imported reusable capability surfaces land through the extension platform
 - imported reach and integration surfaces land as connectors, channel adapters, observer sources, or new extension contribution types
-- each numbered item below is a PR-sized slice
-- each wave should be executed as its own delivery batch, with reranking between waves if benchmark or product evidence changes materially
+- each numbered item below is a historical PR-sized slice that is now shipped on `develop`
 
 ### Wave 1: Hermes Runtime Parity
 
@@ -438,14 +433,14 @@ See [Capability Import Wave 2](./12-capability-import-wave-2.md) for the impleme
 36. [x] `capability-cleanup-and-legacy-path-removal-v1`:
     remove transitional seams and legacy compatibility paths once the imported capability families are first-class, stable parts of Seraph’s architecture
 
-## Next Guardian Memory Upgrade Program
+## Completed Guardian Memory Upgrade Program
 
-This is the next major Guardian Intelligence execution program after the current first-pass world-model fusion, bounded memory layer, and learning-policy foundations.
+This was the major Guardian Intelligence execution program after the first-pass world-model fusion, bounded memory layer, and learning-policy foundations.
 
 - the target product shape is defined in [14. Seraph Memory SOTA Roadmap](/research/seraph-memory-sota-roadmap)
 - [Workstream 05](./05-guardian-intelligence.md) summarizes the shipped-state gap and the same batch structure from the workstream perspective
-- each numbered item below is a PR-sized slice
-- the program is intentionally organized into dependency-ordered batches instead of one flat queue because the substrate, retrieval, and learning layers should land in sequence
+- each numbered item below is a historical PR-sized slice that is now shipped on `develop`
+- the program is preserved in dependency-ordered batches because the shipped memory architecture still follows that sequence
 
 ### Batch A: Structured memory foundation
 

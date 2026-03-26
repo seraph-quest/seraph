@@ -2,15 +2,26 @@
 
 Seraph now uses a three-part docs layout:
 
-- `docs/implementation/` is the canonical shipped-status surface
-- `docs/research/` is the canonical design and product-thesis surface
+- `docs/research/` is the canonical target-shape, evidence, and product-thesis surface
+- `docs/implementation/` is the canonical shipped-status and strategic implementation surface
 - `docs/docs/` is a frozen archive for historical material that is no longer part of the active product contract
 
-The trees are meant to mirror each other:
+Current truth lives in `docs/research/` plus `docs/implementation/`.
+History lives in `docs/docs/`.
+
+GitHub owns execution state:
+
+- the GitHub Project is the execution layer
+- issues and PRs are the active work-tracking layer
+- PR bodies carry branch-specific scope, validation, and review receipts
+- docs should not mirror live `Queue`, `Status`, `Code Review`, or `PR` state
+
+The trees are meant to mirror each other without competing:
 
 - research owns target shape, benchmark logic, and superiority logic
-- implementation owns shipped truth, benchmark-status translation, superiority delivery, and the live PR queue
+- implementation owns shipped truth, benchmark-status translation, superiority delivery, and strategic implementation translation
 - `docs/implementation/01-07` are workstreams; `08-10` are cross-cutting mirror docs
+- `docs/implementation/00-master-roadmap.md` is the strategic implementation program and completed-program record, not a live kanban
 
 Start with:
 

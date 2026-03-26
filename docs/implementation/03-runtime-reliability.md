@@ -29,10 +29,10 @@
 ## Working On Now
 
 - [x] Runtime Reliability is no longer the repo-wide active focus after provider explainability and budgets v3 plus guardian behavioral evals v9 shipped
-- [x] the previous runtime-focused queue is fully shipped on `develop`
+- [x] the previous runtime-focused slice sequence is fully shipped on `develop`
 - [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v3`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, including richer routing reason surfaces, budget/task-class guardrails, and deeper deterministic proof for bootstrap plus branching behavior
 - [ ] richer provider policy still remains to do on `develop`, but the remaining work is now simulation-grade planning, budget steering, and cross-surface legibility rather than first-pass hard requirements and tier guardrails
-- [ ] the next runtime-facing queue item now shifts to `provider-policy-simulation-and-budget-planning-v1`
+- [ ] the next major runtime candidate slice is `provider-policy-simulation-and-budget-planning-v1`, which should be activated through GitHub issues and the GitHub Project when it becomes active work
 
 ## Still To Do On `develop`
 
@@ -58,9 +58,10 @@ This sequence is the finished Runtime Reliability execution order on `develop`.
 7. [x] `incident-trace-gap-closure`:
    bind session-aware helper and agent LLM runtime events into the same audit trace so target choice, reroutes, and fallback outcomes can be explained for one session incident
 
-## Next Most Valuable PR Sequence
+## Follow-On Slice Sequence Now Shipped
 
-This is the next ordered Runtime Reliability slice after the completed incident-trace queue. The repo-wide cross-workstream queue lives in `00-master-roadmap.md`.
+This follow-on Runtime Reliability slice sequence is now fully shipped on `develop`.
+New runtime work should be activated through GitHub issues and the GitHub Project rather than a doc-owned task tracker.
 
 1. [x] `provider-policy-scoring`:
    deepen provider routing with weighted policy scoring, explicit capability preferences, and clearer target ranking so runtime-path selection is stronger than simple preference chains and cooldown skips

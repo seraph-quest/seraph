@@ -11,7 +11,8 @@ Make Seraph superior for a power-user guardian use case, not merely “more capa
 Implementation mirror:
 
 - `docs/implementation/10-superiority-delivery.md` owns the shipped-on-`develop` translation of this program
-- `docs/implementation/00-master-roadmap.md` owns the live 10-PR queue
+- `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record
+- the GitHub Project, issues, and PRs own active execution state
 
 That means winning on:
 
@@ -89,9 +90,10 @@ Seraph should only claim superiority on an axis when all three are true:
 
 ## Translation To Delivery
 
-This research program maps directly to the implementation tree, but the live queue should not be duplicated here.
+This research program maps directly to the implementation tree, but active execution state should not be duplicated here.
 
 Use:
 
 - `docs/implementation/10-superiority-delivery.md` for the current implementation translation
-- `docs/implementation/00-master-roadmap.md` for the live rolling 10-PR sequence
+- `docs/implementation/00-master-roadmap.md` for the strategic implementation program and completed-program record
+- the GitHub Project, issues, and PRs for active execution state

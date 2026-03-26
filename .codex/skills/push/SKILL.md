@@ -47,21 +47,21 @@ the workspace yet.
    - push again.
 5. If push fails due to auth, permissions, or branch protection, stop and
    report the exact error instead of changing remotes or protocols.
-6. Ensure the `symphony` label exists on GitHub:
-   - `gh label create symphony --color 1f6feb --description "Managed by Symphony" || true`
-7. Ensure a PR exists for the branch targeting `develop`:
+6. Ensure a PR exists for the branch targeting `develop`:
    - create one if missing,
    - update it if it already exists,
    - if the branch is tied to a closed or merged PR, create a fresh branch and
      PR instead of reusing it.
-8. Write a concise PR body that reflects the full current scope using the
+7. Write a concise PR body that reflects the full current scope using the
    repo-preferred checklist sections:
    - `## Done on develop`
    - `## Working in this PR`
    - `## Still to do after this PR`
-   - `## Validation`
-9. Ensure the PR has label `symphony`.
-10. Reply with the PR URL.
+    - `## Validation`
+8. If the branch closes or advances a tracked issue, ensure the PR links that
+   issue and update the GitHub Project fields to reflect `PR=Open` and
+   `Code Review=Pending`.
+9. Reply with the PR URL.
 
 ## Commands
 
@@ -77,8 +77,6 @@ if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
   echo "Current branch is tied to a closed PR; create a fresh branch." >&2
   exit 1
 fi
-
-gh label create symphony --color 1f6feb --description "Managed by Symphony" || true
 
 pr_title="<clear PR title>"
 tmp_pr_body=$(mktemp)
@@ -102,7 +100,6 @@ else
   gh pr edit --base develop --title "$pr_title" --body-file "$tmp_pr_body"
 fi
 
-gh pr edit --add-label symphony
 gh pr view --json url -q .url
 rm -f "$tmp_pr_body"
 ```
@@ -115,3 +112,4 @@ rm -f "$tmp_pr_body"
   rewrite remotes.
 - Keep the checklist factual against `develop`. Do not mark branch-only work as
   done on `develop`.
+- This repo does not use Symphony or Linear workflow automation.

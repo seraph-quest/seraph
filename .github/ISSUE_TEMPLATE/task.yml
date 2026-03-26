@@ -1,0 +1,138 @@
+name: Tracked work
+description: Structured execution item for Seraph's GitHub Project workflow
+title: "[Task]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for tracked implementation, workflow, docs, or repo-operations work that belongs on the Seraph GitHub Project.
+
+        Project field contract:
+        - `Queue`: `Now`, `Next`, `Background`, `Blocked`
+        - `Status`: `Todo`, `In Progress`, `Done`
+        - `Lane`: `Trust Boundaries`, `Execution Plane`, `Runtime Reliability`, `Presence and Reach`, `Guardian Intelligence`, `Embodied UX`, `Ecosystem and Leverage`, `Docs / Meta`
+        - `Priority`: `P0`, `P1`, `P2`
+        - `Size`: `S`, `M`, `L`
+        - `Code Review`: `Not Ready`, `Pending`, `Running`, `Passed`, `Changes Requested`
+        - `PR`: `Not Ready`, `Open`, `Merged`
+
+        Repo contract:
+        - truth layer: `docs/research/` + `docs/implementation/`
+        - archive layer: `docs/docs/`
+        - execution layer: GitHub Project + issues + PRs
+        - `docs/implementation/STATUS.md` is the shipped snapshot, not the task board
+        - `docs/implementation/00-master-roadmap.md` is the strategic implementation program, not the live kanban
+
+  - type: dropdown
+    id: lane
+    attributes:
+      label: Lane
+      options:
+        - Trust Boundaries
+        - Execution Plane
+        - Runtime Reliability
+        - Presence and Reach
+        - Guardian Intelligence
+        - Embodied UX
+        - Ecosystem and Leverage
+        - Docs / Meta
+    validations:
+      required: true
+
+  - type: dropdown
+    id: queue
+    attributes:
+      label: Queue
+      options:
+        - Now
+        - Next
+        - Background
+        - Blocked
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0
+        - P1
+        - P2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      options:
+        - S
+        - M
+        - L
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: One concrete outcome, not a general topic.
+      placeholder: Make the GitHub Project the execution layer and remove stale queue ownership from repo docs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this matters
+      description: Explain the operator, product, or maintenance reason.
+      placeholder: The repo currently duplicates execution state across docs and PRs, which causes stale ownership and planning drift.
+    validations:
+      required: true
+
+  - type: textarea
+    id: done_when
+    attributes:
+      label: Done when
+      description: Use explicit, testable acceptance criteria.
+      placeholder: |
+        - the board fields and views exist
+        - repo guidance points to GitHub as the execution layer
+        - stale queue ownership language is removed from current-truth docs
+        - initial real items are seeded on the project
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Expected validation
+      description: Commands, checks, or direct inspections to run before closing the issue.
+      placeholder: |
+        docs build
+        targeted tests
+        direct inspection of the GitHub Project fields and seeded items
+
+  - type: textarea
+    id: docs_to_update
+    attributes:
+      label: Docs to update on completion
+      description: List only the docs that should change if this work succeeds.
+      placeholder: |
+        - docs/implementation/STATUS.md
+        - docs/implementation/00-master-roadmap.md
+        - docs/implementation/08-docs-contract.md
+        - docs/README.md
+    validations:
+      required: true
+
+  - type: textarea
+    id: related_context
+    attributes:
+      label: Related context
+      description: Links to docs, issues, PRs, commands, or screenshots.
+      placeholder: |
+        - docs/implementation/08-docs-contract.md
+        - docs/implementation/00-master-roadmap.md
+        - issue/PR links

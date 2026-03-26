@@ -71,6 +71,12 @@ def _normalize_text(value: str | None) -> str:
     return " ".join(value.strip().split())
 
 
+def _memory_hit_text(memory: Memory) -> str:
+    if memory.kind.value == "procedural":
+        return _normalize_text(memory.content or memory.summary)
+    return _normalize_text(memory.summary or memory.content)
+
+
 def _query_terms(query: str) -> tuple[str, ...]:
     terms: list[str] = []
     seen: set[str] = set()
@@ -252,7 +258,7 @@ async def retrieve_hybrid_memory(
 
     combined_hits: list[HybridMemoryHit] = []
     for memory in [*semantic_memories, *linked_memories]:
-        text = _normalize_text(memory.summary or memory.content)
+        text = _memory_hit_text(memory)
         if not text:
             continue
         score = (

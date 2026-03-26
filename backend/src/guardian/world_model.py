@@ -226,7 +226,7 @@ def build_guardian_world_model(
     goal_memory = list(memory_buckets.get("goal", ()))[:2] or _extract_tagged_memory(memory_context, "goal", limit=2)
     commitment_memory = list(memory_buckets.get("commitment", ()))[:2] or _extract_tagged_memory(memory_context, "commitment", limit=2)
     preference_constraints = list(memory_buckets.get("preference", ()))[:2] or _extract_tagged_memory(memory_context, "preference", limit=2)
-    procedural_constraints = list(memory_buckets.get("procedural", ()))[:2] or _extract_tagged_memory(memory_context, "procedural", limit=2)
+    procedural_constraints = list(memory_buckets.get("procedural", ()))[:4] or _extract_tagged_memory(memory_context, "procedural", limit=4)
     recurring_patterns = list(memory_buckets.get("pattern", ()))[:3] or _extract_tagged_memory(memory_context, "pattern", limit=3)
     project_memory = list(memory_buckets.get("project", ()))[:2] or _extract_tagged_memory(memory_context, "project", limit=2)
     active_routines = list(memory_buckets.get("routine", ()))[:3] or _extract_tagged_memory(memory_context, "routine", limit=3)

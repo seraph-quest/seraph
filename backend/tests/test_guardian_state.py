@@ -250,10 +250,22 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
         importance=0.78,
     )
     await memory_repository.create_memory(
-        content="For advisory nudges, avoid direct interruption during deep-work windows.",
+        content="For advisory interventions, avoid direct interruption during deep-work windows.",
         kind=MemoryKind.procedural,
-        summary="Advisory timing lesson",
+        summary="For advisory interventions, avoid direct interruption during deep-work windows.",
         importance=0.79,
+    )
+    await memory_repository.create_memory(
+        content="For advisory interventions, prefer async native continuation when the user is blocked.",
+        kind=MemoryKind.procedural,
+        summary="For advisory interventions, prefer async native continuation when the user is blocked.",
+        importance=0.78,
+    )
+    await memory_repository.create_memory(
+        content="For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately.",
+        kind=MemoryKind.procedural,
+        summary="For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately.",
+        importance=0.77,
     )
 
     ctx = CurrentContext(
@@ -295,8 +307,12 @@ async def test_build_guardian_state_uses_structured_memory_kinds(async_db):
     assert "Weekly investor note goes out on Friday" in state.world_model.recurring_obligations
     assert "Atlas launch timeline ends on Friday" in state.world_model.project_timeline
     assert "Prefers concise morning briefings" in state.memory_context
-    assert "Advisory timing lesson" in state.memory_context
-    assert "Advisory timing lesson" in state.world_model.active_constraints
+    assert "avoid direct interruption during deep-work windows" in state.memory_context
+    assert "prefer async native continuation when the user is blocked" in state.memory_context
+    assert "bundle lower-urgency check-ins instead of interrupting immediately" in state.memory_context
+    assert "For advisory interventions, avoid direct interruption during deep-work windows." in state.world_model.active_constraints
+    assert "For advisory interventions, prefer async native continuation when the user is blocked." in state.world_model.active_constraints
+    assert "For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately." in state.world_model.active_constraints
     assert "[commitment] Review the Atlas brief tomorrow morning" in state.memory_context
 
 

@@ -46,6 +46,12 @@ def _dedupe_preserve(items: list[str]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _memory_snapshot_text(memory) -> str:
+    if memory.kind == MemoryKind.procedural:
+        return (memory.content or memory.summary or "").strip()
+    return (memory.summary or memory.content or "").strip()
+
+
 async def render_bounded_guardian_snapshot(
     *,
     soul_context: str | None = None,
@@ -57,7 +63,6 @@ async def render_bounded_guardian_snapshot(
             MemoryKind.commitment,
             MemoryKind.preference,
             MemoryKind.communication_preference,
-            MemoryKind.procedural,
             MemoryKind.project,
             MemoryKind.collaborator,
             MemoryKind.obligation,
@@ -65,12 +70,16 @@ async def render_bounded_guardian_snapshot(
         ),
         limit_per_kind=2,
     )
+    procedural_memories = await memory_repository.list_memories(
+        kind=MemoryKind.procedural,
+        limit=4,
+    )
 
     identity_bits = _extract_soul_section_lines(resolved_soul, "Identity", limit=3)
     goal_bits = _dedupe_preserve(
         list(_extract_soul_section_lines(resolved_soul, "Goals", limit=3))
         + [
-            (memory.summary or memory.content or "").strip()
+            _memory_snapshot_text(memory)
             for kind in ("goal", "commitment")
             for memory in grouped.get(kind, [])
         ]
@@ -78,23 +87,23 @@ async def render_bounded_guardian_snapshot(
     preference_bits = _dedupe_preserve(
         list(_extract_soul_section_lines(resolved_soul, "Personality Notes", limit=2))
         + [
-            (memory.summary or memory.content or "").strip()
+            _memory_snapshot_text(memory)
             for kind in ("preference", "communication_preference")
             for memory in grouped.get(kind, [])
         ]
     )
     procedural_bits = _dedupe_preserve(
-        [(memory.summary or memory.content or "").strip() for memory in grouped.get("procedural", [])]
+        [_memory_snapshot_text(memory) for memory in procedural_memories]
     )
     project_bits = _dedupe_preserve(
-        [(memory.summary or memory.content or "").strip() for memory in grouped.get("project", [])]
+        [_memory_snapshot_text(memory) for memory in grouped.get("project", [])]
     )
     collaborator_bits = _dedupe_preserve(
-        [(memory.summary or memory.content or "").strip() for memory in grouped.get("collaborator", [])]
+        [_memory_snapshot_text(memory) for memory in grouped.get("collaborator", [])]
     )
     cadence_bits = _dedupe_preserve(
         [
-            (memory.summary or memory.content or "").strip()
+            _memory_snapshot_text(memory)
             for kind in ("obligation", "routine")
             for memory in grouped.get(kind, [])
         ]
@@ -178,3 +187,10 @@ async def get_or_create_bounded_guardian_snapshot(
 
 def _reset_bounded_guardian_snapshot_cache() -> None:
     _SESSION_BOUNDED_SNAPSHOT_CACHE.clear()
+
+
+def invalidate_bounded_guardian_snapshot_cache(*, session_id: str | None = None) -> None:
+    if session_id is None:
+        _SESSION_BOUNDED_SNAPSHOT_CACHE.clear()
+        return
+    _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)

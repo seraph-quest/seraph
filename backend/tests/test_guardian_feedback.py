@@ -1,5 +1,6 @@
 """Tests for guardian intervention feedback persistence."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -396,3 +397,144 @@ async def test_procedural_memory_sync_updates_in_place_and_archives_neutral_less
     }
 
     assert "timing" in archived_lesson_types
+
+
+async def test_procedural_memory_sync_uses_intervention_specific_wording(async_db):
+    signal = GuardianLearningSignal(
+        intervention_type="alert",
+        helpful_count=0,
+        not_helpful_count=2,
+        acknowledged_count=0,
+        failed_count=0,
+        bias="reduce_interruptions",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="neutral",
+        blocked_state_bias="neutral",
+        suppression_bias="neutral",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=0,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+    )
+
+    await sync_learning_signal_memories(
+        intervention_type="alert",
+        signal=signal,
+        source_session_id="session-alert",
+    )
+
+    delivery_memory = next(
+        memory
+        for memory in await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
+        if json.loads(memory.metadata_json or "{}").get("lesson_type") == "delivery"
+    )
+
+    assert "for alert interventions" in delivery_memory.content.lower()
+    assert "advisory" not in delivery_memory.content.lower()
+    assert delivery_memory.summary == delivery_memory.content
+
+
+async def test_update_outcome_recomputes_procedural_memories_when_failure_is_cleared(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("session-outcome-refresh")
+
+    interventions = []
+    for _ in range(2):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-outcome-refresh",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Retry this later.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        interventions.append(intervention)
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="failed",
+            transport="websocket",
+        )
+
+    active_after_failures = await memory_repository.list_memories(
+        kind=MemoryKind.procedural,
+        limit=20,
+    )
+    active_lesson_types = {
+        json.loads(memory.metadata_json or "{}").get("lesson_type")
+        for memory in active_after_failures
+    }
+    assert "suppression" in active_lesson_types
+    assert "thread" in active_lesson_types
+
+    for intervention in interventions:
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+
+    active_after_recovery = await memory_repository.list_memories(
+        kind=MemoryKind.procedural,
+        limit=20,
+    )
+    recovered_lesson_types = {
+        json.loads(memory.metadata_json or "{}").get("lesson_type")
+        for memory in active_after_recovery
+    }
+    archived_after_recovery = await memory_repository.list_memories(
+        kind=MemoryKind.procedural,
+        limit=20,
+        status="archived",
+    )
+    archived_lesson_types = {
+        json.loads(memory.metadata_json or "{}").get("lesson_type")
+        for memory in archived_after_recovery
+    }
+
+    assert "suppression" not in recovered_lesson_types
+    assert "thread" not in recovered_lesson_types
+    assert "suppression" in archived_lesson_types
+    assert "thread" in archived_lesson_types
+
+
+async def test_sync_scoped_memory_serializes_concurrent_same_scope_writes(async_db):
+    scope = {
+        "writer": "guardian_feedback",
+        "memory_scope": "procedural_learning",
+        "intervention_type": "advisory",
+        "lesson_type": "delivery",
+    }
+    content = "For advisory interventions, reduce direct interruptions after recent negative or failed outcomes."
+
+    await asyncio.gather(
+        *[
+            memory_repository.sync_scoped_memory(
+                kind=MemoryKind.procedural,
+                scope=scope,
+                content=content,
+                summary=content,
+            )
+            for _ in range(5)
+        ]
+    )
+
+    matching = [
+        memory
+        for memory in await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
+        if json.loads(memory.metadata_json or "{}").get("lesson_type") == "delivery"
+    ]
+
+    assert len(matching) == 1

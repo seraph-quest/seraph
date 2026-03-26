@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -87,6 +88,9 @@ class MemorySourceWriteResult:
 
 
 class MemoryRepository:
+    def __init__(self) -> None:
+        self._scoped_memory_locks: dict[str, asyncio.Lock] = {}
+
     @staticmethod
     def _normalize_memory_text(value: str | None) -> str:
         if not isinstance(value, str):
@@ -98,6 +102,23 @@ class MemoryRepository:
         if not isinstance(value, str) or not value.strip():
             return None
         return " ".join(value.strip().split())[:240]
+
+    def _get_scoped_memory_lock(
+        self,
+        *,
+        kind: MemoryKind,
+        scope: dict[str, Any],
+    ) -> asyncio.Lock:
+        key = json.dumps(
+            {"kind": kind.value, "scope": scope},
+            sort_keys=True,
+            default=str,
+        )
+        lock = self._scoped_memory_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._scoped_memory_locks[key] = lock
+        return lock
 
     @staticmethod
     def _normalize_episode_kwargs(
@@ -579,67 +600,72 @@ class MemoryRepository:
                 return False
             return all(payload.get(key) == value for key, value in normalized_scope.items())
 
-        async with get_session() as db:
-            candidates = (
-                await db.execute(
-                    select(Memory)
-                    .where(Memory.kind == normalized_kind)
-                    .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
-                )
-            ).scalars().all()
-            memory = next((item for item in candidates if _matches_scope(item)), None)
+        lock = self._get_scoped_memory_lock(
+            kind=normalized_kind,
+            scope=normalized_scope,
+        )
+        async with lock:
+            async with get_session() as db:
+                candidates = (
+                    await db.execute(
+                        select(Memory)
+                        .where(Memory.kind == normalized_kind)
+                        .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+                    )
+                ).scalars().all()
+                memory = next((item for item in candidates if _matches_scope(item)), None)
 
-            if not normalized_content:
-                if memory is None:
+                if not normalized_content:
+                    if memory is None:
+                        return None
+                    memory.status = MemoryStatus.archived
+                    memory.updated_at = _now()
+                    memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
+                    db.add(memory)
+                    await db.flush()
+                    db.expunge(memory)
                     return None
-                memory.status = MemoryStatus.archived
-                memory.updated_at = _now()
+
+                if memory is None:
+                    memory = Memory(
+                        content=normalized_content,
+                        category=normalized_category,
+                        kind=normalized_kind,
+                        source_session_id=source_session_id,
+                        summary=normalized_summary,
+                        confidence=confidence,
+                        importance=importance,
+                        reinforcement=reinforcement,
+                        metadata_json=json.dumps(merged_metadata, sort_keys=True),
+                        status=MemoryStatus.active,
+                        last_confirmed_at=_normalize_timestamp(last_confirmed_at),
+                    )
+                    db.add(memory)
+                    await db.flush()
+                    db.expunge(memory)
+                    return MemoryWriteResult(memory_id=memory.id)
+
+                memory.content = normalized_content
+                memory.category = normalized_category
+                memory.summary = normalized_summary
+                memory.confidence = confidence
+                memory.importance = importance
+                memory.reinforcement = max(memory.reinforcement, reinforcement)
+                memory.status = MemoryStatus.active
+                if source_session_id:
+                    memory.source_session_id = source_session_id
+                if last_confirmed_at is not None:
+                    memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
                 memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
+                memory.updated_at = _now()
                 db.add(memory)
                 await db.flush()
                 db.expunge(memory)
-                return None
-
-            if memory is None:
-                memory = Memory(
-                    content=normalized_content,
-                    category=normalized_category,
-                    kind=normalized_kind,
-                    source_session_id=source_session_id,
-                    summary=normalized_summary,
-                    confidence=confidence,
-                    importance=importance,
-                    reinforcement=reinforcement,
-                    metadata_json=json.dumps(merged_metadata, sort_keys=True),
-                    status=MemoryStatus.active,
-                    last_confirmed_at=_normalize_timestamp(last_confirmed_at),
+                return MemoryWriteResult(
+                    memory_id=memory.id,
+                    subject_entity_id=memory.subject_entity_id,
+                    project_entity_id=memory.project_entity_id,
                 )
-                db.add(memory)
-                await db.flush()
-                db.expunge(memory)
-                return MemoryWriteResult(memory_id=memory.id)
-
-            memory.content = normalized_content
-            memory.category = normalized_category
-            memory.summary = normalized_summary
-            memory.confidence = confidence
-            memory.importance = importance
-            memory.reinforcement = max(memory.reinforcement, reinforcement)
-            memory.status = MemoryStatus.active
-            if source_session_id:
-                memory.source_session_id = source_session_id
-            if last_confirmed_at is not None:
-                memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
-            memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
-            memory.updated_at = _now()
-            db.add(memory)
-            await db.flush()
-            db.expunge(memory)
-            return MemoryWriteResult(
-                memory_id=memory.id,
-                subject_entity_id=memory.subject_entity_id,
-                project_entity_id=memory.project_entity_id,
-            )
 
     async def create_episode(
         self,

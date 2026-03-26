@@ -76,6 +76,10 @@ class GuardianFeedbackRepository:
         source_session_id: str | None,
     ) -> None:
         from src.memory.procedural import sync_learning_signal_memories
+        from src.memory.snapshots import (
+            invalidate_bounded_guardian_snapshot_cache,
+            refresh_bounded_guardian_snapshot,
+        )
 
         try:
             signal = await self.get_learning_signal(intervention_type=intervention_type)
@@ -84,6 +88,11 @@ class GuardianFeedbackRepository:
                 signal=signal,
                 source_session_id=source_session_id,
             )
+            invalidate_bounded_guardian_snapshot_cache()
+            try:
+                await refresh_bounded_guardian_snapshot()
+            except Exception:
+                logger.debug("Failed to refresh bounded snapshot after procedural memory update", exc_info=True)
         except Exception:
             logger.debug("Failed to refresh procedural learning memories", exc_info=True)
 
@@ -149,6 +158,7 @@ class GuardianFeedbackRepository:
         notification_id: str | None = None,
     ) -> GuardianIntervention | None:
         refreshed: GuardianIntervention | None = None
+        prior_outcome: str | None = None
         async with get_session() as db:
             result = await db.execute(
                 select(GuardianIntervention).where(GuardianIntervention.id == intervention_id)
@@ -156,6 +166,7 @@ class GuardianFeedbackRepository:
             intervention = result.scalar_one_or_none()
             if intervention is None:
                 return None
+            prior_outcome = intervention.latest_outcome
             intervention.latest_outcome = latest_outcome
             intervention.updated_at = _now()
             if transport is not None:
@@ -167,7 +178,7 @@ class GuardianFeedbackRepository:
             await db.refresh(intervention)
             refreshed = intervention
 
-        if latest_outcome == "failed":
+        if latest_outcome == "failed" or prior_outcome == "failed":
             await self._refresh_learning_memories(
                 intervention_type=refreshed.intervention_type,
                 source_session_id=refreshed.session_id,

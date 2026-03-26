@@ -17,6 +17,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_scheduler_job_event
 from src.db.engine import get_session
 from src.db.models import ScheduledJob
+from src.db.session_refs import ensure_sessions_exist
 from src.models.schemas import WSResponse
 from src.observer.delivery import deliver_or_queue
 from src.observer.manager import context_manager
@@ -205,6 +206,7 @@ class ScheduledJobRepository:
             workflow_args_json=workflow_args_json,
         )
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id, created_by_session_id])
             job = ScheduledJob(
                 name=name.strip() or "Scheduled job",
                 enabled=True,
@@ -283,6 +285,7 @@ class ScheduledJobRepository:
             job.action_type = next_action_type
             job.action_spec_json = _dumps(next_action_spec)
             if session_id is not None:
+                await ensure_sessions_exist(db, [session_id])
                 job.session_id = session_id
             job.updated_at = _utc_now()
             await db.flush()

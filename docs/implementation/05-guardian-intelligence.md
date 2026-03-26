@@ -645,6 +645,29 @@ This section records the internal Batch C slices on the feature branch before th
     - scheduled-job execution, consolidation job wiring, and scheduler sync behavior
     - websocket contract regressions
     - onboarding continuity edge cases
+- aggregate PR follow-up after review and full-suite root-cause sweep:
+  - external PR review findings fixed on the branch:
+    - `backend/src/memory/flush.py` now fingerprints flush state from message-level state only, so title-only session edits do not retrigger consolidation or decay work
+    - `backend/src/memory/pipeline/extract.py` now strips and drops blank `soul_updates` keys before consolidation, so malformed LLM payloads cannot fail the whole run on empty section names
+  - full-suite root causes fixed before the branch was ready again:
+    - added `backend/src/db/session_refs.py` and wired session-ref backfill through approval, audit, guardian-feedback, todo, and scheduled-job write paths, then extended that fix to scheduled-job updates too
+    - restored the `src.scheduler.jobs.memory_consolidation.consolidate_session` seam so scheduler tests can still isolate scheduled consolidation behavior
+    - repaired the websocket test seam after the profile split by patching `src.profile.service.get_db` in the shared sync websocket client helper, which stopped onboarding state from leaking through the real profile store across tests
+    - fixed goal-tree deletion under enforced foreign keys by flushing descendant deletes in dependency order instead of relying on one batched self-referential delete
+    - kept exact caller session IDs in `ensure_sessions_exist(...)` instead of trimming them, which prevents phantom placeholder sessions like `"s1"` from being synthesized alongside a real `" s1 "` session row
+    - hardened the websocket drain-timeout path and the eval-harness timeout shim together so the runtime cleanup stays warning-free while the harness still emulates real `asyncio.wait_for(...)` behavior for both coroutines and task-like awaitables
+  - subagent review:
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) and `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) both caught the remaining goal-delete dependency bug before the final full-suite rerun
+    - `Zeno` also flagged the exact-session-id placeholder drift risk, and `Kepler` flagged the missing scheduled-job update backfill; both were fixed on the branch and regression-covered
+    - follow-up recheck:
+      - `Kepler` reported no further material findings after the goal-delete, exact-session-id, and scheduled-job-update fixes landed
+- final full backend sweep on the current branch state:
+  - result: `1298 passed, 27 warnings`
+  - command:
+    - `backend/.venv/bin/python -m pytest backend/tests -q`
+  - residual warnings outside the Batch C follow-up diff:
+    - `backend/tests/test_activity_digest.py::TestActivityDigest::test_llm_timeout` still emits an unawaited local mock coroutine warning from the test’s timeout helper
+    - `backend/src/memory/vector_store.py` still emits existing `table_names()` deprecation warnings through the eval-harness and timeout boundaries
 
 ## Non-Goals
 

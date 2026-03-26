@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from src.db.engine import get_session as get_db
 from src.profile.service import (
     get_or_create_profile,
     get_profile_snapshot,
@@ -31,6 +32,7 @@ async def restart_onboarding():
 
 
 __all__ = [
+    "get_db",
     "get_or_create_profile",
     "get_profile_snapshot",
     "mark_onboarding_complete",

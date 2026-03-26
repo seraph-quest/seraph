@@ -110,8 +110,14 @@ class GoalRepository:
             descendants = await db.execute(
                 select(Goal).where(col(Goal.path).startswith(descendant_path))
             )
-            for d in descendants.scalars().all():
+            descendant_rows = sorted(
+                descendants.scalars().all(),
+                key=lambda item: (item.path.count("/"), item.created_at),
+                reverse=True,
+            )
+            for d in descendant_rows:
                 await db.delete(d)
+                await db.flush()
 
             await db.delete(goal)
             return True

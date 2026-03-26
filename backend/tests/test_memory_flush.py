@@ -37,6 +37,25 @@ async def test_flush_session_memory_deduplicates_unchanged_session(async_db):
     assert mock_consolidate.await_args_list[1].kwargs["trigger"] == "post_response"
 
 
+async def test_flush_session_memory_ignores_title_only_updates(async_db):
+    manager = SessionManager()
+    await manager.get_or_create("flush-title-only")
+    await manager.add_message("flush-title-only", "user", "Remember Atlas launch for Friday.")
+    await manager.add_message("flush-title-only", "assistant", "I will keep that commitment in memory.")
+
+    with patch(
+        "src.memory.consolidator.consolidate_session",
+        AsyncMock(return_value=ConsolidationResult(outcome="succeeded", should_cache_fingerprint=True)),
+    ) as mock_consolidate:
+        first = await flush_session_memory("flush-title-only", trigger="post_response", manager=manager)
+        await manager.update_title("flush-title-only", "Atlas launch planning")
+        second = await flush_session_memory("flush-title-only", trigger="session_end", manager=manager)
+
+    assert first is True
+    assert second is False
+    assert mock_consolidate.await_count == 1
+
+
 async def test_flush_session_memory_deduplicates_overlapping_triggers(async_db):
     manager = SessionManager()
     await manager.get_or_create("flush-race")

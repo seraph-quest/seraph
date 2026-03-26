@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import logging
+from contextlib import suppress
 from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -215,7 +216,18 @@ async def websocket_chat(websocket: WebSocket):
                         elif isinstance(step, FinalAnswerStep):
                             final_result = await redact_secrets_in_text(str(step.output))
 
-                await asyncio.wait_for(_drain_queue(), timeout=settings.agent_chat_timeout)
+                drain_task = asyncio.create_task(
+                    _drain_queue(),
+                    name=f"ws-drain:{session.id[:8]}",
+                )
+                try:
+                    await asyncio.wait_for(drain_task, timeout=settings.agent_chat_timeout)
+                except Exception:
+                    if not drain_task.done():
+                        drain_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await drain_task
+                    raise
 
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)

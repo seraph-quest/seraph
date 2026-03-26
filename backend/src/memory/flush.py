@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import threading
 from typing import TYPE_CHECKING
 
+from sqlalchemy import func
 from sqlmodel import select
 
 from src.approval.runtime import get_current_session_id
@@ -37,18 +38,34 @@ async def _build_session_flush_fingerprint(session_id: str) -> SessionFlushFinge
         if session is None:
             return None
 
-        message_count = len(
-            (
-                await db.execute(
-                    select(Message.id).where(Message.session_id == session_id)
-                )
-            ).all()
-        )
+        message_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.session_id == session_id)
+            )
+        ).scalar_one()
+        latest_message = (
+            await db.execute(
+                select(Message.id, Message.created_at)
+                .where(Message.session_id == session_id)
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(1)
+            )
+        ).first()
         session_created_at = session.created_at.isoformat()
-        session_updated_at = session.updated_at.isoformat()
+        if latest_message is None:
+            fingerprint = "empty:0"
+        else:
+            latest_message_id, latest_message_created_at = latest_message
+            fingerprint = (
+                f"{latest_message_created_at.isoformat()}:"
+                f"{latest_message_id}:"
+                f"{message_count}"
+            )
         return SessionFlushFingerprint(
             cache_key=f"{session.id}:{session_created_at}",
-            fingerprint=f"{session_updated_at}:{message_count}",
+            fingerprint=fingerprint,
         )
 
 

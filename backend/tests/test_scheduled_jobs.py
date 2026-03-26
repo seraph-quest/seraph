@@ -8,7 +8,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import get_current_session_id
 from src.observer.intervention_policy import DeliveryDecision, InterventionAction, InterventionDecision
 from src.scheduler.scheduled_jobs import execute_scheduled_job, scheduled_job_repository
-from src.db.models import ScheduledJob
+from src.db.models import ScheduledJob, Session
 
 
 class DummyWorkflowTool(Tool):
@@ -219,6 +219,35 @@ async def test_execute_scheduled_job_redacts_runtime_error_details(async_db):
 
 
 @pytest.mark.asyncio
+async def test_update_scheduled_job_backfills_new_session_reference(async_db):
+    job = await scheduled_job_repository.create_job(
+        name="Morning check",
+        cron="0 9 * * *",
+        timezone_name="UTC",
+        target_type="message",
+        content="Stand up and review priorities.",
+        intervention_type="advisory",
+        urgency=3,
+        workflow_name="",
+        workflow_args_json="",
+        session_id="s1",
+        created_by_session_id="s1",
+    )
+
+    updated = await scheduled_job_repository.update_job(
+        job["id"],
+        session_id="s2",
+    )
+
+    assert updated is not None
+    assert updated["session_id"] == "s2"
+
+    stored = await scheduled_job_repository.get_job(job["id"])
+    assert stored is not None
+    assert stored["session_id"] == "s2"
+
+
+@pytest.mark.asyncio
 async def test_sync_scheduled_jobs_skips_invalid_rows_and_keeps_valid_jobs(async_db):
     from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
 
@@ -238,6 +267,8 @@ async def test_sync_scheduled_jobs_skips_invalid_rows_and_keeps_valid_jobs(async
         assert scheduler is not None
         try:
             async with async_db() as db:
+                db.add(Session(id="s1", title="Test session"))
+                await db.flush()
                 db.add(
                     ScheduledJob(
                         id="broken-job",

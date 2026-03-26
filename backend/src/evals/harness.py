@@ -819,7 +819,7 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
         mock_agent.run.return_value = iter(_make_agent_steps())
 
         async def _timeout_wait_for(coro: Any, timeout: float):
-            task = asyncio.create_task(coro)
+            task = coro if isinstance(coro, asyncio.Future) else asyncio.create_task(coro)
             await asyncio.sleep(0)
             task.cancel()
             with suppress(asyncio.CancelledError):

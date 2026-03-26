@@ -10,6 +10,7 @@ from sqlmodel import select
 
 from src.db.engine import get_session
 from src.db.models import GuardianIntervention
+from src.db.session_refs import ensure_sessions_exist
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ class GuardianFeedbackRepository:
             notification_id=notification_id,
         )
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             db.add(intervention)
             await db.flush()
             await db.refresh(intervention)

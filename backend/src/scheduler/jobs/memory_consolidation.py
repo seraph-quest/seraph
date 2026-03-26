@@ -12,6 +12,11 @@ from src.memory.flush import flush_session_memory
 logger = logging.getLogger(__name__)
 
 
+async def consolidate_session(session_id: str) -> bool:
+    """Keep a local indirection so tests can isolate consolidation behavior."""
+    return await flush_session_memory(session_id, trigger="scheduled_catchup")
+
+
 async def run_memory_consolidation() -> None:
     """Find sessions with recent unconsolidated messages and consolidate them.
 
@@ -48,7 +53,7 @@ async def run_memory_consolidation() -> None:
         for session in sessions:
             try:
                 visited += 1
-                if await flush_session_memory(session.id, trigger="scheduled_catchup"):
+                if await consolidate_session(session.id):
                     consolidated += 1
             except Exception:
                 failed += 1

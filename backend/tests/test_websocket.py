@@ -53,6 +53,7 @@ def _make_sync_client_with_db():
         "src.approval.repository.get_session",
         "src.audit.repository.get_session",
         "src.goals.repository.get_session",
+        "src.profile.service.get_db",
         "src.vault.repository.get_session",
         "src.api.profile.get_db",
     ]

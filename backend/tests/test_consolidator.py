@@ -496,6 +496,36 @@ class TestConsolidateSession:
             await consolidate_session("s1")
             mock_soul.assert_awaited_once_with("Goals", "- Build an AI startup")
 
+    async def test_ignores_blank_soul_update_keys(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "I want to build an AI startup.")
+        await sm.add_message("s1", "assistant", "I will record that as a durable goal.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {
+                "": "ignore",
+                "   ": "ignore-too",
+                " Goals ": "- Build an AI startup",
+            },
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch("src.memory.consolidator.add_memory"), patch(
+            "src.memory.consolidator.update_profile_soul_section",
+            AsyncMock(return_value="# Guardian Record\n\n## Goals\n- Build an AI startup"),
+        ) as mock_soul:
+            await consolidate_session("s1")
+
+        mock_soul.assert_awaited_once_with("Goals", "- Build an AI startup")
+
     async def test_soul_updates_persist_structured_profile_projection(self, async_db, sm):
         await sm.get_or_create("s1")
         await sm.add_message("s1", "user", "I want to build an AI startup.")

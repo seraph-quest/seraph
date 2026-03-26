@@ -25,6 +25,7 @@ from src.db.models import (
     Session,
     SessionTodo,
 )
+from src.db.session_refs import ensure_sessions_exist
 from src.memory.episodes import build_message_episode
 from src.memory.flush import flush_session_memory
 
@@ -724,6 +725,7 @@ class SessionManager:
 
     async def replace_todos(self, session_id: str, items: list[dict]) -> list[dict]:
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             existing = await db.execute(
                 select(SessionTodo).where(SessionTodo.session_id == session_id)
             )
@@ -752,6 +754,7 @@ class SessionManager:
 
     async def append_todos(self, session_id: str, items: list[dict]) -> list[dict]:
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             existing = await db.execute(
                 select(SessionTodo)
                 .where(SessionTodo.session_id == session_id)

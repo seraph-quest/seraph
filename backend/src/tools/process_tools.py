@@ -8,6 +8,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -162,6 +163,8 @@ def _normalize_command(command: str) -> str:
         raise ValueError(f"command '{normalized}' is blocked in the process runtime.")
     if lowered not in _COMMAND_NAME_ALLOWLIST:
         raise ValueError(f"command '{normalized}' is not allowed in the process runtime.")
+    if lowered in {"python", "python3"}:
+        return sys.executable
     return normalized
 
 

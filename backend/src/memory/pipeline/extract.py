@@ -79,9 +79,9 @@ async def extract_session_memories(
     )
     soul_updates = data.get("soul_updates", {})
     normalized_soul_updates = {
-        str(section): content
+        str(section).strip(): content
         for section, content in soul_updates.items()
-        if isinstance(section, str) and isinstance(content, str)
+        if isinstance(section, str) and str(section).strip() and isinstance(content, str)
     } if isinstance(soul_updates, dict) else {}
     return SessionMemoryExtraction(
         memories=tuple(extracted_memories),

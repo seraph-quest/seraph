@@ -668,6 +668,28 @@ This section records the internal Batch C slices on the feature branch before th
   - residual warnings outside the Batch C follow-up diff:
     - `backend/tests/test_activity_digest.py::TestActivityDigest::test_llm_timeout` still emits an unawaited local mock coroutine warning from the test’s timeout helper
     - `backend/src/memory/vector_store.py` still emits existing `table_names()` deprecation warnings through the eval-harness and timeout boundaries
+- CI follow-up after GitHub Actions run `23605588259`:
+  - root cause:
+    - the remaining PR failures were not new memory-behavior regressions; they were teardown races where background `flush_session_memory(...)` tasks outlived test-scoped in-memory SQLite engines and hit closed databases during the eval-harness phase
+  - fixes:
+    - added `drain_tracked_tasks(...)` in `backend/src/utils/background.py` so tracked background work can be awaited explicitly at shutdown
+    - updated `backend/src/app.py`, `backend/tests/conftest.py`, and `backend/src/evals/harness.py` so shutdown and teardown now drain tracked background work before resource disposal, but still complete cleanup even if the drain path reports a stubborn-task failure
+    - added `backend/tests/test_background.py` to cover the normal pending-task path, cancellation of stalled work, and the explicit failure path for cancellation-resistant tasks
+  - subagent review:
+    - `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) caught two real issues during the first implementation attempt:
+      - the initial bounded drain still had an unbounded post-cancel wait
+      - the follow-up raise path aborted teardown before cleanup finished
+    - both issues were fixed before the final validation pass
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the final diff and reported no current concrete findings
+  - final CI-parity validation on the current branch state:
+    - targeted subset:
+      - result: `11 passed, 24 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_background.py tests/test_eval_harness.py -q`
+    - full backend suite:
+      - result: `1301 passed, 27 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
 
 ## Non-Goals
 

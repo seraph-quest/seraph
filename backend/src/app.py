@@ -18,6 +18,7 @@ from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_schedu
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
+from src.utils.background import drain_tracked_tasks
 from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -112,7 +113,15 @@ async def lifespan(app: FastAPI):
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()
-    await close_db()
+    shutdown_error: Exception | None = None
+    try:
+        await drain_tracked_tasks(timeout_seconds=5.0)
+    except Exception as exc:
+        shutdown_error = exc
+    finally:
+        await close_db()
+    if shutdown_error is not None:
+        raise shutdown_error
 
 
 def create_app() -> FastAPI:

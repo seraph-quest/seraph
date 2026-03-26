@@ -89,6 +89,7 @@ from src.tools.browser_tool import browse_webpage
 from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
+from src.utils.background import drain_tracked_tasks
 from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
 from src.vault.repository import VaultRepository
@@ -380,7 +381,15 @@ async def _patched_async_db(*patch_targets: str):
                 stack.enter_context(patch(target, _get_session))
             yield
     finally:
-        await engine.dispose()
+        teardown_error: Exception | None = None
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+        except Exception as exc:
+            teardown_error = exc
+        finally:
+            await engine.dispose()
+        if teardown_error is not None:
+            raise teardown_error
 
 
 def _make_sync_client_with_db():

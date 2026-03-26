@@ -153,6 +153,16 @@ def _anchor_tokens(text: str) -> set[str]:
     return set(tokens[:4])
 
 
+def _shares_entity(memory: Memory, peer: Memory) -> bool:
+    return (
+        memory.subject_entity_id
+        and memory.subject_entity_id == peer.subject_entity_id
+    ) or (
+        memory.project_entity_id
+        and memory.project_entity_id == peer.project_entity_id
+    )
+
+
 def _comparable(memory: Memory, peer: Memory) -> bool:
     if memory.id == peer.id:
         return False
@@ -172,13 +182,7 @@ def _comparable(memory: Memory, peer: Memory) -> bool:
         and memory.project_entity_id != peer.project_entity_id
     ):
         return False
-    shared_entity = (
-        memory.subject_entity_id
-        and memory.subject_entity_id == peer.subject_entity_id
-    ) or (
-        memory.project_entity_id
-        and memory.project_entity_id == peer.project_entity_id
-    )
+    shared_entity = _shares_entity(memory, peer)
     if shared_entity:
         return True
     return len(_anchor_tokens(_normalized_text(memory)) & _anchor_tokens(_normalized_text(peer))) >= 2
@@ -189,7 +193,9 @@ def _contradictory(memory: Memory, peer: Memory) -> bool:
         return False
     left_text = _normalized_text(memory)
     right_text = _normalized_text(peer)
-    if len(_anchor_tokens(left_text) & _anchor_tokens(right_text)) < 2:
+    overlap = len(_anchor_tokens(left_text) & _anchor_tokens(right_text))
+    required_overlap = 1 if _shares_entity(memory, peer) else 2
+    if overlap < required_overlap:
         return False
     left_polarity = _cue_polarity(left_text)
     right_polarity = _cue_polarity(right_text)
@@ -296,8 +302,14 @@ async def apply_memory_decay_policies(
             step, age_days = _staleness_step(memory, now=resolved_now)
             metadata = json.loads(memory.metadata_json or "{}")
             prior_step = int(metadata.get("decay_step", 0) or 0)
+            delta = 0
             if step > prior_step:
                 delta = step - prior_step
+            elif step >= 4:
+                # Terminal stale rows keep decaying across later maintenance runs until they archive.
+                delta = 1
+
+            if delta > 0:
                 memory.confidence = max(0.15, float(memory.confidence or 0.0) - (0.08 * delta))
                 memory.reinforcement = max(
                     0.0,

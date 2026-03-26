@@ -35,6 +35,37 @@ async def test_apply_memory_decay_archives_stale_memories(async_db):
 
 
 @pytest.mark.asyncio
+async def test_apply_memory_decay_repeats_terminal_decay_until_archive(async_db):
+    reference_now = datetime.now(timezone.utc)
+    old_confirmed_at = reference_now - timedelta(days=800)
+
+    created = await memory_repository.create_memory(
+        content="User prefers redundant weekly recap messages.",
+        kind=MemoryKind.communication_preference,
+        summary="User prefers redundant weekly recap messages.",
+        confidence=0.95,
+        importance=0.35,
+        reinforcement=2.0,
+        last_confirmed_at=old_confirmed_at,
+    )
+
+    final_result = None
+    for _ in range(5):
+        final_result = await apply_memory_decay_policies(now=reference_now)
+
+    archived_memories = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+        status="archived",
+    )
+
+    assert final_result is not None
+    assert final_result.decayed_count == 1
+    assert final_result.archived_count == 1
+    assert [memory.id for memory in archived_memories] == [created.memory_id]
+
+
+@pytest.mark.asyncio
 async def test_apply_memory_decay_supersedes_contradictory_project_memory(async_db):
     atlas = await memory_repository.get_or_create_entity(
         canonical_name="Atlas launch",
@@ -79,6 +110,48 @@ async def test_apply_memory_decay_supersedes_contradictory_project_memory(async_
     assert any(edge.edge_type == MemoryEdgeType.supersedes for edge in edges)
     assert "Atlas launch on track" in snapshot
     assert "Atlas launch delayed" not in snapshot
+
+
+@pytest.mark.asyncio
+async def test_apply_memory_decay_detects_same_entity_short_contradictions(async_db):
+    slack = await memory_repository.get_or_create_entity(
+        canonical_name="Slack",
+        entity_type="organization",
+    )
+    older = await memory_repository.create_memory(
+        content="Prefers Slack.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers Slack",
+        importance=0.7,
+        confidence=0.6,
+        subject_entity_id=slack.id,
+        last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=7),
+    )
+    newer = await memory_repository.create_memory(
+        content="Avoid Slack.",
+        kind=MemoryKind.communication_preference,
+        summary="Avoid Slack",
+        importance=0.9,
+        confidence=0.9,
+        subject_entity_id=slack.id,
+        last_confirmed_at=datetime.now(timezone.utc),
+    )
+
+    result = await apply_memory_decay_policies()
+    active_preferences = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+    )
+    superseded_preferences = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+        status="superseded",
+    )
+
+    assert result.contradiction_count == 1
+    assert result.superseded_count == 1
+    assert [memory.id for memory in active_preferences] == [newer.memory_id]
+    assert [memory.id for memory in superseded_preferences] == [older.memory_id]
 
 
 @pytest.mark.asyncio

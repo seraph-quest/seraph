@@ -564,9 +564,17 @@ This section records the internal Batch C slices on the feature branch before th
   - the first vector-status filter only dropped stale vector hits when at least one active structured-memory ID was still present, so a vector-only result set made entirely of archived or superseded rows could still leak stale text back into hybrid retrieval until the filter was tightened and regression-covered
   - the first contradiction-polarity pass treated `helpful` as present inside `not helpful`, and it relied on summary-first text that could drop the polarity cue entirely, so contradictory communication-preference memories could survive decay until cue matching was hardened and the heuristic started reading combined summary-plus-content text
 - subagent review:
-  - `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) and `Ampere` (`019d29d6-6450-7203-ac60-87ba7e9bfd83`) were both asked to review the completed slice for bugs, regressions, and false claims, but both review threads stalled before returning findings
-  - an additional follow-up review request was sent after the vector-status and polarity fixes landed; if that review also stalls, the aggregate Batch C PR should say so explicitly instead of implying a returned clean review
-  - because none of the reviewer requests have returned findings so far, the completion record for this slice currently relies on the targeted decay suite, the broader adjacent-memory suite, and the local regressions fixed above; if any stalled review later replies before the aggregate Batch C PR is opened, those notes should be appended rather than retroactively implied here
+  - `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) was asked to review the completed slice for bugs, regressions, and false claims, but that review thread stalled before returning findings
+  - `Ampere` (`019d29d6-6450-7203-ac60-87ba7e9bfd83`) returned two concrete findings after the initial slice commit:
+    - terminal stale memories could get stuck active forever because `decay_step = 4` saturated the step function while confidence and reinforcement only decayed when the step number increased
+    - same-entity contradictions with short wording, like `Prefers Slack` versus `Avoid Slack`, could stay active together because contradiction detection still required two overlapping anchor tokens even when the memories already shared a linked entity
+  - fixed before the slice stayed marked complete on the branch:
+    - terminal stale rows now continue decaying one pass at a time after step 4 until archival thresholds are reached, and `backend/tests/test_memory_decay.py` now covers repeated maintenance runs so high-confidence stale rows cannot remain active indefinitely
+    - same-entity contradictions now require only one anchor overlap instead of two, so short linked preference reversals are superseded correctly without loosening the broader non-entity contradiction check
+  - recheck status:
+    - `Ampere` rechecked the follow-up patch and reported no material findings after the step-4 and short-contradiction fixes landed
+  - residual risk:
+    - `Ampere` also noted that concurrent decay workers can still race on direct edge creation inside `backend/src/memory/decay.py`; that remains recorded as residual risk for this slice rather than a blocker because the shipped contract here is stale-memory suppression and contradiction cleanup, not cross-worker edge-uniqueness hardening
 - deferred to later Batch C slices:
   - behavioral proof that the new decay and adaptation rules change end-to-end guardian behavior still belongs to `guardian-memory-behavioral-evals-v1`
 

@@ -17,7 +17,9 @@ os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 from src.app import create_app
 from src.llm_runtime import _reset_target_health
 from src.db.engine import _ensure_search_indexes
+from src.memory.flush import _reset_memory_flush_state
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
+from src.utils.background import drain_tracked_tasks
 
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
@@ -26,7 +28,7 @@ _PATCH_TARGETS = [
     "src.approval.repository.get_session",
     "src.goals.repository.get_session",
     "src.audit.repository.get_session",
-    "src.api.profile.get_db",  # aliased: `import get_session as get_db`
+    "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.scheduler.scheduled_jobs.get_session",
@@ -35,6 +37,8 @@ _PATCH_TARGETS = [
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",
+    "src.memory.decay.get_session",
+    "src.memory.flush.get_session",
     "src.memory.hybrid_retrieval.get_session",
 ]
 
@@ -84,9 +88,17 @@ async def async_db():
 
     yield _get_session
 
-    for p in patches:
-        p.stop()
-    await engine.dispose()
+    teardown_error: Exception | None = None
+    try:
+        await drain_tracked_tasks(timeout_seconds=5.0)
+    except Exception as exc:
+        teardown_error = exc
+    finally:
+        for p in patches:
+            p.stop()
+        await engine.dispose()
+    if teardown_error is not None:
+        raise teardown_error
 
 
 # ── App / HTTP client fixtures ──────────────────────────
@@ -123,3 +135,10 @@ def reset_bounded_snapshot_cache():
     _reset_bounded_guardian_snapshot_cache()
     yield
     _reset_bounded_guardian_snapshot_cache()
+
+
+@pytest.fixture(autouse=True)
+def reset_memory_flush_cache():
+    _reset_memory_flush_state()
+    yield
+    _reset_memory_flush_state()

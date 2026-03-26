@@ -397,6 +397,321 @@ This section records the internal Batch B slices on the feature branch before th
   - a follow-up subagent review was started with `Einstein` (`019d2695-7bf7-7b10-97dd-6145a50ea090`) for the observer-entity reuse and fallback-event-search fixes
   - that review thread stalled before returning findings, so the review record relies on the targeted regression tests for `backend/tests/test_observer_manager.py` and `backend/tests/test_session.py` instead of claiming an unreturned clean review
 
+## Batch C Branch Review Log
+
+This section records the internal Batch C slices on the feature branch before the aggregate GitHub PR is opened.
+
+### `memory-flush-lifecycle-hooks-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `backend/src/memory/flush.py` as the centralized lifecycle flush entrypoint with session-fingerprint dedupe plus in-flight overlap protection so repeated triggers do not double-write the same unchanged session
+  - routed chat-response flushes, websocket-response flushes, and scheduler catch-up flushes through that helper instead of scheduling raw consolidation calls directly
+  - added pre-compaction flushing from the session history path when the context window is about to require a middle summary, while explicitly preventing recursive self-triggering from the consolidator history read
+  - added session-end flushing before session teardown and workflow-completion flushing on successful workflow completion, and carried trigger plus workflow metadata into consolidation audit records
+  - tightened scheduler telemetry so it records visited sessions separately from sessions that actually flushed instead of overstating consolidation count
+  - follow-up hardening on the same branch now caches flush fingerprints only after clean or skipped consolidation outcomes, so non-primary lifecycle hooks can perform a real first flush or retry after a failed or partial consolidation instead of silently treating the session state as already flushed
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/flush.py backend/src/memory/consolidator.py backend/src/agent/context_window.py backend/src/agent/session.py backend/src/api/chat.py backend/src/api/ws.py backend/src/scheduler/jobs/memory_consolidation.py backend/src/workflows/manager.py backend/tests/conftest.py backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py -q`
+- subagent review:
+  - reviewer: `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`)
+  - review target: bug risk, regression risk, concurrency issues, and misleading implementation claims around the new lifecycle flush path
+  - initial findings:
+    - non-primary lifecycle hooks could not perform the first flush for a session because the helper currently arms `session_end`, `pre_compaction`, and `workflow_completed` only after a primary `post_response` or `scheduled_catchup` flush has happened
+    - overlapping flushes could race and double-write the same session state
+    - wording needed to stay explicit that workflow completion currently performs a synchronous full consolidation call, not a lightweight background flush
+    - scheduler telemetry originally counted visited sessions as consolidated sessions even when no flush happened
+  - fixed before the slice stayed marked complete:
+    - added in-flight fingerprint dedupe in `backend/src/memory/flush.py` so overlapping flush requests for the same session state collapse to one consolidation run
+    - changed scheduler telemetry to distinguish visited-session count from actual flush count
+    - narrowed the implementation wording in docs and review notes so the workflow hook is described as the synchronous consolidation path it actually is
+  - follow-up review fixes after the next slice landed:
+    - `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`) returned concrete findings showing that failed or partial consolidations were still poisoning the flush fingerprint cache and that the helper still blocked non-primary hooks when no earlier flush had armed the session
+    - the branch now propagates consolidation outcome back into `backend/src/memory/flush.py`, caches fingerprints only for `succeeded` or `skipped` runs, and allows `session_end`, `pre_compaction`, and `workflow_completed` to act as genuine first-flush or retry hooks for unchanged session state
+    - the same follow-up exposed a delete-path regression once `session_end` flushes became real, so `backend/src/agent/session.py` now deletes session-scoped audit events, approval requests, queued insights, and guardian interventions before removing the session row
+- deferred to later Batch C slices:
+  - this slice still runs the existing full consolidation path rather than a lighter staged capture or merge pipeline
+  - higher-salience capture, staged extraction, and merge-strengthen logic belong in `multi-stage-memory-consolidation-v1`
+
+### `multi-stage-memory-consolidation-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - refactored `backend/src/memory/consolidator.py` into an explicit pipeline with `capture`, `extract`, `merge`, and `strengthen` stages under `backend/src/memory/pipeline/` instead of keeping all extraction and write behavior in one monolithic function
+  - added capture-stage source-message collection so structured memories can keep concrete message provenance instead of only a coarse session id
+  - added duplicate-aware structured memory merging in `backend/src/memory/repository.py` and `backend/src/memory/pipeline/merge.py` so exact repeated memories update confidence, importance, reinforcement, and source links instead of creating a new structured row and a new vector row every time
+  - kept the vector backend active for newly created semantic memories while intentionally skipping redundant vector writes when the pipeline merges into an existing durable memory row
+  - extended consolidation audit details with captured-source count plus created, merged, and source-link counts so the runtime can distinguish append-heavy runs from update-heavy runs
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/memory/pipeline/__init__.py backend/src/memory/pipeline/capture.py backend/src/memory/pipeline/extract.py backend/src/memory/pipeline/merge.py backend/src/memory/pipeline/strengthen.py backend/src/agent/session.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_flush.py backend/tests/test_session.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_memory_repository.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_session.py -q`
+- review notes:
+  - local regressions caught and fixed before the slice stayed complete:
+    - exact-duplicate merge initially failed on offset-naive vs offset-aware `last_confirmed_at` comparisons, which left reinforcement unchanged and prevented merge-path audit counts from moving
+    - moving link resolution into the pipeline briefly broke the existing `src.memory.consolidator.resolve_memory_links` patch seam used by tests, so the consolidator now passes the resolver into the pipeline explicitly instead of silently changing that surface
+    - the entity-link-failure path originally kept the old test expectation of a dangling vector write, but the staged pipeline now resolves links before vector writes on new memories; the final tests document that narrower and safer behavior honestly instead of claiming the old partial-write shape is still live
+  - subagent review:
+    - returned findings from `Nash` (`019d26bd-dbac-7c50-a42e-166ed2a9760c`) and `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`) showed that the first pipeline cut still had real correctness gaps:
+      - snapshot refresh failures crashed into the hard-failure path instead of staying partial because the old `partial_write_count` local was gone and the aggregate audit outcome ignored snapshot-only failures
+      - source capture pulled the oldest session window rather than the newest one, so long sessions could attribute new memories to stale early messages
+      - duplicate merge matching was entity-asymmetric, which blocked later backfill of missing links and also let an unlinked repeat merge into a linked row
+      - the primary source row for newly created memories used synthesized summary text under `source_type="session"`, which overstated true message provenance and suppressed later real message-source rows for the same `source_message_id`
+      - merge-path confirmations could not repair a previously missing `embedding_id`, so exact repeats would strengthen the structured row forever without restoring vector coverage
+    - fixed before this slice stayed marked complete on the branch:
+      - `backend/src/memory/consolidator.py` now returns explicit outcome metadata to the flush layer, counts snapshot refresh failure as a partial write, and keeps snapshot-only failure runs in `partially_succeeded` instead of crashing into `failed`
+      - `backend/src/memory/pipeline/capture.py` now reads the newest message window, not the oldest ascending page
+      - `backend/src/memory/repository.py` now matches linked extractions against same-id or unlinked rows while refusing to merge a later unlinked extraction into an already linked row, and it accepts explicit message-backed source snippets for primary provenance rows
+      - `backend/src/memory/pipeline/merge.py` now drops the zero-overlap fallback, counts source links only when a real message match exists, stores the primary source as an actual `message` source row with the message snippet, repairs missing embeddings on the merge path when a repeated confirmation can restore vector coverage, falls back to session-level provenance plus zero reinforcement delta when a same-session retry has no newly recorded evidence, and applies merge-strengthening plus merge-path provenance in one repository transaction so a failed provenance write cannot leave behind a stronger row that will strengthen again on retry
+      - `backend/src/agent/session.py` now deletes the extra session-scoped rows that became reachable once `session_end` flushes were allowed to run for real before session teardown
+    - review status still open:
+      - the follow-up request to `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`) did not return before this log update, so the recorded review evidence is the two returned subagent findings plus the targeted regressions above rather than an invented clean review
+    - final recheck:
+      - `Aquinas` (`019d26ce-8df7-73e2-9586-b3a068c6883c`) reviewed the finished follow-up changes after the retry-idempotence, session-provenance fallback, and atomic merge-provenance fixes landed and reported no material findings
+  - remaining limitation carried forward intentionally:
+    - this slice merges exact duplicate memories by kind plus normalized summary/content and strengthens them with added provenance, but it does not yet perform contradiction detection, semantic dedupe, or supersession across near-duplicate statements
+- deferred to later Batch C slices:
+  - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+  - the soul surface is still file-backed rather than a projection from structured identity state
+  - outcome-derived procedural memory is still separate from this consolidation pipeline until the later procedural-memory slice lands
+
+### `soul-projection-and-structured-profile-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `backend/src/profile/service.py` as the structured profile service for the singleton user record instead of leaving profile creation, onboarding state, and soul access split across API handlers and file utilities
+  - moved `soul.md` rendering and parsing into `backend/src/memory/soul.py` so the file becomes a readable projection surface while `user_profiles.preferences_json` plus `user_profiles.soul_text` hold the structured durable state underneath it
+  - updated `/api/user/profile` to return `soul_sections` and `soul_text` from the structured profile snapshot instead of exposing only a thin onboarding payload
+  - routed guardian-state synthesis and session consolidation through `sync_soul_file_to_profile()` before they read soul context, and routed consolidation soul writes through `update_profile_soul_section()` so durable soul updates land in the structured profile before they are projected back out to disk
+  - hardened projection sync so a missing `soul.md` is recreated from the stored profile state, and the stale-file guard now uses a soul-specific timestamp stored inside the structured payload instead of the generic profile `updated_at`
+  - changed section updates to optimistic compare-and-swap writes on `preferences_json`, so concurrent soul updates retry against the latest structured state instead of silently dropping one section change
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/soul.py backend/src/profile/service.py backend/src/api/profile.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py -q`
+- local regressions fixed before subagent review:
+  - the first structured-profile cut left `read_soul()` falling back to defaults when `soul.md` was missing even if the profile already had stored identity state, so sync now re-projects the file from the structured profile before guardian-state or consolidation reads it again
+  - the first sync cut could also let an older projection file overwrite newer structured state, so the profile now tracks the last projected hash plus a soul-specific update timestamp and restores structured state only when the on-disk file is older than that soul-specific marker
+- subagent review:
+  - `Chandrasekhar` (`019d26f3-954e-7db0-b9a8-9bae53a629e9`) returned two concrete findings after the initial slice commit:
+    - the stale-file guard was incorrectly using `profile.updated_at`, so unrelated onboarding writes could mark a newer manual `soul.md` edit as stale and overwrite it from older structured state
+    - concurrent `update_profile_soul_section()` calls could lose updates because each writer rewrote the full structured blob from one stale base state
+  - fixed before the slice stayed marked complete on the branch:
+    - the structured soul payload now stores its own soul-specific update timestamp, and sync compares file age against that marker instead of the generic profile row timestamp
+    - `backend/src/profile/service.py` now updates soul sections through an optimistic compare-and-swap loop keyed on the current `preferences_json`, so conflicting writers retry from the latest structured state instead of erasing each other
+- deferred to later Batch C slices:
+  - outcome-derived procedural memory still needs its own explicit durable representation and retrieval lane instead of living only inside guardian feedback heuristics
+  - contradiction cleanup and archival still belong to `memory-decay-contradiction-and-archive-v1`
+
+### `procedural-memory-from-outcomes-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `MemoryKind.procedural` in `backend/src/db/models.py` and mapped it through `backend/src/memory/types.py` so outcome-derived lessons become first-class durable memory instead of piggybacking on generic preference text
+  - added `backend/src/memory/procedural.py` to materialize `GuardianLearningSignal` into scoped procedural memories for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread lessons
+  - added `memory_repository.sync_scoped_memory()` in `backend/src/memory/repository.py` so one lesson scope updates in place across retries, reactivates archived rows when the lesson returns, archives the row when the signal goes neutral, and now persists a deterministic `scope_key` with a unique SQLite index plus retry path so same-scope procedural writes stay deduplicated across workers instead of only inside one event loop
+  - refreshed procedural memories from guardian feedback writes in `backend/src/guardian/feedback.py`, so explicit user feedback and failed outcomes update the durable lesson lane instead of leaving that learning only in ephemeral scoring logic; the follow-up fix now also recomputes lessons when an intervention moves from `failed` back to a non-failed outcome
+  - surfaced procedural memories through the retrieval planner, hybrid retrieval, bounded snapshot, and guardian world model in `backend/src/memory/retrieval_planner.py`, `backend/src/memory/hybrid_retrieval.py`, `backend/src/memory/snapshots.py`, and `backend/src/guardian/world_model.py`, with procedural guidance now rendering the actual rule text instead of opaque lesson labels and allowing more than two active lessons to surface at once
+  - feedback-driven procedural refresh now invalidates the per-session bounded snapshot cache and rebuilds the shared bounded snapshot so the same session does not keep stale delivery guidance after new feedback lands
+- validation:
+  - initial slice boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/db/models.py backend/src/memory/types.py backend/src/memory/repository.py backend/src/memory/procedural.py backend/src/guardian/feedback.py backend/src/memory/retrieval_planner.py backend/src/memory/snapshots.py backend/src/guardian/world_model.py backend/tests/test_guardian_feedback.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py -q`
+  - review-fix boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/procedural.py backend/src/memory/hybrid_retrieval.py backend/src/memory/retrieval_planner.py backend/src/memory/snapshots.py backend/src/guardian/feedback.py backend/src/guardian/world_model.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local regressions fixed before the slice stayed complete:
+  - the new guardian-feedback tests initially created interventions against missing sessions, which violated the `guardian_interventions.session_id` foreign key and masked the actual procedural-memory assertions until the fixture setup was corrected
+- subagent review:
+  - `Galileo` (`019d2703-6e72-7b83-9d77-11c2bbc72165`) and `Rawls` (`019d2704-d877-7511-a4d5-ddcc014569d1`) returned concrete findings after the first slice commit:
+    - procedural memories were surfaced through summary-first rendering, so prompts saw labels like `Advisory timing lesson` instead of the actual learned rule text
+    - procedural refresh wrote the durable row but did not invalidate or rebuild the session-bounded snapshot cache, so an ongoing session could keep stale delivery guidance after feedback landed
+    - lesson text in `backend/src/memory/procedural.py` was hardcoded to advisory wording even when the intervention type was something else
+    - `sync_scoped_memory()` could create duplicate same-scope procedural rows under concurrent refreshes because it did not serialize the read-then-insert path
+    - outcome corrections from `failed` back to a non-failed state could leave stale failure-driven lessons behind because only new `failed` outcomes triggered recomputation
+    - procedural surfacing was capped too tightly, so only two lessons could reach retrieval and world-model context even when more were active
+  - fixed before the slice stayed marked complete on the branch:
+    - procedural memories now store and surface actionable rule text, and procedural rendering paths prefer the rule content over opaque labels
+    - guardian feedback refresh now invalidates the bounded snapshot cache and refreshes the shared bounded snapshot after procedural-memory updates
+    - lesson builders now render intervention-type-specific wording instead of hardcoding advisory-only language
+    - `backend/src/memory/repository.py` now serializes same-scope procedural writes with a per-scope async lock to keep concurrent refreshes from duplicating rows
+    - `update_outcome()` now recomputes procedural lessons when an intervention enters or exits the `failed` state
+    - structured memory and bounded snapshot surfacing now allow more than two procedural lessons without crowding out the whole bundle
+  - recheck status:
+    - `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) returned one remaining medium finding after the first repair pass: the same-scope dedupe was still only process-local because it relied on an in-memory async lock
+    - the branch now adds a durable `scope_key` column plus a unique partial index on `(kind, scope_key)` in `backend/src/db/models.py` and `backend/src/db/engine.py`, and `backend/src/memory/repository.py` now retries scoped inserts after `IntegrityError` by loading the winning row and updating it in place
+    - a final recheck request was sent back to `Kepler` after the DB-backed dedupe path landed; if that response does not return before the aggregate Batch C PR is opened, the PR notes should say exactly that instead of implying a clean reply that never arrived
+- deferred to later Batch C slices:
+  - delivery planning still reads the live `GuardianLearningSignal` heuristics directly; this slice makes those lessons durable and prompt-visible, but direct policy-time retrieval from procedural memory should land with the later learning-quality follow-through
+  - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+
+### `memory-decay-contradiction-and-archive-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `backend/src/memory/decay.py` so Batch C now has an explicit decay-maintenance pass that detects conservative contradiction pairs for comparable active memories, marks losing rows `superseded`, writes contradiction plus supersession metadata, and materializes `contradicts` and `supersedes` edges instead of leaving stale memories active forever
+  - added staleness decay windows by memory kind, with confidence and reinforcement step-downs plus archival metadata once a memory becomes both old enough and weak enough to stop competing with fresher context
+  - wired decay maintenance into `backend/src/memory/consolidator.py` after memory persistence and soul updates, so each consolidation pass now refreshes long-term memory health before bounded snapshots are rebuilt; the consolidation audit payload now records contradiction, superseded, decayed, and archived counts plus whether maintenance itself failed
+  - extended `backend/src/memory/repository.py` with edge dedupe and `list_edges()`, so repeated maintenance runs do not fan out duplicate relationship rows when the same contradiction or supersession is seen again
+  - tightened `backend/src/memory/hybrid_retrieval.py` so vector hits are filtered back through active structured-memory status before they can reach guardian context, which prevents archived or superseded embeddings from reappearing after decay has already invalidated the source row
+- validation:
+  - initial slice boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/memory/decay.py backend/src/memory/hybrid_retrieval.py backend/src/memory/consolidator.py backend/src/memory/repository.py backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py backend/tests/conftest.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py -q`
+  - broader adjacent-memory boundary:
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local regressions fixed before the slice stayed complete:
+  - the first decay test run was accidentally using the real SQLite file instead of the in-memory test database because `src.memory.decay.get_session` was missing from the shared patch target list in `backend/tests/conftest.py`
+  - the first vector-status filter only dropped stale vector hits when at least one active structured-memory ID was still present, so a vector-only result set made entirely of archived or superseded rows could still leak stale text back into hybrid retrieval until the filter was tightened and regression-covered
+  - the first contradiction-polarity pass treated `helpful` as present inside `not helpful`, and it relied on summary-first text that could drop the polarity cue entirely, so contradictory communication-preference memories could survive decay until cue matching was hardened and the heuristic started reading combined summary-plus-content text
+  - subagent review:
+  - `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) was asked to review the completed slice for bugs, regressions, and false claims, but that review thread stalled before returning findings
+  - `Ampere` (`019d29d6-6450-7203-ac60-87ba7e9bfd83`) returned two concrete findings after the initial slice commit:
+    - terminal stale memories could get stuck active forever because `decay_step = 4` saturated the step function while confidence and reinforcement only decayed when the step number increased
+    - same-entity contradictions with short wording, like `Prefers Slack` versus `Avoid Slack`, could stay active together because contradiction detection still required two overlapping anchor tokens even when the memories already shared a linked entity
+  - fixed before the slice stayed marked complete on the branch:
+    - terminal stale rows now continue decaying one pass at a time after step 4 until archival thresholds are reached, and `backend/tests/test_memory_decay.py` now covers repeated maintenance runs so high-confidence stale rows cannot remain active indefinitely
+    - same-entity contradictions now require only one anchor overlap instead of two, so short linked preference reversals are superseded correctly without loosening the broader non-entity contradiction check
+  - recheck status:
+    - `Ampere` rechecked the follow-up patch and reported no material findings after the step-4 and short-contradiction fixes landed
+  - late follow-up review:
+    - `Bernoulli` later returned four additional findings against the already-committed slice:
+      - the structured-status filter in `backend/src/memory/hybrid_retrieval.py` was matching vector hit IDs against `Memory.id` instead of `Memory.embedding_id`, which meant valid active vector hits could be dropped while the tests were still faking vector IDs with structured memory IDs
+      - even after the ID fix, stale vector text could still leak when an active memory and a superseded memory shared the same deduplicated `embedding_id`, because the vector filter was not checking whether the returned text still matched any active structured row for that embedding
+      - the contradiction heuristic in `backend/src/memory/decay.py` was too broad for same-entity project state because generic polarity cues like `active` could make coexisting project memories look contradictory once the overlap threshold had been relaxed
+      - the first polarity narrowing over-corrected by dropping `active` and `available` globally, which hid concise state reversals like `Atlas service is active` versus `Atlas service is paused`
+      - refreshed memories could keep stale `decay_step` metadata after `merge_memory(...)`, which let reconfirmed rows skip normal future decay stages
+      - `source_link_count` was underreporting session-level provenance because the merge pipeline only counted message-linked sources, not fallback session sources
+    - fixed after the late review:
+      - vector-status filtering now matches active structured rows primarily through `embedding_id` and keeps an `id` fallback only for tolerance, and it now drops hits whose returned text no longer matches any active structured row for that embedding so stale shared-embedding text cannot resurface through vector search
+      - contradiction matching now limits one-token shared-entity reversals to `preference` plus `communication_preference`, while ambiguous cues like `active` and `available` only count for very short anchor sets so concise state reversals are still caught without turning broader project-state updates into false contradictions
+      - `merge_memory(...)` now clears stale decay metadata when a newer `last_confirmed_at` reconfirms a memory, and the decay regression suite now proves that refreshed memories re-enter normal decay stages later instead of getting stuck with stale step metadata
+      - the merge pipeline now counts both message and session provenance rows in `source_link_count`, and the consolidator coverage was updated so session-only provenance no longer looks like zero linked sources
+  - residual risk:
+    - `Ampere` also noted that concurrent decay workers can still race on direct edge creation inside `backend/src/memory/decay.py`; that remains recorded as residual risk for this slice rather than a blocker because the shipped contract here is stale-memory suppression and contradiction cleanup, not cross-worker edge-uniqueness hardening
+- deferred to later Batch C slices:
+  - behavioral proof that the new decay and adaptation rules change end-to-end guardian behavior still belongs to `guardian-memory-behavioral-evals-v1`
+
+### `guardian-memory-behavioral-evals-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - expanded `backend/src/evals/harness.py` with `memory_decay_contradiction_cleanup_behavior`, which proves the decay-maintenance path supersedes contradictory project memory, keeps superseded embeddings out of hybrid retrieval, and keeps guardian-state memory context focused on the winning project state
+  - added `procedural_memory_adaptation_behavior` so the eval harness now proves feedback-derived procedural memory can refresh same-session bounded context and surface the learned rule text back into guardian memory context without waiting for a new session
+  - registered both scenarios in the runtime-eval catalog so they show up in `--list` output and can be run independently from the rest of the harness instead of being trapped inside one monolithic all-scenarios contract
+  - extended `backend/tests/test_eval_harness.py` with scenario-list assertions and a focused `test_memory_runtime_eval_scenarios_expose_expected_details()` boundary that validates just the two new memory scenarios and their returned details
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/evals/harness.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details -q`
+  - `cd backend && PYTHONPATH=. .venv/bin/python -m src.evals.harness --scenario memory_decay_contradiction_cleanup_behavior --scenario procedural_memory_adaptation_behavior --indent 2`
+- follow-up validation after late review findings:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/hybrid_retrieval.py backend/src/memory/decay.py backend/src/memory/repository.py backend/src/memory/pipeline/merge.py backend/src/evals/harness.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_decay.py backend/tests/test_consolidator.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_decay.py backend/tests/test_consolidator.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_repository.py backend/tests/test_memory_decay.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local validation notes:
+  - the broader `backend/tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios` contract is green again after patching the remaining DB seam imports used by flush helpers
+  - the broader `backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` contract now also passes after aligning the legacy guardian-state and world-model expectations with the current harness output, where the `guardian_state_synthesis` scenario runs with degraded memory confidence and zero memory signals while the world-model scenario now reflects the dominant continuity thread rather than a seeded memory-signal list
+- subagent review:
+  - `Archimedes` (`019d29e0-d2a1-7a61-ab08-37edf377f6bf`) and `Godel` (`019d29e2-fc4a-7510-9acb-e24b85f5d8fe`) both later returned concrete findings against the initial slice:
+    - the contradiction-cleanup eval could still pass if stale vector text leaked into guardian memory context because the first negative assertion only checked the shortened summary text rather than the rendered retrieval line
+    - the scenarios were still patching `src.memory.soul.read_soul`, even though `build_guardian_state()` now uses `src.profile.service.sync_soul_file_to_profile()`, so the first CLI run was not actually isolated from live profile projection
+    - the procedural-memory scenario was using `active_procedural_memory_count >= 5`, which tolerated duplicate procedural writes instead of guarding against them
+  - fixed after review:
+    - the contradiction-cleanup scenario now rejects both the summary form and the rendered vector-text form of the stale Atlas memory from guardian context, and its vector-hit fixture now uses embedding IDs that match the real vector-store contract
+    - both scenarios now patch `sync_soul_file_to_profile()` at the real profile seam instead of the obsolete soul reader seam, and the procedural-memory assertion now requires the exact expected active procedural count (`== 5`) instead of a permissive lower bound
+    - the older aggregate eval-harness boundaries were then rerun against the repaired seams, and the stale guardian-state plus world-model expectations were updated to match the current memory-degraded and continuity-thread-driven harness output instead of preserving older assumptions that no longer held
+  - final follow-up recheck:
+    - a fresh post-fix review request was sent to `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) and `Godel` (`019d29e2-fc4a-7510-9acb-e24b85f5d8fe`) against the current uncommitted Batch C follow-up diff; neither response returned before the aggregate Batch C PR preparation, so the branch records the attempt and validation results rather than claiming a final clean reply that never arrived
+  - residual eval noise:
+    - the filtered CLI harness run no longer hits real soul projection, but this environment still emits unrelated `tiktoken` fallback tracebacks before the final JSON summary; that warning is recorded as residual harness noise rather than a blocker because the focused pytest boundary stays clean and the CLI JSON result still reports both scenarios passing
+
+### Batch C Aggregate Validation
+
+- targeted Batch C backend boundary:
+  - result: `178 passed`
+  - command:
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_repository.py backend/tests/test_memory_decay.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details backend/tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- docs build:
+  - result: clean
+  - command:
+    - `cd docs && npm run build`
+- fresh full backend sweep:
+  - result: `1244 passed, 50 failed`
+  - command:
+    - `cd backend && .venv/bin/python -m pytest -q`
+  - failure clusters outside the Batch C memory path:
+    - approval request foreign-key setup and approval-wrapped tool flows
+    - audit and runtime-context propagation through chat, tool audit, and process-tool surfaces
+    - goal-tree orphan and cascade deletion integrity
+    - scheduled-job execution, consolidation job wiring, and scheduler sync behavior
+    - websocket contract regressions
+    - onboarding continuity edge cases
+- aggregate PR follow-up after review and full-suite root-cause sweep:
+  - external PR review findings fixed on the branch:
+    - `backend/src/memory/flush.py` now fingerprints flush state from message-level state only, so title-only session edits do not retrigger consolidation or decay work
+    - `backend/src/memory/pipeline/extract.py` now strips and drops blank `soul_updates` keys before consolidation, so malformed LLM payloads cannot fail the whole run on empty section names
+  - full-suite root causes fixed before the branch was ready again:
+    - added `backend/src/db/session_refs.py` and wired session-ref backfill through approval, audit, guardian-feedback, todo, and scheduled-job write paths, then extended that fix to scheduled-job updates too
+    - restored the `src.scheduler.jobs.memory_consolidation.consolidate_session` seam so scheduler tests can still isolate scheduled consolidation behavior
+    - repaired the websocket test seam after the profile split by patching `src.profile.service.get_db` in the shared sync websocket client helper, which stopped onboarding state from leaking through the real profile store across tests
+    - fixed goal-tree deletion under enforced foreign keys by flushing descendant deletes in dependency order instead of relying on one batched self-referential delete
+    - kept exact caller session IDs in `ensure_sessions_exist(...)` instead of trimming them, which prevents phantom placeholder sessions like `"s1"` from being synthesized alongside a real `" s1 "` session row
+    - hardened the websocket drain-timeout path and the eval-harness timeout shim together so the runtime cleanup stays warning-free while the harness still emulates real `asyncio.wait_for(...)` behavior for both coroutines and task-like awaitables
+  - subagent review:
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) and `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) both caught the remaining goal-delete dependency bug before the final full-suite rerun
+    - `Zeno` also flagged the exact-session-id placeholder drift risk, and `Kepler` flagged the missing scheduled-job update backfill; both were fixed on the branch and regression-covered
+    - follow-up recheck:
+      - `Kepler` reported no further material findings after the goal-delete, exact-session-id, and scheduled-job-update fixes landed
+- final full backend sweep on the current branch state:
+  - result: `1298 passed, 27 warnings`
+  - command:
+    - `backend/.venv/bin/python -m pytest backend/tests -q`
+  - residual warnings outside the Batch C follow-up diff:
+    - `backend/tests/test_activity_digest.py::TestActivityDigest::test_llm_timeout` still emits an unawaited local mock coroutine warning from the test’s timeout helper
+    - `backend/src/memory/vector_store.py` still emits existing `table_names()` deprecation warnings through the eval-harness and timeout boundaries
+- CI follow-up after GitHub Actions run `23605588259`:
+  - root cause:
+    - the remaining PR failures were not new memory-behavior regressions; they were teardown races where background `flush_session_memory(...)` tasks outlived test-scoped in-memory SQLite engines and hit closed databases during the eval-harness phase
+  - fixes:
+    - added `drain_tracked_tasks(...)` in `backend/src/utils/background.py` so tracked background work can be awaited explicitly at shutdown
+    - updated `backend/src/app.py`, `backend/tests/conftest.py`, and `backend/src/evals/harness.py` so shutdown and teardown now drain tracked background work before resource disposal, but still complete cleanup even if the drain path reports a stubborn-task failure
+    - added `backend/tests/test_background.py` to cover the normal pending-task path, cancellation of stalled work, and the explicit failure path for cancellation-resistant tasks
+  - subagent review:
+    - `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) caught two real issues during the first implementation attempt:
+      - the initial bounded drain still had an unbounded post-cancel wait
+      - the follow-up raise path aborted teardown before cleanup finished
+    - both issues were fixed before the final validation pass
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the final diff and reported no current concrete findings
+  - final CI-parity validation on the current branch state:
+    - targeted subset:
+      - result: `11 passed, 24 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_background.py tests/test_eval_harness.py -q`
+    - full backend suite:
+      - result: `1301 passed, 27 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+- CI follow-up after GitHub Actions run `23608084293`:
+  - root cause:
+    - the remaining failure in `tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` came from deterministic harness drift, not a live memory regression
+    - the guardian-state and guardian-world-model eval scenarios had been patching `src.memory.vector_store.search_with_status`, but the real retrieval path used by `build_guardian_state(...)` resolves `search_with_status` from `src.memory.hybrid_retrieval`
+    - once the real retrieval seam was patched, the world-model scenario fixture was exposed as inconsistent with its assertions because it still injected semantic goal and pattern hits even though the asserted contract expected an observer, project, execution, and recent-session driven world model with no extra memory-signal section
+  - fixes:
+    - updated `backend/src/evals/harness.py` so the guardian-state and related scenarios patch `src.memory.hybrid_retrieval.search_with_status`, which is the seam actually exercised by the retrieval planner
+    - reset vector-store state at the scenario boundary in `backend/src/evals/harness.py` so eval runs do not inherit stale in-process vector state from earlier scenarios like `vector_store_runtime_audit`
+    - aligned the `guardian_world_model_behavior` fixture with its asserted contract by returning no semantic memories for that scenario, leaving the world model grounded by observer context, recent projects, recent execution, and recent sessions instead of duplicated memory-signal lines
+    - added a regression in `backend/tests/test_eval_harness.py` that runs `vector_store_runtime_audit` before `guardian_state_synthesis` and proves the guardian-state confidence remains `overall=partial` and `memory=degraded`
+  - subagent review:
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the current harness and test diff and reported no material findings
+  - final validation on the current branch state:
+    - targeted subset:
+      - result: `3 passed`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_eval_harness.py::test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
+    - full backend suite:
+      - result: `1302 passed, 3 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

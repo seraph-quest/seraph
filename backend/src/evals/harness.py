@@ -89,6 +89,7 @@ from src.tools.browser_tool import browse_webpage
 from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
+from src.utils.background import drain_tracked_tasks
 from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
 from src.vault.repository import VaultRepository
@@ -368,11 +369,27 @@ async def _patched_async_db(*patch_targets: str):
 
     try:
         with ExitStack() as stack:
-            for target in dict.fromkeys((*patch_targets, "src.memory.repository.get_session")):
+            for target in dict.fromkeys((
+                *patch_targets,
+                "src.agent.session.get_session",
+                "src.memory.repository.get_session",
+                "src.profile.service.get_db",
+                "src.memory.hybrid_retrieval.get_session",
+                "src.memory.decay.get_session",
+                "src.memory.flush.get_session",
+            )):
                 stack.enter_context(patch(target, _get_session))
             yield
     finally:
-        await engine.dispose()
+        teardown_error: Exception | None = None
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+        except Exception as exc:
+            teardown_error = exc
+        finally:
+            await engine.dispose()
+        if teardown_error is not None:
+            raise teardown_error
 
 
 def _make_sync_client_with_db():
@@ -410,9 +427,12 @@ def _make_sync_client_with_db():
         "src.guardian.feedback.get_session",
         "src.observer.insight_queue.get_session",
         "src.vault.repository.get_session",
-        "src.api.profile.get_db",
         "src.api.settings.get_db",
         "src.memory.repository.get_session",
+        "src.profile.service.get_db",
+        "src.memory.hybrid_retrieval.get_session",
+        "src.memory.decay.get_session",
+        "src.memory.flush.get_session",
     ]
     patches = [patch(target, _get_session) for target in targets]
     patches.append(patch("src.app.init_db", _test_init_db))
@@ -808,7 +828,7 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
         mock_agent.run.return_value = iter(_make_agent_steps())
 
         async def _timeout_wait_for(coro: Any, timeout: float):
-            task = asyncio.create_task(coro)
+            task = coro if isinstance(coro, asyncio.Future) else asyncio.create_task(coro)
             await asyncio.sleep(0)
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -2366,9 +2386,12 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
 
         with (
             patch("litellm.completion", side_effect=[title_response, consolidation_response]),
-            patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
+            patch(
+                "src.memory.consolidator.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Hero"}),
+            ),
             patch("src.memory.consolidator.add_memory"),
-            patch("src.memory.consolidator.update_soul_section"),
+            patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()),
         ):
             await session_manager.generate_title("trace-session")
             await consolidate_session("trace-session")
@@ -3224,7 +3247,10 @@ async def _eval_session_consolidation_background_audit() -> dict[str, Any]:
     async with _patched_async_db():
         with (
             patch.object(session_manager, "get_history_text", AsyncMock(return_value="User: I need reliability.\nAssistant: Let's harden it.")),
-            patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
+            patch(
+                "src.memory.consolidator.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Hero"}),
+            ),
             patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1"),
             patch.object(audit_repository, "log_event", mock_log_event),
@@ -3263,10 +3289,13 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
                     "Assistant: Then we need behavioral evals, stronger state, and better operator UX."
                 )),
             ),
-            patch("src.memory.consolidator.read_soul", return_value="# Soul\n\n## Goals\n- Keep the system grounded"),
+            patch(
+                "src.memory.consolidator.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Goals": "- Keep the system grounded"}),
+            ),
             patch("src.memory.consolidator.completion_with_fallback", AsyncMock(return_value=llm_response)),
             patch("src.memory.consolidator.add_memory", return_value="vec-memory-1") as mock_add_memory,
-            patch("src.memory.consolidator.update_soul_section") as mock_update_soul,
+            patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()) as mock_update_soul,
             patch.object(audit_repository, "log_event", mock_log_event),
         ):
             await consolidate_session("guardian-session")
@@ -3287,7 +3316,7 @@ async def _eval_session_consolidation_behavior() -> dict[str, Any]:
 
 
 async def _eval_memory_commitment_continuity_behavior() -> dict[str, Any]:
-    from src.guardian.state import _structured_memory_context_bundle
+    from src.db.models import MemoryKind
 
     async with _patched_async_db(
         "src.agent.session.get_session",
@@ -3329,7 +3358,19 @@ async def _eval_memory_commitment_continuity_behavior() -> dict[str, Any]:
             importance=0.97,
         )
 
-        baseline_context, baseline_buckets = await _structured_memory_context_bundle(active_projects=())
+        baseline_grouped = await memory_repository.list_memories_by_kinds(
+            kinds=(MemoryKind.commitment,),
+            limit_per_kind=2,
+        )
+        baseline_commitments = tuple(
+            (memory.summary or memory.content)
+            for memory in baseline_grouped.get("commitment", [])
+        )
+        baseline_context = "\n".join(
+            f"[commitment] {text}"
+            for text in baseline_commitments
+        )
+        baseline_buckets = {"commitment": baseline_commitments}
 
         ctx = _make_context(
             active_goals_summary="Support Atlas launch",
@@ -3344,8 +3385,16 @@ async def _eval_memory_commitment_continuity_behavior() -> dict[str, Any]:
 
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch("src.agent.context_window._get_encoding", return_value=None),
+            patch(
+                "src.agent.session.session_manager.get_history_text",
+                AsyncMock(return_value="User: What is the Atlas launch status?"),
+            ),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
             patch("src.audit.repository.audit_repository.list_events", return_value=[]),
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -3372,7 +3421,7 @@ async def _eval_memory_commitment_continuity_behavior() -> dict[str, Any]:
 
 
 async def _eval_memory_collaborator_lookup_behavior() -> dict[str, Any]:
-    from src.guardian.state import _structured_memory_context_bundle
+    from src.db.models import MemoryKind
 
     async with _patched_async_db(
         "src.agent.session.get_session",
@@ -3419,7 +3468,19 @@ async def _eval_memory_collaborator_lookup_behavior() -> dict[str, Any]:
             importance=0.97,
         )
 
-        baseline_context, baseline_buckets = await _structured_memory_context_bundle(active_projects=())
+        baseline_grouped = await memory_repository.list_memories_by_kinds(
+            kinds=(MemoryKind.collaborator,),
+            limit_per_kind=2,
+        )
+        baseline_collaborators = tuple(
+            (memory.summary or memory.content)
+            for memory in baseline_grouped.get("collaborator", [])
+        )
+        baseline_context = "\n".join(
+            f"[collaborator] {text}"
+            for text in baseline_collaborators
+        )
+        baseline_buckets = {"collaborator": baseline_collaborators}
 
         ctx = _make_context(
             active_goals_summary="Support Atlas launch",
@@ -3434,8 +3495,11 @@ async def _eval_memory_collaborator_lookup_behavior() -> dict[str, Any]:
 
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
-            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
             patch("src.audit.repository.audit_repository.list_events", return_value=[]),
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -3510,7 +3574,7 @@ async def _eval_bounded_memory_snapshot_behavior() -> dict[str, Any]:
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded"),
-            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
             patch("src.audit.repository.audit_repository.list_events", return_value=[]),
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -3592,6 +3656,255 @@ async def _eval_memory_supersession_filter_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_memory_decay_contradiction_cleanup_behavior() -> dict[str, Any]:
+    from src.db.models import MemoryKind
+    from src.memory.decay import apply_memory_decay_policies
+    from src.memory.hybrid_retrieval import retrieve_hybrid_memory
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+        "src.memory.decay.get_session",
+        "src.memory.hybrid_retrieval.get_session",
+    ):
+        _reset_bounded_guardian_snapshot_cache()
+        await session_manager.get_or_create("decay-current")
+        await session_manager.add_message("decay-current", "user", "What is the Atlas launch status?")
+        await session_manager.add_message("decay-current", "assistant", "Let me ground that in current memory.")
+
+        atlas = await memory_repository.get_or_create_entity(
+            canonical_name="Project Atlas",
+            entity_type="project",
+            aliases=["Atlas"],
+        )
+        older = await memory_repository.create_memory(
+            content="Atlas launch is delayed.",
+            kind="project",
+            summary="Atlas launch delayed",
+            importance=0.8,
+            confidence=0.7,
+            project_entity_id=atlas.id,
+            embedding_id="vec-atlas-delayed",
+            last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=7),
+        )
+        newer = await memory_repository.create_memory(
+            content="Atlas launch is on track.",
+            kind="project",
+            summary="Atlas launch on track",
+            importance=0.92,
+            confidence=0.92,
+            project_entity_id=atlas.id,
+            embedding_id="vec-atlas-on-track",
+            last_confirmed_at=datetime.now(timezone.utc),
+        )
+
+        decay_result = await apply_memory_decay_policies()
+        superseded_memories = await memory_repository.list_memories(
+            kind=MemoryKind.project,
+            limit=10,
+            status="superseded",
+        )
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_window="VS Code",
+            screen_context="Reviewing Atlas release notes",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch(
+                "src.memory.hybrid_retrieval.search_with_status",
+                return_value=(
+                    [
+                        {
+                            "id": "vec-atlas-delayed",
+                            "text": "Atlas launch is delayed.",
+                            "category": "project",
+                            "score": 0.11,
+                            "created_at": "2026-03-25T09:00:00+00:00",
+                        },
+                        {
+                            "id": "vec-atlas-on-track",
+                            "text": "Atlas launch is on track.",
+                            "category": "project",
+                            "score": 0.09,
+                            "created_at": "2026-03-25T10:00:00+00:00",
+                        },
+                    ],
+                    False,
+                ),
+            ),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="",
+            ),
+        ):
+            hybrid = await retrieve_hybrid_memory(
+                query="Atlas launch status",
+                active_projects=("Atlas",),
+                limit=4,
+            )
+            state = await build_guardian_state(
+                session_id="decay-current",
+                user_message="What is the Atlas launch status?",
+            )
+
+        return {
+            "contradiction_count": decay_result.contradiction_count,
+            "superseded_count": decay_result.superseded_count,
+            "superseded_memory_count": len(superseded_memories),
+            "hybrid_filters_superseded": "Atlas launch is delayed." not in hybrid.context,
+            "hybrid_keeps_current": "Atlas launch is on track." in hybrid.context,
+            "guardian_context_filters_superseded": (
+                "Atlas launch delayed" not in state.memory_context
+                and "Atlas launch is delayed." not in state.memory_context
+                and "- [project] Atlas launch is delayed." not in state.memory_context
+            ),
+            "guardian_context_keeps_current": "[project] Atlas launch on track" in state.memory_context,
+        }
+
+
+async def _eval_procedural_memory_adaptation_behavior() -> dict[str, Any]:
+    from src.db.models import MemoryKind
+    from src.guardian.feedback import guardian_feedback_repository
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+        "src.observer.insight_queue.get_session",
+    ):
+        _reset_bounded_guardian_snapshot_cache()
+        await session_manager.get_or_create("procedural-current")
+        await session_manager.add_message("procedural-current", "user", "Should you interrupt me during deep work?")
+        await session_manager.add_message("procedural-current", "assistant", "I will ground that in learned policy.")
+
+        ctx = _make_context(
+            user_state="deep_work",
+            interruption_mode="balanced",
+            active_goals_summary="Ship Atlas launch",
+            active_window="VS Code",
+            screen_context="Focused implementation work",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="medium",
+            salience_reason="active_goals",
+            interruption_cost="high",
+        )
+
+        async def _build_state() -> Any:
+            with ExitStack() as stack:
+                stack.enter_context(patch("src.observer.manager.context_manager.get_context", return_value=ctx))
+                stack.enter_context(patch("src.agent.context_window._get_encoding", return_value=None))
+                stack.enter_context(
+                    patch(
+                        "src.agent.session.session_manager.get_history_text",
+                        AsyncMock(return_value="User: Should you interrupt me during deep work?"),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "src.profile.service.sync_soul_file_to_profile",
+                        AsyncMock(return_value={"Identity": "Builder"}),
+                    )
+                )
+                stack.enter_context(
+                    patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False))
+                )
+                stack.enter_context(
+                    patch("src.audit.repository.audit_repository.list_events", return_value=[])
+                )
+                stack.enter_context(
+                    patch(
+                        "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                        return_value=[],
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                        return_value="",
+                    )
+                )
+                return await build_guardian_state(
+                    session_id="procedural-current",
+                    user_message="Should you interrupt me during deep work?",
+                )
+
+        baseline_state = await _build_state()
+
+        for content in (
+            "This deep-work interruption was not helpful.",
+            "Another deep-work interruption was not helpful.",
+        ):
+            intervention = await guardian_feedback_repository.create_intervention(
+                session_id="procedural-current",
+                message_type="proactive",
+                intervention_type="advisory",
+                urgency=3,
+                content=content,
+                reasoning="aligned_work_activity",
+                is_scheduled=False,
+                guardian_confidence="grounded",
+                data_quality="good",
+                user_state="deep_work",
+                interruption_mode="balanced",
+                policy_action="act",
+                policy_reason="available_capacity",
+                delivery_decision="deliver",
+                latest_outcome="delivered",
+                transport="browser",
+            )
+            await guardian_feedback_repository.record_feedback(
+                intervention.id,
+                feedback_type="not_helpful",
+            )
+
+        active_procedural_memories = await memory_repository.list_memories(
+            kind=MemoryKind.procedural,
+            limit=20,
+        )
+
+        adapted_state = await _build_state()
+
+        adapted_memory_context = adapted_state.memory_context.lower()
+        adapted_bounded_context = adapted_state.bounded_memory_context.lower()
+
+        return {
+            "baseline_snapshot_has_no_procedural_rule": (
+                "avoid direct interruption during deep-work" not in baseline_state.bounded_memory_context.lower()
+            ),
+            "same_session_snapshot_refreshes": (
+                baseline_state.bounded_memory_context != adapted_state.bounded_memory_context
+            ),
+            "adapted_memory_context_has_timing_rule": (
+                "avoid direct interruption during deep-work" in adapted_memory_context
+            ),
+            "adapted_memory_context_has_delivery_rule": (
+                "reduce direct interruptions" in adapted_memory_context
+            ),
+            "adapted_bounded_context_has_timing_rule": (
+                "avoid direct interruption during deep-work" in adapted_bounded_context
+            ),
+            "active_procedural_memory_count": len(active_procedural_memories),
+            "bounded_snapshot_line_count": len(adapted_state.bounded_memory_context.splitlines()),
+        }
+
+
 async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
     sm = SessionManager()
     mock_log_event = AsyncMock()
@@ -3650,8 +3963,8 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch(
-                "src.memory.vector_store.search_with_status",
-                return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
+                "src.memory.hybrid_retrieval.search_with_status",
+                return_value=([], True),
             ),
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
@@ -3716,14 +4029,8 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch(
-                "src.memory.vector_store.search_with_status",
-                return_value=(
-                    [
-                        {"category": "goal", "text": "Prepare investor brief"},
-                        {"category": "pattern", "text": "Protect prep time during meeting blocks"},
-                    ],
-                    False,
-                ),
+                "src.memory.hybrid_retrieval.search_with_status",
+                return_value=([], False),
             ),
             patch(
                 "src.audit.repository.audit_repository.list_events",
@@ -4354,7 +4661,7 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nSeraph"),
             patch(
-                "src.memory.vector_store.search_with_status",
+                "src.memory.hybrid_retrieval.search_with_status",
                 return_value=([{"category": "pattern", "text": "Stretch breaks improve focus"}], False),
             ),
             patch("src.agent.factory.get_model", return_value=MagicMock()),
@@ -6505,6 +6812,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_memory_supersession_filter_behavior,
     ),
     EvalScenario(
+        name="memory_decay_contradiction_cleanup_behavior",
+        category="behavior",
+        description="Decay maintenance supersedes contradictory memory and keeps stale vector hits out of hybrid and guardian retrieval.",
+        runner=_eval_memory_decay_contradiction_cleanup_behavior,
+    ),
+    EvalScenario(
+        name="procedural_memory_adaptation_behavior",
+        category="behavior",
+        description="Feedback-derived procedural memory refreshes same-session bounded recall and surfaces the learned rule text in guardian context.",
+        runner=_eval_procedural_memory_adaptation_behavior,
+    ),
+    EvalScenario(
         name="session_title_generation_background_audit",
         category="observability",
         description="Session title generation records background-task audit success without live providers.",
@@ -6577,6 +6896,7 @@ def _select_scenarios(selected_names: Sequence[str] | None) -> list[EvalScenario
 async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     started = time.perf_counter()
     _reset_bounded_guardian_snapshot_cache()
+    _reset_vector_store_state()
     try:
         output = scenario.runner()
         if asyncio.iscoroutine(output):
@@ -6602,6 +6922,7 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
         )
     finally:
         _reset_bounded_guardian_snapshot_cache()
+        _reset_vector_store_state()
 
 
 async def run_runtime_evals(selected_names: Sequence[str] | None = None) -> EvalSummary:

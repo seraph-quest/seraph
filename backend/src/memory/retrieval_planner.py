@@ -90,6 +90,12 @@ def _prefer_episodic_lane(query: str) -> bool:
     return any(cue in normalized for cue in _EPISODIC_CUES)
 
 
+def _memory_context_text(kind_name: str, memory) -> str:
+    if kind_name == MemoryKind.procedural.value:
+        return (memory.content or memory.summary or "").strip()
+    return (memory.summary or memory.content or "").strip()
+
+
 async def build_structured_memory_context_bundle(
     *,
     active_projects: tuple[str, ...] = (),
@@ -109,13 +115,49 @@ async def build_structured_memory_context_bundle(
         ),
         limit_per_kind=2,
     )
+    procedural_memories = await memory_repository.list_memories(
+        kind=MemoryKind.procedural,
+        limit=4,
+    )
+    if procedural_memories:
+        grouped[MemoryKind.procedural.value] = procedural_memories
 
     bucketed: dict[str, list[str]] = {}
     lines: list[str] = []
-    for kind_name, memories in grouped.items():
+    for kind_name in (
+        MemoryKind.goal.value,
+        MemoryKind.commitment.value,
+        MemoryKind.preference.value,
+        MemoryKind.communication_preference.value,
+        MemoryKind.procedural.value,
+        MemoryKind.pattern.value,
+        MemoryKind.project.value,
+        MemoryKind.collaborator.value,
+        MemoryKind.obligation.value,
+        MemoryKind.routine.value,
+        MemoryKind.timeline.value,
+    ):
+        memories = grouped.get(kind_name, [])
+        if not memories:
+            continue
         bucket_name = bucket_name_for_kind(kind_name)
+        if kind_name == MemoryKind.procedural.value:
+            texts = [
+                _memory_context_text(kind_name, memory)
+                for memory in memories
+                if _memory_context_text(kind_name, memory)
+            ]
+            if texts:
+                bucket = bucketed.setdefault(bucket_name, [])
+                for text in texts:
+                    if text not in bucket:
+                        bucket.append(text)
+                combined_line = f"- [{bucket_name}] {' | '.join(texts)}"
+                if combined_line not in lines:
+                    lines.append(combined_line)
+            continue
         for memory in memories:
-            text = (memory.summary or memory.content or "").strip()
+            text = _memory_context_text(kind_name, memory)
             _append_structured_memory_line(
                 bucketed=bucketed,
                 lines=lines,
@@ -144,7 +186,7 @@ async def build_structured_memory_context_bundle(
             _append_structured_memory_line(
                 bucketed=bucketed,
                 lines=lines,
-                text=(memory.summary or memory.content or "").strip(),
+                text=_memory_context_text(memory.kind.value, memory),
                 bucket_name=bucket_name_for_kind(memory.kind),
             )
 

@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import Index, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -53,6 +54,7 @@ class MemoryKind(str, enum.Enum):
     timeline = "timeline"
     commitment = "commitment"
     communication_preference = "communication_preference"
+    procedural = "procedural"
 
 
 class MemoryStatus(str, enum.Enum):
@@ -169,6 +171,15 @@ class ScheduledJob(SQLModel, table=True):
 
 class Memory(SQLModel, table=True):
     __tablename__ = "memories"
+    __table_args__ = (
+        Index(
+            "ix_memories_kind_scope_key_unique",
+            "kind",
+            "scope_key",
+            unique=True,
+            sqlite_where=text("scope_key IS NOT NULL"),
+        ),
+    )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     content: str
@@ -183,6 +194,7 @@ class Memory(SQLModel, table=True):
     project_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
     source_session_id: Optional[str] = Field(default=None)
     embedding_id: Optional[str] = Field(default=None)
+    scope_key: Optional[str] = Field(default=None, index=True)
     metadata_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

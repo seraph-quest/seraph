@@ -14,14 +14,20 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event
 from src.db.engine import get_session
 from src.db.models import (
+    ApprovalRequest,
+    AuditEvent,
+    GuardianIntervention,
     MemoryEpisode,
     MemoryEpisodeType,
     Message,
+    QueuedInsight,
     ScheduledJob,
     Session,
     SessionTodo,
 )
+from src.db.session_refs import ensure_sessions_exist
 from src.memory.episodes import build_message_episode
+from src.memory.flush import flush_session_memory
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,7 @@ class SessionManager:
             return session
 
     async def delete(self, session_id: str) -> bool:
+        await flush_session_memory(session_id, trigger="session_end", manager=self)
         async with get_session() as db:
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalars().first()
@@ -148,6 +155,26 @@ class SessionManager:
             )
             for scheduled_job in scheduled_jobs.scalars().all():
                 await db.delete(scheduled_job)
+            approval_requests = await db.execute(
+                select(ApprovalRequest).where(ApprovalRequest.session_id == session_id)
+            )
+            for approval_request in approval_requests.scalars().all():
+                await db.delete(approval_request)
+            audit_events = await db.execute(
+                select(AuditEvent).where(AuditEvent.session_id == session_id)
+            )
+            for audit_event in audit_events.scalars().all():
+                await db.delete(audit_event)
+            queued_insights = await db.execute(
+                select(QueuedInsight).where(QueuedInsight.session_id == session_id)
+            )
+            for queued_insight in queued_insights.scalars().all():
+                await db.delete(queued_insight)
+            interventions = await db.execute(
+                select(GuardianIntervention).where(GuardianIntervention.session_id == session_id)
+            )
+            for intervention in interventions.scalars().all():
+                await db.delete(intervention)
             await db.delete(session)
             return True
 
@@ -599,7 +626,11 @@ class SessionManager:
             return msg
 
     async def get_history_text(
-        self, session_id: str, limit: int = 50
+        self,
+        session_id: str,
+        limit: int = 50,
+        *,
+        allow_memory_flush: bool = True,
     ) -> str:
         async with get_session() as db:
             result = await db.execute(
@@ -619,7 +650,13 @@ class SessionManager:
             ]
 
             try:
-                from src.agent.context_window import build_context_window
+                from src.agent.context_window import build_context_window, requires_middle_summary
+                if allow_memory_flush and requires_middle_summary(msg_dicts):
+                    await flush_session_memory(
+                        session_id,
+                        trigger="pre_compaction",
+                        manager=self,
+                    )
                 return await asyncio.to_thread(
                     build_context_window,
                     msg_dicts,
@@ -634,17 +671,26 @@ class SessionManager:
                 return "\n".join(lines)
 
     async def get_messages(
-        self, session_id: str, limit: int = 100, offset: int = 0
+        self,
+        session_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        newest_first: bool = False,
     ) -> list[dict]:
         limit = min(max(limit, 1), 1000)
         async with get_session() as db:
+            order = col(Message.created_at).desc() if newest_first else col(Message.created_at).asc()
             result = await db.execute(
                 select(Message)
                 .where(Message.session_id == session_id)
-                .order_by(col(Message.created_at).asc())
+                .order_by(order)
                 .offset(offset)
                 .limit(limit)
             )
+            messages = result.scalars().all()
+            if newest_first:
+                messages.reverse()
             return [
                 {
                     "id": m.id,
@@ -655,7 +701,7 @@ class SessionManager:
                     "tool_used": m.tool_used,
                     "created_at": m.created_at.isoformat(),
                 }
-                for m in result.scalars().all()
+                for m in messages
             ]
 
     async def get_todos(self, session_id: str) -> list[dict]:
@@ -679,6 +725,7 @@ class SessionManager:
 
     async def replace_todos(self, session_id: str, items: list[dict]) -> list[dict]:
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             existing = await db.execute(
                 select(SessionTodo).where(SessionTodo.session_id == session_id)
             )
@@ -707,6 +754,7 @@ class SessionManager:
 
     async def append_todos(self, session_id: str, items: list[dict]) -> list[dict]:
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             existing = await db.execute(
                 select(SessionTodo)
                 .where(SessionTodo.session_id == session_id)

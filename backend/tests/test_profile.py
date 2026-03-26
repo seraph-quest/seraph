@@ -40,6 +40,10 @@ class TestProfileEndpoints:
         data = res.json()
         assert data["name"] == "Unknown"
         assert "onboarding_completed" in data
+        assert "soul_sections" in data
+        assert "soul_text" in data
+        assert "Identity" in data["soul_sections"]
+        assert "## Identity" in data["soul_text"]
 
     async def test_skip_onboarding(self, client):
         res = await client.post("/api/user/onboarding/skip")

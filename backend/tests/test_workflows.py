@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from src.workflows.manager import WorkflowManager, WorkflowTool, workflow_manage
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import get_tools
+from src.agent.session import SessionManager
 from src.tools.approval import ApprovalTool
 
 
@@ -2019,6 +2021,8 @@ class TestWorkflowSurfaces:
         }]
 
     def test_factory_wraps_high_risk_workflows_for_approval(self, async_db):
+        asyncio.run(SessionManager().get_or_create("s1"))
+
         class DummyWorkflowTool:
             name = "workflow_shell_run"
             description = "Run shell via workflow"
@@ -2085,6 +2089,8 @@ class TestWorkflowSurfaces:
             reset_runtime_context(tokens)
 
     def test_factory_forces_approval_for_mcp_workflows_when_mcp_mode_requires_it(self, async_db):
+        asyncio.run(SessionManager().get_or_create("s1"))
+
         class DummyWorkflowTool:
             name = "workflow_mcp_export"
             description = "Export via MCP"

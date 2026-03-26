@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -9,6 +10,9 @@ from sqlmodel import select
 
 from src.db.engine import get_session
 from src.db.models import GuardianIntervention
+from src.db.session_refs import ensure_sessions_exist
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -66,6 +70,33 @@ class GuardianLearningSignal:
 
 
 class GuardianFeedbackRepository:
+    async def _refresh_learning_memories(
+        self,
+        *,
+        intervention_type: str,
+        source_session_id: str | None,
+    ) -> None:
+        from src.memory.procedural import sync_learning_signal_memories
+        from src.memory.snapshots import (
+            invalidate_bounded_guardian_snapshot_cache,
+            refresh_bounded_guardian_snapshot,
+        )
+
+        try:
+            signal = await self.get_learning_signal(intervention_type=intervention_type)
+            await sync_learning_signal_memories(
+                intervention_type=intervention_type,
+                signal=signal,
+                source_session_id=source_session_id,
+            )
+            invalidate_bounded_guardian_snapshot_cache()
+            try:
+                await refresh_bounded_guardian_snapshot()
+            except Exception:
+                logger.debug("Failed to refresh bounded snapshot after procedural memory update", exc_info=True)
+        except Exception:
+            logger.debug("Failed to refresh procedural learning memories", exc_info=True)
+
     async def create_intervention(
         self,
         *,
@@ -107,6 +138,7 @@ class GuardianFeedbackRepository:
             notification_id=notification_id,
         )
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             db.add(intervention)
             await db.flush()
             await db.refresh(intervention)
@@ -127,6 +159,8 @@ class GuardianFeedbackRepository:
         transport: str | None = None,
         notification_id: str | None = None,
     ) -> GuardianIntervention | None:
+        refreshed: GuardianIntervention | None = None
+        prior_outcome: str | None = None
         async with get_session() as db:
             result = await db.execute(
                 select(GuardianIntervention).where(GuardianIntervention.id == intervention_id)
@@ -134,6 +168,7 @@ class GuardianFeedbackRepository:
             intervention = result.scalar_one_or_none()
             if intervention is None:
                 return None
+            prior_outcome = intervention.latest_outcome
             intervention.latest_outcome = latest_outcome
             intervention.updated_at = _now()
             if transport is not None:
@@ -143,7 +178,14 @@ class GuardianFeedbackRepository:
             db.add(intervention)
             await db.flush()
             await db.refresh(intervention)
-            return intervention
+            refreshed = intervention
+
+        if latest_outcome == "failed" or prior_outcome == "failed":
+            await self._refresh_learning_memories(
+                intervention_type=refreshed.intervention_type,
+                source_session_id=refreshed.session_id,
+            )
+        return refreshed
 
     async def record_feedback(
         self,
@@ -153,6 +195,7 @@ class GuardianFeedbackRepository:
         feedback_note: str | None = None,
         latest_outcome: str = "feedback_received",
     ) -> GuardianIntervention | None:
+        refreshed: GuardianIntervention | None = None
         async with get_session() as db:
             result = await db.execute(
                 select(GuardianIntervention).where(GuardianIntervention.id == intervention_id)
@@ -168,7 +211,13 @@ class GuardianFeedbackRepository:
             db.add(intervention)
             await db.flush()
             await db.refresh(intervention)
-            return intervention
+            refreshed = intervention
+
+        await self._refresh_learning_memories(
+            intervention_type=refreshed.intervention_type,
+            source_session_id=refreshed.session_id,
+        )
+        return refreshed
 
     async def list_recent(
         self,

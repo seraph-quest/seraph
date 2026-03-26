@@ -298,12 +298,13 @@ async def build_guardian_state(
     refresh_observer: bool = False,
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
-    from src.memory.soul import read_soul
+    from src.memory.soul import render_soul_text
     from src.memory.retrieval_planner import plan_memory_retrieval
     from src.memory.snapshots import (
         get_or_create_bounded_guardian_snapshot,
         render_bounded_guardian_snapshot,
     )
+    from src.profile.service import sync_soul_file_to_profile
     from src.audit.repository import audit_repository
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.manager import context_manager
@@ -312,7 +313,7 @@ async def build_guardian_state(
     observer_context = (
         await context_manager.refresh() if refresh_observer else context_manager.get_context()
     )
-    soul_context = read_soul()
+    soul_context = render_soul_text(await sync_soul_file_to_profile())
     session_record = await session_manager.get(session_id) if session_id is not None else None
 
     current_session_history = (

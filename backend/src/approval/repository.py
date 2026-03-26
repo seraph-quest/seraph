@@ -9,6 +9,7 @@ from sqlmodel import select, col
 
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
+from src.db.session_refs import ensure_sessions_exist
 
 
 def fingerprint_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -55,6 +56,7 @@ class ApprovalRepository:
                 summary=summary,
                 details_json=json.dumps(details) if details is not None else None,
             )
+            await ensure_sessions_exist(db, [session_id])
             db.add(request)
             await db.flush()
             db.expunge(request)

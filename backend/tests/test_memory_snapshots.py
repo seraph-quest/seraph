@@ -1,6 +1,8 @@
 import pytest
 
+from src.agent.session import SessionManager
 from src.db.models import MemoryKind, MemorySnapshotKind
+from src.guardian.feedback import guardian_feedback_repository
 from src.memory.repository import memory_repository
 from src.memory.snapshots import (
     get_or_create_bounded_guardian_snapshot,
@@ -28,6 +30,24 @@ async def test_refresh_bounded_guardian_snapshot_persists_structured_summary(asy
         summary="Prefers concise morning briefings",
         importance=0.85,
     )
+    await memory_repository.create_memory(
+        content="For advisory interventions, avoid direct interruption during deep-work windows.",
+        kind=MemoryKind.procedural,
+        summary="For advisory interventions, avoid direct interruption during deep-work windows.",
+        importance=0.84,
+    )
+    await memory_repository.create_memory(
+        content="For advisory interventions, prefer async native continuation when the user is blocked.",
+        kind=MemoryKind.procedural,
+        summary="For advisory interventions, prefer async native continuation when the user is blocked.",
+        importance=0.83,
+    )
+    await memory_repository.create_memory(
+        content="For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately.",
+        kind=MemoryKind.procedural,
+        summary="For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately.",
+        importance=0.82,
+    )
 
     snapshot = await refresh_bounded_guardian_snapshot(
         soul_context=(
@@ -42,6 +62,9 @@ async def test_refresh_bounded_guardian_snapshot_persists_structured_summary(asy
     assert "Ship Batch A memory upgrades" in snapshot.content
     assert "Atlas launch" in snapshot.content
     assert "Prefers concise morning briefings" in snapshot.content
+    assert "avoid direct interruption during deep-work windows" in snapshot.content
+    assert "prefer async native continuation when the user is blocked" in snapshot.content
+    assert "bundle lower-urgency check-ins instead of interrupting immediately" in snapshot.content
     assert snapshot.source_hash == stored.source_hash
 
 
@@ -100,3 +123,43 @@ async def test_get_or_create_bounded_guardian_snapshot_freezes_content_per_sessi
     assert frozen == initial
     assert "Hermes budget memo" not in frozen
     assert "Hermes budget memo" in fresh
+
+
+@pytest.mark.asyncio
+async def test_feedback_refresh_invalidates_session_snapshot_cache(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("session-feedback-cache")
+
+    initial = await get_or_create_bounded_guardian_snapshot(
+        soul_context="# Soul\n\n## Identity\nBuilder",
+        session_id="session-feedback-cache",
+    )
+
+    for user_state in ("deep_work", "in_meeting"):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-feedback-cache",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Respect the focus block.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state=user_state,
+            interruption_mode="focus",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="not_helpful")
+
+    refreshed = await get_or_create_bounded_guardian_snapshot(
+        soul_context="# Soul\n\n## Identity\nBuilder",
+        session_id="session-feedback-cache",
+    )
+
+    assert refreshed != initial
+    assert "avoid direct interruption during deep-work, meeting, or away windows" in refreshed

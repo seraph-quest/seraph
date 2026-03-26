@@ -120,3 +120,139 @@ async def test_hybrid_retrieval_marks_vector_failures_degraded_but_keeps_lexical
     assert result.degraded is True
     assert result.hits[0].text == "Review the Atlas launch brief"
     assert "[commitment] Review the Atlas launch brief" in result.context
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_filters_vector_hits_for_non_active_memories(async_db):
+    archived = await memory_repository.create_memory(
+        content="Atlas launch is delayed.",
+        kind=MemoryKind.project,
+        summary="Atlas launch delayed",
+        importance=0.95,
+        embedding_id="vec-archived",
+        status="superseded",
+    )
+    active = await memory_repository.create_memory(
+        content="Atlas launch is on track.",
+        kind=MemoryKind.project,
+        summary="Atlas launch on track",
+        importance=0.9,
+        embedding_id="vec-active",
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": "vec-archived",
+                    "text": "Atlas launch is delayed.",
+                    "category": "fact",
+                    "score": 0.11,
+                    "created_at": "2026-03-25T09:00:00+00:00",
+                },
+                {
+                    "id": "vec-active",
+                    "text": "Atlas launch is on track.",
+                    "category": "fact",
+                    "score": 0.09,
+                    "created_at": "2026-03-25T10:00:00+00:00",
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="Atlas launch status",
+            active_projects=("Atlas",),
+            limit=4,
+        )
+
+    assert "Atlas launch is delayed." not in result.context
+    assert "Atlas launch is on track." in result.context
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_filters_vector_hits_when_all_ids_are_non_active(async_db):
+    archived = await memory_repository.create_memory(
+        content="Atlas launch is delayed.",
+        kind=MemoryKind.project,
+        summary="Atlas launch delayed",
+        importance=0.95,
+        embedding_id="vec-archived",
+        status="archived",
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": "vec-archived",
+                    "text": "Atlas launch is delayed.",
+                    "category": "fact",
+                    "score": 0.11,
+                    "created_at": "2026-03-25T09:00:00+00:00",
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="Atlas launch status",
+            active_projects=("Atlas",),
+            limit=4,
+        )
+
+    assert result.context == ""
+    assert result.hits == ()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_filters_shared_embedding_hits_when_text_is_stale(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type="project",
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch is delayed.",
+        kind=MemoryKind.project,
+        summary="Atlas launch delayed",
+        importance=0.95,
+        embedding_id="vec-shared",
+        project_entity_id=atlas.id,
+        status="superseded",
+    )
+    await memory_repository.create_memory(
+        content="Atlas launch is on track.",
+        kind=MemoryKind.project,
+        summary="Atlas launch on track",
+        importance=0.9,
+        embedding_id="vec-shared",
+        project_entity_id=atlas.id,
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": "vec-shared",
+                    "text": "Atlas launch is delayed.",
+                    "category": "fact",
+                    "score": 0.11,
+                    "created_at": "2026-03-25T09:00:00+00:00",
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="Atlas launch status",
+            active_projects=("Atlas",),
+            limit=4,
+        )
+
+    assert "Atlas launch is delayed." not in result.context
+    assert "[project] Atlas launch on track" in result.context
+    assert all(hit.text != "Atlas launch is delayed." for hit in result.hits)

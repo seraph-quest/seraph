@@ -3574,7 +3574,7 @@ async def _eval_bounded_memory_snapshot_behavior() -> dict[str, Any]:
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder\n\n## Goals\n- Keep the system grounded"),
-            patch("src.memory.vector_store.search_with_status", return_value=([], False)),
+            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
             patch("src.audit.repository.audit_repository.list_events", return_value=[]),
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -3963,8 +3963,8 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch(
-                "src.memory.vector_store.search_with_status",
-                return_value=([{"category": "goal", "text": "Ship guardian state"}], False),
+                "src.memory.hybrid_retrieval.search_with_status",
+                return_value=([], True),
             ),
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
@@ -4029,14 +4029,8 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
             patch(
-                "src.memory.vector_store.search_with_status",
-                return_value=(
-                    [
-                        {"category": "goal", "text": "Prepare investor brief"},
-                        {"category": "pattern", "text": "Protect prep time during meeting blocks"},
-                    ],
-                    False,
-                ),
+                "src.memory.hybrid_retrieval.search_with_status",
+                return_value=([], False),
             ),
             patch(
                 "src.audit.repository.audit_repository.list_events",
@@ -4667,7 +4661,7 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
             patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nSeraph"),
             patch(
-                "src.memory.vector_store.search_with_status",
+                "src.memory.hybrid_retrieval.search_with_status",
                 return_value=([{"category": "pattern", "text": "Stretch breaks improve focus"}], False),
             ),
             patch("src.agent.factory.get_model", return_value=MagicMock()),
@@ -6902,6 +6896,7 @@ def _select_scenarios(selected_names: Sequence[str] | None) -> list[EvalScenario
 async def _run_scenario(scenario: EvalScenario) -> EvalResult:
     started = time.perf_counter()
     _reset_bounded_guardian_snapshot_cache()
+    _reset_vector_store_state()
     try:
         output = scenario.runner()
         if asyncio.iscoroutine(output):
@@ -6927,6 +6922,7 @@ async def _run_scenario(scenario: EvalScenario) -> EvalResult:
         )
     finally:
         _reset_bounded_guardian_snapshot_cache()
+        _reset_vector_store_state()
 
 
 async def run_runtime_evals(selected_names: Sequence[str] | None = None) -> EvalSummary:

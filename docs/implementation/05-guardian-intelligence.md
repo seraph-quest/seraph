@@ -690,6 +690,27 @@ This section records the internal Batch C slices on the feature branch before th
       - result: `1301 passed, 27 warnings`
       - command:
         - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+- CI follow-up after GitHub Actions run `23608084293`:
+  - root cause:
+    - the remaining failure in `tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` came from deterministic harness drift, not a live memory regression
+    - the guardian-state and guardian-world-model eval scenarios had been patching `src.memory.vector_store.search_with_status`, but the real retrieval path used by `build_guardian_state(...)` resolves `search_with_status` from `src.memory.hybrid_retrieval`
+    - once the real retrieval seam was patched, the world-model scenario fixture was exposed as inconsistent with its assertions because it still injected semantic goal and pattern hits even though the asserted contract expected an observer, project, execution, and recent-session driven world model with no extra memory-signal section
+  - fixes:
+    - updated `backend/src/evals/harness.py` so the guardian-state and related scenarios patch `src.memory.hybrid_retrieval.search_with_status`, which is the seam actually exercised by the retrieval planner
+    - reset vector-store state at the scenario boundary in `backend/src/evals/harness.py` so eval runs do not inherit stale in-process vector state from earlier scenarios like `vector_store_runtime_audit`
+    - aligned the `guardian_world_model_behavior` fixture with its asserted contract by returning no semantic memories for that scenario, leaving the world model grounded by observer context, recent projects, recent execution, and recent sessions instead of duplicated memory-signal lines
+    - added a regression in `backend/tests/test_eval_harness.py` that runs `vector_store_runtime_audit` before `guardian_state_synthesis` and proves the guardian-state confidence remains `overall=partial` and `memory=degraded`
+  - subagent review:
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the current harness and test diff and reported no material findings
+  - final validation on the current branch state:
+    - targeted subset:
+      - result: `3 passed`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_eval_harness.py::test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
+    - full backend suite:
+      - result: `1302 passed, 3 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
 
 ## Non-Goals
 

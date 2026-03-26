@@ -1108,6 +1108,24 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_logged_deleted_count"] == 0
 
 
+def test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "vector_store_runtime_audit",
+                "guardian_state_synthesis",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
+    assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "degraded"
+
+
 def test_memory_runtime_eval_scenarios_expose_expected_details():
     summary = asyncio.run(
         run_runtime_evals(

@@ -27,7 +27,8 @@ fix/my-bugfix    →  develop  →  main
 
 - When a tracked issue is created or refined, set `Queue`, `Lane`, `Priority`, `Size`, `Status=Todo`, `Code Review=Not Ready`, and `PR=Not Ready`.
 - When work starts, set `Status=In Progress` and move `Queue=Now` if the task is active now.
-- When a PR opens, link it to the issue, set `PR=Open`, and set `Code Review=Pending`.
+- The issue remains the project item. Use built-in linked pull requests for the PR relationship instead of creating a second standalone project item for the same tracked work.
+- When a PR opens, link it to the issue, set the issue `PR=Open`, and set issue `Code Review=Pending`.
 - While review is running, set `Code Review=Running`, then move to `Changes Requested` or `Passed`.
 - When the PR merges, set `PR=Merged` and `Status=Done`.
 

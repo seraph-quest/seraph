@@ -59,8 +59,8 @@ the workspace yet.
    - `## Still to do after this PR`
     - `## Validation`
 8. If the branch closes or advances a tracked issue, ensure the PR links that
-   issue and update the GitHub Project fields to reflect `PR=Open` and
-   `Code Review=Pending`.
+   issue. The issue stays the project item; update that issue item's `PR` and
+   `Code Review` fields after the PR exists.
 9. Reply with the PR URL.
 
 ## Commands
@@ -113,3 +113,6 @@ rm -f "$tmp_pr_body"
 - Keep the checklist factual against `develop`. Do not mark branch-only work as
   done on `develop`.
 - This repo does not use Symphony or Linear workflow automation.
+- This skill does not update GitHub Project fields automatically. After the PR
+  exists, update the linked issue's `PR` and `Code Review` fields through the
+  project board or `gh project item-edit`.

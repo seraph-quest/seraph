@@ -219,22 +219,6 @@ open http://localhost:3000
 open http://localhost:8004/docs
 ```
 
-## Project workflow
-
-Seraph does not use Symphony or Linear workflow automation.
-
-Tracked execution work now lives in:
-
-- the Seraph GitHub Project
-- GitHub issues
-- GitHub pull requests
-
-Use the normal app stack when you want to run Seraph locally:
-
-```bash
-./manage.sh -e dev local up
-```
-
 ## Screen daemon
 
 The native macOS daemon runs **outside Docker** and posts the active window context to the backend. This enables context-aware features like deep work detection.

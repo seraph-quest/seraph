@@ -72,14 +72,31 @@ Expected flow:
    - move `Queue=Now` if the task is active now
 3. Open the PR.
    - link the PR to the issue
-   - set `PR=Open`
-   - set `Code Review=Pending`
+   - keep the issue as the project item and use built-in linked pull requests for the PR relationship
+   - set issue `PR=Open`
+   - set issue `Code Review=Pending`
 4. Run review.
    - set `Code Review=Running` while review is active
    - move to `Changes Requested` or `Passed`
 5. Merge and close.
    - set `PR=Merged`
    - set `Status=Done`
+
+## Latest Workflow Contract Update
+
+- [x] GitHub Project now owns the active execution layer for Seraph.
+- subagent review:
+  - reviewer: `Fermat` (`019d2bff-cf88-70f0-a8cd-772182c834d1`)
+  - concrete findings fixed before the slice stayed final:
+    - removed tracked issue form fields that duplicated `Queue`, `Lane`, `Priority`, and `Size` outside the project
+    - removed manual `Queue`, `Lane`, `Code Review`, and `PR` fields from the PR template so PR bodies stop mirroring board state
+    - removed current workflow guidance from `docs/docs/setup.md` so the archive tree stays archival
+    - normalized project seeding to issue-first tracking with built-in linked pull requests instead of a mixed issue-plus-standalone-PR model
+    - corrected the repo-local push skill so it no longer falsely implies automatic board mutation
+  - final verification:
+    - project item `#233` links PR `#238` with `PR=Open` and `Code Review=Pending`
+    - project item `#239` links PR `#232` with `PR=Open` and `Code Review=Pending`
+    - the project no longer uses standalone PR items for tracked work that already has an issue item
 
 ## Parity Rules
 

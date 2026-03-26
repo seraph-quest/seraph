@@ -7,12 +7,8 @@
 ## Still to do after this PR
 - [ ] <real remaining work after this merges>
 
-## Project Flow
-- Linked issue:
-- Queue:
-- Lane:
-- Code Review:
-- PR:
+## Tracking
+- Linked issue: Closes #<issue>
 
 ## Validation
 - <command>

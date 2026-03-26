@@ -255,6 +255,23 @@ async def retrieve_hybrid_memory(
         normalized_query,
         max(limit * 2, 8),
     )
+    active_vector_ids: set[str] | None = None
+    vector_hit_ids = tuple(
+        str(hit.get("id") or "").strip()
+        for hit in vector_hits
+        if str(hit.get("id") or "").strip()
+    )
+    if vector_hit_ids:
+        async with get_session() as db:
+            active_vector_ids = set(
+                (
+                    await db.execute(
+                        select(Memory.id)
+                        .where(Memory.status == MemoryStatus.active)
+                        .where(col(Memory.id).in_(vector_hit_ids))
+                    )
+                ).scalars().all()
+            )
 
     combined_hits: list[HybridMemoryHit] = []
     for memory in [*semantic_memories, *linked_memories]:
@@ -304,6 +321,9 @@ async def retrieve_hybrid_memory(
         )
 
     for hit in vector_hits:
+        hit_id = str(hit.get("id") or "").strip()
+        if hit_id and active_vector_ids is not None and hit_id not in active_vector_ids:
+            continue
         text = _normalize_text(str(hit.get("text") or ""))
         if not text:
             continue

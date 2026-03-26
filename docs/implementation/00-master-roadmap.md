@@ -483,8 +483,8 @@ This is the next major Guardian Intelligence execution program after the current
     move durable identity state underneath the current soul surface so `soul.md` becomes a human-readable projection rather than the only identity substrate, with projection-hash plus soul-specific file-age guards preventing stale files from replacing newer structured state and optimistic compare-and-swap writes preventing concurrent section updates from erasing each other
 14. [x] `procedural-memory-from-outcomes-v1`:
     store timing, phrasing, channel, and interruption lessons from intervention outcomes as explicit procedural memory instead of leaving them only as thin policy heuristics, with scoped upserts now backed by a durable `scope_key` plus unique index and retry path, failed-to-recovered outcome transitions recomputing the durable lessons, procedural guidance surfacing the actual rule text through retrieval and bounded snapshots, and snapshot-cache invalidation keeping mid-session guidance fresh while direct policy-time retrieval still remains part of the later learning-quality work
-15. [ ] `memory-decay-contradiction-and-archive-v1`:
-    add reinforcement, contradiction, supersession, and archive rules so stale or invalid memory stops accumulating forever
+15. [x] `memory-decay-contradiction-and-archive-v1`:
+    add reinforcement, contradiction, supersession, and archive rules so stale or invalid memory stops accumulating forever, with contradiction edges and superseded status now materialized in the structured store, confidence and reinforcement decay plus stale archival applied by memory kind, consolidation running decay maintenance after writes, decay counts flowing into audit logs, repository edge writes deduping repeated relationships, and hybrid retrieval filtering archived or superseded vector hits instead of surfacing stale embeddings back into guardian context
 16. [ ] `guardian-memory-behavioral-evals-v1`:
     prove the new memory behavior with deterministic tests covering contradiction cleanup, adaptation quality, retrieval planning, and bounded-cost recall
 

@@ -521,7 +521,7 @@ This section records the internal Batch C slices on the feature branch before th
     - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
 - local regressions fixed before the slice stayed complete:
   - the new guardian-feedback tests initially created interventions against missing sessions, which violated the `guardian_interventions.session_id` foreign key and masked the actual procedural-memory assertions until the fixture setup was corrected
-  - subagent review:
+- subagent review:
   - `Galileo` (`019d2703-6e72-7b83-9d77-11c2bbc72165`) and `Rawls` (`019d2704-d877-7511-a4d5-ddcc014569d1`) returned concrete findings after the first slice commit:
     - procedural memories were surfaced through summary-first rendering, so prompts saw labels like `Advisory timing lesson` instead of the actual learned rule text
     - procedural refresh wrote the durable row but did not invalidate or rebuild the session-bounded snapshot cache, so an ongoing session could keep stale delivery guidance after feedback landed
@@ -543,6 +543,32 @@ This section records the internal Batch C slices on the feature branch before th
 - deferred to later Batch C slices:
   - delivery planning still reads the live `GuardianLearningSignal` heuristics directly; this slice makes those lessons durable and prompt-visible, but direct policy-time retrieval from procedural memory should land with the later learning-quality follow-through
   - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+
+### `memory-decay-contradiction-and-archive-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - added `backend/src/memory/decay.py` so Batch C now has an explicit decay-maintenance pass that detects conservative contradiction pairs for comparable active memories, marks losing rows `superseded`, writes contradiction plus supersession metadata, and materializes `contradicts` and `supersedes` edges instead of leaving stale memories active forever
+  - added staleness decay windows by memory kind, with confidence and reinforcement step-downs plus archival metadata once a memory becomes both old enough and weak enough to stop competing with fresher context
+  - wired decay maintenance into `backend/src/memory/consolidator.py` after memory persistence and soul updates, so each consolidation pass now refreshes long-term memory health before bounded snapshots are rebuilt; the consolidation audit payload now records contradiction, superseded, decayed, and archived counts plus whether maintenance itself failed
+  - extended `backend/src/memory/repository.py` with edge dedupe and `list_edges()`, so repeated maintenance runs do not fan out duplicate relationship rows when the same contradiction or supersession is seen again
+  - tightened `backend/src/memory/hybrid_retrieval.py` so vector hits are filtered back through active structured-memory status before they can reach guardian context, which prevents archived or superseded embeddings from reappearing after decay has already invalidated the source row
+- validation:
+  - initial slice boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/memory/decay.py backend/src/memory/hybrid_retrieval.py backend/src/memory/consolidator.py backend/src/memory/repository.py backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py backend/tests/conftest.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py -q`
+  - broader adjacent-memory boundary:
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local regressions fixed before the slice stayed complete:
+  - the first decay test run was accidentally using the real SQLite file instead of the in-memory test database because `src.memory.decay.get_session` was missing from the shared patch target list in `backend/tests/conftest.py`
+  - the first vector-status filter only dropped stale vector hits when at least one active structured-memory ID was still present, so a vector-only result set made entirely of archived or superseded rows could still leak stale text back into hybrid retrieval until the filter was tightened and regression-covered
+  - the first contradiction-polarity pass treated `helpful` as present inside `not helpful`, and it relied on summary-first text that could drop the polarity cue entirely, so contradictory communication-preference memories could survive decay until cue matching was hardened and the heuristic started reading combined summary-plus-content text
+- subagent review:
+  - `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) and `Ampere` (`019d29d6-6450-7203-ac60-87ba7e9bfd83`) were both asked to review the completed slice for bugs, regressions, and false claims, but both review threads stalled before returning findings
+  - an additional follow-up review request was sent after the vector-status and polarity fixes landed; if that review also stalls, the aggregate Batch C PR should say so explicitly instead of implying a returned clean review
+  - because none of the reviewer requests have returned findings so far, the completion record for this slice currently relies on the targeted decay suite, the broader adjacent-memory suite, and the local regressions fixed above; if any stalled review later replies before the aggregate Batch C PR is opened, those notes should be appended rather than retroactively implied here
+- deferred to later Batch C slices:
+  - behavioral proof that the new decay and adaptation rules change end-to-end guardian behavior still belongs to `guardian-memory-behavioral-evals-v1`
 
 ## Non-Goals
 

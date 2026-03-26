@@ -8,6 +8,7 @@ from src.agent.session import session_manager
 from src.audit.runtime import log_background_task_event
 from src.llm_runtime import completion_with_fallback
 from src.memory.linking import resolve_memory_links
+from src.memory.decay import apply_memory_decay_policies
 from src.memory.pipeline.capture import capture_session_memory
 from src.memory.pipeline.extract import extract_session_memories
 from src.memory.pipeline.merge import persist_extracted_memories
@@ -101,6 +102,9 @@ async def consolidate_session(
             vector_writer=add_memory,
             link_resolver=resolve_memory_links,
         )
+        decay_result = None
+        decay_maintenance_failed = False
+        decay_partial_write_count = 0
         snapshot_refresh_failed = False
         snapshot_partial_write_count = 0
 
@@ -113,6 +117,13 @@ async def consolidate_session(
                 logger.info("Soul updated: section '%s'", section)
 
         try:
+            decay_result = await apply_memory_decay_policies()
+        except Exception:
+            decay_maintenance_failed = True
+            decay_partial_write_count = 1
+            logger.exception("memory decay maintenance failed for session %s", session_id[:8])
+
+        try:
             await refresh_bounded_guardian_snapshot(soul_context=refreshed_soul)
         except Exception:
             snapshot_refresh_failed = True
@@ -120,11 +131,11 @@ async def consolidate_session(
             logger.exception("bounded memory snapshot refresh failed for session %s", session_id[:8])
 
         total_partial_write_count = (
-            persist_result.partial_write_count + snapshot_partial_write_count
+            persist_result.partial_write_count + snapshot_partial_write_count + decay_partial_write_count
         )
 
         logger.info(
-            "Consolidated session %s: %d stored memories (%d created, %d merged), %d vector memories, %d source links, %d soul updates, %d partial writes, %d failed writes, snapshot_failed=%s",
+            "Consolidated session %s: %d stored memories (%d created, %d merged), %d vector memories, %d source links, %d soul updates, %d contradictions, %d superseded, %d decayed, %d archived, %d partial writes, %d failed writes, snapshot_failed=%s, decay_failed=%s",
             session_id[:8],
             persist_result.stored_count,
             persist_result.created_count,
@@ -132,9 +143,14 @@ async def consolidate_session(
             persist_result.vector_stored,
             persist_result.source_link_count,
             len(extraction.soul_updates),
+            decay_result.contradiction_count if decay_result is not None else 0,
+            decay_result.superseded_count if decay_result is not None else 0,
+            decay_result.decayed_count if decay_result is not None else 0,
+            decay_result.archived_count if decay_result is not None else 0,
             total_partial_write_count,
             persist_result.write_failure_count,
             snapshot_refresh_failed,
+            decay_maintenance_failed,
         )
         outcome = (
             "partially_succeeded"
@@ -157,7 +173,12 @@ async def consolidate_session(
                 "partial_write_count": total_partial_write_count,
                 "write_failure_count": persist_result.write_failure_count,
                 "soul_update_count": len(extraction.soul_updates),
+                "contradiction_count": decay_result.contradiction_count if decay_result is not None else 0,
+                "superseded_memory_count": decay_result.superseded_count if decay_result is not None else 0,
+                "decayed_memory_count": decay_result.decayed_count if decay_result is not None else 0,
+                "archived_memory_count": decay_result.archived_count if decay_result is not None else 0,
                 "snapshot_refresh_failed": snapshot_refresh_failed,
+                "decay_maintenance_failed": decay_maintenance_failed,
                 "trigger": trigger,
                 "workflow_name": workflow_name,
             },

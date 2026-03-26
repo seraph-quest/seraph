@@ -120,3 +120,86 @@ async def test_hybrid_retrieval_marks_vector_failures_degraded_but_keeps_lexical
     assert result.degraded is True
     assert result.hits[0].text == "Review the Atlas launch brief"
     assert "[commitment] Review the Atlas launch brief" in result.context
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_filters_vector_hits_for_non_active_memories(async_db):
+    archived = await memory_repository.create_memory(
+        content="Atlas launch is delayed.",
+        kind=MemoryKind.project,
+        summary="Atlas launch delayed",
+        importance=0.95,
+        status="superseded",
+    )
+    active = await memory_repository.create_memory(
+        content="Atlas launch is on track.",
+        kind=MemoryKind.project,
+        summary="Atlas launch on track",
+        importance=0.9,
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": archived.memory_id,
+                    "text": "Atlas launch is delayed.",
+                    "category": "fact",
+                    "score": 0.11,
+                    "created_at": "2026-03-25T09:00:00+00:00",
+                },
+                {
+                    "id": active.memory_id,
+                    "text": "Atlas launch is on track.",
+                    "category": "fact",
+                    "score": 0.09,
+                    "created_at": "2026-03-25T10:00:00+00:00",
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="Atlas launch status",
+            active_projects=("Atlas",),
+            limit=4,
+        )
+
+    assert "Atlas launch is delayed." not in result.context
+    assert "Atlas launch is on track." in result.context
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_filters_vector_hits_when_all_ids_are_non_active(async_db):
+    archived = await memory_repository.create_memory(
+        content="Atlas launch is delayed.",
+        kind=MemoryKind.project,
+        summary="Atlas launch delayed",
+        importance=0.95,
+        status="archived",
+    )
+
+    with patch(
+        "src.memory.hybrid_retrieval.search_with_status",
+        return_value=(
+            [
+                {
+                    "id": archived.memory_id,
+                    "text": "Atlas launch is delayed.",
+                    "category": "fact",
+                    "score": 0.11,
+                    "created_at": "2026-03-25T09:00:00+00:00",
+                },
+            ],
+            False,
+        ),
+    ):
+        result = await retrieve_hybrid_memory(
+            query="Atlas launch status",
+            active_projects=("Atlas",),
+            limit=4,
+        )
+
+    assert result.context == ""
+    assert result.hits == ()

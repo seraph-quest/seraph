@@ -1016,6 +1016,17 @@ class MemoryRepository:
             raise ValueError("from_memory_id and to_memory_id must be non-empty")
         normalized_edge_type = _coerce_enum(edge_type, MemoryEdgeType)
         async with get_session() as db:
+            existing = (
+                await db.execute(
+                    select(MemoryEdge)
+                    .where(MemoryEdge.from_memory_id == from_memory_id)
+                    .where(MemoryEdge.to_memory_id == to_memory_id)
+                    .where(MemoryEdge.edge_type == normalized_edge_type)
+                )
+            ).scalars().first()
+            if existing is not None:
+                db.expunge(existing)
+                return existing
             edge = MemoryEdge(
                 from_memory_id=from_memory_id,
                 to_memory_id=to_memory_id,
@@ -1027,6 +1038,27 @@ class MemoryRepository:
             await db.flush()
             db.expunge(edge)
             return edge
+
+    async def list_edges(
+        self,
+        *,
+        from_memory_id: str | None = None,
+        to_memory_id: str | None = None,
+        edge_type: MemoryEdgeType | str | None = None,
+    ) -> list[MemoryEdge]:
+        async with get_session() as db:
+            stmt = select(MemoryEdge).order_by(col(MemoryEdge.created_at).asc())
+            if from_memory_id is not None:
+                stmt = stmt.where(MemoryEdge.from_memory_id == from_memory_id)
+            if to_memory_id is not None:
+                stmt = stmt.where(MemoryEdge.to_memory_id == to_memory_id)
+            if edge_type is not None:
+                stmt = stmt.where(MemoryEdge.edge_type == _coerce_enum(edge_type, MemoryEdgeType))
+            result = await db.execute(stmt)
+            edges = result.scalars().all()
+            for edge in edges:
+                db.expunge(edge)
+            return list(edges)
 
     async def save_snapshot(
         self,

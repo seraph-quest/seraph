@@ -146,6 +146,39 @@ async def test_create_edge_persists_structured_relationship(async_db):
 
 
 @pytest.mark.asyncio
+async def test_create_edge_dedupes_identical_relationship(async_db):
+    first = await memory_repository.create_memory(
+        content="Prepare the Atlas investor brief.",
+        kind=MemoryKind.commitment,
+    )
+    second = await memory_repository.create_memory(
+        content="Investor brief belongs to Project Atlas.",
+        kind=MemoryKind.project,
+    )
+
+    first_edge = await memory_repository.create_edge(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+        edge_type=MemoryEdgeType.supports,
+        metadata={"writer": "test"},
+    )
+    second_edge = await memory_repository.create_edge(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+        edge_type=MemoryEdgeType.supports,
+        metadata={"writer": "second-call"},
+    )
+    edges = await memory_repository.list_edges(
+        from_memory_id=first.memory_id,
+        to_memory_id=second.memory_id,
+        edge_type=MemoryEdgeType.supports,
+    )
+
+    assert second_edge.id == first_edge.id
+    assert len(edges) == 1
+
+
+@pytest.mark.asyncio
 async def test_create_memory_rejects_unknown_entity_links(async_db):
     with pytest.raises(IntegrityError):
         await memory_repository.create_memory(

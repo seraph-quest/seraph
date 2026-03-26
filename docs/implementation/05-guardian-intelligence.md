@@ -578,6 +578,24 @@ This section records the internal Batch C slices on the feature branch before th
 - deferred to later Batch C slices:
   - behavioral proof that the new decay and adaptation rules change end-to-end guardian behavior still belongs to `guardian-memory-behavioral-evals-v1`
 
+### `guardian-memory-behavioral-evals-v1`
+
+- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
+- scope:
+  - expanded `backend/src/evals/harness.py` with `memory_decay_contradiction_cleanup_behavior`, which proves the decay-maintenance path supersedes contradictory project memory, keeps superseded embeddings out of hybrid retrieval, and keeps guardian-state memory context focused on the winning project state
+  - added `procedural_memory_adaptation_behavior` so the eval harness now proves feedback-derived procedural memory can refresh same-session bounded context and surface the learned rule text back into guardian memory context without waiting for a new session
+  - registered both scenarios in the runtime-eval catalog so they show up in `--list` output and can be run independently from the rest of the harness instead of being trapped inside one monolithic all-scenarios contract
+  - extended `backend/tests/test_eval_harness.py` with scenario-list assertions and a focused `test_memory_runtime_eval_scenarios_expose_expected_details()` boundary that validates just the two new memory scenarios and their returned details
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/evals/harness.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details -q`
+  - `cd backend && PYTHONPATH=. .venv/bin/python -m src.evals.harness --scenario memory_decay_contradiction_cleanup_behavior --scenario procedural_memory_adaptation_behavior --indent 2`
+- local validation notes:
+  - the broader `backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` contract still fails with 13 unrelated legacy scenarios because several older patch or import seams are out of date, including `src.api.profile.get_db`, `src.memory.consolidator.read_soul`, and `src.guardian.state._structured_memory_context_bundle`; those failures were observed while the two new Batch C memory scenarios were already passing and are recorded as unrelated harness debt rather than blockers for this slice
+- subagent review:
+  - `Archimedes` (`019d29e0-d2a1-7a61-ab08-37edf377f6bf`) and `Godel` (`019d29e2-fc4a-7510-9acb-e24b85f5d8fe`) were both asked to review the completed eval slice for bugs, regressions, and false assertions, but both review threads stalled before returning findings
+  - because neither reviewer returned a result, the completion record for this slice relies on the focused memory-eval test boundary and the direct filtered harness run above; if either stalled review later replies before the aggregate Batch C PR is opened, those notes should be appended rather than implied retroactively here
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

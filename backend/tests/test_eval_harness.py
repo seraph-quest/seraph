@@ -100,6 +100,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "memory_collaborator_lookup_behavior" in captured.out
     assert "bounded_memory_snapshot_behavior" in captured.out
     assert "memory_supersession_filter_behavior" in captured.out
+    assert "memory_decay_contradiction_cleanup_behavior" in captured.out
+    assert "procedural_memory_adaptation_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
@@ -208,6 +210,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "memory_collaborator_lookup_behavior",
                 "bounded_memory_snapshot_behavior",
                 "memory_supersession_filter_behavior",
+                "memory_decay_contradiction_cleanup_behavior",
+                "procedural_memory_adaptation_behavior",
                 "scheduled_local_runtime_profile",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
@@ -944,6 +948,26 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["bounded_memory_snapshot_behavior"]["new_session_uses_real_session_record"] is True
     assert details_by_name["memory_supersession_filter_behavior"]["active_project_present"] is True
     assert details_by_name["memory_supersession_filter_behavior"]["superseded_project_filtered"] is True
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["contradiction_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_memory_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_filters_superseded"] is True
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_keeps_current"] is True
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_filters_superseded"]
+        is True
+    )
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_keeps_current"]
+        is True
+    )
+    assert details_by_name["procedural_memory_adaptation_behavior"]["baseline_snapshot_has_no_procedural_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["same_session_snapshot_refreshes"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_delivery_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] >= 5
+    assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",
@@ -1082,3 +1106,39 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_logged_deleted_count"] == 1
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_count"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_logged_deleted_count"] == 0
+
+
+def test_memory_runtime_eval_scenarios_expose_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "memory_decay_contradiction_cleanup_behavior",
+                "procedural_memory_adaptation_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["contradiction_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_memory_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_filters_superseded"] is True
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_keeps_current"] is True
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_filters_superseded"]
+        is True
+    )
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_keeps_current"]
+        is True
+    )
+    assert details_by_name["procedural_memory_adaptation_behavior"]["baseline_snapshot_has_no_procedural_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["same_session_snapshot_refreshes"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_delivery_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] >= 5
+    assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8

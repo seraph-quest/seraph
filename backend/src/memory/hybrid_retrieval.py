@@ -256,6 +256,7 @@ async def retrieve_hybrid_memory(
         max(limit * 2, 8),
     )
     active_vector_ids: set[str] | None = None
+    active_vector_texts: dict[str, set[str]] = {}
     vector_hit_ids = tuple(
         str(hit.get("id") or "").strip()
         for hit in vector_hits
@@ -263,15 +264,34 @@ async def retrieve_hybrid_memory(
     )
     if vector_hit_ids:
         async with get_session() as db:
-            active_vector_ids = set(
-                (
-                    await db.execute(
-                        select(Memory.id)
-                        .where(Memory.status == MemoryStatus.active)
-                        .where(col(Memory.id).in_(vector_hit_ids))
+            active_id_rows = (
+                await db.execute(
+                    select(Memory.embedding_id, Memory.id, Memory.summary, Memory.content)
+                    .where(Memory.status == MemoryStatus.active)
+                    .where(
+                        or_(
+                            col(Memory.embedding_id).in_(vector_hit_ids),
+                            col(Memory.id).in_(vector_hit_ids),
+                        )
                     )
-                ).scalars().all()
-            )
+                )
+            ).all()
+            active_vector_ids = {
+                str(value).strip()
+                for row in active_id_rows
+                for value in row[:2]
+                if isinstance(value, str) and value.strip()
+            }
+            for embedding_id, memory_id, summary, content in active_id_rows:
+                for identifier in (embedding_id, memory_id):
+                    normalized_identifier = str(identifier or "").strip()
+                    if not normalized_identifier:
+                        continue
+                    allowed_texts = active_vector_texts.setdefault(normalized_identifier, set())
+                    for candidate in (summary, content):
+                        normalized_candidate = _normalize_text(str(candidate or ""))
+                        if normalized_candidate:
+                            allowed_texts.add(normalized_candidate)
 
     combined_hits: list[HybridMemoryHit] = []
     for memory in [*semantic_memories, *linked_memories]:
@@ -327,6 +347,10 @@ async def retrieve_hybrid_memory(
         text = _normalize_text(str(hit.get("text") or ""))
         if not text:
             continue
+        if hit_id:
+            allowed_texts = active_vector_texts.get(hit_id)
+            if allowed_texts and text not in allowed_texts:
+                continue
         distance = float(hit.get("score") or 0.0)
         created_at = None
         raw_created_at = hit.get("created_at")

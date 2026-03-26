@@ -282,6 +282,7 @@ class MemoryRepository:
         )
 
         async with get_session() as db:
+            metadata_map = dict(metadata or {})
             memory = Memory(
                 content=normalized_content,
                 category=normalized_category,
@@ -295,7 +296,7 @@ class MemoryRepository:
                 project_entity_id=project_entity_id,
                 source_session_id=source_session_id,
                 embedding_id=normalized_embedding_id,
-                metadata_json=json.dumps(metadata or {}, sort_keys=True),
+                metadata_json=json.dumps(metadata_map, sort_keys=True),
                 last_confirmed_at=last_confirmed_at,
                 updated_at=_now(),
             )
@@ -322,6 +323,11 @@ class MemoryRepository:
                 memory_id=memory.id,
                 subject_entity_id=subject_entity_id,
                 project_entity_id=project_entity_id,
+                message_source_count=1 if source_message_id is not None else 0,
+                session_source_created=(
+                    source_message_id is None
+                    and source_session_id is not None
+                ),
             )
 
     async def add_memory_source(
@@ -473,6 +479,8 @@ class MemoryRepository:
 
             created_message_source_count = 0
             session_source_created = False
+            existing_metadata = json.loads(memory.metadata_json or "{}")
+            metadata_changed = False
 
             if summary and not memory.summary:
                 memory.summary = summary
@@ -498,9 +506,19 @@ class MemoryRepository:
                     )
                 ):
                     memory.last_confirmed_at = normalized_candidate
+                    for key in (
+                        "decay_step",
+                        "decay_age_days",
+                        "archived_reason",
+                        "archived_at",
+                    ):
+                        if key in existing_metadata:
+                            existing_metadata.pop(key, None)
+                            metadata_changed = True
             if metadata:
-                existing_metadata = json.loads(memory.metadata_json or "{}")
                 existing_metadata.update(metadata)
+                metadata_changed = True
+            if metadata_changed:
                 memory.metadata_json = json.dumps(existing_metadata, sort_keys=True)
             memory.updated_at = _now()
             db.add(memory)

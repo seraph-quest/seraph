@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -155,6 +156,126 @@ async def test_apply_memory_decay_detects_same_entity_short_contradictions(async
 
 
 @pytest.mark.asyncio
+async def test_apply_memory_decay_keeps_scoped_same_entity_preferences(async_db):
+    slack = await memory_repository.get_or_create_entity(
+        canonical_name="Slack",
+        entity_type="organization",
+    )
+    first = await memory_repository.create_memory(
+        content="Prefers Slack for team chat.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers Slack for team chat",
+        importance=0.7,
+        confidence=0.7,
+        subject_entity_id=slack.id,
+        last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    second = await memory_repository.create_memory(
+        content="Avoid Slack notifications during meetings.",
+        kind=MemoryKind.communication_preference,
+        summary="Avoid Slack notifications during meetings",
+        importance=0.8,
+        confidence=0.8,
+        subject_entity_id=slack.id,
+        last_confirmed_at=datetime.now(timezone.utc),
+    )
+
+    result = await apply_memory_decay_policies()
+    active_preferences = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+    )
+    superseded_preferences = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+        status="superseded",
+    )
+
+    assert result.contradiction_count == 0
+    assert result.superseded_count == 0
+    assert {memory.id for memory in active_preferences} == {first.memory_id, second.memory_id}
+    assert superseded_preferences == []
+
+
+@pytest.mark.asyncio
+async def test_apply_memory_decay_keeps_non_contradictory_same_entity_project_updates(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type="project",
+    )
+    first = await memory_repository.create_memory(
+        content="Atlas launch is the active release project.",
+        kind=MemoryKind.project,
+        summary="Atlas active release project",
+        importance=0.7,
+        confidence=0.7,
+        project_entity_id=atlas.id,
+        last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    second = await memory_repository.create_memory(
+        content="Atlas launch is delayed by the vendor handoff.",
+        kind=MemoryKind.project,
+        summary="Atlas delayed by vendor handoff",
+        importance=0.8,
+        confidence=0.8,
+        project_entity_id=atlas.id,
+        last_confirmed_at=datetime.now(timezone.utc),
+    )
+
+    result = await apply_memory_decay_policies()
+    active_projects = await memory_repository.list_memories(kind=MemoryKind.project, limit=10)
+    superseded_projects = await memory_repository.list_memories(
+        kind=MemoryKind.project,
+        limit=10,
+        status="superseded",
+    )
+
+    assert result.contradiction_count == 0
+    assert result.superseded_count == 0
+    assert {memory.id for memory in active_projects} == {first.memory_id, second.memory_id}
+    assert superseded_projects == []
+
+
+@pytest.mark.asyncio
+async def test_apply_memory_decay_detects_concise_active_paused_state_reversal(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas service",
+        entity_type="project",
+    )
+    older = await memory_repository.create_memory(
+        content="Atlas service is active.",
+        kind=MemoryKind.project,
+        summary="Atlas service active",
+        importance=0.7,
+        confidence=0.7,
+        project_entity_id=atlas.id,
+        last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    newer = await memory_repository.create_memory(
+        content="Atlas service is paused.",
+        kind=MemoryKind.project,
+        summary="Atlas service paused",
+        importance=0.8,
+        confidence=0.8,
+        project_entity_id=atlas.id,
+        last_confirmed_at=datetime.now(timezone.utc),
+    )
+
+    result = await apply_memory_decay_policies()
+    active_projects = await memory_repository.list_memories(kind=MemoryKind.project, limit=10)
+    superseded_projects = await memory_repository.list_memories(
+        kind=MemoryKind.project,
+        limit=10,
+        status="superseded",
+    )
+
+    assert result.contradiction_count == 1
+    assert result.superseded_count == 1
+    assert [memory.id for memory in active_projects] == [newer.memory_id]
+    assert [memory.id for memory in superseded_projects] == [older.memory_id]
+
+
+@pytest.mark.asyncio
 async def test_apply_memory_decay_detects_not_helpful_contradictions_from_content(async_db):
     older = await memory_repository.create_memory(
         content="User finds morning briefings helpful.",
@@ -190,3 +311,51 @@ async def test_apply_memory_decay_detects_not_helpful_contradictions_from_conten
     assert [memory.id for memory in active_memories] == [newer.memory_id]
     assert [memory.id for memory in superseded_memories] == [older.memory_id]
     assert any(edge.edge_type == MemoryEdgeType.contradicts for edge in edges)
+
+
+@pytest.mark.asyncio
+async def test_merge_refresh_resets_decay_progress_for_future_maintenance(async_db):
+    first_now = datetime.now(timezone.utc)
+    created = await memory_repository.create_memory(
+        content="User prefers concise morning briefings.",
+        kind=MemoryKind.communication_preference,
+        summary="Prefers concise morning briefings",
+        confidence=0.85,
+        importance=0.6,
+        reinforcement=1.0,
+        last_confirmed_at=first_now - timedelta(days=280),
+    )
+
+    first_decay = await apply_memory_decay_policies(now=first_now)
+    decayed_before_refresh = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+    )
+    before_metadata = json.loads(decayed_before_refresh[0].metadata_json or "{}")
+
+    refresh_now = first_now + timedelta(days=1)
+    await memory_repository.merge_memory(
+        created.memory_id,
+        last_confirmed_at=refresh_now,
+    )
+
+    refreshed_memories = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+    )
+    refreshed_metadata = json.loads(refreshed_memories[0].metadata_json or "{}")
+
+    later_now = refresh_now + timedelta(days=130)
+    second_decay = await apply_memory_decay_policies(now=later_now)
+    decayed_after_refresh = await memory_repository.list_memories(
+        kind=MemoryKind.communication_preference,
+        limit=10,
+    )
+    after_metadata = json.loads(decayed_after_refresh[0].metadata_json or "{}")
+
+    assert first_decay.decayed_count == 1
+    assert before_metadata["decay_step"] == 2
+    assert "decay_step" not in refreshed_metadata
+    assert "decay_age_days" not in refreshed_metadata
+    assert second_decay.decayed_count == 1
+    assert after_metadata["decay_step"] == 1

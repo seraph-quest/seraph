@@ -69,6 +69,16 @@ _COMPARABLE_KINDS = {
     MemoryKind.commitment,
 }
 
+_SHORT_ENTITY_CONTRADICTION_KINDS = {
+    MemoryKind.preference,
+    MemoryKind.communication_preference,
+}
+
+_AMBIGUOUS_STATUS_POSITIVE_CUES = {
+    "active",
+    "available",
+}
+
 _STALE_WINDOWS_DAYS = {
     MemoryKind.commitment: 30,
     MemoryKind.project: 45,
@@ -125,13 +135,18 @@ def _contains_cue(text: str, cue: str) -> bool:
 
 
 def _cue_polarity(text: str) -> int:
+    anchor_tokens = _anchor_tokens(text)
     negative = any(_contains_cue(text, cue) for cue in _NEGATIVE_CUES)
     positive_text = text
     if negative:
         for cue in _NEGATIVE_CUES:
             pattern = r"\b" + r"\s+".join(re.escape(part) for part in cue.lower().split()) + r"\b"
             positive_text = re.sub(pattern, " ", positive_text)
-    positive = any(_contains_cue(positive_text, cue) for cue in _POSITIVE_CUES)
+    positive = any(
+        _contains_cue(positive_text, cue)
+        for cue in _POSITIVE_CUES
+        if cue not in _AMBIGUOUS_STATUS_POSITIVE_CUES or len(anchor_tokens) <= 2
+    )
     if positive and not negative:
         return 1
     if negative and not positive:
@@ -193,8 +208,17 @@ def _contradictory(memory: Memory, peer: Memory) -> bool:
         return False
     left_text = _normalized_text(memory)
     right_text = _normalized_text(peer)
-    overlap = len(_anchor_tokens(left_text) & _anchor_tokens(right_text))
-    required_overlap = 1 if _shares_entity(memory, peer) else 2
+    left_anchors = _anchor_tokens(left_text)
+    right_anchors = _anchor_tokens(right_text)
+    overlap = len(left_anchors & right_anchors)
+    required_overlap = 2
+    if (
+        _shares_entity(memory, peer)
+        and memory.kind in _SHORT_ENTITY_CONTRADICTION_KINDS
+        and len(left_anchors) == 1
+        and len(right_anchors) == 1
+    ):
+        required_overlap = 1
     if overlap < required_overlap:
         return False
     left_polarity = _cue_polarity(left_text)

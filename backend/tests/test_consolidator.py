@@ -852,7 +852,7 @@ class TestConsolidateSession:
         assert any(
             event["tool_name"] == "session_consolidation"
             and event["event_type"] == "background_task_succeeded"
-            and event["details"]["source_link_count"] == 0
+            and event["details"]["source_link_count"] == 1
             for event in events
         )
 

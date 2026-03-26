@@ -291,6 +291,8 @@ async def persist_extracted_memories(
                     ),
                 )
                 source_link_count += merge_result.message_source_count
+                if merge_result.session_source_created:
+                    source_link_count += 1
                 if candidate.embedding_id is None and embedding_result.failed:
                     partial_write_count += 1
                 stored += 1
@@ -330,6 +332,9 @@ async def persist_extracted_memories(
                 last_confirmed_at=item.last_confirmed_at,
             )
             structured_succeeded = True
+            source_link_count += created_memory.message_source_count
+            if created_memory.session_source_created:
+                source_link_count += 1
             for extra_source in selected_sources[1:]:
                 source_result = await memory_repository.add_memory_source(
                     memory_id=created_memory.memory_id,
@@ -340,8 +345,6 @@ async def persist_extracted_memories(
                 )
                 if source_result.created:
                     source_link_count += 1
-            if primary_source is not None:
-                source_link_count += 1
             stored += 1
             created += 1
         except Exception:

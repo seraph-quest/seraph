@@ -370,10 +370,12 @@ async def _patched_async_db(*patch_targets: str):
         with ExitStack() as stack:
             for target in dict.fromkeys((
                 *patch_targets,
+                "src.agent.session.get_session",
                 "src.memory.repository.get_session",
                 "src.profile.service.get_db",
                 "src.memory.hybrid_retrieval.get_session",
                 "src.memory.decay.get_session",
+                "src.memory.flush.get_session",
             )):
                 stack.enter_context(patch(target, _get_session))
             yield
@@ -421,6 +423,7 @@ def _make_sync_client_with_db():
         "src.profile.service.get_db",
         "src.memory.hybrid_retrieval.get_session",
         "src.memory.decay.get_session",
+        "src.memory.flush.get_session",
     ]
     patches = [patch(target, _get_session) for target in targets]
     patches.append(patch("src.app.init_db", _test_init_db))
@@ -2374,7 +2377,10 @@ async def _eval_session_bound_llm_trace() -> dict[str, Any]:
 
         with (
             patch("litellm.completion", side_effect=[title_response, consolidation_response]),
-            patch("src.memory.consolidator.read_soul", return_value="# Soul\nName: Hero"),
+            patch(
+                "src.memory.consolidator.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Hero"}),
+            ),
             patch("src.memory.consolidator.add_memory"),
             patch("src.memory.consolidator.update_profile_soul_section", AsyncMock()),
         ):
@@ -3370,6 +3376,11 @@ async def _eval_memory_commitment_continuity_behavior() -> dict[str, Any]:
 
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch("src.agent.context_window._get_encoding", return_value=None),
+            patch(
+                "src.agent.session.session_manager.get_history_text",
+                AsyncMock(return_value="User: What is the Atlas launch status?"),
+            ),
             patch(
                 "src.profile.service.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Identity": "Builder"}),
@@ -3664,6 +3675,7 @@ async def _eval_memory_decay_contradiction_cleanup_behavior() -> dict[str, Any]:
             importance=0.8,
             confidence=0.7,
             project_entity_id=atlas.id,
+            embedding_id="vec-atlas-delayed",
             last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=7),
         )
         newer = await memory_repository.create_memory(
@@ -3673,6 +3685,7 @@ async def _eval_memory_decay_contradiction_cleanup_behavior() -> dict[str, Any]:
             importance=0.92,
             confidence=0.92,
             project_entity_id=atlas.id,
+            embedding_id="vec-atlas-on-track",
             last_confirmed_at=datetime.now(timezone.utc),
         )
 
@@ -3696,20 +3709,23 @@ async def _eval_memory_decay_contradiction_cleanup_behavior() -> dict[str, Any]:
 
         with (
             patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-            patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder"),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
             patch(
                 "src.memory.hybrid_retrieval.search_with_status",
                 return_value=(
                     [
                         {
-                            "id": older.memory_id,
+                            "id": "vec-atlas-delayed",
                             "text": "Atlas launch is delayed.",
                             "category": "project",
                             "score": 0.11,
                             "created_at": "2026-03-25T09:00:00+00:00",
                         },
                         {
-                            "id": newer.memory_id,
+                            "id": "vec-atlas-on-track",
                             "text": "Atlas launch is on track.",
                             "category": "project",
                             "score": 0.09,
@@ -3745,7 +3761,11 @@ async def _eval_memory_decay_contradiction_cleanup_behavior() -> dict[str, Any]:
             "superseded_memory_count": len(superseded_memories),
             "hybrid_filters_superseded": "Atlas launch is delayed." not in hybrid.context,
             "hybrid_keeps_current": "Atlas launch is on track." in hybrid.context,
-            "guardian_context_filters_superseded": "Atlas launch delayed" not in state.memory_context,
+            "guardian_context_filters_superseded": (
+                "Atlas launch delayed" not in state.memory_context
+                and "Atlas launch is delayed." not in state.memory_context
+                and "- [project] Atlas launch is delayed." not in state.memory_context
+            ),
             "guardian_context_keeps_current": "[project] Atlas launch on track" in state.memory_context,
         }
 
@@ -3780,8 +3800,18 @@ async def _eval_procedural_memory_adaptation_behavior() -> dict[str, Any]:
         async def _build_state() -> Any:
             with ExitStack() as stack:
                 stack.enter_context(patch("src.observer.manager.context_manager.get_context", return_value=ctx))
+                stack.enter_context(patch("src.agent.context_window._get_encoding", return_value=None))
                 stack.enter_context(
-                    patch("src.memory.soul.read_soul", return_value="# Soul\n\n## Identity\nBuilder")
+                    patch(
+                        "src.agent.session.session_manager.get_history_text",
+                        AsyncMock(return_value="User: Should you interrupt me during deep work?"),
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "src.profile.service.sync_soul_file_to_profile",
+                        AsyncMock(return_value={"Identity": "Builder"}),
+                    )
                 )
                 stack.enter_context(
                     patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False))

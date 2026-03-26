@@ -121,6 +121,18 @@ class MemoryRepository:
         return lock
 
     @staticmethod
+    def _scoped_memory_key(
+        *,
+        kind: MemoryKind,
+        scope: dict[str, Any],
+    ) -> str:
+        return json.dumps(
+            {"kind": kind.value, "scope": scope},
+            sort_keys=True,
+            default=str,
+        )
+
+    @staticmethod
     def _normalize_episode_kwargs(
         *,
         episode_type: MemoryEpisodeType | str,
@@ -585,6 +597,10 @@ class MemoryRepository:
         merged_metadata = dict(normalized_scope)
         if isinstance(metadata, dict):
             merged_metadata.update(metadata)
+        normalized_scope_key = self._scoped_memory_key(
+            kind=normalized_kind,
+            scope=normalized_scope,
+        )
 
         def _normalize_timestamp(value: datetime | None) -> datetime | None:
             if value is None:
@@ -606,20 +622,34 @@ class MemoryRepository:
         )
         async with lock:
             async with get_session() as db:
-                candidates = (
+                memory = (
                     await db.execute(
                         select(Memory)
                         .where(Memory.kind == normalized_kind)
+                        .where(Memory.scope_key == normalized_scope_key)
                         .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
                     )
-                ).scalars().all()
-                memory = next((item for item in candidates if _matches_scope(item)), None)
+                ).scalars().first()
+                if memory is None:
+                    candidates = (
+                        await db.execute(
+                            select(Memory)
+                            .where(Memory.kind == normalized_kind)
+                            .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+                        )
+                    ).scalars().all()
+                    memory = next((item for item in candidates if _matches_scope(item)), None)
+                    if memory is not None and memory.scope_key != normalized_scope_key:
+                        memory.scope_key = normalized_scope_key
+                        db.add(memory)
+                        await db.flush()
 
                 if not normalized_content:
                     if memory is None:
                         return None
                     memory.status = MemoryStatus.archived
                     memory.updated_at = _now()
+                    memory.scope_key = normalized_scope_key
                     memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
                     db.add(memory)
                     await db.flush()
@@ -636,12 +666,41 @@ class MemoryRepository:
                         confidence=confidence,
                         importance=importance,
                         reinforcement=reinforcement,
+                        scope_key=normalized_scope_key,
                         metadata_json=json.dumps(merged_metadata, sort_keys=True),
                         status=MemoryStatus.active,
                         last_confirmed_at=_normalize_timestamp(last_confirmed_at),
                     )
                     db.add(memory)
-                    await db.flush()
+                    try:
+                        await db.flush()
+                    except IntegrityError:
+                        await db.rollback()
+                        memory = (
+                            await db.execute(
+                                select(Memory)
+                                .where(Memory.kind == normalized_kind)
+                                .where(Memory.scope_key == normalized_scope_key)
+                            )
+                        ).scalars().first()
+                        if memory is None:
+                            raise
+                        memory.content = normalized_content
+                        memory.category = normalized_category
+                        memory.summary = normalized_summary
+                        memory.confidence = confidence
+                        memory.importance = importance
+                        memory.reinforcement = max(memory.reinforcement, reinforcement)
+                        memory.status = MemoryStatus.active
+                        if source_session_id:
+                            memory.source_session_id = source_session_id
+                        if last_confirmed_at is not None:
+                            memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
+                        memory.scope_key = normalized_scope_key
+                        memory.metadata_json = json.dumps(merged_metadata, sort_keys=True)
+                        memory.updated_at = _now()
+                        db.add(memory)
+                        await db.flush()
                     db.expunge(memory)
                     return MemoryWriteResult(memory_id=memory.id)
 
@@ -652,6 +711,7 @@ class MemoryRepository:
                 memory.importance = importance
                 memory.reinforcement = max(memory.reinforcement, reinforcement)
                 memory.status = MemoryStatus.active
+                memory.scope_key = normalized_scope_key
                 if source_session_id:
                     memory.source_session_id = source_session_id
                 if last_confirmed_at is not None:

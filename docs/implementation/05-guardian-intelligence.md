@@ -508,7 +508,7 @@ This section records the internal Batch C slices on the feature branch before th
 - scope:
   - added `MemoryKind.procedural` in `backend/src/db/models.py` and mapped it through `backend/src/memory/types.py` so outcome-derived lessons become first-class durable memory instead of piggybacking on generic preference text
   - added `backend/src/memory/procedural.py` to materialize `GuardianLearningSignal` into scoped procedural memories for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread lessons
-  - added `memory_repository.sync_scoped_memory()` in `backend/src/memory/repository.py` so one lesson scope updates in place across retries, reactivates archived rows when the lesson returns, archives the row when the signal goes neutral, and now serializes same-scope writes through a per-scope async lock so concurrent feedback refreshes do not duplicate procedural rows
+  - added `memory_repository.sync_scoped_memory()` in `backend/src/memory/repository.py` so one lesson scope updates in place across retries, reactivates archived rows when the lesson returns, archives the row when the signal goes neutral, and now persists a deterministic `scope_key` with a unique SQLite index plus retry path so same-scope procedural writes stay deduplicated across workers instead of only inside one event loop
   - refreshed procedural memories from guardian feedback writes in `backend/src/guardian/feedback.py`, so explicit user feedback and failed outcomes update the durable lesson lane instead of leaving that learning only in ephemeral scoring logic; the follow-up fix now also recomputes lessons when an intervention moves from `failed` back to a non-failed outcome
   - surfaced procedural memories through the retrieval planner, hybrid retrieval, bounded snapshot, and guardian world model in `backend/src/memory/retrieval_planner.py`, `backend/src/memory/hybrid_retrieval.py`, `backend/src/memory/snapshots.py`, and `backend/src/guardian/world_model.py`, with procedural guidance now rendering the actual rule text instead of opaque lesson labels and allowing more than two active lessons to surface at once
   - feedback-driven procedural refresh now invalidates the per-session bounded snapshot cache and rebuilds the shared bounded snapshot so the same session does not keep stale delivery guidance after new feedback lands
@@ -521,7 +521,7 @@ This section records the internal Batch C slices on the feature branch before th
     - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
 - local regressions fixed before the slice stayed complete:
   - the new guardian-feedback tests initially created interventions against missing sessions, which violated the `guardian_interventions.session_id` foreign key and masked the actual procedural-memory assertions until the fixture setup was corrected
-- subagent review:
+  - subagent review:
   - `Galileo` (`019d2703-6e72-7b83-9d77-11c2bbc72165`) and `Rawls` (`019d2704-d877-7511-a4d5-ddcc014569d1`) returned concrete findings after the first slice commit:
     - procedural memories were surfaced through summary-first rendering, so prompts saw labels like `Advisory timing lesson` instead of the actual learned rule text
     - procedural refresh wrote the durable row but did not invalidate or rebuild the session-bounded snapshot cache, so an ongoing session could keep stale delivery guidance after feedback landed
@@ -537,7 +537,9 @@ This section records the internal Batch C slices on the feature branch before th
     - `update_outcome()` now recomputes procedural lessons when an intervention enters or exits the `failed` state
     - structured memory and bounded snapshot surfacing now allow more than two procedural lessons without crowding out the whole bundle
   - recheck status:
-    - a follow-up recheck request was started with `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) after the fixes landed; its result should be attached to the Batch C record when it returns rather than assumed clean
+    - `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) returned one remaining medium finding after the first repair pass: the same-scope dedupe was still only process-local because it relied on an in-memory async lock
+    - the branch now adds a durable `scope_key` column plus a unique partial index on `(kind, scope_key)` in `backend/src/db/models.py` and `backend/src/db/engine.py`, and `backend/src/memory/repository.py` now retries scoped inserts after `IntegrityError` by loading the winning row and updating it in place
+    - a final recheck request was sent back to `Kepler` after the DB-backed dedupe path landed; if that response does not return before the aggregate Batch C PR is opened, the PR notes should say exactly that instead of implying a clean reply that never arrived
 - deferred to later Batch C slices:
   - delivery planning still reads the live `GuardianLearningSignal` heuristics directly; this slice makes those lessons durable and prompt-visible, but direct policy-time retrieval from procedural memory should land with the later learning-quality follow-through
   - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`

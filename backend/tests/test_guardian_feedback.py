@@ -538,3 +538,4 @@ async def test_sync_scoped_memory_serializes_concurrent_same_scope_writes(async_
     ]
 
     assert len(matching) == 1
+    assert matching[0].scope_key is not None

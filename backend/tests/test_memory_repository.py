@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import pytest
@@ -249,6 +250,43 @@ async def test_list_memories_for_entities_supports_project_filters(async_db):
     )
 
     assert [memory.content for memory in linked] == ["Review the Atlas brief tomorrow morning."]
+
+
+@pytest.mark.asyncio
+async def test_sync_scoped_memory_backfills_scope_key_for_legacy_metadata_match(async_db):
+    created = await memory_repository.create_memory(
+        content="For advisory interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        kind=MemoryKind.procedural,
+        summary="For advisory interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        metadata={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+            "bias_value": "reduce_interruptions",
+        },
+    )
+
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+        },
+        content="For advisory interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        summary="For advisory interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        metadata={"bias_value": "reduce_interruptions"},
+    )
+
+    memories = await memory_repository.list_memories(kind=MemoryKind.procedural, limit=10)
+
+    assert result is not None
+    assert result.memory_id == created.memory_id
+    assert len(memories) == 1
+    assert memories[0].scope_key is not None
+    assert json.loads(memories[0].metadata_json or "{}")["lesson_type"] == "delivery"
 
 
 @pytest.mark.asyncio

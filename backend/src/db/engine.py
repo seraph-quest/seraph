@@ -115,6 +115,10 @@ async def _ensure_legacy_columns(conn) -> None:
         await conn.exec_driver_sql(
             "ALTER TABLE memories ADD COLUMN metadata_json VARCHAR"
         )
+    if memory_columns and "scope_key" not in memory_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN scope_key VARCHAR"
+        )
     if memory_columns and "updated_at" not in memory_columns:
         await conn.exec_driver_sql(
             "ALTER TABLE memories ADD COLUMN updated_at DATETIME"
@@ -281,12 +285,23 @@ async def _ensure_search_indexes(conn) -> None:
     )
 
 
+async def _ensure_memory_indexes(conn) -> None:
+    await conn.exec_driver_sql(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ix_memories_kind_scope_key_unique
+        ON memories (kind, scope_key)
+        WHERE scope_key IS NOT NULL
+        """
+    )
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_legacy_columns(conn)
+        await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)
 
 

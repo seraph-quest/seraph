@@ -827,3 +827,286 @@ async def test_live_and_procedural_axis_evidence_use_matching_support_counts(asy
     assert signal.evidence_for_axis("delivery").support_count == guidance.evidence_for_axis("delivery").support_count
     assert signal.evidence_for_axis("channel").support_count == guidance.evidence_for_axis("channel").support_count
     assert signal.evidence_for_axis("escalation").support_count == guidance.evidence_for_axis("escalation").support_count
+
+
+async def test_load_procedural_memory_guidance_prefers_thread_and_project_scope(async_db):
+    for _index in range(2):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="atlas-thread",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Helpful Atlas delivery.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+            active_project="Atlas",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
+
+    for _index in range(2):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="hermes-thread",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="This interruption landed badly.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+            active_project="Hermes",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="not_helpful")
+
+    scoped_guidance = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="atlas-thread",
+        active_project="Atlas",
+    )
+    project_guidance = await load_procedural_memory_guidance(
+        "advisory",
+        active_project="Atlas",
+    )
+    global_guidance = await load_procedural_memory_guidance("advisory")
+
+    assert scoped_guidance.bias == "prefer_direct_delivery"
+    assert project_guidance.bias == "prefer_direct_delivery"
+    assert global_guidance.bias == "reduce_interruptions"
+
+
+async def test_load_procedural_memory_guidance_prefers_thread_scope_over_project_scope(async_db):
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+            "active_project": "Atlas",
+        },
+        content="Project guidance prefers direct delivery while working on Atlas.",
+        summary="Project guidance prefers direct delivery while working on Atlas.",
+        confidence=0.85,
+        reinforcement=1.4,
+        metadata={
+            "bias_value": "prefer_direct_delivery",
+            "support_count": 3,
+            "evidence_count": 3,
+        },
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+            "continuity_thread_id": "session-1",
+        },
+        content="This thread has gone badly; reduce interruptions.",
+        summary="This thread has gone badly; reduce interruptions.",
+        confidence=0.9,
+        reinforcement=1.6,
+        metadata={
+            "bias_value": "reduce_interruptions",
+            "support_count": 2,
+            "evidence_count": 2,
+        },
+    )
+
+    guidance = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="session-1",
+        active_project="Atlas",
+    )
+
+    assert guidance.bias == "reduce_interruptions"
+    assert guidance.evidence_for_axis("delivery").support_count == 2
+
+
+async def test_load_procedural_memory_guidance_falls_back_from_thread_project_to_project_to_global(async_db):
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "timing",
+        },
+        content="Global guidance prefers available windows.",
+        summary="Global guidance prefers available windows.",
+        confidence=0.7,
+        reinforcement=1.2,
+        metadata={
+            "bias_value": "prefer_available_windows",
+            "support_count": 2,
+            "evidence_count": 2,
+        },
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "timing",
+            "active_project": "Atlas",
+        },
+        content="Atlas-specific timing avoids focus windows.",
+        summary="Atlas-specific timing avoids focus windows.",
+        confidence=0.8,
+        reinforcement=1.4,
+        metadata={
+            "bias_value": "avoid_focus_windows",
+            "support_count": 3,
+            "evidence_count": 3,
+        },
+    )
+
+    scoped = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="session-missing",
+        active_project="Atlas",
+    )
+    global_only = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="session-missing",
+        active_project="Hermes",
+    )
+
+    assert scoped.timing_bias == "avoid_focus_windows"
+    assert scoped.evidence_for_axis("timing").support_count == 3
+    assert global_only.timing_bias == "prefer_available_windows"
+    assert global_only.evidence_for_axis("timing").support_count == 2
+
+
+async def test_load_procedural_memory_guidance_prefers_scoped_thread_and_project_context(async_db):
+    base_scope = {
+        "writer": "guardian_feedback",
+        "memory_scope": "procedural_learning",
+        "intervention_type": "advisory",
+        "lesson_type": "timing",
+    }
+
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=base_scope,
+        content="Global: prefer available windows.",
+        summary="Global: prefer available windows.",
+        confidence=0.7,
+        reinforcement=1.2,
+        metadata={"bias_value": "prefer_available_windows", "support_count": 2},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={**base_scope, "continuity_thread_id": "thread-1"},
+        content="Thread: avoid focus windows.",
+        summary="Thread: avoid focus windows.",
+        confidence=0.8,
+        reinforcement=1.4,
+        metadata={"bias_value": "avoid_focus_windows", "support_count": 2},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={**base_scope, "active_project": "Atlas"},
+        content="Project: prefer available windows.",
+        summary="Project: prefer available windows.",
+        confidence=0.85,
+        reinforcement=1.4,
+        metadata={"bias_value": "prefer_available_windows", "support_count": 2},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            **base_scope,
+            "continuity_thread_id": "thread-1",
+            "active_project": "Atlas",
+        },
+        content="Thread and project: avoid focus windows.",
+        summary="Thread and project: avoid focus windows.",
+        confidence=0.9,
+        reinforcement=1.6,
+        metadata={"bias_value": "avoid_focus_windows", "support_count": 3},
+    )
+
+    combined = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="thread-1",
+        active_project="Atlas",
+    )
+    project_only = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="thread-2",
+        active_project="Atlas",
+    )
+    thread_only = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="thread-1",
+        active_project="Other",
+    )
+    global_only = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="thread-2",
+        active_project="Other",
+    )
+
+    assert combined.timing_bias == "avoid_focus_windows"
+    assert project_only.timing_bias == "prefer_available_windows"
+    assert thread_only.timing_bias == "avoid_focus_windows"
+    assert global_only.timing_bias == "prefer_available_windows"
+
+
+async def test_feedback_refresh_writes_thread_and_project_scoped_memories(async_db):
+    for _ in range(2):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="atlas-thread",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Atlas work should not be interrupted directly.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            active_project="Atlas",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="not_helpful")
+
+    scoped_memories = await memory_repository.list_memories_for_scope(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+            "continuity_thread_id": "atlas-thread",
+            "active_project": "Atlas",
+        },
+        limit=4,
+    )
+
+    assert len(scoped_memories) == 1
+    assert json.loads(scoped_memories[0].metadata_json or "{}")["bias_value"] == "reduce_interruptions"

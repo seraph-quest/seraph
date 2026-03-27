@@ -39,6 +39,8 @@ _LESSON_ORDER = (
     "thread",
 )
 
+_CONTEXT_SCOPE_KEYS = ("continuity_thread_id", "active_project")
+
 
 @dataclass(frozen=True)
 class ProceduralMemoryGuidance:
@@ -90,6 +92,12 @@ def _memory_metadata(memory) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _matches_context_scope(metadata: dict[str, object], scope: dict[str, object]) -> bool:
+    return all(metadata.get(key) == scope.get(key) for key in _CONTEXT_SCOPE_KEYS) and all(
+        (key in scope) or (metadata.get(key) is None) for key in _CONTEXT_SCOPE_KEYS
+    )
+
+
 def _metadata_int(metadata: dict[str, object], key: str) -> int:
     value = metadata.get(key)
     if isinstance(value, bool):
@@ -128,17 +136,52 @@ def _procedural_quality_score(memory, metadata: dict[str, object], *, metadata_c
 
 async def load_procedural_memory_guidance(
     intervention_type: str,
+    *,
+    continuity_thread_id: str | None = None,
+    active_project: str | None = None,
 ) -> ProceduralMemoryGuidance:
     normalized_intervention_type = str(intervention_type or "").strip() or "advisory"
-    memories = await memory_repository.list_memories_for_scope(
-        kind=MemoryKind.procedural,
-        scope={
-            "writer": "guardian_feedback",
-            "memory_scope": "procedural_learning",
-            "intervention_type": normalized_intervention_type,
-        },
-        limit=32,
-    )
+    normalized_active_project = " ".join(str(active_project or "").split()) or None
+    scope_candidates: list[dict[str, object]] = []
+    base_scope = {
+        "writer": "guardian_feedback",
+        "memory_scope": "procedural_learning",
+        "intervention_type": normalized_intervention_type,
+    }
+    if continuity_thread_id and normalized_active_project:
+        scope_candidates.append(
+            {
+                **base_scope,
+                "continuity_thread_id": continuity_thread_id,
+                "active_project": normalized_active_project,
+            }
+        )
+    if continuity_thread_id:
+        scope_candidates.append(
+            {
+                **base_scope,
+                "continuity_thread_id": continuity_thread_id,
+            }
+        )
+    if normalized_active_project:
+        scope_candidates.append(
+            {
+                **base_scope,
+                "active_project": normalized_active_project,
+            }
+        )
+    scope_candidates.append(base_scope)
+
+    scoped_memories: list[tuple[int, object]] = []
+    for index, scope in enumerate(scope_candidates):
+        scoped_memories.extend(
+            (index, scope, memory)
+            for memory in await memory_repository.list_memories_for_scope(
+                kind=MemoryKind.procedural,
+                scope=scope,
+                limit=32,
+            )
+        )
 
     guidance_by_field: dict[str, str] = {}
     lesson_types: list[str] = []
@@ -149,8 +192,10 @@ async def load_procedural_memory_guidance(
         matching_memory = None
         matching_bias = ""
         matching_metadata: dict[str, object] = {}
-        for memory in memories:
+        for scope_index, scope, memory in scoped_memories:
             metadata = _memory_metadata(memory)
+            if not _matches_context_scope(metadata, scope):
+                continue
             if metadata.get("lesson_type") != lesson_type:
                 continue
             bias_value = str(metadata.get("bias_value") or "").strip()

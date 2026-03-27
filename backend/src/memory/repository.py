@@ -924,10 +924,33 @@ class MemoryRepository:
         }
         if not normalized_scope:
             raise ValueError("scope must contain at least one key")
+        normalized_scope_key = self._scoped_memory_key(
+            kind=normalized_kind,
+            scope=normalized_scope,
+        )
 
         matches: list[Memory] = []
         async with get_session() as db:
-            stmt = (
+            exact_stmt = (
+                select(Memory)
+                .where(Memory.kind == normalized_kind)
+                .where(Memory.status == normalized_status)
+                .where(Memory.scope_key == normalized_scope_key)
+                .order_by(
+                    col(Memory.importance).desc(),
+                    col(Memory.last_confirmed_at).desc(),
+                    col(Memory.created_at).desc(),
+                )
+                .limit(limit)
+            )
+            exact_result = await db.execute(exact_stmt)
+            for memory in exact_result.scalars().all():
+                db.expunge(memory)
+                matches.append(memory)
+            if matches:
+                return matches
+
+            legacy_stmt = (
                 select(Memory)
                 .where(Memory.kind == normalized_kind)
                 .where(Memory.status == normalized_status)
@@ -941,10 +964,10 @@ class MemoryRepository:
                 .limit(limit)
             )
             for key, value in normalized_scope.items():
-                stmt = stmt.where(
+                legacy_stmt = legacy_stmt.where(
                     func.json_extract(Memory.metadata_json, _sqlite_json_object_path(key)) == value
                 )
-            result = await db.execute(stmt)
+            result = await db.execute(legacy_stmt)
             for memory in result.scalars().all():
                 try:
                     metadata = json.loads(memory.metadata_json or "{}")

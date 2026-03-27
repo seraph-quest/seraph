@@ -821,6 +821,30 @@ This section records the internal Batch C slices on the feature branch before th
   - a subagent review request was started against the current arbitration diff for bugs, regressions, and hallucinated assumptions, but it had not returned findings before this log update
   - the recorded completion therefore relies on the explicit stale-conflict and missing-evidence regressions above plus the local directional-support-count fix instead of claiming a review reply that did not arrive
 
+### `scoped-procedural-guidance-resolution`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - procedural guidance had already grown the ability to persist thread- and project-scoped lessons, but policy-time resolution was still unsafe in two ways:
+    - the fallback order let broader project guidance resolve before tighter continuity-thread guidance when both existed
+    - the repository fallback path treated memories with extra scope keys as compatible with narrower scope queries, so a project-scoped memory could leak back into the global fallback lane
+- scope:
+  - updated `backend/src/memory/procedural_guidance.py` so fallback order is now `thread+project -> thread -> project -> global`, which keeps the current continuity thread tighter than the broader active-project lane
+  - updated `backend/src/memory/repository.py` so `list_memories_for_scope()` resolves by exact `scope_key` first and only uses the JSON field matcher as a legacy fallback, preventing project- or thread-scoped lessons from satisfying unrelated global fallback lookups
+  - added deterministic resolver coverage in `backend/tests/test_guardian_feedback.py` for thread-over-project precedence plus project-to-global fallback isolation
+  - added delivery and guardian-state regressions in `backend/tests/test_delivery.py` and `backend/tests/test_guardian_state.py` proving the scoped resolver now changes real policy outcomes and learning guidance at the runtime call sites that already pass `session_id` and `active_project`
+- local regression fixed while landing the slice:
+  - the first fallback-order patch exposed that `list_memories_for_scope()` was only checking whether the requested keys were present, not whether the memory belonged to the exact same scoped lane
+  - that meant a request for global advisory timing guidance could still pick an `active_project=Atlas` memory during the global fallback step if the base keys matched
+  - fixed by querying exact `scope_key` matches first and only using the broader JSON matcher for older entries that do not carry the newer exact scope key
+- validation:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_scope_over_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_falls_back_from_thread_project_to_project_to_global backend/tests/test_delivery.py::test_deliver_prefers_thread_scoped_procedural_guidance_before_project_or_global backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_thread_scoped_procedural_guidance_before_project_fallback backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `6 passed`
+- subagent review:
+  - a subagent review request was started against the current scoped-resolution diff for bugs, regressions, and hallucinated assumptions, but it had not returned findings before this log update
+  - the recorded completion therefore relies on the concrete scope-bleed regression fixed above plus the targeted delivery, guardian-state, and repository tests instead of claiming a review reply that did not arrive
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

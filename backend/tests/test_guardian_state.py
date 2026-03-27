@@ -530,6 +530,289 @@ async def test_build_guardian_state_prefers_live_learning_when_stale_memory_conf
 
 
 @pytest.mark.asyncio
+async def test_build_guardian_state_prefers_scoped_project_guidance_over_global_memory(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("atlas-thread")
+    await sm.add_message("atlas-thread", "user", "Should this interrupt Atlas work?")
+    await sm.add_message("atlas-thread", "assistant", "Let me load the scoped guidance.")
+
+    timing_scope = {
+        "writer": "guardian_feedback",
+        "memory_scope": "procedural_learning",
+        "intervention_type": "advisory",
+        "lesson_type": "timing",
+    }
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=timing_scope,
+        content="Global: prefer available windows.",
+        summary="Global: prefer available windows.",
+        confidence=0.8,
+        reinforcement=1.4,
+        metadata={"bias_value": "prefer_available_windows", "support_count": 2},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            **timing_scope,
+            "continuity_thread_id": "atlas-thread",
+            "active_project": "Atlas",
+        },
+        content="Scoped: avoid direct interruption during Atlas focus windows.",
+        summary="Scoped: avoid direct interruption during Atlas focus windows.",
+        confidence=0.9,
+        reinforcement=1.6,
+        metadata={"bias_value": "avoid_focus_windows", "support_count": 3},
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect Atlas focus blocks",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Deep in Atlas implementation",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="deep_work",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="atlas-thread",
+            user_message="Should this interrupt Atlas work?",
+        )
+
+    assert "Avoid direct interruptions during deep-work, meeting, or away windows unless urgency is high." in state.learning_guidance
+    assert "When possible, deliver nudges while the user is explicitly available." not in state.learning_guidance
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_prefers_thread_scoped_procedural_guidance_before_project_fallback(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should this wait until I am available?")
+    await sm.add_message("current", "assistant", "Let me check the guardian guidance.")
+
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        ),
+        active_project="Atlas",
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="avoid_focus_windows",
+            blocked_state_bias="avoid_blocked_state_interruptions",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=2,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+        ),
+        continuity_thread_id="current",
+        active_project="Atlas",
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect focus time",
+        active_window="Calendar",
+        screen_context="In a long meeting block",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="deep_work",
+        active_project="Atlas",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should this wait until I am available?",
+        )
+
+    assert "Avoid direct interruptions during deep-work, meeting, or away windows unless urgency is high." in state.learning_guidance
+    assert "When possible, deliver nudges while the user is explicitly available." not in state.learning_guidance
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_prefers_context_scoped_guidance_over_global_memory(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("atlas-thread")
+    await sm.add_message("atlas-thread", "user", "Should this wait until I am available?")
+    await sm.add_message("atlas-thread", "assistant", "Let me check the scoped guardian guidance.")
+
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="reduce_interruptions",
+            phrasing_bias="neutral",
+            cadence_bias="bundle_more",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="avoid_focus_windows",
+            blocked_state_bias="avoid_blocked_state_interruptions",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=2,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+        ),
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="be_more_direct",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="resume_faster",
+            thread_preference_bias="prefer_existing_thread",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        ),
+        continuity_thread_id="atlas-thread",
+        active_project="Atlas",
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect focus time",
+        active_window="Calendar",
+        active_project="Atlas",
+        screen_context="Checking the Atlas launch plan",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="available",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="atlas-thread",
+            user_message="Should this wait until I am available?",
+        )
+
+    assert "When possible, deliver nudges while the user is explicitly available." in state.learning_guidance
+    assert "Avoid direct interruptions during deep-work, meeting, or away windows unless urgency is high." not in state.learning_guidance
+
+
+@pytest.mark.asyncio
 async def test_build_guardian_state_pulls_project_linked_memories_for_active_project(async_db):
     sm = SessionManager()
     await sm.get_or_create("current")

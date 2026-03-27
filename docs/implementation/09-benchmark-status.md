@@ -51,4 +51,4 @@ This file owns three implementation questions:
 - [x] Every benchmark axis says what is shipped on `develop` and what is still missing.
 - [x] The benchmark mirror has been refreshed after the five-wave capability import program.
 - [ ] No axis should be called effectively “won” in implementation docs without shipped proof on `develop`.
-- [x] The roadmap queue continues to map directly back to the gaps named here.
+- [x] The strategic roadmap and active GitHub execution layer still map back to the gaps named here.

@@ -43,11 +43,13 @@
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 
-## Next Memory Upgrade Program
+## Memory Upgrade Program Record
 
-The canonical PR queue for the upgraded memory system lives in [00. Master Roadmap](./00-master-roadmap.md).
+The upgraded memory system is now complete through Batches A, B, and C.
+This section preserves the delivered batch structure as implementation history and architecture context.
+Active follow-up work should be tracked through GitHub issues, PRs, and the GitHub Project rather than extending this file into a task tracker.
 
-The delivery shape should stay split into three implementation batches:
+The delivered shape stayed split into three implementation batches:
 
 ### Batch A: Structured memory foundation
 

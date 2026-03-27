@@ -111,9 +111,10 @@ Seraph should be judged against OpenClaw, Hermes, and IronClaw on explicit axes:
 ## Docs Contract
 
 - research docs define the target shape, evidence rules, and benchmark/program logic
-- implementation docs define shipped truth on `develop`, delivery ownership, and the live PR queue
+- implementation docs define shipped truth on `develop`, delivery ownership, and strategic implementation translation
+- the GitHub Project, issues, and PRs define active execution state
 - if a new benchmark or program layer appears in research, implementation needs a mirror doc in the same PR
-- if implementation changes the live queue or shipped-state translation, research should not keep a stale competing version
+- if implementation changes shipped-state translation or strategic implementation framing, research should not keep a stale competing version
 
 ## What “Superior” Means Here
 

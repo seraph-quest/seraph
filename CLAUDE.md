@@ -4,6 +4,37 @@
 - Always include tests in a PR where they bring value. If you add or modify functionality, add corresponding tests.
 - Always update CLAUDE.md documentation when changes in a PR affect the project architecture, API surface, new modules, or design decisions.
 
+## Docs And Execution Contract
+- `docs/research/` is the target-shape, evidence, and product-thesis truth layer.
+- `docs/implementation/` is the shipped-truth and strategic implementation layer for `develop`.
+- `docs/docs/` is the archive and historical layer.
+- The GitHub Project is the execution layer.
+- GitHub issues and PRs are the active work-tracking layer.
+- PR bodies carry branch-specific scope, validation, and review receipts.
+- Do not create competing queue, status, or runbook markdown files that mirror GitHub execution state.
+
+## Project Board Contract
+- Expected project fields:
+  - `Queue`: `Now`, `Next`, `Background`, `Blocked`
+  - `Status`: `Todo`, `In Progress`, `Done`
+  - `Lane`: `Trust Boundaries`, `Execution Plane`, `Runtime Reliability`, `Presence and Reach`, `Guardian Intelligence`, `Embodied UX`, `Ecosystem and Leverage`, `Docs / Meta`
+  - `Priority`: `P0`, `P1`, `P2`
+  - `Size`: `S`, `M`, `L`
+  - `Code Review`: `Not Ready`, `Pending`, `Running`, `Passed`, `Changes Requested`
+  - `Linked pull requests`
+  - `PR`: `Not Ready`, `Open`, `Merged`
+- Board flow:
+  - new or refined tracked issue: set `Queue`, `Lane`, `Priority`, `Size`, `Status=Todo`, `Code Review=Not Ready`, `PR=Not Ready`
+  - default batch mode: one parent batch issue is the project item, one aggregate PR links to that parent issue, and the parent issue checklist is the authoritative internal-slice list unless a slice genuinely needs separate tracking
+  - create child slice issues only when a slice has separate ownership, is a blocker, has independent acceptance criteria, or could be reprioritized separately
+  - child slice issues may carry their own `Queue` and `Status`, but keep `PR=Not Ready` and `Code Review=Not Ready` unless they have their own PR
+  - work starts: set `Status=In Progress` and move `Queue=Now` if appropriate
+  - the issue remains the project item; use built-in linked pull requests instead of duplicating the same work as a second standalone PR item
+  - aggregate PR opens: link the PR to the parent batch issue, set that issue `PR=Open`, set that issue `Code Review=Pending`
+  - review runs: set `Code Review=Running`, then `Changes Requested` or `Passed`
+  - merge: set `PR=Merged` and `Status=Done`
+- For non-trivial PRs, run a subagent review and verify its claims before merging.
+
 ## Project Overview
 Seraph is an AI agent with a retro 16-bit RPG village UI. A Phaser 3 canvas renders a tile-based village where an animated pixel-art avatar casts magic effects when using tools while the user chats via an RPG-style dialog box. The agent has persistent identity (soul file), long-term memory (vector embeddings), a hierarchical goal/quest system, and plug-and-play MCP server integration.
 

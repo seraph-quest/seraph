@@ -18,7 +18,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 ## Current Snapshot
 
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
-- [x] The live planning surface is now `docs/research/` plus `docs/implementation/`.
+- [x] The live truth surface is now `docs/research/` plus `docs/implementation/`, while the GitHub Project, issues, and PRs carry active execution state.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian workspace, not a village-first shell.
 - [x] The guardian workspace is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
@@ -34,9 +34,10 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment.
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program.
 - [x] this file owns the fastest shipped snapshot on `develop`.
-- [x] `docs/implementation/00-master-roadmap.md` owns the live ordered slice queue.
+- [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record.
 - [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, and `docs/implementation/10-superiority-delivery.md` are the implementation-side mirrors of the research evidence/benchmark/program docs.
 - [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `10` are meta mirrors, not extra workstreams.
+- [x] the GitHub Project, issues, and PRs own active execution and review state.
 
 ## Current Focus On `develop`
 
@@ -44,7 +45,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph now ships Hermes-style runtime primitives (`execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`) plus packaged browser, messaging, automation, node, canvas, and workflow-runtime surfaces through the extension architecture.
 - [x] The workspace now makes imported capability reach, extension governance, and runtime-path/capability-family spend attribution visible inside the operator surface instead of leaving the new breadth opaque.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution and imported capability surfaces in addition to the earlier guardian/runtime contracts.
-- [x] The repo-wide roadmap is tracked in `docs/implementation/00-master-roadmap.md` as one ordered slice queue, not a rotating 10-PR horizon.
+- [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
 - [x] The next strategic focus is now post-import hardening: deeper execution isolation, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
 
 ## Current Target Shape

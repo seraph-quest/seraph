@@ -456,7 +456,7 @@ If Seraph wants the highest capability gain first, the order should be:
 
 ## Roadmap Translation
 
-This research should seed future Workstream 07 queue items in this order:
+This research should seed future Workstream 07 candidate slices in this order, while active execution stays in GitHub:
 
 1. Hermes runtime parity:
    - `execute-code-and-clarify-v1`

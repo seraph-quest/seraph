@@ -77,7 +77,8 @@
 - public docs, scaffolding scripts, validation tooling, and a canonical example pack are part of the architecture transition itself, not follow-up polish
 - built-in declarative capabilities must migrate onto the same packaged extension model as user-authored capabilities before this program is considered complete
 - trusted arbitrary-code plugins are not part of the implementation path unless the final RFC explicitly approves them
-- the canonical ordered slice queue lives in [the roadmap](./00-master-roadmap.md#current-extension-platform-transition-queue); this workstream doc summarizes the same program by phase so the queue definition does not drift across docs
+- [the roadmap](./00-master-roadmap.md#completed-extension-platform-transition-program) preserves the completed transition program and strategic ownership; this workstream doc summarizes the same program by phase so the implementation record does not drift across docs
+- active extension work should be tracked through GitHub issues, PRs, and the GitHub Project instead of a doc-owned task tracker
 - the result of each mandatory subagent review pass must be rolled into the eventual GitHub PR `Validation` section before any slice is marked complete in the implementation docs
 
 ## Transition Phases

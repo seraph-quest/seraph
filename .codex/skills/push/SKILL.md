@@ -57,8 +57,13 @@ the workspace yet.
    - `## Done on develop`
    - `## Working in this PR`
    - `## Still to do after this PR`
-   - `## Validation`
-8. Reply with the PR URL.
+    - `## Validation`
+8. If the branch closes or advances a tracked issue, ensure the PR links that
+   issue. In batch mode, link the parent batch issue rather than every internal
+   slice. The linked issue stays the project item; update that issue item's
+   `PR` and `Code Review` fields after the PR exists. Do not duplicate the
+   internal slice checklist in the PR body.
+9. Reply with the PR URL.
 
 ## Commands
 
@@ -109,3 +114,12 @@ rm -f "$tmp_pr_body"
   rewrite remotes.
 - Keep the checklist factual against `develop`. Do not mark branch-only work as
   done on `develop`.
+- This repo does not use Symphony or Linear workflow automation.
+- In batch mode, prefer one parent batch issue plus one aggregate PR. Keep
+  internal slices on the parent issue unless a slice truly needs its own issue.
+- If a child slice issue exists under an aggregate PR, it can carry `Queue` and
+  `Status`, but leave `PR=Not Ready` and `Code Review=Not Ready` unless that
+  child issue gets its own PR.
+- This skill does not update GitHub Project fields automatically. After the PR
+  exists, update the linked issue's `PR` and `Code Review` fields through the
+  project board or `gh project item-edit`.

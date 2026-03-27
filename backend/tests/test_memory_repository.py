@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.db.models import MemoryEdgeType, MemoryEntityType, MemoryKind, MemorySnapshotKind
+from src.db.models import Memory, MemoryEdgeType, MemoryEntityType, MemoryKind, MemorySnapshotKind
 from src.memory.repository import memory_repository
 
 
@@ -320,6 +320,100 @@ async def test_sync_scoped_memory_backfills_scope_key_for_legacy_metadata_match(
     assert len(memories) == 1
     assert memories[0].scope_key is not None
     assert json.loads(memories[0].metadata_json or "{}")["lesson_type"] == "delivery"
+
+
+@pytest.mark.asyncio
+async def test_list_memories_for_scope_filters_procedural_memories(async_db):
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+        },
+        content="For advisory interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        summary="For advisory interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        metadata={"bias_value": "reduce_interruptions"},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "alert",
+            "lesson_type": "delivery",
+        },
+        content="For alert interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        summary="For alert interventions, reduce direct interruptions after recent negative or failed outcomes.",
+        metadata={"bias_value": "reduce_interruptions"},
+    )
+
+    advisory_memories = await memory_repository.list_memories_for_scope(
+        kind=MemoryKind.procedural,
+        scope={
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+        },
+        limit=10,
+    )
+
+    assert [memory.content for memory in advisory_memories] == [
+        "For advisory interventions, reduce direct interruptions after recent negative or failed outcomes."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads(async_db):
+    async with async_db() as db:
+        db.add(
+            Memory(
+                content="Legacy malformed metadata payload",
+                kind=MemoryKind.procedural,
+                category="preference",
+                metadata_json='["not", "a", "dict"]',
+                status="active",
+                importance=0.95,
+            )
+        )
+        db.add(
+            Memory(
+                content="Legacy invalid metadata payload",
+                kind=MemoryKind.procedural,
+                category="preference",
+                metadata_json='{"writer": "guardian_feedback"',
+                status="active",
+                importance=0.96,
+            )
+        )
+        await db.commit()
+
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "channel",
+        },
+        content="For advisory interventions, async native notification is usually tolerated better than browser interruption.",
+        summary="For advisory interventions, async native notification is usually tolerated better than browser interruption.",
+        metadata={"bias_value": "prefer_native_notification"},
+    )
+
+    advisory_memories = await memory_repository.list_memories_for_scope(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+        },
+        limit=10,
+    )
+
+    assert [memory.content for memory in advisory_memories] == [
+        "For advisory interventions, async native notification is usually tolerated better than browser interruption."
+    ]
 
 
 @pytest.mark.asyncio

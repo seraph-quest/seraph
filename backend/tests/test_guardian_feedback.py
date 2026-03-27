@@ -10,6 +10,7 @@ from src.agent.session import SessionManager
 from src.db.models import GuardianIntervention, MemoryKind
 from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
 from src.memory.procedural import sync_learning_signal_memories
+from src.memory.procedural_guidance import load_procedural_memory_guidance
 from src.memory.repository import memory_repository
 
 
@@ -539,3 +540,39 @@ async def test_sync_scoped_memory_serializes_concurrent_same_scope_writes(async_
 
     assert len(matching) == 1
     assert matching[0].scope_key is not None
+
+
+async def test_load_procedural_memory_guidance_ignores_other_writers(async_db):
+    guardian_scope = {
+        "writer": "guardian_feedback",
+        "memory_scope": "procedural_learning",
+        "intervention_type": "advisory",
+        "lesson_type": "channel",
+    }
+    foreign_scope = {
+        "writer": "other_writer",
+        "memory_scope": "procedural_learning",
+        "intervention_type": "advisory",
+        "lesson_type": "channel",
+    }
+
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=guardian_scope,
+        content="For advisory interventions, async native notification is usually tolerated better than browser interruption.",
+        summary="For advisory interventions, async native notification is usually tolerated better than browser interruption.",
+        metadata={"bias_value": "prefer_native_notification"},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=foreign_scope,
+        content="Foreign writer guidance should not override guardian feedback lessons.",
+        summary="Foreign writer guidance should not override guardian feedback lessons.",
+        metadata={"bias_value": "prefer_browser_interrupt"},
+        importance=0.99,
+    )
+
+    guidance = await load_procedural_memory_guidance("advisory")
+
+    assert guidance.channel_bias == "prefer_native_notification"
+    assert guidance.lesson_types == ("channel",)

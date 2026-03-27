@@ -712,6 +712,66 @@ This section records the internal Batch C slices on the feature branch before th
       - command:
         - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
 
+### `procedural-memory-policy-routing-v1`
+
+- status: complete on `feat/procedural-memory-policy-routing-v1`, pending inclusion in the next memory follow-up PR
+- root cause addressed:
+  - Batch C made intervention lessons durable and prompt-visible, but the delivery gate and guardian-state learning guidance still read only the live `GuardianLearningSignal` heuristic window
+  - when that live window was neutral, the system could ignore durable procedural lessons that had already been written from prior outcomes and feedback
+- scope:
+  - added `memory_repository.list_memories_for_scope()` in `backend/src/memory/repository.py` so policy-time code can read active procedural memories by exact scope without reopening the broader retrieval planner
+  - added `backend/src/memory/procedural_guidance.py` to turn scoped procedural memories back into `GuardianLearningSignal`-compatible bias overrides for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread guidance, with the resolver now matching the stored `writer=guardian_feedback` scope instead of assuming the procedural-learning lane stays single-writer forever
+  - updated `backend/src/observer/delivery.py` so `decide_intervention(...)` and async-native surface selection use an effective learning signal that overlays durable procedural lessons onto the live heuristic signal, while audit details now record whether the decision came from heuristics alone or heuristics plus procedural memory
+  - updated `backend/src/guardian/state.py` so guardian-state synthesis and rendered learning guidance use the same effective guidance surface instead of dropping back to a neutral live signal when durable procedural lessons already exist
+  - added regression coverage in `backend/tests/test_memory_repository.py`, `backend/tests/test_delivery.py`, `backend/tests/test_guardian_state.py`, and `backend/tests/test_guardian_feedback.py` proving neutral live heuristics still pick up stored procedural channel, escalation, and blocked-state lessons and that foreign writers cannot contaminate the guidance resolver
+- validation:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/guardian/state.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py backend/tests/test_guardian_feedback.py`
+  - `cd backend && uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_guardian_state.py -q`
+    - result: `68 passed, 2 warnings`
+  - `cd backend && uv run pytest tests/test_guardian_feedback.py tests/test_intervention_policy.py -q`
+    - result: `32 passed`
+- hardening fix before the slice stayed complete:
+  - the first policy-time resolver only matched `memory_scope + intervention_type`, but the stored procedural lessons are scoped by `writer` as well
+  - that assumption would let a future non-guardian procedural writer override delivery or guardian-state guidance for the same lesson lane
+  - the resolver now requires `writer=guardian_feedback`, and `test_load_procedural_memory_guidance_ignores_other_writers()` proves the guidance lane stays isolated
+- follow-up validation after the writer-scope hardening:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py`
+  - `cd backend && uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_guardian_state.py tests/test_guardian_feedback.py tests/test_intervention_policy.py -q`
+    - result: `101 passed`
+- subagent review:
+  - `Kant` (`019d2bab-005c-74f3-a0fb-b68895b5f6ab`) returned two concrete findings against the first complete slice:
+    - procedural memory could flip a blocked-state or async-native advisory from `bundle` to `act`, but the live delivery path still followed the default live-route transport order and could deliver over websocket/browser even when the learned channel bias was `prefer_native_notification`
+    - scoped procedural-memory reads and the legacy-scope fallback inside `sync_scoped_memory()` both assumed `metadata_json` decoded to a dict, so a malformed legacy payload could raise `AttributeError` and silently disable the new guidance lane behind the existing exception swallow
+  - fixed after review:
+    - `backend/src/observer/delivery.py` now reorders the active transport order to put `native_notification` first when the effective learned channel bias is `prefer_native_notification`, and audit details record `transport_order_adjustment=learned_native_channel_preference`
+    - `backend/src/memory/repository.py` now skips non-dict decoded metadata payloads in both `list_memories_for_scope()` and the scoped-memory fallback matcher used by `sync_scoped_memory()`
+    - added `test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery()` and `test_list_memories_for_scope_skips_non_dict_metadata_payloads()` so both regressions stay covered
+  - `Tesla` (`019d2ba7-08b8-79f3-a4b2-e3e30cf2c8b4`) and `James` (`019d2ba9-a4dc-75a3-88df-2374f6bf93f0`) did not return findings before the follow-up validation finished
+- follow-up validation after subagent fixes:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/guardian/state.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py backend/tests/test_guardian_feedback.py`
+  - `cd backend && uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_guardian_state.py tests/test_guardian_feedback.py tests/test_intervention_policy.py -q`
+    - result: `103 passed`
+  - `cd docs && npm run build`
+    - result: clean
+- PR follow-up after review comment and CI failure:
+  - root cause addressed:
+    - `memory_repository.list_memories_for_scope()` still filtered only `kind` and `status` in SQL, then parsed and matched `metadata_json` in Python, so policy-time scoped reads could walk every active procedural memory before finding the requested scope
+    - learned native-notification rerouting changed `strategist_tick_learning_continuity_behavior` from a websocket delivery path to a native-notification delivery path, but the delivered audit payload did not expose transport counts for that native path and the eval still used the stale websocket-oriented `broadcast_delivered_connections` expectation
+  - fixes:
+    - `backend/src/memory/repository.py` now pushes scoped procedural-memory filtering into SQLite with `json_valid(...)`, object-shape checks, per-key `json_extract(...)`, and SQL-side limiting before the defensive Python metadata verification runs
+    - `backend/src/observer/delivery.py` now records `attempted_connections`, `delivered_connections`, and `failed_connections` for successful native-notification deliveries in both direct and queued-bundle paths so the delivery audit contract stays stable when routing moves off websocket
+    - `backend/src/evals/harness.py` and `backend/tests/test_eval_harness.py` now use the transport-agnostic `delivered_connections` field and expect `1` for the strategist continuity scenario because that learned path now delivers successfully over native notification
+    - `backend/tests/test_memory_repository.py` now also covers invalid JSON metadata payloads, not just non-dict decoded payloads, on the scoped-read path
+  - validation:
+    - `python3 -m py_compile backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/evals/harness.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_eval_harness.py`
+    - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
+      - result: `58 passed`
+  - review:
+    - GitHub review comment on PR `#232` correctly identified the policy-time Python scan in scoped procedural-memory reads
+    - internal subagent review sessions were started for this follow-up (`Schrodinger` `019d2e2b-1b27-7f32-bd1a-1cf3afab0ce8`, `Socrates` `019d2e2d-e8e5-7d12-9d88-31d6ae469539`, `Franklin` `019d2e2f-5dba-75e2-8026-5e4226ba6ca4`, `Mill` `019d2e30-7a86-7772-9078-54c6c7737d4a`) but they did not return findings before follow-up validation completed
+- residual risk:
+  - this slice uses exact scoped procedural lookup and bias overlay, not a richer conflict-resolution layer between durable procedural memory and fresh live heuristics, so conflicting signals still rely on the current overlay order rather than a separate arbitration policy
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

@@ -322,8 +322,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
         == "native_notification"
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["broadcast_delivered_connections"]
-        == 0
+        details_by_name["strategist_tick_learning_continuity_behavior"]["delivered_connections"]
+        == 1
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]

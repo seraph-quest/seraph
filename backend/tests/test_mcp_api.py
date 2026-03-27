@@ -245,6 +245,22 @@ async def test_add_server_rejects_mixed_raw_and_placeholder_sensitive_header(cli
 
 
 @pytest.mark.asyncio
+async def test_update_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {"gh": {"url": "https://example.com/mcp", "headers": {}}}
+
+        resp = await client.put(
+            "/api/mcp/servers/gh",
+            json={
+                "headers": {"Authorization": "Bearer raw-token${DUMMY}"},
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "Sensitive header 'Authorization'" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_remove_server_rejects_extension_managed_entry(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
         mock_mgr._config = {

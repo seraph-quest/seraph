@@ -295,6 +295,25 @@ class TestMCPManager:
         assert credential_sources == ["env", "vault"]
 
     @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    def test_resolve_headers_reports_env_backed_missing_vault_secrets(self, mock_exists):
+        mock_exists.return_value = False
+
+        import os
+
+        os.environ["MCP_TOKEN_REF"] = "${vault:mcp.server.gh.bearer_token}"
+        try:
+            resolved, missing_env, missing_vault, credential_sources = MCPManager.resolve_headers(
+                {"Authorization": "Bearer ${MCP_TOKEN_REF}"}
+            )
+        finally:
+            del os.environ["MCP_TOKEN_REF"]
+
+        assert resolved == {"Authorization": "Bearer ${MCP_TOKEN_REF}"}
+        assert missing_env == []
+        assert missing_vault == ["mcp.server.gh.bearer_token"]
+        assert credential_sources == ["env", "vault"]
+
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
     @patch("src.tools.mcp_manager.vault_repository.get", new_callable=AsyncMock)
     def test_resolve_headers_resolves_vault_backed_credentials(self, mock_get, mock_exists):
         mock_exists.return_value = True

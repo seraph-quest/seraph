@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _WEIGHTED_BIAS_THRESHOLD = 1.25
 _WEIGHTED_BIAS_MARGIN = 0.1
+_MEMORY_REFRESH_OUTCOMES = frozenset({"failed", "delivered", "feedback_received"})
 _BIAS_CANDIDATES: dict[str, tuple[str, ...]] = {
     "delivery": ("reduce_interruptions", "prefer_direct_delivery"),
     "channel": ("prefer_native_notification",),
@@ -524,7 +525,10 @@ class GuardianFeedbackRepository:
             await db.refresh(intervention)
             refreshed = intervention
 
-        if latest_outcome == "failed" or prior_outcome == "failed":
+        if (
+            latest_outcome in _MEMORY_REFRESH_OUTCOMES
+            or prior_outcome in _MEMORY_REFRESH_OUTCOMES
+        ):
             await self._refresh_learning_memories(
                 intervention_type=refreshed.intervention_type,
                 source_session_id=refreshed.session_id,

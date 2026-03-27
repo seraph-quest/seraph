@@ -864,6 +864,9 @@ This section records the internal Batch C slices on the feature branch before th
 - subagent review:
   - `Lorentz` flagged one hallucinated assumption in the first `#242` write-up: some test names and prose still read like per-axis hierarchical fallback, but the implemented resolver intentionally selects one scope tier and keeps that bundle isolated from broader lessons
   - fixed by making the contract explicit in the tests and docs: candidate tiers are ordered `thread+project -> thread -> project -> global`, the first non-empty tier wins, and broader tiers do not backfill missing axes once a narrower tier is active
+- aggregate-PR follow-up after review:
+  - existing SQLite databases created before this slice did not have `guardian_interventions.active_project`, so upgraded runtimes could fail at first ORM read/write against that model
+  - fixed by teaching `backend/src/db/engine.py::_ensure_legacy_columns()` to add the missing `active_project` column and index on upgrade, with a regression in `backend/tests/test_db_engine.py`
 
 ### `weighted-guardian-learning-support`
 
@@ -882,6 +885,10 @@ This section records the internal Batch C slices on the feature branch before th
   - procedural `weighted_support` was initially loaded correctly but still ignored by the arbitration scorer, so the final conflict resolver kept behaving like a raw-count system
   - the first weighted branch still let generic outcomes manufacture phrasing/cadence/thread lessons and still counted native failures against the direct-delivery axis
   - fixed by scoring support from `weighted_support` when present, neutralizing unsupported axes in the live loop and procedural sync path, and requiring explicit direct transport on the negative delivery side
+- aggregate-PR follow-up after review:
+  - `update_outcome(...)` was still refreshing procedural learning memories only for failure transitions, even though weighted positive evidence now also comes from successful `delivered` and `feedback_received` outcomes
+  - that meant live learning could strengthen from outcome-only async/direct successes while durable scoped procedural guidance stayed stale until explicit feedback arrived
+  - fixed by refreshing learning memories whenever outcome transitions enter or leave the success/failure states that the weighted evidence model actually uses, with a regression in `backend/tests/test_guardian_feedback.py`
 - validation:
   - `python3 -m py_compile backend/src/guardian/feedback.py backend/src/guardian/learning_arbitration.py backend/src/memory/procedural.py backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
   - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py -q`

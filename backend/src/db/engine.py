@@ -62,6 +62,21 @@ async def _ensure_legacy_columns(conn) -> None:
             "ALTER TABLE queued_insights ADD COLUMN session_id VARCHAR"
         )
 
+    guardian_intervention_columns = await _table_columns("guardian_interventions")
+    if guardian_intervention_columns and "active_project" not in guardian_intervention_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE guardian_interventions ADD COLUMN active_project VARCHAR"
+        )
+    if guardian_intervention_columns and "active_project" in await _table_columns(
+        "guardian_interventions"
+    ):
+        await conn.exec_driver_sql(
+            """
+            CREATE INDEX IF NOT EXISTS ix_guardian_interventions_active_project
+            ON guardian_interventions (active_project)
+            """
+        )
+
     memory_columns = await _table_columns("memories")
     if memory_columns and "kind" not in memory_columns:
         await conn.exec_driver_sql(

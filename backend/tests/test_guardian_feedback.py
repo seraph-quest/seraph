@@ -67,6 +67,44 @@ async def test_record_feedback_returns_none_for_missing_id(async_db):
     assert result is None
 
 
+async def test_update_outcome_refreshes_learning_memories_for_delivery_success(async_db):
+    for _ in range(2):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="atlas-thread",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Use successful async delivery as learning evidence.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            active_project="Atlas",
+            interruption_mode="focus",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="pending",
+        )
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+
+    guidance = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="atlas-thread",
+        active_project="Atlas",
+    )
+
+    assert guidance.channel_bias == "prefer_native_notification"
+    assert guidance.blocked_state_bias == "prefer_async_for_blocked_state"
+    assert guidance.evidence_for_axis("channel").support_count == 2
+    assert guidance.evidence_for_axis("blocked_state").support_count == 2
+
+
 async def test_learning_signal_biases_after_negative_feedback(async_db):
     first = await guardian_feedback_repository.create_intervention(
         session_id=None,

@@ -236,6 +236,56 @@ def _as_record(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: dict[str, None] = {}
+    for item in value:
+        text = str(item).strip()
+        if text:
+            normalized[text] = None
+    return sorted(normalized)
+
+
+def _normalize_approval_context(value: Any, *, workflow_name: str | None = None) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    risk_level = str(value.get("risk_level") or "").strip()
+    execution_boundaries = _normalize_string_list(value.get("execution_boundaries"))
+    step_tools = _normalize_string_list(value.get("step_tools"))
+    if not any([risk_level, execution_boundaries, step_tools, "accepts_secret_refs" in value]):
+        return None
+    return {
+        "workflow_name": str(value.get("workflow_name") or workflow_name or "").strip() or None,
+        "risk_level": risk_level or "unknown",
+        "execution_boundaries": execution_boundaries,
+        "accepts_secret_refs": bool(value.get("accepts_secret_refs", False)),
+        "step_tools": step_tools,
+    }
+
+
+def _workflow_current_approval_context(
+    *,
+    workflow_name: str,
+    workflow_meta: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = _normalize_approval_context(
+        workflow_meta.get("approval_context"),
+        workflow_name=workflow_name,
+    )
+    if normalized is not None:
+        return normalized
+    return {
+        "workflow_name": workflow_name,
+        "risk_level": str(workflow_meta.get("risk_level") or "high"),
+        "execution_boundaries": _normalize_string_list(
+            workflow_meta.get("execution_boundaries") or ["unknown"]
+        ),
+        "accepts_secret_refs": bool(workflow_meta.get("accepts_secret_refs", False)),
+        "step_tools": _normalize_string_list(workflow_meta.get("step_tools")),
+    }
+
+
 def _workflow_name_from_tool(tool_name: str) -> str:
     if tool_name.startswith("workflow_"):
         return tool_name.removeprefix("workflow_").replace("_", "-")
@@ -272,7 +322,11 @@ def _workflow_event_fingerprint(tool_name: str, details: dict[str, Any]) -> str:
         return run_fingerprint
     arguments = _as_record(details.get("arguments"))
     if arguments:
-        return fingerprint_tool_call(tool_name, arguments)
+        return fingerprint_tool_call(
+            tool_name,
+            arguments,
+            approval_context=_normalize_approval_context(details.get("approval_context")),
+        )
     return "none"
 
 
@@ -302,7 +356,11 @@ def _workflow_run_approval_key(run: dict[str, Any]) -> str:
         run_fingerprint
         if isinstance(run_fingerprint, str) and run_fingerprint.strip()
         else (
-            fingerprint_tool_call(tool_name, run.get("arguments") or {})
+            fingerprint_tool_call(
+                tool_name,
+                run.get("arguments") or {},
+                approval_context=_normalize_approval_context(run.get("approval_context")),
+            )
             if run.get("arguments")
             else None
         )
@@ -557,11 +615,14 @@ def _workflow_replay_policy(
     execution_boundaries: list[str],
     accepts_secret_refs: bool,
     pending_approval_count: int,
+    approval_context_mismatch: bool,
 ) -> tuple[bool, str | None]:
     if availability == "disabled":
         return False, "workflow_disabled"
     if availability != "ready":
         return False, "workflow_unavailable"
+    if approval_context_mismatch:
+        return False, "approval_context_changed"
     if pending_approval_count > 0:
         return False, "pending_approval"
     if accepts_secret_refs:
@@ -814,6 +875,10 @@ async def _list_workflow_runs(
                 "artifact_paths": _extract_artifact_paths(arguments),
                 "continued_error_steps": [],
                 "arguments": arguments,
+                "approval_context": _normalize_approval_context(
+                    details.get("approval_context"),
+                    workflow_name=str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
+                ),
             })
             continue
 
@@ -850,6 +915,10 @@ async def _list_workflow_runs(
             "artifact_paths": [],
             "continued_error_steps": [],
             "arguments": _as_record(details.get("arguments")) or None,
+            "approval_context": _normalize_approval_context(
+                details.get("approval_context"),
+                workflow_name=str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
+            ),
         }
         if not run_queue and key in pending_by_key:
             pending_by_key.pop(key, None)
@@ -868,6 +937,25 @@ async def _list_workflow_runs(
         approvals = pending_by_signature.get(approval_key) or pending_by_tool.get(
             (run.get("session_id"), tool_name),
             [],
+        )
+        recorded_approval_context = (
+            _normalize_approval_context(
+                details.get("approval_context"),
+                workflow_name=str(run["workflow_name"]),
+            )
+            or _normalize_approval_context(
+                run.get("approval_context"),
+                workflow_name=str(run["workflow_name"]),
+            )
+        )
+        current_approval_context = _workflow_current_approval_context(
+            workflow_name=str(run["workflow_name"]),
+            workflow_meta=workflow_meta,
+        )
+        effective_approval_context = recorded_approval_context or current_approval_context
+        approval_context_mismatch = bool(
+            recorded_approval_context is not None
+            and recorded_approval_context != current_approval_context
         )
 
         run.update({
@@ -911,9 +999,25 @@ async def _list_workflow_runs(
                 if isinstance(details.get("canvas_output"), dict)
                 else run.get("canvas_output")
             ),
-            "risk_level": workflow_meta.get("risk_level", "high"),
-            "execution_boundaries": workflow_meta.get("execution_boundaries", ["unknown"]),
-            "accepts_secret_refs": bool(workflow_meta.get("accepts_secret_refs", False)),
+            "approval_context": effective_approval_context,
+            "recorded_approval_context": recorded_approval_context,
+            "current_approval_context": current_approval_context,
+            "approval_context_mismatch": approval_context_mismatch,
+            "risk_level": (
+                str(effective_approval_context.get("risk_level"))
+                if effective_approval_context is not None
+                else workflow_meta.get("risk_level", "high")
+            ),
+            "execution_boundaries": (
+                list(effective_approval_context.get("execution_boundaries", []))
+                if effective_approval_context is not None
+                else workflow_meta.get("execution_boundaries", ["unknown"])
+            ),
+            "accepts_secret_refs": (
+                bool(effective_approval_context.get("accepts_secret_refs", False))
+                if effective_approval_context is not None
+                else bool(workflow_meta.get("accepts_secret_refs", False))
+            ),
             "pending_approval_count": len(approvals),
             "pending_approval_ids": [approval["id"] for approval in approvals],
             "pending_approvals": approvals,
@@ -947,6 +1051,7 @@ async def _list_workflow_runs(
             execution_boundaries=list(run["execution_boundaries"]),
             accepts_secret_refs=bool(run["accepts_secret_refs"]),
             pending_approval_count=len(approvals),
+            approval_context_mismatch=bool(run.get("approval_context_mismatch")),
         )
         run_identity = f"{run.get('session_id') or 'global'}:{tool_name}:{run_fingerprint}"
         lineage = _workflow_branch_lineage(
@@ -991,12 +1096,16 @@ async def _list_workflow_runs(
                 continued_error_steps=list(run.get("continued_error_steps", [])),
             ),
             "approval_recovery_message": (
-                f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
-                if len(approvals) > 0
+                f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
+                if bool(run.get("approval_context_mismatch"))
                 else (
-                    f"Repair workflow '{run['workflow_name']}' before replaying."
-                    if str(run["availability"]) != "ready"
-                    else None
+                    f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
+                    if len(approvals) > 0
+                    else (
+                        f"Repair workflow '{run['workflow_name']}' before replaying."
+                        if str(run["availability"]) != "ready"
+                        else None
+                    )
                 )
             ),
             "thread_continue_message": (
@@ -1032,10 +1141,39 @@ async def _list_workflow_runs(
                 (run.get("session_id"), str(run["tool_name"])),
                 [],
             )
+            recorded_approval_context = _normalize_approval_context(
+                run.get("approval_context"),
+                workflow_name=str(run["workflow_name"]),
+            )
+            current_approval_context = _workflow_current_approval_context(
+                workflow_name=str(run["workflow_name"]),
+                workflow_meta=workflow_meta,
+            )
+            effective_approval_context = recorded_approval_context or current_approval_context
+            approval_context_mismatch = bool(
+                recorded_approval_context is not None
+                and recorded_approval_context != current_approval_context
+            )
             run.update({
-                "risk_level": workflow_meta.get("risk_level", "high"),
-                "execution_boundaries": workflow_meta.get("execution_boundaries", ["unknown"]),
-                "accepts_secret_refs": bool(workflow_meta.get("accepts_secret_refs", False)),
+                "approval_context": effective_approval_context,
+                "recorded_approval_context": recorded_approval_context,
+                "current_approval_context": current_approval_context,
+                "approval_context_mismatch": approval_context_mismatch,
+                "risk_level": (
+                    str(effective_approval_context.get("risk_level"))
+                    if effective_approval_context is not None
+                    else workflow_meta.get("risk_level", "high")
+                ),
+                "execution_boundaries": (
+                    list(effective_approval_context.get("execution_boundaries", []))
+                    if effective_approval_context is not None
+                    else workflow_meta.get("execution_boundaries", ["unknown"])
+                ),
+                "accepts_secret_refs": (
+                    bool(effective_approval_context.get("accepts_secret_refs", False))
+                    if effective_approval_context is not None
+                    else bool(workflow_meta.get("accepts_secret_refs", False))
+                ),
                 "status": "awaiting_approval" if len(approvals) > 0 else "running",
                 "pending_approval_count": len(approvals),
                 "pending_approval_ids": [approval["id"] for approval in approvals],
@@ -1072,6 +1210,7 @@ async def _list_workflow_runs(
                 execution_boundaries=list(run["execution_boundaries"]),
                 accepts_secret_refs=bool(run["accepts_secret_refs"]),
                 pending_approval_count=len(approvals),
+                approval_context_mismatch=bool(run.get("approval_context_mismatch")),
             )
             run_identity = f"{run.get('session_id') or 'global'}:{run['tool_name']}:{run.get('run_fingerprint') or 'none'}"
             lineage = _workflow_branch_lineage(
@@ -1115,12 +1254,16 @@ async def _list_workflow_runs(
                     continued_error_steps=list(run.get("continued_error_steps", [])),
                 ),
                 "approval_recovery_message": (
-                    f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
-                    if len(approvals) > 0
+                    f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
+                    if bool(run.get("approval_context_mismatch"))
                     else (
-                        f"Repair workflow '{run['workflow_name']}' before replaying."
-                        if str(run["availability"]) != "ready"
-                        else None
+                        f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
+                        if len(approvals) > 0
+                        else (
+                            f"Repair workflow '{run['workflow_name']}' before replaying."
+                            if str(run["availability"]) != "ready"
+                            else None
+                        )
                     )
                 ),
                 "thread_continue_message": (
@@ -1324,6 +1467,14 @@ async def build_workflow_resume_plan(
             run = next((item for item in runs if item.get("run_identity") == run_identity), None)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
+    if str(run.get("replay_block_reason") or "") == "approval_context_changed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Workflow run '{run_identity}' cannot resume because its trust boundary "
+                "changed after the original run. Start a fresh run instead."
+            ),
+        )
     resume_plan = _workflow_resume_plan(
         run,
         approvals=list(run.get("pending_approvals", [])),

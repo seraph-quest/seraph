@@ -12,6 +12,7 @@ from typing import Any
 
 from smolagents import Tool
 
+from src.audit.formatting import format_tool_call_summary, redact_for_audit
 from src.approval.runtime import get_current_session_id
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
@@ -189,6 +190,43 @@ def _canonicalize_tool_names(tool_names: list[str]) -> list[str]:
     return list(dict.fromkeys(canonical_tool_name(tool_name) for tool_name in tool_names))
 
 
+def _approval_context_for_workflow(workflow: Workflow) -> dict[str, Any]:
+    canonical_step_tools = _canonicalize_tool_names(workflow.step_tools)
+    execution_boundaries: list[str] = []
+    accepts_secret_refs = False
+    for tool_name in workflow.step_tools:
+        canonical_name = canonical_tool_name(tool_name)
+        if canonical_name.startswith("mcp_"):
+            if "external_mcp" not in execution_boundaries:
+                execution_boundaries.append("external_mcp")
+            accepts_secret_refs = True
+            continue
+        tool_meta = TOOL_METADATA.get(canonical_name, {})
+        for boundary in tool_meta.get("execution_boundaries", []):
+            if boundary not in execution_boundaries:
+                execution_boundaries.append(boundary)
+        if bool(tool_meta.get("accepts_secret_refs", False)):
+            accepts_secret_refs = True
+    if any(tool_name.startswith("mcp_") for tool_name in canonical_step_tools):
+        risk_level = "high"
+    elif any(
+        tool_name in {"write_file", "update_goal", "update_soul", "store_secret", "delete_secret"}
+        for tool_name in canonical_step_tools
+    ):
+        risk_level = "medium"
+    elif any(tool_name in {"execute_code", "get_secret"} for tool_name in canonical_step_tools):
+        risk_level = "high"
+    else:
+        risk_level = "low"
+    return {
+        "workflow_name": workflow.name,
+        "risk_level": risk_level,
+        "execution_boundaries": sorted(dict.fromkeys(execution_boundaries or ["unknown"])),
+        "accepts_secret_refs": accepts_secret_refs,
+        "step_tools": sorted(dict.fromkeys(canonical_step_tools)),
+    }
+
+
 class WorkflowTool(Tool):
     """Dynamic Tool wrapper that executes a reusable workflow definition."""
 
@@ -217,7 +255,12 @@ class WorkflowTool(Tool):
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         workflow_inputs = self._normalize_inputs(args, kwargs)
-        run_fingerprint = fingerprint_tool_call(self.name, workflow_inputs)
+        approval_context = self.get_approval_context(workflow_inputs)
+        run_fingerprint = fingerprint_tool_call(
+            self.name,
+            workflow_inputs,
+            approval_context=approval_context,
+        )
         current_session_id = get_current_session_id()
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
@@ -312,6 +355,7 @@ class WorkflowTool(Tool):
             {
                 "workflow_name": self.workflow.name,
                 "run_fingerprint": run_fingerprint,
+                "approval_context": approval_context,
                 "step_count": len(self.workflow.steps),
                 "step_tools": canonical_step_tools,
                 "step_records": step_records,
@@ -349,6 +393,25 @@ class WorkflowTool(Tool):
         _result: Any,
     ) -> tuple[str, dict[str, Any]] | None:
         return self._last_audit_payload
+
+    def get_audit_call_payload(self, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        approval_context = self.get_approval_context(arguments)
+        return (
+            format_tool_call_summary(self.name, arguments, set()),
+            {
+                "arguments": redact_for_audit(arguments),
+                "workflow_name": self.workflow.name,
+                "run_fingerprint": fingerprint_tool_call(
+                    self.name,
+                    arguments,
+                    approval_context=approval_context,
+                ),
+                "approval_context": approval_context,
+            },
+        )
+
+    def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return _approval_context_for_workflow(self.workflow)
 
     def _normalize_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
@@ -807,6 +870,7 @@ class WorkflowManager:
             "execution_boundaries": self._infer_execution_boundaries(workflow),
             "risk_level": self._infer_risk_level(workflow),
             "accepts_secret_refs": self._accepts_secret_refs(workflow),
+            "approval_context": _approval_context_for_workflow(workflow),
         }
 
     def _get_runtime_availability(

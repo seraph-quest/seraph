@@ -4,7 +4,8 @@ When delegation mode is enabled, the root orchestrator delegates to domain-speci
 specialist agents rather than calling tools directly. Each specialist has a focused
 tool set and tuned temperature for its domain.
 
-Tier 1 (built-in): memory_keeper, goal_planner, web_researcher, file_worker
+Tier 1 (built-in): memory_keeper, vault_keeper, goal_planner, web_researcher,
+file_worker
 Tier 2 (dynamic): one specialist per connected MCP server
 """
 
@@ -28,11 +29,11 @@ from src.workflows.manager import workflow_manager
 TOOL_DOMAINS: dict[str, str] = {
     "view_soul": "memory",
     "update_soul": "memory",
-    "store_secret": "memory",
-    "get_secret": "memory",
-    "get_secret_ref": "memory",
-    "list_secrets": "memory",
-    "delete_secret": "memory",
+    "store_secret": "vault",
+    "get_secret": "vault",
+    "get_secret_ref": "vault",
+    "list_secrets": "vault",
+    "delete_secret": "vault",
     "create_goal": "goals",
     "update_goal": "goals",
     "get_goals": "goals",
@@ -61,6 +62,15 @@ SPECIALIST_CONFIGS: dict[str, dict] = {
             "the guardian record sections (identity, values, priorities, preferences)."
         ),
         "temperature": 0.5,
+        "max_steps": 3,
+    },
+    "vault_keeper": {
+        "domain": "vault",
+        "description": (
+            "Handles privileged secret and credential operations. Use for storing, "
+            "listing, deleting, or issuing opaque references for vault-managed secrets."
+        ),
+        "temperature": 0.2,
         "max_steps": 3,
     },
     "goal_planner": {
@@ -156,6 +166,14 @@ def create_memory_keeper(tools_by_name: dict) -> ToolCallingAgent | None:
     return create_specialist("memory_keeper", cfg["description"], tools, cfg["temperature"], cfg["max_steps"])
 
 
+def create_vault_keeper(tools_by_name: dict) -> ToolCallingAgent | None:
+    cfg = SPECIALIST_CONFIGS["vault_keeper"]
+    tools = [tools_by_name[n] for n in DOMAIN_TOOLS["vault"] if n in tools_by_name]
+    if not tools:
+        return None
+    return create_specialist("vault_keeper", cfg["description"], tools, cfg["temperature"], cfg["max_steps"])
+
+
 def create_goal_planner(tools_by_name: dict) -> ToolCallingAgent | None:
     cfg = SPECIALIST_CONFIGS["goal_planner"]
     tools = [tools_by_name[n] for n in DOMAIN_TOOLS["goals"] if n in tools_by_name]
@@ -214,7 +232,13 @@ def build_all_specialists() -> list[ToolCallingAgent]:
     executable_tools: list = list(all_tools)
 
     # Tier 1: built-in specialists
-    for factory in (create_memory_keeper, create_goal_planner, create_web_researcher, create_file_worker):
+    for factory in (
+        create_memory_keeper,
+        create_vault_keeper,
+        create_goal_planner,
+        create_web_researcher,
+        create_file_worker,
+    ):
         agent = factory(tools_by_name)
         if agent is not None:
             specialists.append(agent)

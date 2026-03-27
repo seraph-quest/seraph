@@ -171,8 +171,8 @@ def create_orchestrator(
     """Create an orchestrator agent that delegates to specialist sub-agents.
 
     The orchestrator has NO tools itself — it delegates all execution to
-    specialist managed_agents (memory_keeper, goal_planner, web_researcher,
-    file_worker, and one per MCP server).
+    specialist managed_agents (memory_keeper, vault_keeper, goal_planner,
+    web_researcher, file_worker, and one per MCP server).
     """
     from src.agent.specialists import build_all_specialists
 

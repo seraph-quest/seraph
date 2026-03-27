@@ -6,6 +6,14 @@ body:
     attributes:
       value: |
         Use this template for tracked implementation, workflow, docs, or repo-operations work that belongs on the Seraph GitHub Project.
+        It can be used for standalone issues, parent batch issues, or separately tracked child slice issues.
+
+        Default batch model when this issue is the parent batch item:
+        - create one parent batch issue as the project item
+        - open one aggregate PR linked to that parent issue
+        - keep the authoritative slice list in the parent issue itself by default
+        - only split slices into child issues when they need separate ownership, blocking, or reprioritization
+        - if a slice becomes a child issue, let that child issue carry `Queue` and `Status`, but keep `PR=Not Ready` and `Code Review=Not Ready` unless it gets its own PR
 
         Project field contract:
         - `Queue`: `Now`, `Next`, `Background`, `Blocked`
@@ -53,6 +61,21 @@ body:
         - initial real items are seeded on the project
     validations:
       required: true
+
+  - type: textarea
+    id: internal_slices
+    attributes:
+      label: Parent batch breakdown
+      description: Optional. Fill this only when this issue is the parent batch item. Use this as the authoritative slice list. Leave blank for standalone or child slice issues.
+      placeholder: |
+        - [ ] slice 1
+        - [ ] slice 2
+        - [ ] slice 3
+
+        or
+
+        - child issue #123
+        - child issue #124
 
   - type: textarea
     id: validation

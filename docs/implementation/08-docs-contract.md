@@ -82,6 +82,18 @@ Expected flow:
    - set `PR=Merged`
    - set `Status=Done`
 
+## Batch Mode
+
+Use this as the default execution model when several internal slices will land through one GitHub PR.
+
+- create one parent batch issue as the project item
+- keep one aggregate PR linked to that parent issue
+- use the parent batch issue checklist as the authoritative internal-slice list by default
+- only create child slice issues when a slice has separate ownership, is a blocker, has independent acceptance criteria, or could be reprioritized separately
+- if child slice issues exist, they may carry their own `Queue` and `Status`, but leave `PR=Not Ready` and `Code Review=Not Ready` unless that slice gets its own PR
+- do not mirror one aggregate PR across all child slice issues; the parent batch issue remains the main project item for aggregate `PR` and `Code Review` state
+- use issue comments or the PR body for receipts and progress notes, not as a second authoritative slice-state surface
+
 ## Latest Workflow Contract Update
 
 - [x] GitHub Project now owns the active execution layer for Seraph.
@@ -97,6 +109,18 @@ Expected flow:
     - project item `#233` links PR `#238` with `PR=Open` and `Code Review=Pending`
     - project item `#239` links PR `#232` with `PR=Open` and `Code Review=Pending`
     - the project no longer uses standalone PR items for tracked work that already has an issue item
+- [x] Batch execution now defaults to one parent issue plus one aggregate PR.
+- subagent follow-up review:
+  - reviewer: `Fermat` (`019d2bff-cf88-70f0-a8cd-772182c834d1`)
+  - concrete findings fixed before the slice stayed final:
+    - removed PR-template wording that would duplicate internal slice tracking in the PR body
+    - made the parent batch issue checklist the authoritative batch-decomposition surface unless a slice becomes its own child issue
+    - defined child-slice board semantics under an aggregate PR: child issues may move through `Queue` and `Status`, but keep `PR=Not Ready` and `Code Review=Not Ready` unless they get their own PR
+    - clarified the tracked-work issue template so the batch-decomposition section is only for parent batch issues and can be left blank on standalone or child issues
+  - final verification:
+    - the parent batch issue owns aggregate `PR` and `Code Review` state
+    - child slice issues no longer imply duplicated aggregate-PR state
+    - issue comments and PR bodies are now receipts and notes, not a second authoritative slice-status surface
 
 ## Parity Rules
 

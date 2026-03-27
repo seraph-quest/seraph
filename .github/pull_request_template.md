@@ -8,7 +8,7 @@
 - [ ] <real remaining work after this merges>
 
 ## Tracking
-- Linked issue: Closes #<issue>
+- Linked parent issue: Closes #<issue>
 
 ## Validation
 - <command>

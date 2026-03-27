@@ -26,9 +26,13 @@ fix/my-bugfix    →  develop  →  main
 ## Project Board Flow
 
 - When a tracked issue is created or refined, set `Queue`, `Lane`, `Priority`, `Size`, `Status=Todo`, `Code Review=Not Ready`, and `PR=Not Ready`.
+- Default batch mode: use one parent batch issue as the project item and one aggregate PR linked to that parent issue.
+- Track internal slices in the parent batch issue itself by default. That parent issue checklist is the authoritative slice list unless a slice becomes its own child issue.
+- Create child slice issues only when a slice has separate ownership, is a blocker, has independent acceptance criteria, or could be reprioritized separately.
+- If child slice issues exist, they may carry their own `Queue` and `Status`, but keep `PR=Not Ready` and `Code Review=Not Ready` unless they get their own PR. Do not mirror one aggregate PR across every child issue.
 - When work starts, set `Status=In Progress` and move `Queue=Now` if the task is active now.
 - The issue remains the project item. Use built-in linked pull requests for the PR relationship instead of creating a second standalone project item for the same tracked work.
-- When a PR opens, link it to the issue, set the issue `PR=Open`, and set issue `Code Review=Pending`.
+- When an aggregate PR opens, link it to the parent batch issue, set that issue `PR=Open`, and set that issue `Code Review=Pending`.
 - While review is running, set `Code Review=Running`, then move to `Changes Requested` or `Passed`.
 - When the PR merges, set `PR=Merged` and `Status=Done`.
 

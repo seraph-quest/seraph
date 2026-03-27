@@ -722,7 +722,7 @@ async def test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_st
         events = await audit_repository.list_events(limit=10)
         assert any(
             event["event_type"] == "observer_delivery_queued"
-            and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
+            and event["details"]["learning_signal_source"] == "heuristic_only"
             and event["details"]["learning_bias"] == "reduce_interruptions"
             and event["details"]["learning_arbitration_mode"] == "evidence_weighted"
             and event["details"]["learning_arbitration_sources"]["delivery"] == "live_signal"
@@ -798,7 +798,7 @@ async def test_deliver_prefers_scoped_project_and_thread_guidance_over_global_me
 
 
 @pytest.mark.asyncio
-async def test_deliver_prefers_thread_scoped_procedural_guidance_before_project_or_global(async_db):
+async def test_deliver_prefers_thread_scoped_procedural_guidance_over_project_or_global_scope(async_db):
     await sync_learning_signal_memories(
         intervention_type="advisory",
         signal=GuardianLearningSignal(
@@ -967,7 +967,7 @@ async def test_deliver_prefers_context_scoped_guidance_over_conflicting_global_m
             event["event_type"] == "observer_delivery_delivered"
             and event["details"]["learning_bias"] == "prefer_direct_delivery"
             and event["details"]["learning_timing_bias"] == "prefer_available_windows"
-            and event["details"]["procedural_learning_lesson_types"] == ["delivery", "phrasing", "timing", "suppression", "thread"]
+            and event["details"]["procedural_learning_lesson_types"] == ["delivery", "timing", "suppression"]
             for event in events
         )
     finally:
@@ -1040,6 +1040,7 @@ async def test_queue_when_recent_negative_feedback(async_db):
         policy_reason="available_capacity",
         delivery_decision="deliver",
         latest_outcome="delivered",
+        transport="websocket",
     )
     await guardian_feedback_repository.record_feedback(first.id, feedback_type="not_helpful")
     second = await guardian_feedback_repository.create_intervention(
@@ -1058,6 +1059,7 @@ async def test_queue_when_recent_negative_feedback(async_db):
         policy_reason="available_capacity",
         delivery_decision="deliver",
         latest_outcome="delivered",
+        transport="websocket",
     )
     await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
 
@@ -1106,6 +1108,7 @@ async def test_learned_direct_delivery_overrides_high_interrupt_bundle(async_db)
             policy_reason="available_capacity",
             delivery_decision="deliver",
             latest_outcome="delivered",
+            transport="websocket",
         )
         await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
 
@@ -1158,6 +1161,7 @@ async def test_acknowledged_native_feedback_can_lower_notification_threshold(asy
             policy_reason="available_capacity",
             delivery_decision="deliver",
             latest_outcome="delivered",
+            transport="native_notification",
         )
         await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="acknowledged")
 

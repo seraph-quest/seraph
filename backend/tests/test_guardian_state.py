@@ -429,6 +429,7 @@ async def test_build_guardian_state_uses_procedural_memory_guidance_when_live_si
     assert state.world_model.intervention_receptivity == "guarded_async"
     assert "Async native delivery is usually tolerated better than browser interruption." in state.learning_guidance
     assert "When the user is blocked, prefer async native continuation instead of browser interruption." in state.learning_guidance
+    assert "When the user is explicitly available, direct delivery is usually tolerated." not in state.learning_guidance
 
 
 @pytest.mark.asyncio
@@ -612,7 +613,7 @@ async def test_build_guardian_state_prefers_scoped_project_guidance_over_global_
 
 
 @pytest.mark.asyncio
-async def test_build_guardian_state_prefers_thread_scoped_procedural_guidance_before_project_fallback(async_db):
+async def test_build_guardian_state_prefers_thread_scoped_procedural_guidance_over_project_scope(async_db):
     sm = SessionManager()
     await sm.get_or_create("current")
     await sm.add_message("current", "user", "Should this wait until I am available?")
@@ -810,6 +811,71 @@ async def test_build_guardian_state_prefers_context_scoped_guidance_over_global_
 
     assert "When possible, deliver nudges while the user is explicitly available." in state.learning_guidance
     assert "Avoid direct interruptions during deep-work, meeting, or away windows unless urgency is high." not in state.learning_guidance
+    assert "When the user is explicitly available, direct delivery is usually tolerated." in state.learning_guidance
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_uses_requested_intervention_type_for_learning_arbitration(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should this alert cut through immediately?")
+    await sm.add_message("current", "assistant", "Let me check the guidance.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect focus time",
+        active_window="Calendar",
+        screen_context="Heads-down work",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="available",
+        active_project="Atlas",
+    )
+    get_learning_signal = AsyncMock(return_value=GuardianLearningSignal.neutral("alert"))
+    load_guidance = AsyncMock(return_value=ProceduralMemoryGuidance(intervention_type="alert"))
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            get_learning_signal,
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            load_guidance,
+        ),
+    ):
+        await build_guardian_state(
+            session_id="current",
+            user_message="Should this alert cut through immediately?",
+            intervention_type="alert",
+        )
+
+    get_learning_signal.assert_awaited_once_with(intervention_type="alert", limit=12)
+    load_guidance.assert_awaited_once_with(
+        "alert",
+        continuity_thread_id="current",
+        active_project="Atlas",
+    )
 
 
 @pytest.mark.asyncio

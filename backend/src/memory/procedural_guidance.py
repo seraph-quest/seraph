@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
+from datetime import timezone
 
 from src.db.models import MemoryKind
 from src.guardian.learning_evidence import (
@@ -114,10 +116,76 @@ def _metadata_int(metadata: dict[str, object], key: str) -> int:
     return 0
 
 
+def _metadata_int_or_none(metadata: dict[str, object], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    if isinstance(value, str):
+        try:
+            return max(0, int(float(value.strip())))
+        except ValueError:
+            return None
+    return None
+
+
+def _metadata_float(metadata: dict[str, object], key: str) -> float | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return clamp_unit_interval(float(value))
+    if isinstance(value, str):
+        try:
+            return clamp_unit_interval(float(value.strip()))
+        except ValueError:
+            return None
+    return None
+
+
+def _metadata_nonnegative_float(metadata: dict[str, object], key: str) -> float | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    if isinstance(value, str):
+        try:
+            return max(0.0, float(value.strip()))
+        except ValueError:
+            return None
+    return None
+
+
+def _metadata_timestamp(metadata: dict[str, object], key: str) -> datetime | None:
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _metadata_support_count(metadata: dict[str, object]) -> int:
     if "support_count" in metadata:
-        return _metadata_int(metadata, "support_count")
+        parsed = _metadata_int_or_none(metadata, "support_count")
+        if parsed is not None:
+            return parsed
     return _metadata_int(metadata, "evidence_count")
+
+
+def _metadata_weighted_support(metadata: dict[str, object]) -> float:
+    explicit = _metadata_nonnegative_float(metadata, "weighted_support")
+    if explicit is not None:
+        return round(explicit, 3)
+    return float(_metadata_support_count(metadata))
 
 
 def _has_active_lessons(memories: list[object]) -> bool:
@@ -133,6 +201,9 @@ def _has_active_lessons(memories: list[object]) -> bool:
 
 
 def _procedural_quality_score(memory, metadata: dict[str, object], *, metadata_complete: bool) -> float:
+    explicit_quality = _metadata_float(metadata, "evidence_quality_score")
+    if explicit_quality is not None:
+        return round(explicit_quality, 3)
     if "weighted_support" in metadata:
         try:
             return clamp_unit_interval(float(metadata["weighted_support"]) / 3.0)
@@ -243,18 +314,53 @@ async def load_procedural_memory_guidance(
         if text:
             lessons.append(text)
         axis = learning_axis_for_field(field_name)
-        metadata_complete = "bias_value" in matching_metadata and (
-            "support_count" in matching_metadata or "evidence_count" in matching_metadata
+        explicit_confidence_score = _metadata_float(
+            matching_metadata,
+            "evidence_confidence_score",
         )
-        last_confirmed_at = matching_memory.last_confirmed_at or matching_memory.updated_at
+        explicit_quality_score = _metadata_float(
+            matching_metadata,
+            "evidence_quality_score",
+        )
+        explicit_support_count = _metadata_int_or_none(
+            matching_metadata,
+            "support_count",
+        )
+        explicit_weighted_support = _metadata_nonnegative_float(
+            matching_metadata,
+            "weighted_support",
+        )
+        evidence_last_confirmed_at = _metadata_timestamp(
+            matching_metadata,
+            "evidence_last_confirmed_at",
+        )
+        metadata_complete = (
+            "bias_value" in matching_metadata
+            and explicit_support_count is not None
+            and explicit_weighted_support is not None
+            and explicit_confidence_score is not None
+            and explicit_quality_score is not None
+            and evidence_last_confirmed_at is not None
+        )
+        last_confirmed_at = (
+            evidence_last_confirmed_at
+            or matching_memory.last_confirmed_at
+            or matching_memory.updated_at
+        )
         evidence_by_axis[axis] = GuardianLearningAxisEvidence(
             axis=axis,
             field_name=learning_field_for_axis(axis),
             source="procedural_memory",
             bias=matching_bias,
             support_count=_metadata_support_count(matching_metadata),
+            weighted_support=_metadata_weighted_support(matching_metadata),
             recency_score=round(recency_score_for_timestamp(last_confirmed_at), 3),
-            confidence_score=round(clamp_unit_interval(float(matching_memory.confidence or 0.0)), 3),
+            confidence_score=round(
+                explicit_confidence_score
+                if explicit_confidence_score is not None
+                else clamp_unit_interval(float(matching_memory.confidence or 0.0)),
+                3,
+            ),
             quality_score=_procedural_quality_score(
                 matching_memory,
                 matching_metadata,

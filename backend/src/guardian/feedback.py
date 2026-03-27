@@ -23,6 +23,17 @@ from src.guardian.learning_evidence import (
 
 logger = logging.getLogger(__name__)
 
+_WEIGHTED_BIAS_THRESHOLD = 1.25
+_WEIGHTED_BIAS_MARGIN = 0.1
+_BIAS_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "delivery": ("reduce_interruptions", "prefer_direct_delivery"),
+    "channel": ("prefer_native_notification",),
+    "escalation": ("prefer_async_native",),
+    "timing": ("avoid_focus_windows", "prefer_available_windows"),
+    "blocked_state": ("avoid_blocked_state_interruptions", "prefer_async_for_blocked_state"),
+    "suppression": ("extend_suppression", "resume_faster"),
+}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -108,6 +119,108 @@ def _average_score(values: list[float]) -> float:
     return round(sum(values) / len(values), 3)
 
 
+def _intervention_reliability(item: GuardianIntervention) -> float:
+    return round(
+        (
+            guardian_confidence_score(item.guardian_confidence)
+            + data_quality_score(item.data_quality)
+        )
+        / 2.0,
+        3,
+    )
+
+
+def _positive_feedback_weight(item: GuardianIntervention) -> float:
+    if item.feedback_type == "helpful":
+        return 1.0
+    if item.feedback_type == "acknowledged":
+        return 0.85
+    return 0.0
+
+
+def _positive_delivery_outcome_weight(item: GuardianIntervention) -> float:
+    positive_feedback = _positive_feedback_weight(item)
+    if positive_feedback > 0.0:
+        return positive_feedback
+    if item.feedback_type == "not_helpful" or item.latest_outcome == "failed":
+        return 0.0
+    if item.latest_outcome in {"delivered", "feedback_received"}:
+        return 0.7
+    return 0.0
+
+
+def _negative_outcome_weight(item: GuardianIntervention) -> float:
+    if item.feedback_type == "not_helpful" or item.latest_outcome == "failed":
+        return 1.0
+    return 0.0
+
+
+def _bias_outcome_weight(axis: str, bias: str, item: GuardianIntervention) -> float:
+    if bias in {
+        "reduce_interruptions",
+        "be_brief_and_literal",
+        "bundle_more",
+        "avoid_focus_windows",
+        "avoid_blocked_state_interruptions",
+        "extend_suppression",
+        "prefer_clean_thread",
+    }:
+        return _negative_outcome_weight(item)
+    if bias in {
+        "prefer_native_notification",
+        "prefer_async_native",
+        "prefer_available_windows",
+        "prefer_async_for_blocked_state",
+    }:
+        return _positive_delivery_outcome_weight(item)
+    return _positive_feedback_weight(item)
+
+
+def _weighted_support_for_bias(
+    axis: str,
+    bias: str,
+    contributors: list[GuardianIntervention],
+) -> float:
+    return round(
+        sum(
+            _intervention_reliability(item) * _bias_outcome_weight(axis, bias, item)
+            for item in contributors
+        ),
+        3,
+    )
+
+
+def _select_weighted_bias(
+    interventions: list[GuardianIntervention],
+    *,
+    axis: str,
+) -> str:
+    candidates = list(_BIAS_CANDIDATES.get(axis, ()))
+    if not candidates:
+        return "neutral"
+
+    weighted_candidates = [
+        (
+            bias,
+            _weighted_support_for_bias(
+                axis,
+                bias,
+                _axis_supporting_interventions(interventions, axis=axis, bias=bias),
+            ),
+        )
+        for bias in candidates
+    ]
+    weighted_candidates.sort(key=lambda item: item[1], reverse=True)
+    best_bias, best_weight = weighted_candidates[0]
+    runner_up_weight = weighted_candidates[1][1] if len(weighted_candidates) > 1 else 0.0
+
+    if best_weight < _WEIGHTED_BIAS_THRESHOLD:
+        return "neutral"
+    if runner_up_weight > 0.0 and best_weight < runner_up_weight + _WEIGHTED_BIAS_MARGIN:
+        return "neutral"
+    return best_bias
+
+
 def _axis_supporting_interventions(
     interventions: list[GuardianIntervention],
     *,
@@ -121,7 +234,11 @@ def _axis_supporting_interventions(
             return [
                 item
                 for item in interventions
-                if item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+                if _is_explicit_direct_transport(item.transport)
+                and (
+                    item.feedback_type == "not_helpful"
+                    or item.latest_outcome == "failed"
+                )
             ]
         if bias == "prefer_direct_delivery":
             return [
@@ -132,33 +249,13 @@ def _axis_supporting_interventions(
                 and item.feedback_type in {"helpful", "acknowledged"}
             ]
         return []
-    if axis == "phrasing":
-        if bias == "be_brief_and_literal":
-            return [item for item in interventions if item.feedback_type == "not_helpful"]
-        if bias == "be_more_direct":
-            return [item for item in interventions if item.feedback_type == "helpful"]
-        return []
-    if axis == "cadence":
-        if bias == "bundle_more":
-            return [
-                item
-                for item in interventions
-                if item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
-            ]
-        if bias == "check_in_sooner":
-            return [
-                item
-                for item in interventions
-                if item.feedback_type in {"helpful", "acknowledged"}
-            ]
-        return []
     if axis == "channel":
         if bias == "prefer_native_notification":
             return [
                 item
                 for item in interventions
                 if item.transport == "native_notification"
-                and item.feedback_type in {"helpful", "acknowledged"}
+                and _positive_delivery_outcome_weight(item) > 0.0
             ]
         return []
     if axis == "escalation":
@@ -187,7 +284,7 @@ def _axis_supporting_interventions(
                 for item in interventions
                 if item.user_state == "available"
                 and _is_explicit_direct_transport(item.transport)
-                and item.feedback_type in {"helpful", "acknowledged"}
+                and _positive_delivery_outcome_weight(item) > 0.0
             ]
         return []
     if axis == "blocked_state":
@@ -207,7 +304,7 @@ def _axis_supporting_interventions(
                 for item in interventions
                 if item.user_state in {"deep_work", "in_meeting", "away"}
                 and item.transport == "native_notification"
-                and item.feedback_type in {"helpful", "acknowledged"}
+                and _positive_delivery_outcome_weight(item) > 0.0
             ]
         return []
     if axis == "suppression":
@@ -219,16 +316,6 @@ def _axis_supporting_interventions(
             ]
         if bias == "resume_faster":
             return [item for item in interventions if item.feedback_type == "helpful"]
-        return []
-    if axis == "thread":
-        if bias == "prefer_existing_thread":
-            return [
-                item
-                for item in interventions
-                if item.feedback_type in {"helpful", "acknowledged"}
-            ]
-        if bias == "prefer_clean_thread":
-            return [item for item in interventions if item.latest_outcome == "failed"]
         return []
     return []
 
@@ -255,6 +342,7 @@ def _build_live_axis_evidence(
             bias=axis_bias,
         )
         support_count = len(contributors)
+        weighted_support = _weighted_support_for_bias(axis, axis_bias, contributors)
         last_confirmed_at = max(
             (item.updated_at for item in contributors if item.updated_at is not None),
             default=None,
@@ -266,6 +354,7 @@ def _build_live_axis_evidence(
                 source="live_signal",
                 bias=axis_bias,
                 support_count=support_count,
+                weighted_support=weighted_support,
                 recency_score=round(
                     recency_score_for_timestamp(last_confirmed_at, now=now),
                     3,
@@ -556,90 +645,29 @@ class GuardianFeedbackRepository:
             1
             for item in blocked_state_interventions
             if item.transport == "native_notification"
-            and item.feedback_type in {"helpful", "acknowledged"}
-        )
-        native_positive_count = sum(
-            1
-            for item in interventions
-            if item.transport == "native_notification"
-            and item.feedback_type in {"helpful", "acknowledged"}
-        )
-        native_helpful_count = sum(
-            1
-            for item in interventions
-            if item.transport == "native_notification" and item.feedback_type == "helpful"
+            and _positive_delivery_outcome_weight(item) > 0.0
         )
         available_window_positive = sum(
             1
             for item in interventions
             if item.user_state == "available"
             and _is_explicit_direct_transport(item.transport)
-            and item.feedback_type in {"helpful", "acknowledged"}
+            and _positive_delivery_outcome_weight(item) > 0.0
         )
 
-        bias = "neutral"
-        if not_helpful_count >= 2 or (
-            not_helpful_count >= 1 and helpful_count == 0 and failed_count >= 1
-        ):
-            bias = "reduce_interruptions"
-        elif available_window_positive >= 2 and not_helpful_count == 0:
-            bias = "prefer_direct_delivery"
-
-        phrasing_bias = "neutral"
-        if not_helpful_count >= 2 and helpful_count == 0:
-            phrasing_bias = "be_brief_and_literal"
-        elif helpful_count >= 2 and not_helpful_count == 0:
-            phrasing_bias = "be_more_direct"
-
-        cadence_bias = "neutral"
-        if not_helpful_count >= 2 or failed_count >= 2:
-            cadence_bias = "bundle_more"
-        elif helpful_count >= 2 and acknowledged_count >= 1 and not_helpful_count == 0:
-            cadence_bias = "check_in_sooner"
-
-        channel_bias = "neutral"
-        if native_positive_count >= 2 and not_helpful_count == 0:
-            channel_bias = "prefer_native_notification"
-
-        escalation_bias = "neutral"
-        if native_positive_count >= 2 and native_helpful_count >= 1 and not_helpful_count == 0:
-            escalation_bias = "prefer_async_native"
-
-        timing_bias = "neutral"
-        if blocked_direct_failures >= 2:
-            timing_bias = "avoid_focus_windows"
-        elif available_window_positive >= 2 and not_helpful_count == 0:
-            timing_bias = "prefer_available_windows"
-
-        blocked_state_bias = "neutral"
-        if blocked_direct_failures >= 2:
-            blocked_state_bias = "avoid_blocked_state_interruptions"
-        elif blocked_state_positive_native >= 2 and blocked_direct_failures == 0:
-            blocked_state_bias = "prefer_async_for_blocked_state"
-
-        suppression_bias = "neutral"
-        if not_helpful_count >= 3 or failed_count >= 2:
-            suppression_bias = "extend_suppression"
-        elif helpful_count >= 2 and not_helpful_count == 0:
-            suppression_bias = "resume_faster"
-
-        thread_preference_bias = "neutral"
-        if helpful_count + acknowledged_count >= 2 and not_helpful_count == 0:
-            thread_preference_bias = "prefer_existing_thread"
-        elif failed_count >= 2:
-            thread_preference_bias = "prefer_clean_thread"
-
         bias_by_axis = {
-            "delivery": bias,
-            "phrasing": phrasing_bias,
-            "cadence": cadence_bias,
-            "channel": channel_bias,
-            "escalation": escalation_bias,
-            "timing": timing_bias,
-            "blocked_state": blocked_state_bias,
-            "suppression": suppression_bias,
-            "thread": thread_preference_bias,
+            axis: _select_weighted_bias(interventions, axis=axis)
+            for axis in ordered_learning_axes()
         }
+        bias = bias_by_axis["delivery"]
+        phrasing_bias = bias_by_axis["phrasing"]
+        cadence_bias = bias_by_axis["cadence"]
+        channel_bias = bias_by_axis["channel"]
+        escalation_bias = bias_by_axis["escalation"]
+        timing_bias = bias_by_axis["timing"]
+        blocked_state_bias = bias_by_axis["blocked_state"]
+        suppression_bias = bias_by_axis["suppression"]
+        thread_preference_bias = bias_by_axis["thread"]
 
         return GuardianLearningSignal(
             intervention_type=intervention_type,

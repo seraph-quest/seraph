@@ -133,7 +133,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] observer salience, confidence, and interruption-cost scoring for observer refresh, guardian state, and proactive policy
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
-- [x] first multi-signal guardian learning loop that can reduce interruption eagerness after negative outcomes, prefer direct delivery, native reroute, and async-native escalation after repeated positive/acknowledged outcomes, and now also emit phrasing, cadence, timing, suppression, blocked-state, and thread guidance back into guardian state and intervention policy
+- [x] evidence-weighted guardian learning that can now arbitrate between live heuristics and durable procedural memory at policy time, prefer direct delivery or reduce interruptions from weighted delivery evidence, strengthen timing/channel/blocked-state lessons from actual routing outcomes, and emit grounded channel, escalation, timing, suppression, and blocked-state guidance back into guardian state and intervention policy while leaving phrasing/cadence/thread neutral until runtime records those variants explicitly
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
 - [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] deterministic guardian behavioral proof that strategist tick can use learned direct/native-delivery bias and still surface the resulting intervention through continuity state
@@ -179,7 +179,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Guardian intelligence
 
-- [ ] stronger learning and feedback loops beyond the first multi-signal delivery/channel/timing/suppression/thread layer
+- [ ] stronger learning and feedback loops beyond the current evidence-weighted delivery/channel/timing/blocked-state/suppression layer and first live-versus-durable procedural arbitration pass
 - [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 
@@ -198,7 +198,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 - [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser workflow/operator debugging, stronger intervention learning beyond the current world-model plus timing/suppression/thread layer, and production-grade hardening for the broadened reach surface.
+- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser workflow/operator debugging, stronger intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, and production-grade hardening for the broadened reach surface.
 - [ ] The next major step is to harden and deepen the imported capability surface without losing the existing guardian trust and memory foundations.
 
 ## Workstream View

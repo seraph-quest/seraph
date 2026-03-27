@@ -145,12 +145,33 @@ _LESSON_BUILDERS = {
     "thread": _thread_lesson,
 }
 
+_OBSERVABLE_LESSON_TYPES = frozenset(
+    {
+        "delivery",
+        "channel",
+        "escalation",
+        "timing",
+        "blocked_state",
+        "suppression",
+    }
+)
+
+
+def _axis_evidence(signal: Any, lesson_type: str):
+    evidence_for_axis = getattr(signal, "evidence_for_axis", None)
+    if not callable(evidence_for_axis):
+        return None
+    try:
+        return evidence_for_axis(lesson_type)
+    except Exception:
+        return None
+
 
 def _support_count(signal: Any, lesson_type: str) -> int:
-    evidence_for_axis = getattr(signal, "evidence_for_axis", None)
-    if callable(evidence_for_axis):
+    axis_evidence = _axis_evidence(signal, lesson_type)
+    if axis_evidence is not None:
         try:
-            return max(0, int(evidence_for_axis(lesson_type).support_count))
+            return max(0, int(axis_evidence.support_count))
         except (TypeError, ValueError):
             pass
     return _fallback_evidence_count(signal, lesson_type)
@@ -170,7 +191,7 @@ def _fallback_evidence_count(signal: Any, lesson_type: str) -> int:
 
 
 def _evidence_count(signal: Any, lesson_type: str) -> int:
-    return _support_count(signal, lesson_type)
+    return _fallback_evidence_count(signal, lesson_type)
 
 
 def _confidence_for_evidence(evidence_count: int) -> float:
@@ -201,7 +222,13 @@ async def sync_learning_signal_memories(
     normalized_active_project = " ".join(str(active_project or "").split()) or None
 
     for lesson_type, builder in _LESSON_BUILDERS.items():
-        lesson = builder(signal, intervention_phrase)
+        # Do not persist unsupported axes until interventions record which
+        # concrete phrasing, cadence, or thread mode was actually used.
+        lesson = (
+            builder(signal, intervention_phrase)
+            if lesson_type in _OBSERVABLE_LESSON_TYPES
+            else None
+        )
         scope = {
             "writer": "guardian_feedback",
             "memory_scope": "procedural_learning",
@@ -223,8 +250,20 @@ async def sync_learning_signal_memories(
             continue
 
         bias_value, content = lesson
+        axis_evidence = _axis_evidence(signal, lesson_type)
         support_count = _support_count(signal, lesson_type)
         evidence_count = _evidence_count(signal, lesson_type)
+        metadata = {
+            "bias_value": bias_value,
+            "support_count": support_count,
+            "evidence_count": evidence_count,
+        }
+        if axis_evidence is not None:
+            metadata["weighted_support"] = round(float(axis_evidence.weighted_support), 3)
+            metadata["evidence_confidence_score"] = round(float(axis_evidence.confidence_score), 3)
+            metadata["evidence_quality_score"] = round(float(axis_evidence.quality_score), 3)
+            if axis_evidence.last_confirmed_at is not None:
+                metadata["evidence_last_confirmed_at"] = axis_evidence.last_confirmed_at.isoformat()
         await memory_repository.sync_scoped_memory(
             kind=MemoryKind.procedural,
             category=MemoryCategory.preference,
@@ -236,9 +275,5 @@ async def sync_learning_signal_memories(
             reinforcement=_reinforcement_for_evidence(evidence_count),
             source_session_id=source_session_id,
             last_confirmed_at=confirmed_at,
-            metadata={
-                "bias_value": bias_value,
-                "support_count": support_count,
-                "evidence_count": evidence_count,
-            },
+            metadata=metadata,
         )

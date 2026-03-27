@@ -46,8 +46,8 @@ This file explains:
 
 ### 2. Intervention quality and timing
 
-- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, a first multi-signal outcome-learning layer that can now quiet, accelerate, reroute, bias async-native escalation, and nudge phrasing, cadence, timing, suppression, blocked-state choices, plus thread preference, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate plus strategist-learning native-reroute continuity behavior
-- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment beyond the first delivery/channel/escalation plus phrasing/cadence/timing/suppression adaptation layer
+- [x] shipped foundations: strategist, proactive scheduler surfaces, explicit intervention policy, queued bundles, salience-aware interruption gating, persisted intervention outcomes, explicit feedback capture, first coherent desktop presence plus native notification fallback, evidence-weighted live-versus-procedural guardian learning that can now quiet, accelerate, reroute, bias async-native escalation, and nudge timing, suppression, blocked-state, and grounded channel choices, scoped procedural-memory routing by continuity thread and active project, calibrated high-salience timing overrides, and deterministic behavioral proof for calibrated deliver versus degraded-confidence defer outcomes at the delivery gate plus strategist-learning native-reroute continuity behavior
+- [ ] still missing: deeper multi-signal learning from outcomes and stronger long-horizon intervention judgment beyond the current evidence-weighted delivery/channel/escalation/timing/suppression/blocked-state adaptation layer
 - owners: Workstream 05, Workstream 04
 
 ### 3. Reliability and legibility

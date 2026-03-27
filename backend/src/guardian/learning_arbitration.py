@@ -39,7 +39,7 @@ class GuardianLearningArbitration:
 
     @property
     def source_label(self) -> str:
-        if self.procedural_guidance.has_active_guidance:
+        if any(decision.selected_source == "procedural_memory" for decision in self.decisions):
             return "heuristic_plus_procedural_memory"
         return "heuristic_only"
 
@@ -102,7 +102,10 @@ def _procedural_axis_evidence(
 def _axis_weight(evidence: GuardianLearningAxisEvidence) -> float:
     if evidence.bias == "neutral":
         return 0.0
-    support_score = clamp_unit_interval(evidence.support_count / 4.0)
+    support_basis = evidence.weighted_support
+    if support_basis <= 0.0:
+        support_basis = float(evidence.support_count)
+    support_score = clamp_unit_interval(support_basis / 4.0)
     weight = (
         (0.35 * support_score)
         + (0.25 * clamp_unit_interval(evidence.confidence_score))

@@ -485,6 +485,17 @@ This was the major Guardian Intelligence execution program after the first-pass 
 17. [x] `procedural-memory-policy-routing-v1`:
     route delivery planning and guardian-state learning guidance through scoped procedural memory so outcome-derived lessons stay active even when the live `GuardianLearningSignal` window is neutral, with a dedicated scope lookup path, writer-scoped procedural guidance resolution, policy-time bias overlay, delivery audit visibility for the effective guidance source, and regression coverage proving blocked-state and native-channel lessons still affect real routing without waiting for fresh feedback in the same narrow window
 
+### Batch D: Policy-time learning quality
+
+18. [x] `guardian-learning-evidence-foundation`:
+    expose a comparable live-versus-durable guardian-learning evidence surface, including per-axis support count, confidence, quality, and recency, so later policy-time arbitration stops comparing raw bias labels
+19. [x] `guardian-learning-arbitration`:
+    replace overlay-order conflict handling with evidence-weighted arbitration at the real policy call sites, keep guardian state and delivery on the same effective guidance surface, and make arbitration provenance truthful instead of claiming procedural influence when live evidence still won every axis
+20. [x] `scoped-procedural-guidance-resolution`:
+    resolve procedural lessons by exact continuity-thread and active-project scope so narrower guidance bundles stop inheriting unrelated broader fallback lessons during policy-time reads
+21. [x] `weighted-guardian-learning-support`:
+    weight live and durable guardian learning by confidence, data quality, and actual delivery outcomes, persist weighted support in procedural memory, let successful native/direct routing outcomes strengthen timing, channel, and blocked-state lessons without waiting for explicit feedback every time, and stop inferring unsupported phrasing/cadence/thread lessons until runtime records those intervention variants explicitly
+
 ## Delivery Order
 
 1. Trust Boundaries

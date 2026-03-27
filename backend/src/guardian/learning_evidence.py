@@ -44,7 +44,7 @@ def learning_field_for_axis(axis: str) -> str:
     return _FIELD_BY_AXIS[axis]
 
 
-def support_count_for_axis(
+def evidence_count_for_axis(
     axis: str,
     *,
     helpful_count: int,
@@ -66,9 +66,6 @@ def support_count_for_axis(
     if axis == "thread":
         return int(helpful_count + acknowledged_count + failed_count)
     return int(helpful_count + not_helpful_count + acknowledged_count + failed_count)
-
-
-evidence_count_for_axis = support_count_for_axis
 
 
 def guardian_confidence_score(value: str | None) -> float:
@@ -114,6 +111,7 @@ class GuardianLearningAxisEvidence:
     source: str
     bias: str = "neutral"
     support_count: int = 0
+    weighted_support: float = 0.0
     recency_score: float = 0.0
     confidence_score: float = 0.0
     quality_score: float = 0.0

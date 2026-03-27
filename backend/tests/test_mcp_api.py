@@ -77,6 +77,29 @@ async def test_validate_server_rejects_raw_sensitive_header(client):
 
 
 @pytest.mark.asyncio
+async def test_validate_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr.inspect_headers.return_value = ([], [], ["env"])
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer raw-token${DUMMY}"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "Sensitive header 'Authorization'" in data["issues"][0]
+
+
+@pytest.mark.asyncio
 async def test_validate_server_degrades_when_credential_inspection_fails(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
         mock_mgr.inspect_headers.side_effect = RuntimeError("vault unavailable")
@@ -194,6 +217,25 @@ async def test_add_server_rejects_raw_sensitive_header(client):
                 "name": "gh",
                 "url": "https://example.com/mcp",
                 "headers": {"Authorization": "Bearer raw-token"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "Sensitive header 'Authorization'" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_add_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer raw-token${DUMMY}"},
                 "enabled": True,
             },
         )

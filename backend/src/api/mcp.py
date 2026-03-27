@@ -15,6 +15,9 @@ router = APIRouter()
 
 _ENV_PLACEHOLDER_RE = re.compile(r"\$\{(\w+)\}")
 _VAULT_PLACEHOLDER_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
+_MANAGED_SENSITIVE_HEADER_VALUE_RE = re.compile(
+    r"^(?:[A-Za-z][A-Za-z0-9_-]*\s+)?(?:\$\{\w+\}|\$\{vault:[A-Za-z0-9_.:-]+\})$"
+)
 _SENSITIVE_HEADER_NAMES = {
     "authorization",
     "proxy-authorization",
@@ -67,7 +70,7 @@ def _is_sensitive_header_name(name: str) -> bool:
 
 
 def _uses_managed_credential_placeholder(value: str) -> bool:
-    return bool(re.search(_ENV_PLACEHOLDER_RE, value) or re.search(_VAULT_PLACEHOLDER_RE, value))
+    return bool(_MANAGED_SENSITIVE_HEADER_VALUE_RE.fullmatch(value.strip()))
 
 
 def _validate_header_credentials(headers: dict[str, str] | None) -> list[str]:

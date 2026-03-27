@@ -119,7 +119,8 @@ class MCPManager:
         for value in headers.values():
             if not isinstance(value, str):
                 continue
-            for match in re.finditer(_VAULT_SECRET_RE, value):
+            resolved = MCPManager._resolve_env_vars(value)
+            for match in re.finditer(_VAULT_SECRET_RE, resolved):
                 key = match.group(1)
                 if key in checked:
                     continue
@@ -141,15 +142,17 @@ class MCPManager:
         for key, value in headers.items():
             if not isinstance(value, str):
                 continue
+            resolved = MCPManager._resolve_env_vars(value)
             if re.search(_ENV_VAR_RE, value):
                 credential_sources.add("env")
-            if re.search(_VAULT_SECRET_RE, value):
+            if re.search(_VAULT_SECRET_RE, value) or re.search(_VAULT_SECRET_RE, resolved):
                 credential_sources.add("vault")
             if (
                 isinstance(key, str)
                 and key.strip().lower() == "authorization"
                 and not re.search(_ENV_VAR_RE, value)
                 and not re.search(_VAULT_SECRET_RE, value)
+                and not re.search(_VAULT_SECRET_RE, resolved)
             ):
                 credential_sources.add("inline")
 

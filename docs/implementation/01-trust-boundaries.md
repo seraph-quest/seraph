@@ -68,7 +68,10 @@
   - `Galileo` found one real regression: MCP validation and test endpoints could still raise a `500` if vault-backed credential resolution failed before endpoint-level error handling ran
   - root cause: `validate` and `test` were calling credential resolution too early; validation should inspect placeholders without reading secret values, and test should degrade credential-resolution failures into an operator-visible auth/config result instead of crashing
   - fix: validation now uses non-secret-bearing header inspection, and the test endpoint converts credential-resolution failures into `auth_required` with explicit `credential_resolution_failed` audit detail
-  - no remaining material issue was found after the credential-resolution fix and the per-header credential-source inspection path landed
+  - PR review follow-up found two more real boundary gaps: sensitive-header validation still accepted mixed raw-secret plus placeholder values because it only searched for any `${...}` token, and missing-vault preflight still scanned raw header text before env substitution so env-backed vault placeholders could degrade into opaque downstream auth failures
+  - root cause: the API guard was substring-based instead of requiring the credential-bearing portion of a sensitive header to be fully placeholder-backed, and `inspect_headers()` only looked for `${vault:...}` before env expansion
+  - fix: sensitive headers now only accept fully placeholder-backed values such as `${ENV}`, `${vault:key}`, or `Bearer ${...}`, and header inspection now resolves env placeholders before vault-missing detection and credential-source classification
+  - follow-up focused review found no remaining material issue after the placeholder-tightening and env-to-vault inspection fix landed
 
 ### `approval-replay-boundary-enforcement-v1`
 

@@ -300,42 +300,42 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
     assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "deliver"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "queue"
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
-        == "act"
+        == "bundle"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
-        == "learned_direct_delivery"
+        == "high_interruption_cost"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
-        == "prefer_direct_delivery"
+        == "neutral"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["learning_channel_bias"]
-        == "prefer_native_notification"
+        == "neutral"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
-        == "native_notification"
+        is None
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["delivered_connections"]
-        == 1
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
-        == 1
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
         == 0
     )
     assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
+        == 0
+    )
+    assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
+        == 1
+    )
+    assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
-        == "native_notification"
+        == "bundle_queue"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
@@ -343,11 +343,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
-        is True
+        is False
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
-        == 1
+        == 0
     )
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
@@ -521,23 +521,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_feedback_loop"]["prompt_contains_feedback_section"] is True
     assert details_by_name["guardian_feedback_loop"]["instructions_include_feedback"] is True
     assert details_by_name["guardian_feedback_loop"]["remaining_notifications"] == 0
-    assert details_by_name["guardian_outcome_learning"]["action"] == "bundle"
-    assert details_by_name["guardian_outcome_learning"]["reason"] == "recent_negative_feedback"
-    assert details_by_name["guardian_outcome_learning"]["queued"] is True
+    assert details_by_name["guardian_outcome_learning"]["action"] == "defer"
+    assert details_by_name["guardian_outcome_learning"]["reason"] == "learned_suppression_window"
+    assert details_by_name["guardian_outcome_learning"]["queued"] is False
     assert details_by_name["guardian_outcome_learning"]["broadcast_skipped"] is True
-    assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "reduce_interruptions"
+    assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "neutral"
     assert details_by_name["guardian_outcome_learning"]["learning_not_helpful_count"] == 2
-    assert details_by_name["guardian_outcome_learning"]["positive_action"] == "act"
-    assert details_by_name["guardian_outcome_learning"]["positive_reason"] == "learned_direct_delivery"
-    assert details_by_name["guardian_outcome_learning"]["positive_transport"] == "native_notification"
-    assert details_by_name["guardian_outcome_learning"]["positive_learning_bias"] == "prefer_direct_delivery"
+    assert details_by_name["guardian_outcome_learning"]["positive_action"] == "bundle"
+    assert details_by_name["guardian_outcome_learning"]["positive_reason"] == "high_interruption_cost"
+    assert details_by_name["guardian_outcome_learning"]["positive_transport"] is None
+    assert details_by_name["guardian_outcome_learning"]["positive_learning_bias"] == "neutral"
     assert (
         details_by_name["guardian_outcome_learning"]["positive_learning_channel_bias"]
-        == "prefer_native_notification"
+        == "neutral"
     )
     assert details_by_name["guardian_outcome_learning"]["positive_helpful_count"] == 2
     assert details_by_name["guardian_outcome_learning"]["positive_acknowledged_count"] == 2
-    assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 1
+    assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 0
     assert details_by_name["guardian_learning_policy_v2_behavior"]["timing_bias"] == "avoid_focus_windows"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_state_bias"] == "avoid_blocked_state_interruptions"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_action"] == "bundle"
@@ -966,7 +966,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_delivery_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
-    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 5
+    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
     assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
@@ -1158,5 +1158,5 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_delivery_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
-    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 5
+    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
     assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8

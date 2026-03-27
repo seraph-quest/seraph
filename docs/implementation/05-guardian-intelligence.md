@@ -889,6 +889,13 @@ This section records the internal Batch C slices on the feature branch before th
   - `update_outcome(...)` was still refreshing procedural learning memories only for failure transitions, even though weighted positive evidence now also comes from successful `delivered` and `feedback_received` outcomes
   - that meant live learning could strengthen from outcome-only async/direct successes while durable scoped procedural guidance stayed stale until explicit feedback arrived
   - fixed by refreshing learning memories whenever outcome transitions enter or leave the success/failure states that the weighted evidence model actually uses, with a regression in `backend/tests/test_guardian_feedback.py`
+- aggregate-PR CI follow-up:
+  - the eval harness was still asserting the pre-Batch D policy contract in three places:
+    - `strategist_tick_learning_continuity_behavior` still expected learned generic feedback to force a delivered native-notification path
+    - `guardian_outcome_learning` still expected generic helpful/not-helpful rows to manufacture direct-delivery lessons instead of the now-supported suppression-only behavior
+    - `procedural_memory_adaptation_behavior` still expected the pre-Batch D active procedural-memory count
+  - the shipped policy is stricter now: generic feedback without explicit transport/runtime evidence no longer invents delivery/channel lessons, learned suppression can defer or queue instead of forcing live delivery, and the Batch D procedural layer leaves eight active procedural memories in the adaptation eval
+  - fixed by updating `backend/src/evals/harness.py` and `backend/tests/test_eval_harness.py` to assert the current evidence-weighted queue/defer behavior and the new procedural-memory count instead of the stale pre-Batch D contract
 - validation:
   - `python3 -m py_compile backend/src/guardian/feedback.py backend/src/guardian/learning_arbitration.py backend/src/memory/procedural.py backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
   - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py -q`

@@ -117,10 +117,12 @@ Use this as the default execution model when several internal slices will land t
     - made the parent batch issue checklist the authoritative batch-decomposition surface unless a slice becomes its own child issue
     - defined child-slice board semantics under an aggregate PR: child issues may move through `Queue` and `Status`, but keep `PR=Not Ready` and `Code Review=Not Ready` unless they get their own PR
     - clarified the tracked-work issue template so the batch-decomposition section is only for parent batch issues and can be left blank on standalone or child issues
+    - generalized the PR-template tracking label back to `Linked tracked issue` so standalone tracked work and batch-parent linking both match the same template
   - final verification:
     - the parent batch issue owns aggregate `PR` and `Code Review` state
     - child slice issues no longer imply duplicated aggregate-PR state
     - issue comments and PR bodies are now receipts and notes, not a second authoritative slice-status surface
+    - the PR template now supports both standalone tracked issues and parent batch issues without implying every PR must close a batch parent
 
 ## Parity Rules
 

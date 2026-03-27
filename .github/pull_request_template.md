@@ -8,7 +8,8 @@
 - [ ] <real remaining work after this merges>
 
 ## Tracking
-- Linked parent issue: Closes #<issue>
+- Linked tracked issue: Closes #<issue>
+- In batch mode, link the parent batch issue rather than every child slice issue.
 
 ## Validation
 - <command>

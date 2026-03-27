@@ -93,8 +93,9 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
   - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
     - result: `1 passed`
 - subagent review:
-  - focused review threads were started for bugs, regressions, and hallucinated assumptions before the slice record was written
-  - those subagent sessions did not return findings before validation completed, so this record relies on the fixed local regression plus the targeted runtime validation above instead of claiming an unreturned clean review
+  - a focused subagent review was started for bugs, regressions, and hallucinated assumptions before the slice record was written
+  - the first returned review response was not usable as a review artifact because it mixed the requested findings pass with out-of-scope operational mutations instead of returning a clean read-only findings list
+  - the landed slice therefore relies on direct diff verification plus the targeted runtime validation above, and that direct review found no additional material bugs, regressions, or unsupported implementation claims in the shipped diff
 
 ## Non-Goals
 

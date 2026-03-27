@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.db.models import MemoryCategory, MemoryKind
+from src.guardian.learning_evidence import evidence_count_for_axis
 from src.memory.repository import memory_repository
 
 
@@ -145,18 +146,27 @@ _LESSON_BUILDERS = {
 }
 
 
+def _support_count(signal: Any, lesson_type: str) -> int:
+    evidence_for_axis = getattr(signal, "evidence_for_axis", None)
+    if callable(evidence_for_axis):
+        try:
+            return max(0, int(evidence_for_axis(lesson_type).support_count))
+        except (TypeError, ValueError):
+            pass
+    return _evidence_count(signal, lesson_type)
+
+
 def _evidence_count(signal: Any, lesson_type: str) -> int:
-    if lesson_type in {"delivery", "phrasing", "cadence", "suppression"}:
-        return int(signal.helpful_count + signal.not_helpful_count + signal.failed_count)
-    if lesson_type in {"channel", "escalation"}:
-        return int(signal.acknowledged_count + signal.helpful_count)
-    if lesson_type == "timing":
-        return int(signal.blocked_direct_failure_count + signal.available_direct_success_count)
-    if lesson_type == "blocked_state":
-        return int(signal.blocked_direct_failure_count + signal.blocked_native_success_count)
-    if lesson_type == "thread":
-        return int(signal.helpful_count + signal.acknowledged_count + signal.failed_count)
-    return int(signal.helpful_count + signal.not_helpful_count + signal.acknowledged_count + signal.failed_count)
+    return evidence_count_for_axis(
+        lesson_type,
+        helpful_count=signal.helpful_count,
+        not_helpful_count=signal.not_helpful_count,
+        acknowledged_count=signal.acknowledged_count,
+        failed_count=signal.failed_count,
+        blocked_direct_failure_count=signal.blocked_direct_failure_count,
+        blocked_native_success_count=signal.blocked_native_success_count,
+        available_direct_success_count=signal.available_direct_success_count,
+    )
 
 
 def _confidence_for_evidence(evidence_count: int) -> float:
@@ -202,6 +212,7 @@ async def sync_learning_signal_memories(
             continue
 
         bias_value, content = lesson
+        support_count = _support_count(signal, lesson_type)
         evidence_count = _evidence_count(signal, lesson_type)
         await memory_repository.sync_scoped_memory(
             kind=MemoryKind.procedural,
@@ -216,6 +227,7 @@ async def sync_learning_signal_memories(
             last_confirmed_at=confirmed_at,
             metadata={
                 "bias_value": bias_value,
+                "support_count": support_count,
                 "evidence_count": evidence_count,
             },
         )

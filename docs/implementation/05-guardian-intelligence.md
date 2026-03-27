@@ -774,6 +774,30 @@ This section records the internal Batch C slices on the feature branch before th
 - residual risk:
   - this slice uses exact scoped procedural lookup and bias overlay, not a richer conflict-resolution layer between durable procedural memory and fresh live heuristics, so conflicting signals still rely on the current overlay order rather than a separate arbitration policy
 
+### `guardian-learning-evidence-foundation`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - the codebase now has two policy-time learning sources: fresh `GuardianLearningSignal` heuristics and durable procedural memories
+  - before this slice, those sources exposed only bias labels, not a comparable evidence surface, so the next arbitration layer would have had to compare incomparable inputs
+- scope:
+  - added `backend/src/guardian/learning_evidence.py` as the shared evidence model for guardian-learning axes, including axis ordering, field mapping, confidence/data-quality normalization, recency scoring, and neutral evidence defaults
+  - extended `GuardianLearningSignal` in `backend/src/guardian/feedback.py` with per-axis evidence so live learning now exposes `support_count`, `recency_score`, `confidence_score`, `quality_score`, and `last_confirmed_at` alongside the existing bias fields
+  - extended `ProceduralMemoryGuidance` in `backend/src/memory/procedural_guidance.py` with the same per-axis evidence surface so durable procedural lessons can be compared without re-parsing ad hoc metadata at every policy call site
+  - updated `backend/src/memory/procedural.py` to reuse the shared support-count helper so the procedural writer and live signal builder cannot silently drift on the same axis-level evidence math
+  - added regressions in `backend/tests/test_guardian_feedback.py` covering live evidence exposure, partial stale procedural metadata, and live-versus-durable support-count parity for active guidance axes
+- local regression fixed before the slice was recorded:
+  - the first pass built live `axis_evidence.support_count` from ad hoc per-bias supporter subsets, while durable procedural memories still stored axis-level `evidence_count` values from `sync_learning_signal_memories()`
+  - that mismatch made the new evidence surface internally inconsistent: the same learned channel or escalation bias could report one support count in the live signal and a different count after persistence, and in the native-channel case it could even report `0` live support for a non-neutral bias
+  - fixed by centralizing the support-count math in `backend/src/guardian/learning_evidence.py`, reusing it from `backend/src/memory/procedural.py`, and changing live evidence construction to use axis-level contributor windows that match the persisted evidence contract instead of bespoke per-bias subsets
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/feedback.py backend/src/memory/procedural.py backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `18 passed`
+- subagent review:
+  - a subagent review request was started against the completed `#240` diff for bugs, regressions, and hallucinated assumptions, but it had not returned findings before this log update
+  - the recorded completion therefore relies on the concrete comparability bug fixed locally above plus the targeted regression validation, not on inventing a clean review reply that never arrived
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

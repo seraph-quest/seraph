@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlmodel import select
 
 from src.agent.session import SessionManager
@@ -146,6 +147,8 @@ async def test_learning_signal_can_prefer_direct_delivery_and_native_channel(asy
     assert signal.bias == "prefer_direct_delivery"
     assert signal.channel_bias == "prefer_native_notification"
     assert signal.escalation_bias == "prefer_async_native"
+    assert signal.evidence_for_axis("channel").support_count == 4
+    assert signal.evidence_for_axis("escalation").support_count == 4
 
 
 async def test_learning_signal_tracks_timing_and_blocked_state_biases(async_db):
@@ -576,3 +579,224 @@ async def test_load_procedural_memory_guidance_ignores_other_writers(async_db):
 
     assert guidance.channel_bias == "prefer_native_notification"
     assert guidance.lesson_types == ("channel",)
+
+
+async def test_learning_signal_exposes_comparable_live_axis_evidence(async_db):
+    base_time = datetime.now(timezone.utc)
+    interventions = []
+    for offset_days in (2, 1):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Helpful direct delivery.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        interventions.append(intervention)
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
+
+        async with async_db() as db:
+            stored = (
+                await db.execute(
+                    select(GuardianIntervention).where(GuardianIntervention.id == intervention.id)
+                )
+            ).scalar_one()
+            stored.updated_at = base_time - timedelta(days=offset_days)
+            db.add(stored)
+            await db.flush()
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+    delivery_evidence = signal.evidence_for_axis("delivery")
+
+    assert len(signal.axis_evidence) == 9
+    assert delivery_evidence.bias == "prefer_direct_delivery"
+    assert delivery_evidence.support_count == 2
+    assert delivery_evidence.confidence_score == pytest.approx(1.0)
+    assert delivery_evidence.quality_score == pytest.approx(1.0)
+    assert delivery_evidence.recency_score == pytest.approx(29 / 30, abs=0.02)
+
+
+async def test_neutral_live_axis_evidence_preserves_recent_support(async_db):
+    base_time = datetime.now(timezone.utc)
+    for offset_days, feedback_type in ((2, "helpful"), (1, "not_helpful")):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Mixed direct delivery signal.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+        async with async_db() as db:
+            stored = (
+                await db.execute(
+                    select(GuardianIntervention).where(GuardianIntervention.id == intervention.id)
+                )
+            ).scalar_one()
+            stored.updated_at = base_time - timedelta(days=offset_days)
+            db.add(stored)
+            await db.flush()
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+    delivery_evidence = signal.evidence_for_axis("delivery")
+
+    assert signal.bias == "neutral"
+    assert delivery_evidence.bias == "neutral"
+    assert delivery_evidence.support_count == 2
+    assert delivery_evidence.confidence_score == pytest.approx(1.0)
+    assert delivery_evidence.quality_score == pytest.approx(1.0)
+    assert delivery_evidence.recency_score == pytest.approx(29 / 30, abs=0.02)
+
+
+async def test_load_procedural_memory_guidance_handles_partial_stale_metadata(async_db):
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "channel",
+        },
+        content="For advisory interventions, async native notification is usually tolerated better than browser interruption.",
+        summary="For advisory interventions, async native notification is usually tolerated better than browser interruption.",
+        confidence=0.82,
+        reinforcement=1.4,
+        last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=60),
+        metadata={"bias_value": "prefer_native_notification"},
+    )
+
+    guidance = await load_procedural_memory_guidance("advisory")
+    channel_evidence = guidance.evidence_for_axis("channel")
+
+    assert len(guidance.axis_evidence) == 9
+    assert guidance.channel_bias == "prefer_native_notification"
+    assert channel_evidence.support_count == 0
+    assert channel_evidence.metadata_complete is False
+    assert channel_evidence.confidence_score == pytest.approx(0.82)
+    assert channel_evidence.recency_score == pytest.approx(0.0)
+
+
+async def test_procedural_guidance_support_count_matches_live_supporters(async_db):
+    for _index in range(2):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-procedural",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Helpful direct delivery.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
+
+    failed_intervention = await guardian_feedback_repository.create_intervention(
+        session_id="session-procedural",
+        message_type="proactive",
+        intervention_type="advisory",
+        urgency=2,
+        content="A failed interruption.",
+        reasoning="available_capacity",
+        is_scheduled=False,
+        guardian_confidence="grounded",
+        data_quality="good",
+        user_state="available",
+        interruption_mode="balanced",
+        policy_action="act",
+        policy_reason="available_capacity",
+        delivery_decision="deliver",
+        latest_outcome="failed",
+        transport="websocket",
+    )
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=signal,
+        source_session_id=failed_intervention.session_id,
+    )
+
+    guidance = await load_procedural_memory_guidance("advisory")
+    delivery_memory = next(
+        memory
+        for memory in await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
+        if json.loads(memory.metadata_json or "{}").get("lesson_type") == "delivery"
+    )
+    delivery_metadata = json.loads(delivery_memory.metadata_json or "{}")
+    delivery_evidence = guidance.evidence_for_axis("delivery")
+
+    assert signal.bias == "prefer_direct_delivery"
+    assert signal.failed_count == 1
+    assert signal.evidence_for_axis("delivery").support_count == 2
+    assert delivery_metadata["support_count"] == 2
+    assert delivery_metadata["evidence_count"] == 3
+    assert delivery_evidence.support_count == 2
+
+
+async def test_live_and_procedural_axis_evidence_use_matching_support_counts(async_db):
+    for feedback_type, content in (
+        ("helpful", "That landed at the right moment."),
+        ("helpful", "Another useful nudge."),
+        ("acknowledged", "Seen on desktop and acted on it."),
+        ("acknowledged", "Acknowledged from the notification center."),
+    ):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+    await sync_learning_signal_memories(intervention_type="advisory", signal=signal)
+    guidance = await load_procedural_memory_guidance("advisory")
+
+    assert signal.channel_bias == guidance.channel_bias == "prefer_native_notification"
+    assert signal.escalation_bias == guidance.escalation_bias == "prefer_async_native"
+    assert signal.bias == guidance.bias == "prefer_direct_delivery"
+    assert signal.evidence_for_axis("delivery").support_count == guidance.evidence_for_axis("delivery").support_count
+    assert signal.evidence_for_axis("channel").support_count == guidance.evidence_for_axis("channel").support_count
+    assert signal.evidence_for_axis("escalation").support_count == guidance.evidence_for_axis("escalation").support_count

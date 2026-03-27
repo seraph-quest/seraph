@@ -11,6 +11,16 @@ from sqlmodel import select
 from src.db.engine import get_session
 from src.db.models import GuardianIntervention
 from src.db.session_refs import ensure_sessions_exist
+from src.guardian.learning_evidence import (
+    GuardianLearningAxisEvidence,
+    data_quality_score,
+    guardian_confidence_score,
+    learning_field_for_axis,
+    neutral_axis_evidence,
+    ordered_learning_axes,
+    recency_score_for_timestamp,
+    support_count_for_axis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +55,16 @@ class GuardianLearningSignal:
     blocked_direct_failure_count: int
     blocked_native_success_count: int
     available_direct_success_count: int
+    axis_evidence: tuple[GuardianLearningAxisEvidence, ...] = ()
+
+    def evidence_by_axis(self) -> dict[str, GuardianLearningAxisEvidence]:
+        return {item.axis: item for item in self.axis_evidence}
+
+    def evidence_for_axis(self, axis: str) -> GuardianLearningAxisEvidence:
+        return self.evidence_by_axis().get(
+            axis,
+            neutral_axis_evidence(axis, source="live_signal"),
+        )
 
     @classmethod
     def neutral(cls, intervention_type: str) -> "GuardianLearningSignal":
@@ -66,7 +86,145 @@ class GuardianLearningSignal:
             blocked_direct_failure_count=0,
             blocked_native_success_count=0,
             available_direct_success_count=0,
+            axis_evidence=tuple(
+                neutral_axis_evidence(axis, source="live_signal")
+                for axis in ordered_learning_axes()
+            ),
         )
+
+
+def _average_score(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 3)
+
+
+def _axis_contributing_interventions(
+    interventions: list[GuardianIntervention],
+    *,
+    axis: str,
+) -> list[GuardianIntervention]:
+    if axis in {"delivery", "phrasing", "cadence", "suppression"}:
+        return [
+            item
+            for item in interventions
+            if item.feedback_type in {"helpful", "not_helpful"}
+            or item.latest_outcome == "failed"
+        ]
+    if axis == "channel":
+        return [
+            item
+            for item in interventions
+            if item.feedback_type in {"helpful", "acknowledged"}
+        ]
+    if axis == "escalation":
+        return [
+            item
+            for item in interventions
+            if item.feedback_type in {"helpful", "acknowledged"}
+        ]
+    if axis == "timing":
+        return [
+            item
+            for item in interventions
+            if (
+                item.user_state in {"deep_work", "in_meeting", "away"}
+                and item.transport != "native_notification"
+                and (
+                    item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+                )
+            )
+            or (
+                item.user_state == "available"
+                and item.transport != "native_notification"
+                and item.feedback_type in {"helpful", "acknowledged"}
+            )
+        ]
+    if axis == "blocked_state":
+        return [
+            item
+            for item in interventions
+            if (
+                item.user_state in {"deep_work", "in_meeting", "away"}
+                and item.transport != "native_notification"
+                and (
+                    item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+                )
+            )
+            or (
+                item.user_state in {"deep_work", "in_meeting", "away"}
+                and item.transport == "native_notification"
+                and item.feedback_type in {"helpful", "acknowledged"}
+            )
+        ]
+    if axis == "thread":
+        return [
+            item
+            for item in interventions
+            if item.feedback_type in {"helpful", "acknowledged"}
+            or item.latest_outcome == "failed"
+        ]
+    return []
+
+
+def _build_live_axis_evidence(
+    *,
+    interventions: list[GuardianIntervention],
+    bias_by_axis: dict[str, str],
+    helpful_count: int,
+    not_helpful_count: int,
+    acknowledged_count: int,
+    failed_count: int,
+    blocked_direct_failure_count: int,
+    blocked_native_success_count: int,
+    available_direct_success_count: int,
+) -> tuple[GuardianLearningAxisEvidence, ...]:
+    now = _now()
+    evidence_items: list[GuardianLearningAxisEvidence] = []
+    for axis in ordered_learning_axes():
+        axis_bias = bias_by_axis[axis]
+        contributors = _axis_contributing_interventions(
+            interventions,
+            axis=axis,
+        )
+        support_count = support_count_for_axis(
+            axis,
+            helpful_count=helpful_count,
+            not_helpful_count=not_helpful_count,
+            acknowledged_count=acknowledged_count,
+            failed_count=failed_count,
+            blocked_direct_failure_count=blocked_direct_failure_count,
+            blocked_native_success_count=blocked_native_success_count,
+            available_direct_success_count=available_direct_success_count,
+        )
+        last_confirmed_at = max(
+            (item.updated_at for item in contributors if item.updated_at is not None),
+            default=None,
+        )
+        evidence_items.append(
+            GuardianLearningAxisEvidence(
+                axis=axis,
+                field_name=learning_field_for_axis(axis),
+                source="live_signal",
+                bias=axis_bias,
+                support_count=support_count,
+                recency_score=round(
+                    recency_score_for_timestamp(last_confirmed_at, now=now),
+                    3,
+                ),
+                confidence_score=_average_score(
+                    [
+                        guardian_confidence_score(item.guardian_confidence)
+                        for item in contributors
+                    ]
+                ),
+                quality_score=_average_score(
+                    [data_quality_score(item.data_quality) for item in contributors]
+                ),
+                last_confirmed_at=last_confirmed_at,
+            )
+        )
+    return tuple(evidence_items)
 
 
 class GuardianFeedbackRepository:
@@ -354,6 +512,18 @@ class GuardianFeedbackRepository:
         elif failed_count >= 2:
             thread_preference_bias = "prefer_clean_thread"
 
+        bias_by_axis = {
+            "delivery": bias,
+            "phrasing": phrasing_bias,
+            "cadence": cadence_bias,
+            "channel": channel_bias,
+            "escalation": escalation_bias,
+            "timing": timing_bias,
+            "blocked_state": blocked_state_bias,
+            "suppression": suppression_bias,
+            "thread": thread_preference_bias,
+        }
+
         return GuardianLearningSignal(
             intervention_type=intervention_type,
             helpful_count=helpful_count,
@@ -372,6 +542,17 @@ class GuardianFeedbackRepository:
             blocked_direct_failure_count=blocked_direct_failures,
             blocked_native_success_count=blocked_state_positive_native,
             available_direct_success_count=available_window_positive,
+            axis_evidence=_build_live_axis_evidence(
+                interventions=interventions,
+                bias_by_axis=bias_by_axis,
+                helpful_count=helpful_count,
+                not_helpful_count=not_helpful_count,
+                acknowledged_count=acknowledged_count,
+                failed_count=failed_count,
+                blocked_direct_failure_count=blocked_direct_failures,
+                blocked_native_success_count=blocked_state_positive_native,
+                available_direct_success_count=available_window_positive,
+            ),
         )
 
 

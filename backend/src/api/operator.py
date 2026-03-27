@@ -251,6 +251,10 @@ async def get_operator_timeline(
                 "max_latency_tier": details.get("max_latency_tier"),
                 "required_task_class": details.get("required_task_class"),
                 "max_budget_class": details.get("max_budget_class"),
+                "budget_steering_mode": details.get("budget_steering_mode"),
+                "selected_budget_headroom": details.get("selected_budget_headroom"),
+                "selected_budget_preference_score": details.get("selected_budget_preference_score"),
+                "selected_route_score": details.get("selected_route_score"),
                 "attempt_order": details.get("attempt_order", []),
                 "reroute_cause": details.get("reroute_cause"),
                 "rerouted_from_unhealthy_primary": details.get("rerouted_from_unhealthy_primary"),
@@ -258,6 +262,7 @@ async def get_operator_timeline(
                 "guardrail_compliant_targets_present": details.get("guardrail_compliant_targets_present"),
                 "rejected_target_count": details.get("rejected_target_count"),
                 "candidate_targets": details.get("candidate_targets", []),
+                "simulated_routes": details.get("simulated_routes", []),
                 "rejected_targets": details.get("rejected_targets", []),
             }
             items.append({

@@ -238,12 +238,15 @@ def _entry_metric_count(items: list[dict[str, Any]], key: str) -> float:
     return total
 
 
-def _request_metadata_value(details: dict[str, Any], key: str) -> str | None:
+def _request_metadata_value(details: dict[str, Any], key: str) -> Any | None:
     value = details.get(key)
     if isinstance(value, str):
         trimmed = value.strip()
         if trimmed:
             return trimmed
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
     return None
 
 
@@ -653,6 +656,9 @@ async def get_activity_ledger(
             "selected_model",
             "selected_profile",
             "selected_source",
+            "budget_steering_mode",
+            "selected_route_score",
+            "selected_budget_preference_score",
             "required_task_class",
             "max_budget_class",
             "max_cost_tier",
@@ -769,7 +775,15 @@ async def get_activity_ledger(
                 "error": call.get("error"),
                 "runtime_path": runtime_path,
                 "runtime_profile": _request_metadata_value(routing_metadata, "runtime_profile"),
+                "selected_model": _request_metadata_value(routing_metadata, "selected_model"),
+                "selected_profile": _request_metadata_value(routing_metadata, "selected_profile"),
                 "selected_source": _request_metadata_value(routing_metadata, "selected_source"),
+                "budget_steering_mode": _request_metadata_value(routing_metadata, "budget_steering_mode"),
+                "selected_route_score": _request_metadata_value(routing_metadata, "selected_route_score"),
+                "selected_budget_preference_score": _request_metadata_value(
+                    routing_metadata,
+                    "selected_budget_preference_score",
+                ),
                 "max_budget_class": _request_metadata_value(routing_metadata, "max_budget_class"),
                 "required_task_class": _request_metadata_value(routing_metadata, "required_task_class"),
                 "max_cost_tier": _request_metadata_value(routing_metadata, "max_cost_tier"),

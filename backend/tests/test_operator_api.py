@@ -299,6 +299,10 @@ async def test_operator_timeline_projects_routing_metadata(client):
                             "max_latency_tier": "medium",
                             "required_task_class": "interactive",
                             "max_budget_class": "standard",
+                            "budget_steering_mode": "prefer_lower_budget",
+                            "selected_budget_headroom": 1,
+                            "selected_budget_preference_score": 2.0,
+                            "selected_route_score": 10.5,
                             "attempt_order": ["gpt-4o-mini", "gpt-4.1-mini"],
                             "reroute_cause": "primary_timeout",
                             "rerouted_from_unhealthy_primary": False,
@@ -306,6 +310,14 @@ async def test_operator_timeline_projects_routing_metadata(client):
                             "guardrail_compliant_targets_present": True,
                             "rejected_target_count": 2,
                             "candidate_targets": ["gpt-4o-mini", "gpt-4.1-mini", "local-model"],
+                            "simulated_routes": [
+                                {
+                                    "rank": 1,
+                                    "entry_model": "gpt-4o-mini",
+                                    "selected": True,
+                                    "route_score": 10.5,
+                                }
+                            ],
                             "rejected_targets": [
                                 {"target": "local-model", "reason": "task_class_mismatch"},
                                 {"target": "gpt-4.1-mini", "reason": "latency_tier_exceeded"},
@@ -332,8 +344,12 @@ async def test_operator_timeline_projects_routing_metadata(client):
     assert routing_item["metadata"]["selected_model"] == "openrouter/gpt-4o-mini"
     assert routing_item["metadata"]["selected_reason_codes"] == ["policy_score", "healthy"]
     assert routing_item["metadata"]["reroute_cause"] == "primary_timeout"
+    assert routing_item["metadata"]["budget_steering_mode"] == "prefer_lower_budget"
+    assert routing_item["metadata"]["selected_budget_preference_score"] == 2.0
+    assert routing_item["metadata"]["selected_route_score"] == 10.5
     assert routing_item["metadata"]["rejected_target_count"] == 2
     assert routing_item["metadata"]["guardrail_compliant_targets_present"] is True
+    assert routing_item["metadata"]["simulated_routes"][0]["entry_model"] == "gpt-4o-mini"
 
 
 @pytest.mark.asyncio

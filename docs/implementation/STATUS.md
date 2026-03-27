@@ -44,7 +44,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The extension-platform transition and five-wave capability import program are now represented in the shipped state on `develop`.
 - [x] Seraph now ships Hermes-style runtime primitives (`execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`) plus packaged browser, messaging, automation, node, canvas, and workflow-runtime surfaces through the extension architecture.
 - [x] The workspace now makes imported capability reach, extension governance, and runtime-path/capability-family spend attribution visible inside the operator surface instead of leaving the new breadth opaque.
-- [x] Runtime Reliability now has deterministic proof for activity-ledger attribution and imported capability surfaces in addition to the earlier guardian/runtime contracts.
+- [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
 - [x] The next strategic focus is now post-import hardening: deeper execution isolation, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
 
@@ -121,6 +121,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with explicit degrade-open audit semantics when no compliant target exists
+- [x] first simulation-grade provider planning pass that scores candidate routes before execution, makes budget steering explicit, and surfaces route scores plus simulated-route explanations through runtime audit, operator timeline, and activity-ledger views
 - [x] runtime audit visibility across chat, WebSocket, session-bound helper LLM traces, scheduler including daily-briefing, activity-digest, and evening-review degraded-input fallback paths, strategist, proactive delivery transport, MCP lifecycle and manual test API flows, skills toggle/reload flows, observer plus screen observation summary/cleanup boundaries, embedding, vector store, guardian-record file, vault repository, filesystem, browser, sandbox, and web search flows
 - [x] deterministic runtime eval harness for fallback, routing, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, workflow composition behavior, storage, observer, and integration seam contracts, including vault repository, the MCP test API, skills API, screen repository boundaries, and daily-briefing, activity-digest, plus evening-review degraded-input audit behavior
 - [x] deterministic runtime eval coverage for activity-ledger attribution and imported capability surfaces, so runtime-path spend, packaged reach visibility, and extension-governance surfaces stay pinned on `develop`
@@ -174,7 +175,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Runtime and execution
 
-- [ ] richer provider selection policy beyond the shipped weighted scoring, required capability safeguards, tier guardrails, path patterns, explicit overrides, ordered fallbacks, and cooldown rerouting
+- [ ] deeper provider planning beyond the first simulation-grade route scoring and explicit budget steering pass, especially with stronger production-like failure modeling and live-provider feedback
 - [ ] broader live-provider and long-running integration eval coverage beyond the shipped deterministic REST, WebSocket, observer, delivery, activity-ledger, imported-capability, tool/MCP guardrail, delegated workflow, and workflow-composition contracts
 - [ ] stronger execution isolation and privileged-path hardening beyond the current workflow/tool, browser-mode, and connector-boundary pass
 - [ ] richer capability installation, recommendation, and recovery beyond the shipped catalog/install, runbook preflight, bounded bootstrap flow, extension studio, and imported-reach governance surfaces

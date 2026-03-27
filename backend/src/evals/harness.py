@@ -2436,12 +2436,17 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
     return {
         "completion_selected_model": completion_decision["details"]["selected_model"],
         "completion_attempt_order": completion_decision["details"]["attempt_order"],
+        "completion_budget_steering_mode": completion_decision["details"]["budget_steering_mode"],
+        "completion_selected_route_score": completion_decision["details"]["selected_route_score"],
+        "completion_simulated_route_count": len(completion_decision["details"]["simulated_routes"]),
+        "completion_first_route_entry": completion_decision["details"]["simulated_routes"][0]["entry_model"],
         "completion_rejected_models": [
             candidate["model_id"]
             for candidate in completion_decision["details"]["rejected_targets"]
         ],
         "agent_selected_model": rerouted_agent_decision["details"]["selected_model"],
         "agent_attempt_order": rerouted_agent_decision["details"]["attempt_order"],
+        "agent_budget_steering_mode": rerouted_agent_decision["details"]["budget_steering_mode"],
         "agent_primary_decision": primary_candidate["decision"],
         "agent_primary_reason_codes": primary_candidate["reason_codes"],
     }

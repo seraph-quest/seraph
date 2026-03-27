@@ -120,6 +120,18 @@ def _metadata_support_count(metadata: dict[str, object]) -> int:
     return _metadata_int(metadata, "evidence_count")
 
 
+def _has_active_lessons(memories: list[object]) -> bool:
+    for memory in memories:
+        metadata = _memory_metadata(memory)
+        lesson_type = str(metadata.get("lesson_type") or "").strip()
+        if lesson_type not in _LESSON_ORDER:
+            continue
+        bias_value = str(metadata.get("bias_value") or "").strip()
+        if bias_value and bias_value != "neutral":
+            return True
+    return False
+
+
 def _procedural_quality_score(memory, metadata: dict[str, object], *, metadata_complete: bool) -> float:
     if "weighted_support" in metadata:
         try:
@@ -172,16 +184,31 @@ async def load_procedural_memory_guidance(
         )
     scope_candidates.append(base_scope)
 
-    scoped_memories: list[tuple[int, object]] = []
-    for index, scope in enumerate(scope_candidates):
-        scoped_memories.extend(
-            (index, scope, memory)
-            for memory in await memory_repository.list_memories_for_scope(
-                kind=MemoryKind.procedural,
-                scope=scope,
-                limit=32,
+    scoped_memories_by_scope: list[tuple[dict[str, object], list[object]]] = []
+    for scope in scope_candidates:
+        scoped_memories_by_scope.append(
+            (
+                scope,
+                list(
+                    await memory_repository.list_memories_for_scope(
+                        kind=MemoryKind.procedural,
+                        scope=scope,
+                        limit=32,
+                        exact_scope_keys=_CONTEXT_SCOPE_KEYS,
+                    )
+                ),
             )
         )
+
+    selected_scope: dict[str, object] | None = None
+    selected_memories: list[object] = []
+    for scope, memories in scoped_memories_by_scope:
+        if _has_active_lessons(memories):
+            selected_scope = scope
+            selected_memories = memories
+            break
+    if selected_scope is None and scoped_memories_by_scope:
+        selected_scope, selected_memories = scoped_memories_by_scope[-1]
 
     guidance_by_field: dict[str, str] = {}
     lesson_types: list[str] = []
@@ -192,9 +219,9 @@ async def load_procedural_memory_guidance(
         matching_memory = None
         matching_bias = ""
         matching_metadata: dict[str, object] = {}
-        for scope_index, scope, memory in scoped_memories:
+        for memory in selected_memories:
             metadata = _memory_metadata(memory)
-            if not _matches_context_scope(metadata, scope):
+            if selected_scope is not None and not _matches_context_scope(metadata, selected_scope):
                 continue
             if metadata.get("lesson_type") != lesson_type:
                 continue

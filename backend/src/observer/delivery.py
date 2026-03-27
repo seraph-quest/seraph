@@ -247,7 +247,11 @@ async def deliver_or_queue(
         except Exception:
             logger.debug("Failed to compute guardian learning signal", exc_info=True)
         try:
-            procedural_guidance = await load_procedural_memory_guidance(intervention_type)
+            procedural_guidance = await load_procedural_memory_guidance(
+                intervention_type,
+                continuity_thread_id=session_id,
+                active_project=ctx.active_project,
+            )
             arbitration = arbitrate_learning_signal(
                 live_signal=learning_signal,
                 procedural_guidance=procedural_guidance,

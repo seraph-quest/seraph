@@ -192,10 +192,13 @@ async def sync_learning_signal_memories(
     intervention_type: str,
     signal: Any,
     source_session_id: str | None = None,
+    continuity_thread_id: str | None = None,
+    active_project: str | None = None,
 ) -> None:
     normalized_intervention_type = str(intervention_type or "").strip() or "advisory"
     intervention_phrase = _intervention_phrase(normalized_intervention_type)
     confirmed_at = _now()
+    normalized_active_project = " ".join(str(active_project or "").split()) or None
 
     for lesson_type, builder in _LESSON_BUILDERS.items():
         lesson = builder(signal, intervention_phrase)
@@ -205,6 +208,10 @@ async def sync_learning_signal_memories(
             "intervention_type": normalized_intervention_type,
             "lesson_type": lesson_type,
         }
+        if continuity_thread_id:
+            scope["continuity_thread_id"] = continuity_thread_id
+        if normalized_active_project:
+            scope["active_project"] = normalized_active_project
         if lesson is None:
             await memory_repository.sync_scoped_memory(
                 kind=MemoryKind.procedural,

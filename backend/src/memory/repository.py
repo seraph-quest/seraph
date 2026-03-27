@@ -914,6 +914,7 @@ class MemoryRepository:
         scope: dict[str, Any],
         limit: int = 20,
         status: MemoryStatus | str = MemoryStatus.active,
+        exact_scope_keys: tuple[str, ...] = (),
     ) -> list[Memory]:
         normalized_kind = _coerce_enum(kind, MemoryKind)
         normalized_status = _coerce_enum(status, MemoryStatus)
@@ -928,6 +929,21 @@ class MemoryRepository:
             kind=normalized_kind,
             scope=normalized_scope,
         )
+        normalized_exact_scope_keys = tuple(
+            dict.fromkeys(str(key).strip() for key in exact_scope_keys if str(key).strip())
+        )
+
+        def _matches_exact_scope_keys(metadata: dict[str, Any]) -> bool:
+            if not normalized_exact_scope_keys:
+                return True
+            return all(
+                (
+                    metadata.get(key) == normalized_scope[key]
+                    if key in normalized_scope
+                    else metadata.get(key) is None
+                )
+                for key in normalized_exact_scope_keys
+            )
 
         matches: list[Memory] = []
         async with get_session() as db:
@@ -945,6 +961,14 @@ class MemoryRepository:
             )
             exact_result = await db.execute(exact_stmt)
             for memory in exact_result.scalars().all():
+                try:
+                    metadata = json.loads(memory.metadata_json or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                if not _matches_exact_scope_keys(metadata):
+                    continue
                 db.expunge(memory)
                 matches.append(memory)
             if matches:
@@ -976,6 +1000,8 @@ class MemoryRepository:
                 if not isinstance(metadata, dict):
                     continue
                 if not all(metadata.get(key) == value for key, value in normalized_scope.items()):
+                    continue
+                if not _matches_exact_scope_keys(metadata):
                     continue
                 db.expunge(memory)
                 matches.append(memory)

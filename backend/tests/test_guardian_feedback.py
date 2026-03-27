@@ -1072,6 +1072,65 @@ async def test_load_procedural_memory_guidance_prefers_scoped_thread_and_project
     assert global_only.timing_bias == "prefer_available_windows"
 
 
+async def test_load_procedural_memory_guidance_does_not_mix_broader_lessons_into_selected_scope(async_db):
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="reduce_interruptions",
+            phrasing_bias="neutral",
+            cadence_bias="bundle_more",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+        ),
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="be_more_direct",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="resume_faster",
+            thread_preference_bias="prefer_existing_thread",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        ),
+        continuity_thread_id="atlas-thread",
+        active_project="Atlas",
+    )
+
+    guidance = await load_procedural_memory_guidance(
+        "advisory",
+        continuity_thread_id="atlas-thread",
+        active_project="Atlas",
+    )
+
+    assert guidance.bias == "prefer_direct_delivery"
+    assert guidance.cadence_bias == "neutral"
+    assert guidance.timing_bias == "prefer_available_windows"
+
+
 async def test_feedback_refresh_writes_thread_and_project_scoped_memories(async_db):
     for _ in range(2):
         intervention = await guardian_feedback_repository.create_intervention(

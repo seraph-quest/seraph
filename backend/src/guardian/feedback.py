@@ -40,6 +40,11 @@ def _normalized_active_project(value: str | None) -> str | None:
     return normalized or None
 
 
+def _is_explicit_direct_transport(value: str | None) -> bool:
+    normalized = str(value or "").strip()
+    return bool(normalized) and normalized != "native_notification"
+
+
 @dataclass(frozen=True)
 class GuardianLearningSignal:
     intervention_type: str
@@ -123,7 +128,7 @@ def _axis_supporting_interventions(
                 item
                 for item in interventions
                 if item.user_state == "available"
-                and item.transport != "native_notification"
+                and _is_explicit_direct_transport(item.transport)
                 and item.feedback_type in {"helpful", "acknowledged"}
             ]
         return []
@@ -152,7 +157,8 @@ def _axis_supporting_interventions(
             return [
                 item
                 for item in interventions
-                if item.feedback_type in {"helpful", "acknowledged"}
+                if item.transport == "native_notification"
+                and item.feedback_type in {"helpful", "acknowledged"}
             ]
         return []
     if axis == "escalation":
@@ -160,7 +166,8 @@ def _axis_supporting_interventions(
             return [
                 item
                 for item in interventions
-                if item.feedback_type in {"helpful", "acknowledged"}
+                if item.transport == "native_notification"
+                and item.feedback_type in {"helpful", "acknowledged"}
             ]
         return []
     if axis == "timing":
@@ -169,7 +176,7 @@ def _axis_supporting_interventions(
                 item
                 for item in interventions
                 if item.user_state in {"deep_work", "in_meeting", "away"}
-                and item.transport != "native_notification"
+                and _is_explicit_direct_transport(item.transport)
                 and (
                     item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
                 )
@@ -179,7 +186,7 @@ def _axis_supporting_interventions(
                 item
                 for item in interventions
                 if item.user_state == "available"
-                and item.transport != "native_notification"
+                and _is_explicit_direct_transport(item.transport)
                 and item.feedback_type in {"helpful", "acknowledged"}
             ]
         return []
@@ -189,7 +196,7 @@ def _axis_supporting_interventions(
                 item
                 for item in interventions
                 if item.user_state in {"deep_work", "in_meeting", "away"}
-                and item.transport != "native_notification"
+                and _is_explicit_direct_transport(item.transport)
                 and (
                     item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
                 )
@@ -356,7 +363,6 @@ class GuardianFeedbackRepository:
         guardian_confidence: str | None,
         data_quality: str | None,
         user_state: str | None,
-        active_project: str | None,
         interruption_mode: str | None,
         policy_action: str,
         policy_reason: str,
@@ -364,6 +370,7 @@ class GuardianFeedbackRepository:
         latest_outcome: str,
         transport: str | None = None,
         notification_id: str | None = None,
+        active_project: str | None = None,
     ) -> GuardianIntervention:
         intervention = GuardianIntervention(
             session_id=session_id,
@@ -538,7 +545,7 @@ class GuardianFeedbackRepository:
             1
             for item in blocked_state_interventions
             if (
-                item.transport != "native_notification"
+                _is_explicit_direct_transport(item.transport)
                 and (
                     item.feedback_type == "not_helpful"
                     or item.latest_outcome == "failed"
@@ -551,11 +558,22 @@ class GuardianFeedbackRepository:
             if item.transport == "native_notification"
             and item.feedback_type in {"helpful", "acknowledged"}
         )
+        native_positive_count = sum(
+            1
+            for item in interventions
+            if item.transport == "native_notification"
+            and item.feedback_type in {"helpful", "acknowledged"}
+        )
+        native_helpful_count = sum(
+            1
+            for item in interventions
+            if item.transport == "native_notification" and item.feedback_type == "helpful"
+        )
         available_window_positive = sum(
             1
             for item in interventions
             if item.user_state == "available"
-            and item.transport != "native_notification"
+            and _is_explicit_direct_transport(item.transport)
             and item.feedback_type in {"helpful", "acknowledged"}
         )
 
@@ -580,11 +598,11 @@ class GuardianFeedbackRepository:
             cadence_bias = "check_in_sooner"
 
         channel_bias = "neutral"
-        if acknowledged_count >= 2 and not_helpful_count == 0:
+        if native_positive_count >= 2 and not_helpful_count == 0:
             channel_bias = "prefer_native_notification"
 
         escalation_bias = "neutral"
-        if acknowledged_count >= 2 and helpful_count >= 1 and not_helpful_count == 0:
+        if native_positive_count >= 2 and native_helpful_count >= 1 and not_helpful_count == 0:
             escalation_bias = "prefer_async_native"
 
         timing_bias = "neutral"

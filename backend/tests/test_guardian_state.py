@@ -9,9 +9,16 @@ from src.agent.session import SessionManager
 from src.agent.strategist import create_strategist_agent
 from src.db.models import MemoryKind
 from src.guardian.feedback import GuardianLearningSignal
+from src.guardian.learning_evidence import (
+    GuardianLearningAxisEvidence,
+    learning_field_for_axis,
+    neutral_axis_evidence,
+    ordered_learning_axes,
+)
 from src.guardian.state import GuardianState, GuardianStateConfidence, build_guardian_state
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
 from src.memory.procedural import sync_learning_signal_memories
+from src.memory.procedural_guidance import ProceduralMemoryGuidance
 from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
 
@@ -64,6 +71,36 @@ def _make_guardian_state() -> GuardianState:
             current_session="grounded",
             recent_sessions="grounded",
         ),
+    )
+
+
+def _axis_evidence_tuple(
+    axis: str,
+    *,
+    source: str,
+    bias: str,
+    support_count: int,
+    recency_score: float,
+    confidence_score: float,
+    quality_score: float,
+    metadata_complete: bool = True,
+) -> tuple[GuardianLearningAxisEvidence, ...]:
+    evidence_by_axis = {
+        axis: GuardianLearningAxisEvidence(
+            axis=axis,
+            field_name=learning_field_for_axis(axis),
+            source=source,
+            bias=bias,
+            support_count=support_count,
+            recency_score=recency_score,
+            confidence_score=confidence_score,
+            quality_score=quality_score,
+            metadata_complete=metadata_complete,
+        )
+    }
+    return tuple(
+        evidence_by_axis.get(item_axis, neutral_axis_evidence(item_axis, source=source))
+        for item_axis in ordered_learning_axes()
     )
 
 
@@ -392,6 +429,104 @@ async def test_build_guardian_state_uses_procedural_memory_guidance_when_live_si
     assert state.world_model.intervention_receptivity == "guarded_async"
     assert "Async native delivery is usually tolerated better than browser interruption." in state.learning_guidance
     assert "When the user is blocked, prefer async native continuation instead of browser interruption." in state.learning_guidance
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_prefers_live_learning_when_stale_memory_conflicts(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should this wait until I am available?")
+    await sm.add_message("current", "assistant", "Let me check the guardian guidance.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect focus time",
+        active_window="Calendar",
+        screen_context="In a long meeting block",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="deep_work",
+    )
+    live_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=2,
+        acknowledged_count=0,
+        failed_count=0,
+        bias="neutral",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="avoid_focus_windows",
+        blocked_state_bias="avoid_blocked_state_interruptions",
+        suppression_bias="neutral",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=2,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+        axis_evidence=_axis_evidence_tuple(
+            "timing",
+            source="live_signal",
+            bias="avoid_focus_windows",
+            support_count=2,
+            recency_score=0.95,
+            confidence_score=1.0,
+            quality_score=1.0,
+        ),
+    )
+    procedural_guidance = ProceduralMemoryGuidance(
+        intervention_type="advisory",
+        timing_bias="prefer_available_windows",
+        lesson_types=("timing",),
+        axis_evidence=_axis_evidence_tuple(
+            "timing",
+            source="procedural_memory",
+            bias="prefer_available_windows",
+            support_count=1,
+            recency_score=0.0,
+            confidence_score=0.63,
+            quality_score=0.4,
+        ),
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=live_signal),
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=procedural_guidance),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should this wait until I am available?",
+        )
+
+    assert "Avoid direct interruptions during deep-work, meeting, or away windows unless urgency is high." in state.learning_guidance
+    assert "When possible, deliver nudges while the user is explicitly available." not in state.learning_guidance
 
 
 @pytest.mark.asyncio

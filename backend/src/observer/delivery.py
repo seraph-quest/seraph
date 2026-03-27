@@ -1,7 +1,6 @@
 """Delivery coordinator — single entry point for all proactive messages."""
 
 import logging
-from dataclasses import replace
 
 from src.audit.runtime import log_observer_delivery_event
 from src.models.schemas import WSResponse
@@ -148,6 +147,7 @@ async def _create_intervention_record(
     is_scheduled: bool,
     guardian_confidence: str | None,
     user_state: str,
+    active_project: str | None,
     interruption_mode: str,
     data_quality: str,
     policy_decision: InterventionDecision,
@@ -167,6 +167,7 @@ async def _create_intervention_record(
             guardian_confidence=guardian_confidence,
             data_quality=data_quality,
             user_state=user_state,
+            active_project=active_project,
             interruption_mode=interruption_mode,
             policy_action=policy_decision.action.value,
             policy_reason=policy_decision.reason,
@@ -221,6 +222,7 @@ async def deliver_or_queue(
     from src.observer.insight_queue import insight_queue
     from src.scheduler.connection_manager import ws_manager
     from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+    from src.guardian.learning_arbitration import arbitrate_learning_signal
     from src.memory.procedural_guidance import load_procedural_memory_guidance
 
     ctx = context_manager.get_context()
@@ -232,6 +234,9 @@ async def deliver_or_queue(
     effective_learning_signal = learning_signal
     learning_signal_source = "heuristic_only"
     procedural_lesson_types: tuple[str, ...] = ()
+    learning_arbitration_sources: dict[str, str] = {}
+    learning_arbitration_reasons: dict[str, str] = {}
+    learning_arbitration_weights: dict[str, float] = {}
 
     try:
         try:
@@ -243,15 +248,16 @@ async def deliver_or_queue(
             logger.debug("Failed to compute guardian learning signal", exc_info=True)
         try:
             procedural_guidance = await load_procedural_memory_guidance(intervention_type)
-            if procedural_guidance.has_active_guidance:
-                effective_learning_signal = replace(
-                    learning_signal,
-                    **procedural_guidance.bias_overrides(),
-                )
-                learning_signal_source = "heuristic_plus_procedural_memory"
-                procedural_lesson_types = procedural_guidance.lesson_types
-            else:
-                effective_learning_signal = learning_signal
+            arbitration = arbitrate_learning_signal(
+                live_signal=learning_signal,
+                procedural_guidance=procedural_guidance,
+            )
+            effective_learning_signal = arbitration.effective_signal
+            learning_signal_source = arbitration.source_label
+            procedural_lesson_types = procedural_guidance.lesson_types
+            learning_arbitration_sources = arbitration.selected_sources()
+            learning_arbitration_reasons = arbitration.selected_reasons()
+            learning_arbitration_weights = arbitration.selected_weights()
         except Exception:
             logger.debug("Failed to load procedural learning guidance", exc_info=True)
             effective_learning_signal = learning_signal
@@ -307,6 +313,10 @@ async def deliver_or_queue(
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,
             "learning_failed_count": learning_signal.failed_count,
+            "learning_arbitration_mode": "evidence_weighted",
+            "learning_arbitration_sources": learning_arbitration_sources,
+            "learning_arbitration_reasons": learning_arbitration_reasons,
+            "learning_arbitration_weights": learning_arbitration_weights,
             "policy_action": policy_decision.action.value,
             "policy_reason": policy_decision.reason,
         }
@@ -316,6 +326,7 @@ async def deliver_or_queue(
             is_scheduled=is_scheduled,
             guardian_confidence=guardian_confidence,
             user_state=ctx.user_state,
+            active_project=ctx.active_project,
             interruption_mode=ctx.interruption_mode,
             data_quality=ctx.data_quality,
             policy_decision=policy_decision,

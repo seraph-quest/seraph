@@ -19,7 +19,6 @@ from src.guardian.learning_evidence import (
     neutral_axis_evidence,
     ordered_learning_axes,
     recency_score_for_timestamp,
-    support_count_for_axis,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +33,11 @@ def _excerpt(text: str, *, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3] + "..."
+
+
+def _normalized_active_project(value: str | None) -> str | None:
+    normalized = " ".join(str(value or "").split())
+    return normalized or None
 
 
 @dataclass(frozen=True)
@@ -99,71 +103,126 @@ def _average_score(values: list[float]) -> float:
     return round(sum(values) / len(values), 3)
 
 
-def _axis_contributing_interventions(
+def _axis_supporting_interventions(
     interventions: list[GuardianIntervention],
     *,
     axis: str,
+    bias: str,
 ) -> list[GuardianIntervention]:
-    if axis in {"delivery", "phrasing", "cadence", "suppression"}:
-        return [
-            item
-            for item in interventions
-            if item.feedback_type in {"helpful", "not_helpful"}
-            or item.latest_outcome == "failed"
-        ]
-    if axis == "channel":
-        return [
-            item
-            for item in interventions
-            if item.feedback_type in {"helpful", "acknowledged"}
-        ]
-    if axis == "escalation":
-        return [
-            item
-            for item in interventions
-            if item.feedback_type in {"helpful", "acknowledged"}
-        ]
-    if axis == "timing":
-        return [
-            item
-            for item in interventions
-            if (
-                item.user_state in {"deep_work", "in_meeting", "away"}
-                and item.transport != "native_notification"
-                and (
-                    item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
-                )
-            )
-            or (
-                item.user_state == "available"
+    if bias == "neutral":
+        return []
+    if axis == "delivery":
+        if bias == "reduce_interruptions":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+            ]
+        if bias == "prefer_direct_delivery":
+            return [
+                item
+                for item in interventions
+                if item.user_state == "available"
                 and item.transport != "native_notification"
                 and item.feedback_type in {"helpful", "acknowledged"}
-            )
-        ]
-    if axis == "blocked_state":
-        return [
-            item
-            for item in interventions
-            if (
-                item.user_state in {"deep_work", "in_meeting", "away"}
+            ]
+        return []
+    if axis == "phrasing":
+        if bias == "be_brief_and_literal":
+            return [item for item in interventions if item.feedback_type == "not_helpful"]
+        if bias == "be_more_direct":
+            return [item for item in interventions if item.feedback_type == "helpful"]
+        return []
+    if axis == "cadence":
+        if bias == "bundle_more":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+            ]
+        if bias == "check_in_sooner":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type in {"helpful", "acknowledged"}
+            ]
+        return []
+    if axis == "channel":
+        if bias == "prefer_native_notification":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type in {"helpful", "acknowledged"}
+            ]
+        return []
+    if axis == "escalation":
+        if bias == "prefer_async_native":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type in {"helpful", "acknowledged"}
+            ]
+        return []
+    if axis == "timing":
+        if bias == "avoid_focus_windows":
+            return [
+                item
+                for item in interventions
+                if item.user_state in {"deep_work", "in_meeting", "away"}
                 and item.transport != "native_notification"
                 and (
                     item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
                 )
-            )
-            or (
-                item.user_state in {"deep_work", "in_meeting", "away"}
+            ]
+        if bias == "prefer_available_windows":
+            return [
+                item
+                for item in interventions
+                if item.user_state == "available"
+                and item.transport != "native_notification"
+                and item.feedback_type in {"helpful", "acknowledged"}
+            ]
+        return []
+    if axis == "blocked_state":
+        if bias == "avoid_blocked_state_interruptions":
+            return [
+                item
+                for item in interventions
+                if item.user_state in {"deep_work", "in_meeting", "away"}
+                and item.transport != "native_notification"
+                and (
+                    item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+                )
+            ]
+        if bias == "prefer_async_for_blocked_state":
+            return [
+                item
+                for item in interventions
+                if item.user_state in {"deep_work", "in_meeting", "away"}
                 and item.transport == "native_notification"
                 and item.feedback_type in {"helpful", "acknowledged"}
-            )
-        ]
+            ]
+        return []
+    if axis == "suppression":
+        if bias == "extend_suppression":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type == "not_helpful" or item.latest_outcome == "failed"
+            ]
+        if bias == "resume_faster":
+            return [item for item in interventions if item.feedback_type == "helpful"]
+        return []
     if axis == "thread":
-        return [
-            item
-            for item in interventions
-            if item.feedback_type in {"helpful", "acknowledged"}
-            or item.latest_outcome == "failed"
-        ]
+        if bias == "prefer_existing_thread":
+            return [
+                item
+                for item in interventions
+                if item.feedback_type in {"helpful", "acknowledged"}
+            ]
+        if bias == "prefer_clean_thread":
+            return [item for item in interventions if item.latest_outcome == "failed"]
+        return []
     return []
 
 
@@ -183,20 +242,12 @@ def _build_live_axis_evidence(
     evidence_items: list[GuardianLearningAxisEvidence] = []
     for axis in ordered_learning_axes():
         axis_bias = bias_by_axis[axis]
-        contributors = _axis_contributing_interventions(
+        contributors = _axis_supporting_interventions(
             interventions,
             axis=axis,
+            bias=axis_bias,
         )
-        support_count = support_count_for_axis(
-            axis,
-            helpful_count=helpful_count,
-            not_helpful_count=not_helpful_count,
-            acknowledged_count=acknowledged_count,
-            failed_count=failed_count,
-            blocked_direct_failure_count=blocked_direct_failure_count,
-            blocked_native_success_count=blocked_native_success_count,
-            available_direct_success_count=available_direct_success_count,
-        )
+        support_count = len(contributors)
         last_confirmed_at = max(
             (item.updated_at for item in contributors if item.updated_at is not None),
             default=None,
@@ -233,6 +284,7 @@ class GuardianFeedbackRepository:
         *,
         intervention_type: str,
         source_session_id: str | None,
+        active_project: str | None,
     ) -> None:
         from src.memory.procedural import sync_learning_signal_memories
         from src.memory.snapshots import (
@@ -247,6 +299,42 @@ class GuardianFeedbackRepository:
                 signal=signal,
                 source_session_id=source_session_id,
             )
+            if source_session_id:
+                thread_signal = await self.get_learning_signal(
+                    intervention_type=intervention_type,
+                    session_id=source_session_id,
+                )
+                await sync_learning_signal_memories(
+                    intervention_type=intervention_type,
+                    signal=thread_signal,
+                    source_session_id=source_session_id,
+                    continuity_thread_id=source_session_id,
+                )
+            normalized_active_project = _normalized_active_project(active_project)
+            if normalized_active_project:
+                project_signal = await self.get_learning_signal(
+                    intervention_type=intervention_type,
+                    active_project=normalized_active_project,
+                )
+                await sync_learning_signal_memories(
+                    intervention_type=intervention_type,
+                    signal=project_signal,
+                    source_session_id=source_session_id,
+                    active_project=normalized_active_project,
+                )
+                if source_session_id:
+                    thread_project_signal = await self.get_learning_signal(
+                        intervention_type=intervention_type,
+                        session_id=source_session_id,
+                        active_project=normalized_active_project,
+                    )
+                    await sync_learning_signal_memories(
+                        intervention_type=intervention_type,
+                        signal=thread_project_signal,
+                        source_session_id=source_session_id,
+                        continuity_thread_id=source_session_id,
+                        active_project=normalized_active_project,
+                    )
             invalidate_bounded_guardian_snapshot_cache()
             try:
                 await refresh_bounded_guardian_snapshot()
@@ -268,6 +356,7 @@ class GuardianFeedbackRepository:
         guardian_confidence: str | None,
         data_quality: str | None,
         user_state: str | None,
+        active_project: str | None,
         interruption_mode: str | None,
         policy_action: str,
         policy_reason: str,
@@ -287,6 +376,7 @@ class GuardianFeedbackRepository:
             guardian_confidence=guardian_confidence,
             data_quality=data_quality,
             user_state=user_state,
+            active_project=_normalized_active_project(active_project),
             interruption_mode=interruption_mode,
             policy_action=policy_action,
             policy_reason=policy_reason,
@@ -342,6 +432,7 @@ class GuardianFeedbackRepository:
             await self._refresh_learning_memories(
                 intervention_type=refreshed.intervention_type,
                 source_session_id=refreshed.session_id,
+                active_project=refreshed.active_project,
             )
         return refreshed
 
@@ -374,6 +465,7 @@ class GuardianFeedbackRepository:
         await self._refresh_learning_memories(
             intervention_type=refreshed.intervention_type,
             source_session_id=refreshed.session_id,
+            active_project=refreshed.active_project,
         )
         return refreshed
 
@@ -416,13 +508,20 @@ class GuardianFeedbackRepository:
         *,
         intervention_type: str,
         limit: int = 12,
+        session_id: str | None = None,
+        active_project: str | None = None,
     ) -> GuardianLearningSignal:
         async with get_session() as db:
+            stmt = select(GuardianIntervention).where(
+                GuardianIntervention.intervention_type == intervention_type
+            )
+            if session_id is not None:
+                stmt = stmt.where(GuardianIntervention.session_id == session_id)
+            normalized_active_project = _normalized_active_project(active_project)
+            if normalized_active_project is not None:
+                stmt = stmt.where(GuardianIntervention.active_project == normalized_active_project)
             result = await db.execute(
-                select(GuardianIntervention)
-                .where(GuardianIntervention.intervention_type == intervention_type)
-                .order_by(GuardianIntervention.updated_at.desc())
-                .limit(limit)
+                stmt.order_by(GuardianIntervention.updated_at.desc()).limit(limit)
             )
             interventions = list(result.scalars().all())
 

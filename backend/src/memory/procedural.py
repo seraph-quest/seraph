@@ -153,10 +153,10 @@ def _support_count(signal: Any, lesson_type: str) -> int:
             return max(0, int(evidence_for_axis(lesson_type).support_count))
         except (TypeError, ValueError):
             pass
-    return _evidence_count(signal, lesson_type)
+    return _fallback_evidence_count(signal, lesson_type)
 
 
-def _evidence_count(signal: Any, lesson_type: str) -> int:
+def _fallback_evidence_count(signal: Any, lesson_type: str) -> int:
     return evidence_count_for_axis(
         lesson_type,
         helpful_count=signal.helpful_count,
@@ -167,6 +167,10 @@ def _evidence_count(signal: Any, lesson_type: str) -> int:
         blocked_native_success_count=signal.blocked_native_success_count,
         available_direct_success_count=signal.available_direct_success_count,
     )
+
+
+def _evidence_count(signal: Any, lesson_type: str) -> int:
+    return _support_count(signal, lesson_type)
 
 
 def _confidence_for_evidence(evidence_count: int) -> float:

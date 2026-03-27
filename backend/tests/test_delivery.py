@@ -8,7 +8,14 @@ from config.settings import settings
 from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
 from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+from src.guardian.learning_evidence import (
+    GuardianLearningAxisEvidence,
+    learning_field_for_axis,
+    neutral_axis_evidence,
+    ordered_learning_axes,
+)
 from src.memory.procedural import sync_learning_signal_memories
+from src.memory.procedural_guidance import ProceduralMemoryGuidance
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
@@ -57,6 +64,36 @@ def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
             )
         )
     return patches, mock_cm, mock_ws, mock_iq
+
+
+def _axis_evidence_tuple(
+    axis: str,
+    *,
+    source: str,
+    bias: str,
+    support_count: int,
+    recency_score: float,
+    confidence_score: float,
+    quality_score: float,
+    metadata_complete: bool = True,
+) -> tuple[GuardianLearningAxisEvidence, ...]:
+    evidence_by_axis = {
+        axis: GuardianLearningAxisEvidence(
+            axis=axis,
+            field_name=learning_field_for_axis(axis),
+            source=source,
+            bias=bias,
+            support_count=support_count,
+            recency_score=recency_score,
+            confidence_score=confidence_score,
+            quality_score=quality_score,
+            metadata_complete=metadata_complete,
+        )
+    }
+    return tuple(
+        evidence_by_axis.get(item_axis, neutral_axis_evidence(item_axis, source=source))
+        for item_axis in ordered_learning_axes()
+    )
 
 
 @pytest.mark.asyncio
@@ -606,6 +643,91 @@ async def test_deliver_prefers_native_transport_when_procedural_memory_promotes_
         )
     finally:
         await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_stale(async_db):
+    live_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=3,
+        acknowledged_count=0,
+        failed_count=1,
+        bias="reduce_interruptions",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="neutral",
+        blocked_state_bias="neutral",
+        suppression_bias="extend_suppression",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=0,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+        axis_evidence=_axis_evidence_tuple(
+            "delivery",
+            source="live_signal",
+            bias="reduce_interruptions",
+            support_count=4,
+            recency_score=0.95,
+            confidence_score=1.0,
+            quality_score=1.0,
+        ),
+    )
+    procedural_guidance = ProceduralMemoryGuidance(
+        intervention_type="advisory",
+        bias="prefer_direct_delivery",
+        lesson_types=("delivery",),
+        axis_evidence=_axis_evidence_tuple(
+            "delivery",
+            source="procedural_memory",
+            bias="prefer_direct_delivery",
+            support_count=1,
+            recency_score=0.0,
+            confidence_score=0.63,
+            quality_score=0.4,
+        ),
+    )
+
+    ctx = _make_context(user_state="available")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, use_actual_learning_signal=True)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="This should still queue because the live signal is stronger.",
+            intervention_type="advisory",
+            urgency=2,
+        )
+        with patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=live_signal),
+        ), patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=procedural_guidance),
+        ):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "recent_negative_feedback"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
+            and event["details"]["learning_bias"] == "reduce_interruptions"
+            and event["details"]["learning_arbitration_mode"] == "evidence_weighted"
+            and event["details"]["learning_arbitration_sources"]["delivery"] == "live_signal"
+            and event["details"]["learning_arbitration_reasons"]["delivery"] == "live_signal_stronger"
+            for event in events
+        )
+    finally:
         for p in patches:
             p.stop()
 

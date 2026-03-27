@@ -627,7 +627,7 @@ async def test_learning_signal_exposes_comparable_live_axis_evidence(async_db):
     assert delivery_evidence.recency_score == pytest.approx(29 / 30, abs=0.02)
 
 
-async def test_neutral_live_axis_evidence_preserves_recent_support(async_db):
+async def test_neutral_live_axis_evidence_stays_neutral(async_db):
     base_time = datetime.now(timezone.utc)
     for offset_days, feedback_type in ((2, "helpful"), (1, "not_helpful")):
         intervention = await guardian_feedback_repository.create_intervention(
@@ -665,10 +665,73 @@ async def test_neutral_live_axis_evidence_preserves_recent_support(async_db):
 
     assert signal.bias == "neutral"
     assert delivery_evidence.bias == "neutral"
+    assert delivery_evidence.support_count == 0
+    assert delivery_evidence.confidence_score == pytest.approx(0.0)
+    assert delivery_evidence.quality_score == pytest.approx(0.0)
+    assert delivery_evidence.recency_score == pytest.approx(0.0)
+
+
+async def test_live_axis_evidence_ignores_newer_rows_that_support_the_other_bias(async_db):
+    base_time = datetime.now(timezone.utc)
+    for offset_days, feedback_type in ((6, "not_helpful"), (5, "not_helpful"), (1, "helpful")):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Keep the learning direction honest.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+        async with async_db() as db:
+            stored = (
+                await db.execute(
+                    select(GuardianIntervention).where(GuardianIntervention.id == intervention.id)
+                )
+            ).scalar_one()
+            stored.updated_at = base_time - timedelta(days=offset_days)
+            db.add(stored)
+            await db.flush()
+
+    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
+    delivery_evidence = signal.evidence_for_axis("delivery")
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=signal,
+        source_session_id=None,
+    )
+
+    assert signal.bias == "reduce_interruptions"
+    assert delivery_evidence.bias == "reduce_interruptions"
     assert delivery_evidence.support_count == 2
-    assert delivery_evidence.confidence_score == pytest.approx(1.0)
-    assert delivery_evidence.quality_score == pytest.approx(1.0)
-    assert delivery_evidence.recency_score == pytest.approx(29 / 30, abs=0.02)
+    assert delivery_evidence.recency_score == pytest.approx(25 / 30, abs=0.02)
+
+    delivery_memory = (
+        await memory_repository.list_memories_for_scope(
+            kind=MemoryKind.procedural,
+            scope={
+                "writer": "guardian_feedback",
+                "memory_scope": "procedural_learning",
+                "intervention_type": "advisory",
+                "lesson_type": "delivery",
+            },
+            limit=1,
+        )
+    )[0]
+    delivery_metadata = json.loads(delivery_memory.metadata_json or "{}")
+    assert delivery_metadata["support_count"] == 2
+    assert delivery_metadata["evidence_count"] == 2
 
 
 async def test_load_procedural_memory_guidance_handles_partial_stale_metadata(async_db):
@@ -699,69 +762,33 @@ async def test_load_procedural_memory_guidance_handles_partial_stale_metadata(as
     assert channel_evidence.recency_score == pytest.approx(0.0)
 
 
-async def test_procedural_guidance_support_count_matches_live_supporters(async_db):
-    for _index in range(2):
-        intervention = await guardian_feedback_repository.create_intervention(
-            session_id="session-procedural",
-            message_type="proactive",
-            intervention_type="advisory",
-            urgency=2,
-            content="Helpful direct delivery.",
-            reasoning="available_capacity",
-            is_scheduled=False,
-            guardian_confidence="grounded",
-            data_quality="good",
-            user_state="available",
-            interruption_mode="balanced",
-            policy_action="act",
-            policy_reason="available_capacity",
-            delivery_decision="deliver",
-            latest_outcome="delivered",
-            transport="websocket",
-        )
-        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
-
-    failed_intervention = await guardian_feedback_repository.create_intervention(
-        session_id="session-procedural",
-        message_type="proactive",
-        intervention_type="advisory",
-        urgency=2,
-        content="A failed interruption.",
-        reasoning="available_capacity",
-        is_scheduled=False,
-        guardian_confidence="grounded",
-        data_quality="good",
-        user_state="available",
-        interruption_mode="balanced",
-        policy_action="act",
-        policy_reason="available_capacity",
-        delivery_decision="deliver",
-        latest_outcome="failed",
-        transport="websocket",
-    )
-
-    signal = await guardian_feedback_repository.get_learning_signal(intervention_type="advisory")
-    await sync_learning_signal_memories(
-        intervention_type="advisory",
-        signal=signal,
-        source_session_id=failed_intervention.session_id,
+async def test_load_procedural_memory_guidance_prefers_explicit_support_count(async_db):
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope={
+            "writer": "guardian_feedback",
+            "memory_scope": "procedural_learning",
+            "intervention_type": "advisory",
+            "lesson_type": "delivery",
+        },
+        content="For advisory interventions, direct delivery is usually tolerated when the user is available.",
+        summary="For advisory interventions, direct delivery is usually tolerated when the user is available.",
+        confidence=0.9,
+        reinforcement=1.6,
+        last_confirmed_at=datetime.now(timezone.utc) - timedelta(days=1),
+        metadata={
+            "bias_value": "prefer_direct_delivery",
+            "support_count": 2,
+            "evidence_count": 3,
+        },
     )
 
     guidance = await load_procedural_memory_guidance("advisory")
-    delivery_memory = next(
-        memory
-        for memory in await memory_repository.list_memories(kind=MemoryKind.procedural, limit=20)
-        if json.loads(memory.metadata_json or "{}").get("lesson_type") == "delivery"
-    )
-    delivery_metadata = json.loads(delivery_memory.metadata_json or "{}")
     delivery_evidence = guidance.evidence_for_axis("delivery")
 
-    assert signal.bias == "prefer_direct_delivery"
-    assert signal.failed_count == 1
-    assert signal.evidence_for_axis("delivery").support_count == 2
-    assert delivery_metadata["support_count"] == 2
-    assert delivery_metadata["evidence_count"] == 3
+    assert guidance.bias == "prefer_direct_delivery"
     assert delivery_evidence.support_count == 2
+    assert delivery_evidence.metadata_complete is True
 
 
 async def test_live_and_procedural_axis_evidence_use_matching_support_counts(async_db):

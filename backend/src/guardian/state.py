@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from dataclasses import replace
 
 from src.agent.session import session_manager
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
@@ -309,6 +308,7 @@ async def build_guardian_state(
     from src.profile.service import sync_soul_file_to_profile
     from src.audit.repository import audit_repository
     from src.guardian.feedback import guardian_feedback_repository
+    from src.guardian.learning_arbitration import arbitrate_learning_signal
     from src.observer.manager import context_manager
     from src.observer.screen_repository import screen_observation_repo
 
@@ -335,11 +335,10 @@ async def build_guardian_state(
     effective_learning_signal = advisory_learning_signal
     try:
         procedural_guidance = await load_procedural_memory_guidance("advisory")
-        if procedural_guidance.has_active_guidance:
-            effective_learning_signal = replace(
-                advisory_learning_signal,
-                **procedural_guidance.bias_overrides(),
-            )
+        effective_learning_signal = arbitrate_learning_signal(
+            live_signal=advisory_learning_signal,
+            procedural_guidance=procedural_guidance,
+        ).effective_signal
     except Exception:
         logger.debug("Failed to load procedural guidance for guardian state", exc_info=True)
     try:

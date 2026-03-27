@@ -784,19 +784,42 @@ This section records the internal Batch C slices on the feature branch before th
   - added `backend/src/guardian/learning_evidence.py` as the shared evidence model for guardian-learning axes, including axis ordering, field mapping, confidence/data-quality normalization, recency scoring, and neutral evidence defaults
   - extended `GuardianLearningSignal` in `backend/src/guardian/feedback.py` with per-axis evidence so live learning now exposes `support_count`, `recency_score`, `confidence_score`, `quality_score`, and `last_confirmed_at` alongside the existing bias fields
   - extended `ProceduralMemoryGuidance` in `backend/src/memory/procedural_guidance.py` with the same per-axis evidence surface so durable procedural lessons can be compared without re-parsing ad hoc metadata at every policy call site
-  - updated `backend/src/memory/procedural.py` to reuse the shared support-count helper so the procedural writer and live signal builder cannot silently drift on the same axis-level evidence math
+  - updated `backend/src/memory/procedural.py` so persisted procedural lesson metadata follows the active-bias support counts already exposed on the live signal instead of drifting back to broader axis-level totals during memory sync
   - added regressions in `backend/tests/test_guardian_feedback.py` covering live evidence exposure, partial stale procedural metadata, and live-versus-durable support-count parity for active guidance axes
 - local regression fixed before the slice was recorded:
-  - the first pass built live `axis_evidence.support_count` from ad hoc per-bias supporter subsets, while durable procedural memories still stored axis-level `evidence_count` values from `sync_learning_signal_memories()`
-  - that mismatch made the new evidence surface internally inconsistent: the same learned channel or escalation bias could report one support count in the live signal and a different count after persistence, and in the native-channel case it could even report `0` live support for a non-neutral bias
-  - fixed by centralizing the support-count math in `backend/src/guardian/learning_evidence.py`, reusing it from `backend/src/memory/procedural.py`, and changing live evidence construction to use axis-level contributor windows that match the persisted evidence contract instead of bespoke per-bias subsets
+  - the first pass left the live and durable evidence surfaces internally inconsistent in the opposite direction: live `axis_evidence.support_count` correctly counted only rows that supported the currently selected bias, but `sync_learning_signal_memories()` still persisted broader axis-level `evidence_count` totals that could include newer rows pushing the other bias
+  - that meant the same learned delivery bias could report `support_count=2` in the live signal and then reappear as `evidence_count=3` after persistence, which would skew the next arbitration layer toward stale contradictory evidence
+  - fixed by teaching `backend/src/memory/procedural.py` to reuse the live axis-evidence support count when it exists, persisting both `support_count` and `evidence_count` from that active-bias surface, and having `backend/src/memory/procedural_guidance.py` prefer explicit `support_count` metadata while still tolerating older memories that only carry `evidence_count`
 - validation:
   - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/feedback.py backend/src/memory/procedural.py backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py`
   - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
-    - result: `18 passed`
+    - result: `21 passed`
 - subagent review:
   - a subagent review request was started against the completed `#240` diff for bugs, regressions, and hallucinated assumptions, but it had not returned findings before this log update
   - the recorded completion therefore relies on the concrete comparability bug fixed locally above plus the targeted regression validation, not on inventing a clean review reply that never arrived
+
+### `guardian-learning-arbitration`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - policy-time learning guidance was still resolving conflicts by overlay order: if procedural memory had any non-neutral lesson, it could overwrite fresher live guardian-learning heuristics without proving that the durable lesson still had stronger evidence
+  - that kept delivery and guardian-state synthesis shallow even after the memory substrate could expose comparable evidence across live and durable sources
+- scope:
+  - added `backend/src/guardian/learning_arbitration.py` as the shared policy-time resolver that scores live and procedural evidence per axis using support count, confidence, quality, and recency, then resolves conflicts with explicit tie rules instead of simple overwrite order
+  - updated `backend/src/observer/delivery.py` so proactive delivery uses the arbitration result, records the effective learned biases after arbitration, and logs per-axis arbitration source, reason, and winning weight in the delivery audit details
+  - updated `backend/src/guardian/state.py` so guardian-state synthesis uses the same arbitration surface as delivery instead of a separate procedural overlay path
+  - hardened the `#240` evidence substrate underneath the resolver so live `support_count` remains directional to the currently selected bias, while durable procedural memories persist both `support_count` and broader `evidence_count` without collapsing them into the same field
+  - added unit coverage in `backend/tests/test_learning_arbitration.py` for stale-conflict, live-gap-fill, and missing-evidence paths, plus integration regressions in `backend/tests/test_delivery.py` and `backend/tests/test_guardian_state.py` proving stale procedural memory no longer overrides a stronger live signal at real policy call sites
+- local regression fixed while landing the slice:
+  - the first `#240` pass still let persistence flatten directional `support_count` into broader axis-level totals, which would have biased the new arbitration weights toward contradictory rows that supported the other bias
+  - fixed by teaching `backend/src/memory/procedural.py` to persist the live signal's directional `support_count` when available, while keeping `evidence_count` as the broader durability/confidence measure and having `backend/src/memory/procedural_guidance.py` prefer the explicit `support_count` on read
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_arbitration.py backend/src/guardian/feedback.py backend/src/guardian/learning_evidence.py backend/src/guardian/state.py backend/src/memory/procedural.py backend/src/observer/delivery.py backend/tests/test_learning_arbitration.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py::test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_neutral backend/tests/test_delivery.py::test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery backend/tests/test_delivery.py::test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_stale backend/tests/test_guardian_state.py::test_build_guardian_state_uses_procedural_memory_guidance_when_live_signal_is_neutral backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_live_learning_when_stale_memory_conflicts backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `30 passed`
+- subagent review:
+  - a subagent review request was started against the current arbitration diff for bugs, regressions, and hallucinated assumptions, but it had not returned findings before this log update
+  - the recorded completion therefore relies on the explicit stale-conflict and missing-evidence regressions above plus the local directional-support-count fix instead of claiming a review reply that did not arrive
 
 ## Non-Goals
 

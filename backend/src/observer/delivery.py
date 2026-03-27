@@ -425,6 +425,13 @@ async def deliver_or_queue(
                         title=notification.title,
                         outcome="queued",
                     )
+                    event_details.update(
+                        {
+                            "attempted_connections": 1,
+                            "delivered_connections": 1,
+                            "failed_connections": 0,
+                        }
+                    )
                     if policy_decision.should_cost_budget:
                         context_manager.decrement_attention_budget()
                     await _update_intervention_outcome(
@@ -616,6 +623,13 @@ async def deliver_queued_bundle() -> int:
                     transport="native_notification_bundle",
                     notification_id=notification.id,
                 )
+            details.update(
+                {
+                    "attempted_connections": 1,
+                    "delivered_connections": 1,
+                    "failed_connections": 0,
+                }
+            )
             await log_observer_delivery_event(
                 decision="delivered",
                 message_type="proactive",

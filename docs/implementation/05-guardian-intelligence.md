@@ -753,6 +753,22 @@ This section records the internal Batch C slices on the feature branch before th
     - result: `103 passed`
   - `cd docs && npm run build`
     - result: clean
+- PR follow-up after review comment and CI failure:
+  - root cause addressed:
+    - `memory_repository.list_memories_for_scope()` still filtered only `kind` and `status` in SQL, then parsed and matched `metadata_json` in Python, so policy-time scoped reads could walk every active procedural memory before finding the requested scope
+    - learned native-notification rerouting changed `strategist_tick_learning_continuity_behavior` from a websocket delivery path to a native-notification delivery path, but the delivered audit payload did not expose transport counts for that native path and the eval still used the stale websocket-oriented `broadcast_delivered_connections` expectation
+  - fixes:
+    - `backend/src/memory/repository.py` now pushes scoped procedural-memory filtering into SQLite with `json_valid(...)`, object-shape checks, per-key `json_extract(...)`, and SQL-side limiting before the defensive Python metadata verification runs
+    - `backend/src/observer/delivery.py` now records `attempted_connections`, `delivered_connections`, and `failed_connections` for successful native-notification deliveries in both direct and queued-bundle paths so the delivery audit contract stays stable when routing moves off websocket
+    - `backend/src/evals/harness.py` and `backend/tests/test_eval_harness.py` now use the transport-agnostic `delivered_connections` field and expect `1` for the strategist continuity scenario because that learned path now delivers successfully over native notification
+    - `backend/tests/test_memory_repository.py` now also covers invalid JSON metadata payloads, not just non-dict decoded payloads, on the scoped-read path
+  - validation:
+    - `python3 -m py_compile backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/evals/harness.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_eval_harness.py`
+    - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
+      - result: `58 passed`
+  - review:
+    - GitHub review comment on PR `#232` correctly identified the policy-time Python scan in scoped procedural-memory reads
+    - internal subagent review sessions were started for this follow-up (`Schrodinger` `019d2e2b-1b27-7f32-bd1a-1cf3afab0ce8`, `Socrates` `019d2e2d-e8e5-7d12-9d88-31d6ae469539`, `Franklin` `019d2e2f-5dba-75e2-8026-5e4226ba6ca4`, `Mill` `019d2e30-7a86-7772-9078-54c6c7737d4a`) but they did not return findings before follow-up validation completed
 - residual risk:
   - this slice uses exact scoped procedural lookup and bias overlay, not a richer conflict-resolution layer between durable procedural memory and fresh live heuristics, so conflicting signals still rely on the current overlay order rather than a separate arbitration policy
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import or_
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -70,6 +71,13 @@ def _coerce_enum(
         return enum_cls(value)
     except ValueError as exc:
         raise ValueError(f"Invalid {enum_cls.__name__}: {value!r}") from exc
+
+
+def _sqlite_json_object_path(key: str) -> str:
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        return f"$.{key}"
+    escaped_key = key.replace('"', '\\"')
+    return f'$."{escaped_key}"'
 
 
 @dataclass(frozen=True)
@@ -923,12 +931,19 @@ class MemoryRepository:
                 select(Memory)
                 .where(Memory.kind == normalized_kind)
                 .where(Memory.status == normalized_status)
+                .where(func.json_valid(Memory.metadata_json) == 1)
+                .where(func.json_type(Memory.metadata_json, "$") == "object")
                 .order_by(
                     col(Memory.importance).desc(),
                     col(Memory.last_confirmed_at).desc(),
                     col(Memory.created_at).desc(),
                 )
+                .limit(limit)
             )
+            for key, value in normalized_scope.items():
+                stmt = stmt.where(
+                    func.json_extract(Memory.metadata_json, _sqlite_json_object_path(key)) == value
+                )
             result = await db.execute(stmt)
             for memory in result.scalars().all():
                 try:
@@ -941,8 +956,6 @@ class MemoryRepository:
                     continue
                 db.expunge(memory)
                 matches.append(memory)
-                if len(matches) >= limit:
-                    break
         return matches
 
     async def list_memories_for_entities(

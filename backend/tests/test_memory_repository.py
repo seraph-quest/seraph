@@ -364,7 +364,7 @@ async def test_list_memories_for_scope_filters_procedural_memories(async_db):
 
 
 @pytest.mark.asyncio
-async def test_list_memories_for_scope_skips_non_dict_metadata_payloads(async_db):
+async def test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads(async_db):
     async with async_db() as db:
         db.add(
             Memory(
@@ -374,6 +374,16 @@ async def test_list_memories_for_scope_skips_non_dict_metadata_payloads(async_db
                 metadata_json='["not", "a", "dict"]',
                 status="active",
                 importance=0.95,
+            )
+        )
+        db.add(
+            Memory(
+                content="Legacy invalid metadata payload",
+                kind=MemoryKind.procedural,
+                category="preference",
+                metadata_json='{"writer": "guardian_feedback"',
+                status="active",
+                importance=0.96,
             )
         )
         await db.commit()

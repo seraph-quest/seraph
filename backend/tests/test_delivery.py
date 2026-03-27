@@ -516,6 +516,9 @@ async def test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_
             and event["details"]["learning_blocked_state_bias"] == "prefer_async_for_blocked_state"
             and event["details"]["policy_reason"] == "learned_blocked_state_async"
             and event["details"]["procedural_learning_lesson_types"] == ["channel", "blocked_state"]
+            and event["details"]["attempted_connections"] == 1
+            and event["details"]["delivered_connections"] == 1
+            and event["details"]["failed_connections"] == 0
             for event in events
         )
     finally:
@@ -596,6 +599,9 @@ async def test_deliver_prefers_native_transport_when_procedural_memory_promotes_
             and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
             and event["details"]["transport_order"] == ["native_notification", "websocket"]
             and event["details"]["transport_order_adjustment"] == "learned_native_channel_preference"
+            and event["details"]["attempted_connections"] == 1
+            and event["details"]["delivered_connections"] == 1
+            and event["details"]["failed_connections"] == 0
             for event in events
         )
     finally:
@@ -811,6 +817,7 @@ async def test_acknowledged_native_feedback_can_lower_notification_threshold(asy
             event["event_type"] == "observer_delivery_delivered"
             and event["details"]["transport"] == "native_notification"
             and event["details"]["learning_channel_bias"] == "prefer_native_notification"
+            and event["details"]["delivered_connections"] == 1
             for event in events
         )
     finally:
@@ -998,6 +1005,9 @@ async def test_delivery_reroutes_to_native_notification_when_daemon_connected(as
             and event["details"]["transport"] == "native_notification"
             and event["details"]["notification_id"] is not None
             and event["details"]["intervention_id"] == msg.intervention_id
+            and event["details"]["attempted_connections"] == 1
+            and event["details"]["delivered_connections"] == 1
+            and event["details"]["failed_connections"] == 0
             for event in events
         )
     finally:

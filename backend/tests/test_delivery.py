@@ -8,7 +8,16 @@ from config.settings import settings
 from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
 from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+from src.guardian.learning_evidence import (
+    GuardianLearningAxisEvidence,
+    learning_field_for_axis,
+    neutral_axis_evidence,
+    ordered_learning_axes,
+)
+from src.db.models import MemoryKind
 from src.memory.procedural import sync_learning_signal_memories
+from src.memory.procedural_guidance import ProceduralMemoryGuidance
+from src.memory.repository import memory_repository
 from src.models.schemas import WSResponse
 from src.observer.context import CurrentContext
 from src.observer.delivery import _active_channel_adapters, deliver_or_queue, deliver_queued_bundle
@@ -57,6 +66,36 @@ def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
             )
         )
     return patches, mock_cm, mock_ws, mock_iq
+
+
+def _axis_evidence_tuple(
+    axis: str,
+    *,
+    source: str,
+    bias: str,
+    support_count: int,
+    recency_score: float,
+    confidence_score: float,
+    quality_score: float,
+    metadata_complete: bool = True,
+) -> tuple[GuardianLearningAxisEvidence, ...]:
+    evidence_by_axis = {
+        axis: GuardianLearningAxisEvidence(
+            axis=axis,
+            field_name=learning_field_for_axis(axis),
+            source=source,
+            bias=bias,
+            support_count=support_count,
+            recency_score=recency_score,
+            confidence_score=confidence_score,
+            quality_score=quality_score,
+            metadata_complete=metadata_complete,
+        )
+    }
+    return tuple(
+        evidence_by_axis.get(item_axis, neutral_axis_evidence(item_axis, source=source))
+        for item_axis in ordered_learning_axes()
+    )
 
 
 @pytest.mark.asyncio
@@ -611,6 +650,332 @@ async def test_deliver_prefers_native_transport_when_procedural_memory_promotes_
 
 
 @pytest.mark.asyncio
+async def test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_stale(async_db):
+    live_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=3,
+        acknowledged_count=0,
+        failed_count=1,
+        bias="reduce_interruptions",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="neutral",
+        blocked_state_bias="neutral",
+        suppression_bias="extend_suppression",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=0,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+        axis_evidence=_axis_evidence_tuple(
+            "delivery",
+            source="live_signal",
+            bias="reduce_interruptions",
+            support_count=4,
+            recency_score=0.95,
+            confidence_score=1.0,
+            quality_score=1.0,
+        ),
+    )
+    procedural_guidance = ProceduralMemoryGuidance(
+        intervention_type="advisory",
+        bias="prefer_direct_delivery",
+        lesson_types=("delivery",),
+        axis_evidence=_axis_evidence_tuple(
+            "delivery",
+            source="procedural_memory",
+            bias="prefer_direct_delivery",
+            support_count=1,
+            recency_score=0.0,
+            confidence_score=0.63,
+            quality_score=0.4,
+        ),
+    )
+
+    ctx = _make_context(user_state="available")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, use_actual_learning_signal=True)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="This should still queue because the live signal is stronger.",
+            intervention_type="advisory",
+            urgency=2,
+        )
+        with patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=live_signal),
+        ), patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=procedural_guidance),
+        ):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "recent_negative_feedback"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["details"]["learning_signal_source"] == "heuristic_only"
+            and event["details"]["learning_bias"] == "reduce_interruptions"
+            and event["details"]["learning_arbitration_mode"] == "evidence_weighted"
+            and event["details"]["learning_arbitration_sources"]["delivery"] == "live_signal"
+            and event["details"]["learning_arbitration_reasons"]["delivery"] == "live_signal_stronger"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_prefers_scoped_project_and_thread_guidance_over_global_memory(async_db):
+    global_scope = {
+        "writer": "guardian_feedback",
+        "memory_scope": "procedural_learning",
+        "intervention_type": "advisory",
+        "lesson_type": "delivery",
+    }
+    scoped_scope = {
+        **global_scope,
+        "continuity_thread_id": "atlas-thread",
+        "active_project": "Atlas",
+    }
+
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=global_scope,
+        content="Global: direct delivery is usually tolerated when the user is available.",
+        summary="Global: direct delivery is usually tolerated when the user is available.",
+        confidence=0.9,
+        reinforcement=1.6,
+        metadata={"bias_value": "prefer_direct_delivery", "support_count": 2},
+    )
+    await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=scoped_scope,
+        content="Scoped: reduce direct interruptions on Atlas work.",
+        summary="Scoped: reduce direct interruptions on Atlas work.",
+        confidence=0.92,
+        reinforcement=1.8,
+        metadata={"bias_value": "reduce_interruptions", "support_count": 2},
+    )
+
+    ctx = _make_context(user_state="available", active_project="Atlas")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="Respect the scoped project guidance.",
+            intervention_type="advisory",
+            urgency=2,
+        )
+        decision = await deliver_or_queue(msg, session_id="atlas-thread")
+
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "recent_negative_feedback"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["details"]["learning_bias"] == "reduce_interruptions"
+            and event["details"]["learning_arbitration_sources"]["delivery"] == "procedural_memory"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_prefers_thread_scoped_procedural_guidance_over_project_or_global_scope(async_db):
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        ),
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=1,
+            bias="reduce_interruptions",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
+            suppression_bias="extend_suppression",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+        ),
+        continuity_thread_id="session-1",
+        active_project="Atlas",
+    )
+
+    ctx = _make_context(
+        user_state="available",
+        active_project="Atlas",
+        interruption_cost="high",
+        salience_level="high",
+        salience_reason="current_event",
+        observer_confidence="grounded",
+    )
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="Scoped guidance should keep this queued.",
+            intervention_type="advisory",
+            urgency=2,
+        )
+        with patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ):
+            decision = await deliver_or_queue(
+                msg,
+                guardian_confidence="grounded",
+                session_id="session-1",
+            )
+
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "recent_negative_feedback"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["details"]["learning_bias"] == "reduce_interruptions"
+            and event["details"]["learning_signal_source"] == "heuristic_plus_procedural_memory"
+            and event["details"]["procedural_learning_lesson_types"] == ["delivery", "suppression"]
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_deliver_prefers_context_scoped_guidance_over_conflicting_global_memory(async_db):
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="reduce_interruptions",
+            phrasing_bias="neutral",
+            cadence_bias="bundle_more",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+        ),
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="be_more_direct",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="resume_faster",
+            thread_preference_bias="prefer_existing_thread",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        ),
+        continuity_thread_id="atlas-thread",
+        active_project="Atlas",
+    )
+
+    ctx = _make_context(user_state="available", active_project="Atlas")
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="This should use the scoped Atlas guidance.",
+            intervention_type="advisory",
+            urgency=2,
+        )
+        with patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(return_value=GuardianLearningSignal.neutral("advisory")),
+        ):
+            decision = await deliver_or_queue(msg, session_id="atlas-thread")
+
+        assert decision.action == InterventionAction.act
+        assert decision.reason != "recent_negative_feedback"
+        mock_ws.broadcast.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_delivered"
+            and event["details"]["learning_bias"] == "prefer_direct_delivery"
+            and event["details"]["learning_timing_bias"] == "prefer_available_windows"
+            and event["details"]["procedural_learning_lesson_types"] == ["delivery", "timing", "suppression"]
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_queue_logs_runtime_audit(async_db):
     ctx = _make_context(user_state="deep_work")
     patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
@@ -675,6 +1040,7 @@ async def test_queue_when_recent_negative_feedback(async_db):
         policy_reason="available_capacity",
         delivery_decision="deliver",
         latest_outcome="delivered",
+        transport="websocket",
     )
     await guardian_feedback_repository.record_feedback(first.id, feedback_type="not_helpful")
     second = await guardian_feedback_repository.create_intervention(
@@ -693,6 +1059,7 @@ async def test_queue_when_recent_negative_feedback(async_db):
         policy_reason="available_capacity",
         delivery_decision="deliver",
         latest_outcome="delivered",
+        transport="websocket",
     )
     await guardian_feedback_repository.record_feedback(second.id, feedback_type="not_helpful")
 
@@ -741,6 +1108,7 @@ async def test_learned_direct_delivery_overrides_high_interrupt_bundle(async_db)
             policy_reason="available_capacity",
             delivery_decision="deliver",
             latest_outcome="delivered",
+            transport="websocket",
         )
         await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
 
@@ -793,6 +1161,7 @@ async def test_acknowledged_native_feedback_can_lower_notification_threshold(asy
             policy_reason="available_capacity",
             delivery_decision="deliver",
             latest_outcome="delivered",
+            transport="native_notification",
         )
         await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="acknowledged")
 

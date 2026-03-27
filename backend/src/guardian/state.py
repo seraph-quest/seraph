@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from dataclasses import replace
 
 from src.agent.session import session_manager
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
@@ -184,6 +183,7 @@ def _world_model_status(world_model: GuardianWorldModel) -> str:
 
 def _learning_guidance_text(
     *,
+    delivery_bias: str,
     phrasing_bias: str,
     cadence_bias: str,
     channel_bias: str,
@@ -194,6 +194,11 @@ def _learning_guidance_text(
     thread_preference_bias: str,
 ) -> str:
     guidance: list[str] = []
+    if delivery_bias == "reduce_interruptions":
+        guidance.append("After recent negative or failed outcomes, reduce direct interruptions.")
+    elif delivery_bias == "prefer_direct_delivery":
+        guidance.append("When the user is explicitly available, direct delivery is usually tolerated.")
+
     if phrasing_bias == "be_brief_and_literal":
         guidance.append("Prefer brief, literal wording over flourish when interrupting.")
     elif phrasing_bias == "be_more_direct":
@@ -296,6 +301,7 @@ async def build_guardian_state(
     session_id: str | None = None,
     user_message: str | None = None,
     memory_query: str | None = None,
+    intervention_type: str = "advisory",
     refresh_observer: bool = False,
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
@@ -309,12 +315,14 @@ async def build_guardian_state(
     from src.profile.service import sync_soul_file_to_profile
     from src.audit.repository import audit_repository
     from src.guardian.feedback import guardian_feedback_repository
+    from src.guardian.learning_arbitration import arbitrate_learning_signal
     from src.observer.manager import context_manager
     from src.observer.screen_repository import screen_observation_repo
 
     observer_context = (
         await context_manager.refresh() if refresh_observer else context_manager.get_context()
     )
+    normalized_intervention_type = str(intervention_type or "").strip() or "advisory"
     soul_context = render_soul_text(await sync_soul_file_to_profile())
     session_record = await session_manager.get(session_id) if session_id is not None else None
 
@@ -329,17 +337,20 @@ async def build_guardian_state(
     )
     recent_intervention_feedback = await guardian_feedback_repository.summarize_recent(limit=5)
     advisory_learning_signal = await guardian_feedback_repository.get_learning_signal(
-        intervention_type="advisory",
+        intervention_type=normalized_intervention_type,
         limit=12,
     )
     effective_learning_signal = advisory_learning_signal
     try:
-        procedural_guidance = await load_procedural_memory_guidance("advisory")
-        if procedural_guidance.has_active_guidance:
-            effective_learning_signal = replace(
-                advisory_learning_signal,
-                **procedural_guidance.bias_overrides(),
-            )
+        procedural_guidance = await load_procedural_memory_guidance(
+            normalized_intervention_type,
+            continuity_thread_id=session_id,
+            active_project=observer_context.active_project,
+        )
+        effective_learning_signal = arbitrate_learning_signal(
+            live_signal=advisory_learning_signal,
+            procedural_guidance=procedural_guidance,
+        ).effective_signal
     except Exception:
         logger.debug("Failed to load procedural guidance for guardian state", exc_info=True)
     try:
@@ -442,6 +453,7 @@ async def build_guardian_state(
         recent_intervention_feedback=recent_intervention_feedback,
         recent_execution_summary=recent_execution_summary,
         learning_guidance=_learning_guidance_text(
+            delivery_bias=effective_learning_signal.bias,
             phrasing_bias=effective_learning_signal.phrasing_bias,
             cadence_bias=effective_learning_signal.cadence_bias,
             channel_bias=effective_learning_signal.channel_bias,

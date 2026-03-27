@@ -3202,12 +3202,12 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             event_type="scheduler_job_succeeded",
             tool_name="strategist_tick",
         )
-        delivered_event = _find_audit_call(
+        delivery_event = _find_audit_call(
             mock_log_event,
-            event_type="observer_delivery_delivered",
+            event_type="observer_delivery_queued",
             tool_name="observer_delivery_gate",
         )
-        notification = continuity["notifications"][0]
+        notification = continuity["notifications"][0] if continuity["notifications"] else None
         intervention = continuity["recent_interventions"][0]
         queued_ids = [item.id for item in await insight_queue.peek_all()]
         if queued_ids:
@@ -3220,16 +3220,19 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             "urgency": 2,
             "scheduler_delivery": scheduler_event["details"]["delivery"],
             "scheduler_policy_action": scheduler_event["details"]["policy_action"],
-            "policy_reason": delivered_event["details"]["policy_reason"],
-            "learning_bias": delivered_event["details"]["learning_bias"],
-            "learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
-            "transport": delivered_event["details"]["transport"],
-            "delivered_connections": delivered_event["details"]["delivered_connections"],
+            "policy_reason": delivery_event["details"]["policy_reason"],
+            "learning_bias": delivery_event["details"]["learning_bias"],
+            "learning_channel_bias": delivery_event["details"]["learning_channel_bias"],
+            "transport": delivery_event["details"].get("transport"),
+            "delivered_connections": delivery_event["details"].get("delivered_connections", 0),
             "continuity_notification_count": len(continuity["notifications"]),
             "continuity_queued_insight_count": continuity["queued_insight_count"],
             "continuity_surface": intervention["continuity_surface"],
             "continuity_excerpt_mentions_workflow": "workflow review" in intervention["content_excerpt"].lower(),
-            "notification_intervention_matches": notification["intervention_id"] == intervention["id"],
+            "notification_intervention_matches": (
+                notification is not None
+                and notification["intervention_id"] == intervention["id"]
+            ),
             "remaining_notifications_before_cleanup": remaining_notifications,
         }
 
@@ -4811,9 +4814,9 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
                 guardian_confidence="grounded",
             )
 
-        queued_event = _find_audit_call(
+        negative_event = _find_audit_call(
             mock_log_event,
-            event_type="observer_delivery_queued",
+            event_type="observer_delivery_deferred",
             tool_name="observer_delivery_gate",
         )
 
@@ -4880,9 +4883,9 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
                 guardian_confidence="grounded",
             )
 
-        delivered_event = _find_audit_call(
+        positive_event = _find_audit_call(
             positive_log_event,
-            event_type="observer_delivery_delivered",
+            event_type="observer_delivery_queued",
             tool_name="observer_delivery_gate",
         )
         positive_signal = await guardian_feedback_repository.get_learning_signal(
@@ -4897,13 +4900,13 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
         "reason": decision.reason,
         "queued": mock_insight_queue.enqueue.await_count == 1,
         "broadcast_skipped": mock_ws_manager.broadcast.await_count == 0,
-        "learning_bias": queued_event["details"]["learning_bias"],
-        "learning_not_helpful_count": queued_event["details"]["learning_not_helpful_count"],
+        "learning_bias": negative_event["details"]["learning_bias"],
+        "learning_not_helpful_count": negative_event["details"]["learning_not_helpful_count"],
         "positive_action": positive_decision.action.value,
         "positive_reason": positive_decision.reason,
-        "positive_transport": delivered_event["details"]["transport"],
-        "positive_learning_bias": delivered_event["details"]["learning_bias"],
-        "positive_learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
+        "positive_transport": positive_event["details"].get("transport"),
+        "positive_learning_bias": positive_event["details"]["learning_bias"],
+        "positive_learning_channel_bias": positive_event["details"]["learning_channel_bias"],
         "positive_helpful_count": positive_signal.helpful_count,
         "positive_acknowledged_count": positive_signal.acknowledged_count,
         "remaining_native_notifications": remaining_notifications,

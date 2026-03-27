@@ -31,15 +31,15 @@
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the corroboration-aware world-model and richer thread-guidance pass shipped
+- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the corroboration-aware world-model and scoped procedural-guidance pass shipped
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
-- [x] the first multi-signal learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
+- [x] the current evidence-weighted learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
 - [x] `world-model-memory-fusion-v9`, `guardian-learning-policy-v9`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, so the next gap shifts to project-graph quality, longer-horizon learning, and stronger cross-thread policy adaptation rather than more missing first-pass structure
 
 ## Still To Do On `develop`
 
 - [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, and corroboration-source grounding
-- [ ] stronger learning loops based on intervention outcomes beyond the first multi-signal delivery/channel/escalation plus phrasing/cadence/timing/suppression/blocked-state/thread layer
+- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted delivery/channel/escalation/timing/suppression/blocked-state layer and first live-versus-durable arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 
@@ -772,7 +772,140 @@ This section records the internal Batch C slices on the feature branch before th
     - GitHub review comment on PR `#232` correctly identified the policy-time Python scan in scoped procedural-memory reads
     - internal subagent review sessions were started for this follow-up (`Schrodinger` `019d2e2b-1b27-7f32-bd1a-1cf3afab0ce8`, `Socrates` `019d2e2d-e8e5-7d12-9d88-31d6ae469539`, `Franklin` `019d2e2f-5dba-75e2-8026-5e4226ba6ca4`, `Mill` `019d2e30-7a86-7772-9078-54c6c7737d4a`) but they did not return findings before follow-up validation completed
 - residual risk:
-  - this slice uses exact scoped procedural lookup and bias overlay, not a richer conflict-resolution layer between durable procedural memory and fresh live heuristics, so conflicting signals still rely on the current overlay order rather than a separate arbitration policy
+  - the overlay-order limitation recorded here was resolved later in Batch D by `guardian-learning-arbitration`; the remaining gap is stronger long-horizon intervention learning beyond the now evidence-weighted live-versus-durable arbitration layer
+
+### `guardian-learning-evidence-foundation`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - the codebase now has two policy-time learning sources: fresh `GuardianLearningSignal` heuristics and durable procedural memories
+  - before this slice, those sources exposed only bias labels, not a comparable evidence surface, so the next arbitration layer would have had to compare incomparable inputs
+- scope:
+  - added `backend/src/guardian/learning_evidence.py` as the shared evidence model for guardian-learning axes, including axis ordering, field mapping, confidence/data-quality normalization, recency scoring, and neutral evidence defaults
+  - extended `GuardianLearningSignal` in `backend/src/guardian/feedback.py` with per-axis evidence so live learning now exposes `support_count`, `recency_score`, `confidence_score`, `quality_score`, and `last_confirmed_at` alongside the existing bias fields
+  - extended `ProceduralMemoryGuidance` in `backend/src/memory/procedural_guidance.py` with the same per-axis evidence surface so durable procedural lessons can be compared without re-parsing ad hoc metadata at every policy call site
+  - updated `backend/src/memory/procedural.py` so persisted procedural lesson metadata follows the active-bias support counts already exposed on the live signal instead of drifting back to broader axis-level totals during memory sync
+  - added regressions in `backend/tests/test_guardian_feedback.py` covering live evidence exposure, partial stale procedural metadata, and live-versus-durable support-count parity for active guidance axes
+- local regression fixed before the slice was recorded:
+  - the first pass left the live and durable evidence surfaces internally inconsistent in the opposite direction: live `axis_evidence.support_count` correctly counted only rows that supported the currently selected bias, but `sync_learning_signal_memories()` still persisted broader axis-level `evidence_count` totals that could include newer rows pushing the other bias
+  - that meant the same learned delivery bias could report `support_count=2` in the live signal and then reappear as `evidence_count=3` after persistence, which would skew the next arbitration layer toward stale contradictory evidence
+  - fixed by teaching `backend/src/memory/procedural.py` to reuse the live axis-evidence support count when it exists, persisting both `support_count` and `evidence_count` from that active-bias surface, and having `backend/src/memory/procedural_guidance.py` prefer explicit `support_count` metadata while still tolerating older memories that only carry `evidence_count`
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/feedback.py backend/src/memory/procedural.py backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `21 passed`
+- subagent review:
+  - `Locke`, `Harvey`, and `Hypatia` returned concrete issues against the first `#240` branch state:
+    - native-channel and async-native evidence could still be inferred from generic positive rows without proof that the winning intervention actually used native delivery
+    - missing `transport` could still be treated as direct/browser evidence, which made delivery-axis lessons stronger than the runtime data justified
+    - procedural reads did not reliably fall back from malformed `support_count` metadata to legacy `evidence_count`
+    - durable procedural evidence was still reconstructing confidence, quality, and recency from memory-level fields instead of loading the same comparable evidence metadata the live signal exposed
+  - fixed by requiring explicit direct/native transport evidence, falling back from malformed `support_count` to legacy `evidence_count`, and persisting/loading explicit confidence, quality, weighted-support, and last-confirmed evidence metadata on procedural lessons
+
+### `guardian-learning-arbitration`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - policy-time learning guidance was still resolving conflicts by overlay order: if procedural memory had any non-neutral lesson, it could overwrite fresher live guardian-learning heuristics without proving that the durable lesson still had stronger evidence
+  - that kept delivery and guardian-state synthesis shallow even after the memory substrate could expose comparable evidence across live and durable sources
+- scope:
+  - added `backend/src/guardian/learning_arbitration.py` as the shared policy-time resolver that scores live and procedural evidence per axis using support count, confidence, quality, and recency, then resolves conflicts with explicit tie rules instead of simple overwrite order
+  - updated `backend/src/observer/delivery.py` so proactive delivery uses the arbitration result, records the effective learned biases after arbitration, and logs per-axis arbitration source, reason, and winning weight in the delivery audit details
+  - updated `backend/src/guardian/state.py` so guardian-state synthesis uses the same arbitration surface as delivery instead of a separate procedural overlay path
+  - hardened the `#240` evidence substrate underneath the resolver so live `support_count` remains directional to the currently selected bias, while durable procedural memories persist both `support_count` and broader `evidence_count` without collapsing them into the same field
+  - added unit coverage in `backend/tests/test_learning_arbitration.py` for stale-conflict, live-gap-fill, and missing-evidence paths, plus integration regressions in `backend/tests/test_delivery.py` and `backend/tests/test_guardian_state.py` proving stale procedural memory no longer overrides a stronger live signal at real policy call sites
+- local regression fixed while landing the slice:
+  - the first `#240` pass still let persistence flatten directional `support_count` into broader axis-level totals, which would have biased the new arbitration weights toward contradictory rows that supported the other bias
+  - fixed by teaching `backend/src/memory/procedural.py` to persist the live signal's directional `support_count` when available, while keeping `evidence_count` as the broader durability/confidence measure and having `backend/src/memory/procedural_guidance.py` prefer the explicit `support_count` on read
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_arbitration.py backend/src/guardian/feedback.py backend/src/guardian/learning_evidence.py backend/src/guardian/state.py backend/src/memory/procedural.py backend/src/observer/delivery.py backend/tests/test_learning_arbitration.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py::test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_neutral backend/tests/test_delivery.py::test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery backend/tests/test_delivery.py::test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_stale backend/tests/test_guardian_state.py::test_build_guardian_state_uses_procedural_memory_guidance_when_live_signal_is_neutral backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_live_learning_when_stale_memory_conflicts backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `30 passed`
+- subagent review:
+  - `Huygens` returned three concrete issues against the first `#237` branch state:
+    - guardian-state learning guidance still omitted the delivery axis even when arbitration had selected a non-neutral delivery bias
+    - guardian-state arbitration still hardcoded `intervention_type="advisory"` instead of using the requested intervention type
+    - arbitration provenance still labeled the effective guidance `heuristic_plus_procedural_memory` whenever procedural memory was active, even if live evidence won every contested axis
+  - fixed by rendering delivery guidance in guardian state, threading the requested intervention type through the guardian-state arbitration path, and deriving provenance from the actual selected-axis sources instead of from procedural-memory presence alone
+
+### `scoped-procedural-guidance-resolution`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - procedural guidance had already grown the ability to persist thread- and project-scoped lessons, but policy-time resolution was still unsafe in two ways:
+    - the candidate scope order could let broader project guidance resolve before tighter continuity-thread guidance when both existed
+    - the repository fallback path treated memories with extra scope keys as compatible with narrower scope queries, so a project-scoped memory could leak back into the global fallback lane
+- scope:
+  - updated `backend/src/memory/procedural_guidance.py` so candidate scope order is now `thread+project -> thread -> project -> global`, and the resolver selects the first tier with any active lessons before resolving the full guidance bundle from that tier
+  - updated `backend/src/memory/repository.py` so `list_memories_for_scope()` resolves by exact `scope_key` first and only uses the JSON field matcher as a legacy fallback, preventing project- or thread-scoped lessons from satisfying unrelated global fallback lookups
+  - added deterministic resolver coverage in `backend/tests/test_guardian_feedback.py` for thread-over-project precedence, first-nonempty-tier selection, and bundle isolation from broader scope tiers
+  - added delivery and guardian-state regressions in `backend/tests/test_delivery.py` and `backend/tests/test_guardian_state.py` proving the scoped resolver now changes real policy outcomes and learning guidance at the runtime call sites that already pass `session_id` and `active_project`
+- local regression fixed while landing the slice:
+  - the first fallback-order patch exposed that `list_memories_for_scope()` was only checking whether the requested keys were present, not whether the memory belonged to the exact same scoped lane
+  - that meant a request for global advisory timing guidance could still pick an `active_project=Atlas` memory during the global fallback step if the base keys matched
+  - fixed by querying exact `scope_key` matches first and only using the broader JSON matcher for older entries that do not carry the newer exact scope key
+- aggregate-PR follow-up before the slice can be treated as stable:
+  - root cause addressed:
+    - the first context-aware resolver still selected lessons per axis across every fallback tier, so a thread+project guidance bundle could inherit unrelated broader-scope lessons even after the resolver had found narrower Atlas-specific delivery and timing guidance
+    - that hybrid bundle was strong enough to change real policy outcomes back to `bundle`, which meant the scoped resolver was still leaking broader negative guidance into a narrower active context
+  - fixes:
+    - `backend/src/memory/procedural_guidance.py` now selects the first scope tier that has any active non-neutral lessons, then resolves the full guidance bundle only from that tier instead of mixing lessons across thread+project, thread, project, and global fallbacks
+    - `backend/src/memory/repository.py` now accepts `exact_scope_keys` for scoped reads so context fallback steps can require exact matches for `continuity_thread_id` and `active_project` before falling back to legacy JSON matching
+    - `backend/src/observer/delivery.py` now passes `session_id` and `ctx.active_project` into `load_procedural_memory_guidance(...)`, and `backend/src/db/models.py` plus `backend/src/guardian/feedback.py` now persist `active_project` on `GuardianIntervention` so scoped learning refreshes can actually write thread/project memories from live runtime context
+    - `backend/tests/test_guardian_feedback.py` now adds `test_load_procedural_memory_guidance_does_not_mix_broader_lessons_into_selected_scope()` so the resolver must keep scoped bundles isolated from broader fallback lessons
+  - validation:
+    - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_and_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_scope_over_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_selects_first_nonempty_scope_tier backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_scoped_thread_and_project_context backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_does_not_mix_broader_lessons_into_selected_scope backend/tests/test_guardian_feedback.py::test_feedback_refresh_writes_thread_and_project_scoped_memories backend/tests/test_delivery.py::test_deliver_prefers_scoped_project_and_thread_guidance_over_global_memory backend/tests/test_delivery.py::test_deliver_prefers_thread_scoped_procedural_guidance_over_project_or_global_scope backend/tests/test_delivery.py::test_deliver_prefers_context_scoped_guidance_over_conflicting_global_memory backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_scoped_project_guidance_over_global_memory backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_thread_scoped_procedural_guidance_over_project_scope backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_context_scoped_guidance_over_global_memory -q`
+      - result: `12 passed`
+- validation:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_scope_over_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_selects_first_nonempty_scope_tier backend/tests/test_delivery.py::test_deliver_prefers_thread_scoped_procedural_guidance_over_project_or_global_scope backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_thread_scoped_procedural_guidance_over_project_scope backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `6 passed`
+- subagent review:
+  - `Lorentz` flagged one hallucinated assumption in the first `#242` write-up: some test names and prose still read like per-axis hierarchical fallback, but the implemented resolver intentionally selects one scope tier and keeps that bundle isolated from broader lessons
+  - fixed by making the contract explicit in the tests and docs: candidate tiers are ordered `thread+project -> thread -> project -> global`, the first non-empty tier wins, and broader tiers do not backfill missing axes once a narrower tier is active
+- aggregate-PR follow-up after review:
+  - existing SQLite databases created before this slice did not have `guardian_interventions.active_project`, so upgraded runtimes could fail at first ORM read/write against that model
+  - fixed by teaching `backend/src/db/engine.py::_ensure_legacy_columns()` to add the missing `active_project` column and index on upgrade, with a regression in `backend/tests/test_db_engine.py`
+
+### `weighted-guardian-learning-support`
+
+- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
+- root cause addressed:
+  - even after `#240` and `#237`, live bias selection still relied too heavily on flat counts, and arbitration could still overvalue noisier higher-volume evidence over stronger lower-volume evidence
+  - the live outcome loop was also still manufacturing unsupported phrasing, cadence, and thread lessons from generic success/failure rows even though runtime never records which of those variants was actually used
+  - delivery-axis negatives were still transport-agnostic, so failed native notifications could be misread as evidence that browser/direct interruptions should be reduced
+- scope:
+  - updated `backend/src/guardian/feedback.py` so live bias selection now weights supporting interventions by guardian confidence, data quality, and outcome quality instead of comparing raw counts alone
+  - extended `GuardianLearningAxisEvidence` and procedural memory metadata with explicit `weighted_support`, then updated `backend/src/memory/procedural.py`, `backend/src/memory/procedural_guidance.py`, and `backend/src/guardian/learning_arbitration.py` so durable memories persist that value and policy-time arbitration actually scores conflicts from it
+  - strengthened timing, channel, and blocked-state evidence from successful direct/native delivery outcomes where the runtime data actually proves the chosen route worked
+  - stopped deriving phrasing, cadence, and thread biases from generic outcomes and stopped persisting those unsupported axes into procedural memory until runtime records the actual intervention variants explicitly
+  - tightened delivery negative evidence so only explicit direct-transport failures can teach `reduce_interruptions`; failed native notifications no longer create a fake direct-interruption lesson
+- local regressions fixed while landing the slice:
+  - procedural `weighted_support` was initially loaded correctly but still ignored by the arbitration scorer, so the final conflict resolver kept behaving like a raw-count system
+  - the first weighted branch still let generic outcomes manufacture phrasing/cadence/thread lessons and still counted native failures against the direct-delivery axis
+  - fixed by scoring support from `weighted_support` when present, neutralizing unsupported axes in the live loop and procedural sync path, and requiring explicit direct transport on the negative delivery side
+- aggregate-PR follow-up after review:
+  - `update_outcome(...)` was still refreshing procedural learning memories only for failure transitions, even though weighted positive evidence now also comes from successful `delivered` and `feedback_received` outcomes
+  - that meant live learning could strengthen from outcome-only async/direct successes while durable scoped procedural guidance stayed stale until explicit feedback arrived
+  - fixed by refreshing learning memories whenever outcome transitions enter or leave the success/failure states that the weighted evidence model actually uses, with a regression in `backend/tests/test_guardian_feedback.py`
+- aggregate-PR CI follow-up:
+  - the eval harness was still asserting the pre-Batch D policy contract in three places:
+    - `strategist_tick_learning_continuity_behavior` still expected learned generic feedback to force a delivered native-notification path
+    - `guardian_outcome_learning` still expected generic helpful/not-helpful rows to manufacture direct-delivery lessons instead of the now-supported suppression-only behavior
+    - `procedural_memory_adaptation_behavior` still expected the pre-Batch D active procedural-memory count
+  - the shipped policy is stricter now: generic feedback without explicit transport/runtime evidence no longer invents delivery/channel lessons, learned suppression can defer or queue instead of forcing live delivery, and the Batch D procedural layer leaves eight active procedural memories in the adaptation eval
+  - fixed by updating `backend/src/evals/harness.py` and `backend/tests/test_eval_harness.py` to assert the current evidence-weighted queue/defer behavior and the new procedural-memory count instead of the stale pre-Batch D contract
+- validation:
+  - `python3 -m py_compile backend/src/guardian/feedback.py backend/src/guardian/learning_arbitration.py backend/src/memory/procedural.py backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py -q`
+    - result: `95 passed`
+- subagent review:
+  - `Lorentz` returned the main arbitration bug: `backend/src/guardian/learning_arbitration.py` was still deriving conflict weight from raw `support_count`, which made the new `learning_arbitration_mode=evidence_weighted` claim false for real disagreements
+  - `Epicurus` returned two grounded review findings:
+    - phrasing, cadence, and thread biases were still being inferred from generic outcomes even though the runtime never records which phrasing style, cadence strategy, or thread mode was used
+    - the negative side of the delivery axis still counted transport-agnostic failures, so bad native-notification outcomes could teach `reduce_interruptions` and then be persisted as a lesson about direct interruptions
+  - fixed by routing arbitration through `weighted_support`, neutralizing unsupported axes until explicit runtime instrumentation exists, and scoping negative delivery evidence to explicit direct transports only
 
 ## Non-Goals
 

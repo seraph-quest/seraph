@@ -338,6 +338,7 @@ class GuardianIntervention(SQLModel, table=True):
     guardian_confidence: Optional[str] = Field(default=None, index=True)
     data_quality: Optional[str] = Field(default=None, index=True)
     user_state: Optional[str] = Field(default=None, index=True)
+    active_project: Optional[str] = Field(default=None, index=True)
     interruption_mode: Optional[str] = Field(default=None, index=True)
     policy_action: str = Field(default="act", index=True)
     policy_reason: str = Field(default="")

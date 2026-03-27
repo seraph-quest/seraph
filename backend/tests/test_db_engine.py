@@ -43,6 +43,50 @@ async def test_ensure_legacy_columns_backfills_kind_from_category(tmp_path):
         await engine.dispose()
 
 
+async def test_ensure_legacy_columns_adds_guardian_intervention_active_project(tmp_path):
+    db_path = tmp_path / "legacy-guardian-interventions.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                """
+                CREATE TABLE guardian_interventions (
+                    id VARCHAR PRIMARY KEY,
+                    session_id VARCHAR,
+                    message_type VARCHAR,
+                    intervention_type VARCHAR,
+                    urgency INTEGER,
+                    content_excerpt VARCHAR,
+                    latest_outcome VARCHAR,
+                    created_at DATETIME,
+                    updated_at DATETIME
+                )
+                """
+            )
+
+            await _ensure_legacy_columns(conn)
+
+            columns = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA table_info(guardian_interventions)")
+                ).fetchall()
+            }
+            indexes = {
+                row[1]
+                for row in (
+                    await conn.exec_driver_sql("PRAGMA index_list(guardian_interventions)")
+                ).fetchall()
+            }
+
+            assert "active_project" in columns
+            assert "ix_guardian_interventions_active_project" in indexes
+    finally:
+        await engine.dispose()
+
+
 async def test_sqlite_connection_enables_foreign_keys(tmp_path):
     db_path = tmp_path / "fk-check.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")

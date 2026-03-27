@@ -3224,7 +3224,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             "learning_bias": delivered_event["details"]["learning_bias"],
             "learning_channel_bias": delivered_event["details"]["learning_channel_bias"],
             "transport": delivered_event["details"]["transport"],
-            "broadcast_delivered_connections": delivered_event["details"]["delivered_connections"],
+            "delivered_connections": delivered_event["details"]["delivered_connections"],
             "continuity_notification_count": len(continuity["notifications"]),
             "continuity_queued_insight_count": continuity["queued_insight_count"],
             "continuity_surface": intervention["continuity_surface"],

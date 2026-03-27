@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from dataclasses import replace
 
 from src.agent.session import session_manager
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
@@ -299,6 +300,7 @@ async def build_guardian_state(
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import render_soul_text
+    from src.memory.procedural_guidance import load_procedural_memory_guidance
     from src.memory.retrieval_planner import plan_memory_retrieval
     from src.memory.snapshots import (
         get_or_create_bounded_guardian_snapshot,
@@ -330,6 +332,16 @@ async def build_guardian_state(
         intervention_type="advisory",
         limit=12,
     )
+    effective_learning_signal = advisory_learning_signal
+    try:
+        procedural_guidance = await load_procedural_memory_guidance("advisory")
+        if procedural_guidance.has_active_guidance:
+            effective_learning_signal = replace(
+                advisory_learning_signal,
+                **procedural_guidance.bias_overrides(),
+            )
+    except Exception:
+        logger.debug("Failed to load procedural guidance for guardian state", exc_info=True)
     try:
         recent_execution_summary = _summarize_recent_execution(
             await audit_repository.list_events(limit=20, session_id=session_id)
@@ -385,7 +397,7 @@ async def build_guardian_state(
         active_projects=active_projects,
         recent_execution_summary=recent_execution_summary,
         memory_buckets=memory_buckets,
-        learning_signal=advisory_learning_signal,
+        learning_signal=effective_learning_signal,
     )
     world_model_status = _world_model_status(world_model)
     memory_status = (
@@ -430,14 +442,14 @@ async def build_guardian_state(
         recent_intervention_feedback=recent_intervention_feedback,
         recent_execution_summary=recent_execution_summary,
         learning_guidance=_learning_guidance_text(
-            phrasing_bias=advisory_learning_signal.phrasing_bias,
-            cadence_bias=advisory_learning_signal.cadence_bias,
-            channel_bias=advisory_learning_signal.channel_bias,
-            escalation_bias=advisory_learning_signal.escalation_bias,
-            timing_bias=advisory_learning_signal.timing_bias,
-            blocked_state_bias=advisory_learning_signal.blocked_state_bias,
-            suppression_bias=advisory_learning_signal.suppression_bias,
-            thread_preference_bias=advisory_learning_signal.thread_preference_bias,
+            phrasing_bias=effective_learning_signal.phrasing_bias,
+            cadence_bias=effective_learning_signal.cadence_bias,
+            channel_bias=effective_learning_signal.channel_bias,
+            escalation_bias=effective_learning_signal.escalation_bias,
+            timing_bias=effective_learning_signal.timing_bias,
+            blocked_state_bias=effective_learning_signal.blocked_state_bias,
+            suppression_bias=effective_learning_signal.suppression_bias,
+            thread_preference_bias=effective_learning_signal.thread_preference_bias,
         ),
         confidence=confidence,
     )

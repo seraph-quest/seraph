@@ -98,7 +98,8 @@
   - `cd backend && .venv/bin/python -m pytest tests/test_specialists.py tests/test_delegate_task_tool.py tests/test_delegation.py -q`
   - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -k "build_all_specialists or workflow_runner" -q`
   - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_main_lists_available_scenarios tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
-- review pass:
-  - the first cut still had a real trust-boundary regression risk: `delegate_task` checked generic memory keywords before vault keywords, so a prompt like `Remember this password` would have routed to `memory_keeper` instead of the privileged vault surface
+- subagent review:
+  - the first review pressure exposed a real trust-boundary regression risk: `delegate_task` still checked generic memory keywords before vault keywords, so a prompt like `Remember this password` would have routed to `memory_keeper` instead of the privileged vault surface
   - root cause: the delegation matcher gave generic `memory` and `remember` cues higher precedence than secret-bearing cues, which let planning-style phrasing capture tasks that should stay on the secret-management boundary
   - fix: vault routing now takes precedence over generic memory cues, with regression tests plus a dedicated eval-harness scenario pinning both the precedence rule and the specialist tool split
+  - follow-up `Pauli` review found no remaining material issue after the precedence fix landed

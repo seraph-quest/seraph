@@ -12,13 +12,20 @@ from src.db.models import ApprovalRequest
 from src.db.session_refs import ensure_sessions_exist
 
 
-def fingerprint_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
+def fingerprint_tool_call(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    approval_context: dict[str, Any] | None = None,
+) -> str:
     """Build a stable fingerprint for a tool invocation."""
-    payload = json.dumps(
-        {"tool_name": tool_name, "arguments": arguments},
-        sort_keys=True,
-        default=str,
-    )
+    fingerprint_payload: dict[str, Any] = {
+        "tool_name": tool_name,
+        "arguments": arguments,
+    }
+    if isinstance(approval_context, dict) and approval_context:
+        fingerprint_payload["approval_context"] = approval_context
+    payload = json.dumps(fingerprint_payload, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

@@ -84,6 +84,15 @@ class AuditedTool(Tool):
     def forward(self, *args, **kwargs):
         return self.wrapped_tool(*args, **kwargs)
 
+    def get_approval_context(self, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        hook = getattr(self.wrapped_tool, "get_approval_context", None)
+        if not callable(hook):
+            return None
+        payload = hook(arguments)
+        if isinstance(payload, dict):
+            return payload
+        return None
+
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         session_id = get_current_session_id()
         arguments = self._normalize_invocation(args, kwargs)

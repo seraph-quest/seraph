@@ -42,9 +42,40 @@ class TestDelegateTask:
         goal_planner.run.assert_called_once_with("Review my priorities and update the plan.", stream=False, reset=True)
 
     @patch("src.agent.specialists.build_all_specialists")
+    def test_delegate_task_routes_secret_keywords_to_vault_keeper(self, mock_build_all_specialists):
+        vault_keeper = _specialist("vault_keeper", "secret stored")
+        mock_build_all_specialists.return_value = [
+            _specialist("memory_keeper", "memory updated"),
+            vault_keeper,
+        ]
+
+        with patch("src.tools.delegate_task_tool.settings.use_delegation", True):
+            result = delegate_task("Store this API key in the vault.")
+
+        assert result == "secret stored"
+        vault_keeper.run.assert_called_once_with("Store this API key in the vault.", stream=False, reset=True)
+
+    @patch("src.agent.specialists.build_all_specialists")
+    def test_delegate_task_prefers_vault_keeper_when_secret_task_mentions_remember(self, mock_build_all_specialists):
+        memory_keeper = _specialist("memory_keeper", "memory updated")
+        vault_keeper = _specialist("vault_keeper", "secret stored")
+        mock_build_all_specialists.return_value = [
+            memory_keeper,
+            vault_keeper,
+        ]
+
+        with patch("src.tools.delegate_task_tool.settings.use_delegation", True):
+            result = delegate_task("Remember this password for later.")
+
+        assert result == "secret stored"
+        memory_keeper.run.assert_not_called()
+        vault_keeper.run.assert_called_once_with("Remember this password for later.", stream=False, reset=True)
+
+    @patch("src.agent.specialists.build_all_specialists")
     def test_delegate_task_errors_when_specialist_is_unknown(self, mock_build_all_specialists):
         mock_build_all_specialists.return_value = [
             _specialist("memory_keeper", "ok"),
+            _specialist("vault_keeper", "ok"),
             _specialist("web_researcher", "ok"),
         ]
 
@@ -53,12 +84,14 @@ class TestDelegateTask:
 
         assert result.startswith("Error: Unknown specialist 'unknown'")
         assert "memory_keeper" in result
+        assert "vault_keeper" in result
         assert "web_researcher" in result
 
     @patch("src.agent.specialists.build_all_specialists")
     def test_delegate_task_errors_when_it_cannot_infer_specialist(self, mock_build_all_specialists):
         mock_build_all_specialists.return_value = [
             _specialist("memory_keeper", "ok"),
+            _specialist("vault_keeper", "ok"),
             _specialist("web_researcher", "ok"),
         ]
 
@@ -67,6 +100,7 @@ class TestDelegateTask:
 
         assert result.startswith("Error: Unable to infer a specialist")
         assert "memory_keeper" in result
+        assert "vault_keeper" in result
         assert "web_researcher" in result
 
     def test_delegate_task_errors_when_delegation_is_disabled(self):

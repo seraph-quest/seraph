@@ -16,6 +16,16 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def _tool_approval_context(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    hook = getattr(tool, "get_approval_context", None)
+    if not callable(hook):
+        return None
+    payload = hook(arguments)
+    if isinstance(payload, dict) and payload:
+        return payload
+    return None
+
+
 class ApprovalTool(Tool):
     """Tool wrapper that pauses high-risk actions pending approval."""
 
@@ -58,7 +68,12 @@ class ApprovalTool(Tool):
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
         arguments = self._normalize_invocation(args, kwargs)
-        fingerprint = fingerprint_tool_call(self.name, arguments)
+        approval_context = _tool_approval_context(self.wrapped_tool, arguments)
+        fingerprint = fingerprint_tool_call(
+            self.name,
+            arguments,
+            approval_context=approval_context,
+        )
         if _run_async(
             approval_repository.consume_approved(
                 session_id=session_id,
@@ -77,7 +92,10 @@ class ApprovalTool(Tool):
                 risk_level=risk_level,
                 summary=summary,
                 fingerprint=fingerprint,
-                details={"arguments": redact_for_audit(arguments)},
+                details={
+                    "arguments": redact_for_audit(arguments),
+                    **({"approval_context": approval_context} if approval_context else {}),
+                },
             )
         )
         raise ApprovalRequired(

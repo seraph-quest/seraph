@@ -71,6 +71,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "context_window_summary_audit" in captured.out
     assert "agent_local_runtime_profile" in captured.out
     assert "delegation_local_runtime_profile" in captured.out
+    assert "delegation_secret_boundary_behavior" in captured.out
     assert "delegated_tool_workflow_behavior" in captured.out
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
     assert "workflow_composition_behavior" in captured.out
@@ -181,6 +182,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "guardian_learning_policy_v2_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
+                "delegation_secret_boundary_behavior",
                 "delegated_tool_workflow_behavior",
                 "delegated_tool_workflow_degraded_behavior",
                 "workflow_composition_behavior",
@@ -549,9 +551,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
+    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["vault_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
+    assert details_by_name["delegation_secret_boundary_behavior"]["memory_excludes_secret_tools"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["vault_only_secret_tools"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_routed_to_vault_keeper"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["memory_task_routed_to_memory_keeper"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_result"] == "vault handled"
+    assert details_by_name["delegation_secret_boundary_behavior"]["memory_task_result"] == "memory handled"
+    assert details_by_name["delegation_secret_boundary_behavior"]["explicit_vault_alias_result"] == "vault handled"
     assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_web_researcher"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_file_worker"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["tool_steps_present"] == {

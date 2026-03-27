@@ -7,6 +7,9 @@ Server configuration loaded from mcp-servers.json at startup. Servers can be
 added/removed/toggled at runtime via the MCP API endpoints.
 """
 
+import asyncio
+import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -16,8 +19,12 @@ from pathlib import Path
 from smolagents import MCPClient
 
 from src.audit.runtime import log_integration_event_sync
+from src.vault.repository import vault_repository
 
 logger = logging.getLogger(__name__)
+
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
+_VAULT_SECRET_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
 
 
 class MCPManager:
@@ -66,10 +73,16 @@ class MCPManager:
     def _resolve_env_vars(value: str) -> str:
         """Replace ${VAR} patterns with environment variable values."""
         return re.sub(
-            r"\$\{(\w+)\}",
+            _ENV_VAR_RE,
             lambda m: os.environ.get(m.group(1), m.group(0)),
             value,
         )
+
+    @staticmethod
+    def _run_async(coro):
+        """Run an async coroutine from sync context, even under an active event loop."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
 
     @staticmethod
     def _flatten_exception_text(exc: BaseException) -> str:
@@ -92,17 +105,109 @@ class MCPManager:
         missing: list[str] = []
         for v in headers.values():
             resolved = MCPManager._resolve_env_vars(v)
-            for m in re.finditer(r"\$\{(\w+)\}", resolved):
+            for m in re.finditer(_ENV_VAR_RE, resolved):
                 missing.append(m.group(1))
         return missing
+
+    @staticmethod
+    def _check_missing_vault_secrets(headers: dict[str, str] | None) -> list[str]:
+        """Return vault-backed secret keys referenced by headers that are missing."""
+        if not headers:
+            return []
+        missing: list[str] = []
+        checked: set[str] = set()
+        for value in headers.values():
+            if not isinstance(value, str):
+                continue
+            resolved = MCPManager._resolve_env_vars(value)
+            for match in re.finditer(_VAULT_SECRET_RE, resolved):
+                key = match.group(1)
+                if key in checked:
+                    continue
+                checked.add(key)
+                exists = MCPManager._run_async(vault_repository.exists(key))
+                if not exists:
+                    missing.append(key)
+        return missing
+
+    @staticmethod
+    def inspect_headers(headers: dict[str, str] | None) -> tuple[list[str], list[str], list[str]]:
+        """Inspect headers for missing env/vault credentials without resolving them."""
+        if not headers:
+            return [], [], []
+
+        missing_env_vars = MCPManager._check_unresolved_vars(headers)
+        missing_vault_keys = MCPManager._check_missing_vault_secrets(headers)
+        credential_sources: set[str] = set()
+        for key, value in headers.items():
+            if not isinstance(value, str):
+                continue
+            resolved = MCPManager._resolve_env_vars(value)
+            if re.search(_ENV_VAR_RE, value):
+                credential_sources.add("env")
+            if re.search(_VAULT_SECRET_RE, value) or re.search(_VAULT_SECRET_RE, resolved):
+                credential_sources.add("vault")
+            if (
+                isinstance(key, str)
+                and key.strip().lower() == "authorization"
+                and not re.search(_ENV_VAR_RE, value)
+                and not re.search(_VAULT_SECRET_RE, value)
+                and not re.search(_VAULT_SECRET_RE, resolved)
+            ):
+                credential_sources.add("inline")
+
+        return missing_env_vars, missing_vault_keys, sorted(credential_sources)
+
+    @staticmethod
+    def resolve_headers(
+        headers: dict[str, str] | None,
+    ) -> tuple[dict[str, str] | None, list[str], list[str], list[str]]:
+        """Resolve env vars and vault placeholders inside headers.
+
+        Returns: resolved headers, missing env vars, missing vault keys, credential sources.
+        """
+        if not headers:
+            return None, [], [], []
+
+        missing_env_vars, missing_vault_keys, credential_sources = MCPManager.inspect_headers(headers)
+        if missing_env_vars or missing_vault_keys:
+            return dict(headers), missing_env_vars, missing_vault_keys, credential_sources
+        resolved_headers: dict[str, str] = {}
+
+        for key, value in headers.items():
+            if not isinstance(value, str):
+                continue
+            resolved = MCPManager._resolve_env_vars(value)
+
+            def _replace_vault(match: re.Match[str]) -> str:
+                secret_key = match.group(1)
+                secret_value = MCPManager._run_async(vault_repository.get(secret_key))
+                if secret_value is None:
+                    return match.group(0)
+                return secret_value
+
+            resolved = re.sub(_VAULT_SECRET_RE, _replace_vault, resolved)
+            resolved_headers[key] = resolved
+
+        return resolved_headers, missing_env_vars, missing_vault_keys, credential_sources
+
+    @staticmethod
+    def _token_secret_key(name: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", name.strip()).strip("._-")
+        digest = hashlib.sha1(name.strip().encode("utf-8")).hexdigest()[:10]
+        return f"mcp.server.{normalized or 'default'}.{digest}.bearer_token"
 
     def connect(self, name: str, url: str, headers: dict[str, str] | None = None) -> None:
         """Connect to a named MCP server via HTTP/SSE. Fails gracefully."""
         try:
-            # Check for unresolved env vars before attempting connection
-            missing_vars = self._check_unresolved_vars(headers)
+            resolved_headers, missing_vars, missing_vault_keys, credential_sources = self.resolve_headers(headers)
+            missing_details: list[str] = []
             if missing_vars:
-                msg = f"Missing environment variables: {', '.join(missing_vars)}"
+                missing_details.append(f"Missing environment variables: {', '.join(missing_vars)}")
+            if missing_vault_keys:
+                missing_details.append(f"Missing vault secrets: {', '.join(missing_vault_keys)}")
+            if missing_details:
+                msg = "; ".join(missing_details)
                 self._status[name] = {"status": "auth_required", "error": msg}
                 logger.warning("MCP server '%s' requires auth: %s", name, msg)
                 log_integration_event_sync(
@@ -113,15 +218,15 @@ class MCPManager:
                         "url": url,
                         "error": msg,
                         "missing_env_vars": missing_vars,
+                        "missing_vault_keys": missing_vault_keys,
+                        "credential_sources": credential_sources,
                     },
                 )
                 return
 
             params: dict = {"url": url, "transport": "streamable-http"}
-            if headers:
-                params["headers"] = {
-                    k: self._resolve_env_vars(v) for k, v in headers.items()
-                }
+            if resolved_headers:
+                params["headers"] = resolved_headers
             client = MCPClient(params, structured_output=False)
             tools = client.get_tools()
             self._clients[name] = client
@@ -135,6 +240,8 @@ class MCPManager:
                 details={
                     "url": url,
                     "tool_count": len(tools),
+                    "used_headers": bool(resolved_headers),
+                    "credential_sources": credential_sources,
                 },
             )
         except BaseException as exc:
@@ -240,13 +347,30 @@ class MCPManager:
         if name not in self._config:
             return False
         server = self._config[name]
+        secret_key = self._token_secret_key(name)
+        self._run_async(vault_repository.store(
+            secret_key,
+            token,
+            description=f"MCP bearer token for server '{name}'",
+        ))
         if "headers" not in server:
             server["headers"] = {}
-        server["headers"]["Authorization"] = f"Bearer {token}"
+        server["headers"]["Authorization"] = f"Bearer ${{vault:{secret_key}}}"
         self._save_config()
         if server.get("enabled", True):
             self.disconnect(name)
             self.connect(name, server["url"], headers=server.get("headers"))
+        log_integration_event_sync(
+            integration_type="mcp_server",
+            name=name,
+            outcome="credential_updated",
+            details={
+                "credential_source": "vault",
+                "header_name": "Authorization",
+                "secret_key": secret_key,
+                "enabled": bool(server.get("enabled", True)),
+            },
+        )
         return True
 
     # --- Runtime config mutations ---

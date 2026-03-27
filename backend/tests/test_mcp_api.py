@@ -10,7 +10,7 @@ from src.audit.repository import audit_repository
 @pytest.mark.asyncio
 async def test_validate_server_returns_missing_env_var_warnings(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
-        mock_mgr._check_unresolved_vars.return_value = ["API_TOKEN"]
+        mock_mgr.inspect_headers.return_value = (["API_TOKEN"], [], ["env"])
         mock_mgr._config = {}
 
         resp = await client.post(
@@ -37,7 +37,7 @@ async def test_validate_server_returns_missing_env_var_warnings(client):
 @pytest.mark.asyncio
 async def test_validate_server_rejects_invalid_url(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
-        mock_mgr._check_unresolved_vars.return_value = []
+        mock_mgr.inspect_headers.return_value = ([], [], [])
         mock_mgr._config = {"gh": {"url": "https://api.github.com/mcp"}}
 
         resp = await client.post(
@@ -51,6 +51,75 @@ async def test_validate_server_rejects_invalid_url(client):
     assert data["status"] == "invalid"
     assert "Server URL must use http or https" in data["issues"]
     assert data["existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_server_rejects_raw_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr.inspect_headers.return_value = ([], [], ["inline"])
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer raw-token"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "Sensitive header 'Authorization'" in data["issues"][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr.inspect_headers.return_value = ([], [], ["env"])
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer raw-token${DUMMY}"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "Sensitive header 'Authorization'" in data["issues"][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_server_degrades_when_credential_inspection_fails(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr.inspect_headers.side_effect = RuntimeError("vault unavailable")
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${vault:mcp.server.gh.bearer_token}"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "Credential inspection failed: vault unavailable" in data["issues"]
 
 
 @pytest.mark.asyncio
@@ -138,6 +207,60 @@ async def test_update_server_rejects_extension_managed_entry(client):
 
 
 @pytest.mark.asyncio
+async def test_add_server_rejects_raw_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer raw-token"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "Sensitive header 'Authorization'" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_add_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "gh",
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer raw-token${DUMMY}"},
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "Sensitive header 'Authorization'" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {"gh": {"url": "https://example.com/mcp", "headers": {}}}
+
+        resp = await client.put(
+            "/api/mcp/servers/gh",
+            json={
+                "headers": {"Authorization": "Bearer raw-token${DUMMY}"},
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "Sensitive header 'Authorization'" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_remove_server_rejects_extension_managed_entry(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
         mock_mgr._config = {
@@ -183,7 +306,12 @@ async def test_test_server_auth_required_for_missing_vars(client):
                 "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
             }
         }
-        mock_mgr._check_unresolved_vars.return_value = ["GITHUB_TOKEN"]
+        mock_mgr.resolve_headers.return_value = (
+            {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+            ["GITHUB_TOKEN"],
+            [],
+            ["env"],
+        )
 
         resp = await client.post("/api/mcp/servers/gh/test")
         assert resp.status_code == 200
@@ -201,7 +329,12 @@ async def test_test_server_auth_required_logs_runtime_audit(async_db, client):
                 "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
             }
         }
-        mock_mgr._check_unresolved_vars.return_value = ["GITHUB_TOKEN"]
+        mock_mgr.resolve_headers.return_value = (
+            {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+            ["GITHUB_TOKEN"],
+            [],
+            ["env"],
+        )
 
         resp = await client.post("/api/mcp/servers/gh/test")
         assert resp.status_code == 200
@@ -232,8 +365,12 @@ async def test_test_server_success_logs_runtime_audit(async_db, client):
                 "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
             }
         }
-        mock_mgr._check_unresolved_vars.return_value = []
-        mock_mgr._resolve_env_vars.side_effect = lambda value: value.replace("${GITHUB_TOKEN}", "ghp_test")
+        mock_mgr.resolve_headers.return_value = (
+            {"Authorization": "Bearer ghp_test"},
+            [],
+            [],
+            ["env"],
+        )
 
         resp = await client.post("/api/mcp/servers/gh/test")
         assert resp.status_code == 200
@@ -265,7 +402,7 @@ async def test_test_server_auth_failed_logs_runtime_audit(async_db, client):
                 "headers": None,
             }
         }
-        mock_mgr._check_unresolved_vars.return_value = []
+        mock_mgr.resolve_headers.return_value = (None, [], [], [])
 
         resp = await client.post("/api/mcp/servers/gh/test")
         assert resp.status_code == 200
@@ -293,7 +430,7 @@ async def test_test_server_connection_failure_logs_runtime_audit(async_db, clien
                 "headers": None,
             }
         }
-        mock_mgr._check_unresolved_vars.return_value = []
+        mock_mgr.resolve_headers.return_value = (None, [], [], [])
 
         resp = await client.post("/api/mcp/servers/gh/test")
         assert resp.status_code == 502
@@ -306,3 +443,31 @@ async def test_test_server_connection_failure_logs_runtime_audit(async_db, clien
             and event["details"]["error"] == "refused"
             for event in events
         )
+
+
+@pytest.mark.asyncio
+async def test_test_server_credential_resolution_failure_degrades_to_auth_required(async_db, client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "gh": {
+                "url": "http://gh/mcp",
+                "headers": {"Authorization": "Bearer ${vault:mcp.server.gh.bearer_token}"},
+            }
+        }
+        mock_mgr.resolve_headers.side_effect = RuntimeError("vault unavailable")
+
+        resp = await client.post("/api/mcp/servers/gh/test")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "auth_required"
+    assert data["message"] == "Credential resolution failed: vault unavailable"
+
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "integration_auth_required"
+        and event["tool_name"] == "mcp_test:gh"
+        and event["details"]["status"] == "credential_resolution_failed"
+        and event["details"]["error"] == "vault unavailable"
+        for event in events
+    )

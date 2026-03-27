@@ -116,9 +116,10 @@ class TestCreateOrchestrator:
             create_orchestrator()
 
         orch_kwargs = mock_agent_cls.call_args[1]
-        assert len(orch_kwargs["managed_agents"]) == 5
+        assert len(orch_kwargs["managed_agents"]) == 6
         assert {agent.name for agent in orch_kwargs["managed_agents"]} == {
             "memory_keeper",
+            "vault_keeper",
             "goal_planner",
             "web_researcher",
             "file_worker",

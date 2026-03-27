@@ -83,6 +83,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] structured audit logging for approval, tool, and runtime events
 - [x] secret redaction and scoped secret-reference handling
 - [x] secret-reference resolution now stays limited to explicit injection-safe surfaces instead of resolving into arbitrary tool calls
+- [x] delegation now keeps generic memory handling separate from vault-backed secret management, with explicit secret/vault routing into a dedicated privileged specialist and deterministic eval coverage for that boundary
 
 ### Execution and integrations
 
@@ -92,7 +93,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] shell execution via sandboxed tool path
 - [x] browser automation foundation
 - [x] filesystem, guardian-record, goals, vault, and web-search tool foundations
-- [x] MCP server management and runtime-managed server configuration
+- [x] MCP server management and runtime-managed server configuration, with manual bearer-token updates now landing in vault-backed placeholders instead of raw config headers and MCP connect/test audit surfacing the credential source
 - [x] execute-code, clarify, todo, session-search, and first-class delegation runtime primitives for deeper Hermes-style operator work
 - [x] visible tool execution streaming in chat and agent flows
 - [x] first-class reusable workflows loaded from defaults and workspace files, exposed through a workflows API and `workflow_runner` specialist
@@ -104,6 +105,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] workflow audit now surfaces structured workflow-run details for cockpit/operator views, including artifact-path lineage and degraded-step visibility
 - [x] workflow history endpoint now exposes run arguments, risk level, execution boundaries, approval counts, secret-ref acceptance, and artifact lineage for replay and operator inspection
 - [x] workflow history endpoint now also exposes timeline events, replay guardrails, parameterized replay drafts, approval-recovery messaging, pending-approval details, and explicit thread metadata for replay/open-thread control
+- [x] workflow approvals and workflow history now persist approval-context snapshots plus context-aware run fingerprints, so replay/resume and approval reuse fail closed when the privileged workflow surface changes
 - [x] operator timeline API now unifies workflow runs, approvals, notifications, queued insights, recent interventions, and surfaced failures into one threaded live operator feed
 - [x] activity ledger API now projects workflow runs, approvals, guardian events, audit activity, tool steps, and attributed LLM call spend into one separate accountability feed for the browser workspace
 - [x] catalog/install surfaces for skills and MCP servers

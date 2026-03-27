@@ -86,6 +86,7 @@ from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
 from src.scheduler.connection_manager import BroadcastResult
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
+from src.tools.delegate_task_tool import delegate_task
 from src.tools.filesystem_tool import read_file, write_file
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
@@ -1419,12 +1420,19 @@ def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
         patch.object(
             settings,
             "local_runtime_paths",
-            "orchestrator_agent,goal_planner,web_researcher,file_worker",
+            "orchestrator_agent,vault_keeper,goal_planner,web_researcher,file_worker",
         ),
         patch("src.agent.specialists.build_all_specialists", return_value=[]),
         patch("src.agent.factory.skill_manager.get_active_skills", return_value=[]),
     ):
         orchestrator = create_orchestrator()
+        vault_keeper = create_specialist(
+            "vault_keeper",
+            "Vault specialist",
+            [],
+            temperature=0.2,
+            max_steps=3,
+        )
         goal_planner = create_specialist(
             "goal_planner",
             "Goal planner specialist",
@@ -1449,6 +1457,7 @@ def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
 
     routed_models = {
         "orchestrator_agent": orchestrator.model.model_id,
+        "vault_keeper": vault_keeper.model.model_id,
         "goal_planner": goal_planner.model.model_id,
         "web_researcher": web_researcher.model.model_id,
         "file_worker": file_worker.model.model_id,
@@ -1457,6 +1466,87 @@ def _eval_delegation_local_runtime_profile() -> dict[str, Any]:
     return {
         "runtime_profile": "local",
         "routed_models": routed_models,
+    }
+
+
+def _eval_delegation_secret_boundary_behavior() -> dict[str, Any]:
+    from src.tools.delegate_task_tool import delegate_task
+
+    def _tool(name: str) -> MagicMock:
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    builtin_tools = [
+        _tool("view_soul"),
+        _tool("update_soul"),
+        _tool("store_secret"),
+        _tool("get_secret"),
+        _tool("get_secret_ref"),
+        _tool("list_secrets"),
+        _tool("delete_secret"),
+        _tool("read_file"),
+    ]
+
+    with (
+        patch(
+            "src.agent.specialists.create_specialist",
+            side_effect=lambda name, description, tools, temperature, max_steps: types.SimpleNamespace(
+                name=name,
+                description=description,
+                tools=tools,
+            ),
+        ),
+        patch("src.agent.specialists.discover_tools", return_value=builtin_tools),
+        patch("src.agent.specialists.filter_tools", side_effect=lambda tools, *_args, **_kwargs: list(tools)),
+        patch("src.agent.specialists.wrap_tools_for_secret_refs", side_effect=lambda tools: list(tools)),
+        patch("src.agent.specialists.wrap_tools_for_audit", side_effect=lambda tools, **_kwargs: list(tools)),
+        patch("src.agent.specialists.wrap_tools_for_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+        patch("src.agent.specialists.wrap_tools_with_forced_approval", side_effect=lambda tools, **_kwargs: list(tools)),
+        patch("src.agent.specialists.mcp_manager.get_config", return_value=[]),
+        patch("src.agent.specialists.skill_manager.get_active_skills", return_value=[]),
+        patch("src.agent.specialists.workflow_manager.build_workflow_tools", return_value=[]),
+    ):
+        specialists = build_all_specialists()
+
+    specialists_by_name = {specialist.name: specialist for specialist in specialists}
+    memory_tool_names = [tool.name for tool in specialists_by_name["memory_keeper"].tools]
+    vault_tool_names = [tool.name for tool in specialists_by_name["vault_keeper"].tools]
+
+    memory_runner = MagicMock(return_value="memory handled")
+    vault_runner = MagicMock(return_value="vault handled")
+    routed_specialists = [
+        types.SimpleNamespace(name="memory_keeper", run=memory_runner),
+        types.SimpleNamespace(name="vault_keeper", run=vault_runner),
+    ]
+
+    with (
+        patch("src.tools.delegate_task_tool.settings.use_delegation", True),
+        patch("src.agent.specialists.build_all_specialists", return_value=routed_specialists),
+    ):
+        secret_result = delegate_task("Remember this password for later.")
+        memory_result = delegate_task("Update the guardian record preference.")
+        explicit_vault_result = delegate_task("Store this credential safely.", specialist="vault")
+
+    return {
+        "memory_tool_names": memory_tool_names,
+        "vault_tool_names": vault_tool_names,
+        "memory_excludes_secret_tools": not any(
+            tool_name in {"store_secret", "get_secret", "get_secret_ref", "list_secrets", "delete_secret"}
+            for tool_name in memory_tool_names
+        ),
+        "vault_only_secret_tools": set(vault_tool_names) == {
+            "store_secret",
+            "get_secret",
+            "get_secret_ref",
+            "list_secrets",
+            "delete_secret",
+        },
+        "secret_task_result": secret_result,
+        "memory_task_result": memory_result,
+        "explicit_vault_alias_result": explicit_vault_result,
+        "secret_task_routed_to_vault_keeper": vault_runner.call_count == 2,
+        "memory_task_routed_to_memory_keeper": memory_runner.call_count == 1,
     }
 
 
@@ -6068,8 +6158,11 @@ async def _eval_mcp_test_api_audit() -> dict[str, Any]:
                 "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
             }
         }
-        mock_mgr._check_unresolved_vars.side_effect = [["GITHUB_TOKEN"], [], []]
-        mock_mgr._resolve_env_vars.side_effect = lambda value: value.replace("${GITHUB_TOKEN}", "ghp_test")
+        mock_mgr.resolve_headers.side_effect = [
+            ({}, ["GITHUB_TOKEN"], [], ["env"]),
+            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
+            ({"Authorization": "Bearer ghp_test"}, [], [], ["env"]),
+        ]
 
         auth_required = await test_mcp_server("gh")
 
@@ -6417,6 +6510,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="runtime",
         description="Delegation paths can route the orchestrator and remaining built-in specialists through the local profile.",
         runner=_eval_delegation_local_runtime_profile,
+    ),
+    EvalScenario(
+        name="delegation_secret_boundary_behavior",
+        category="behavior",
+        description="Delegation keeps vault operations behind an explicit privileged specialist instead of bundling them into generic memory handling.",
+        runner=_eval_delegation_secret_boundary_behavior,
     ),
     EvalScenario(
         name="delegated_tool_workflow_behavior",

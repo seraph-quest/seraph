@@ -13,6 +13,11 @@ SPECIALIST_ALIASES: dict[str, str] = {
     "memory": "memory_keeper",
     "memories": "memory_keeper",
     "soul": "memory_keeper",
+    "vault": "vault_keeper",
+    "secret": "vault_keeper",
+    "secrets": "vault_keeper",
+    "credential": "vault_keeper",
+    "credentials": "vault_keeper",
     "goals": "goal_planner",
     "goal": "goal_planner",
     "priorities": "goal_planner",
@@ -29,6 +34,7 @@ SPECIALIST_ALIASES: dict[str, str] = {
 
 AUTO_ROUTE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("workflow_runner", ("workflow", "runbook", "starter pack", "starter-pack")),
+    ("vault_keeper", ("vault", "secret", "credential", "credentials", "api key", "password")),
     ("memory_keeper", ("remember", "memory", "identity", "preference", "guardian record", "soul")),
     ("goal_planner", ("goal", "goals", "priority", "priorities", "plan", "roadmap")),
     ("web_researcher", ("research", "search", "look up", "lookup", "find", "web", "weather")),
@@ -79,7 +85,7 @@ def delegate_task(task: str, specialist: str = "") -> str:
     Args:
         task: The bounded subtask to hand off to a specialist.
         specialist: Optional specialist name or alias such as `research`,
-            `files`, `goals`, `memory`, or `workflow`.
+            `files`, `goals`, `memory`, `vault`, or `workflow`.
 
     Returns:
         The delegated specialist's final response, or a clear routing error.

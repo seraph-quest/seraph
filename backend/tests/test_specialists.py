@@ -15,6 +15,7 @@ from src.agent.specialists import (
     create_mcp_specialist,
     create_memory_keeper,
     create_specialist,
+    create_vault_keeper,
     create_web_researcher,
     mcp_specialist_runtime_path,
 )
@@ -33,7 +34,7 @@ class TestToolDomainMapping:
         assert set(TOOL_DOMAINS.keys()) == expected_tools
 
     def test_reverse_index_covers_all_domains(self):
-        assert set(DOMAIN_TOOLS.keys()) == {"memory", "goals", "research", "files"}
+        assert set(DOMAIN_TOOLS.keys()) == {"memory", "vault", "goals", "research", "files"}
 
     def test_reverse_index_matches_forward(self):
         for tool, domain in TOOL_DOMAINS.items():
@@ -149,6 +150,18 @@ class TestNamedFactories:
         assert tool_names == {
             "view_soul",
             "update_soul",
+        }
+
+    @patch("src.agent.specialists.ToolCallingAgent")
+    @patch("src.agent.specialists.LiteLLMModel")
+    def test_vault_keeper_filters_tools(self, mock_model_cls, mock_agent_cls):
+        mock_model_cls.return_value = MagicMock()
+        mock_agent_cls.return_value = MagicMock()
+        tools_by_name = self._make_tools_by_name()
+        create_vault_keeper(tools_by_name)
+        agent_kwargs = mock_agent_cls.call_args[1]
+        tool_names = {t.name for t in agent_kwargs["tools"]}
+        assert tool_names == {
             "store_secret",
             "get_secret",
             "get_secret_ref",
@@ -314,10 +327,11 @@ class TestBuildAllSpecialists:
         ):
             specialists = build_all_specialists()
 
-        assert len(specialists) == 5
+        assert len(specialists) == 6
         names = {s.name for s in specialists}
         assert names == {
             "memory_keeper",
+            "vault_keeper",
             "goal_planner",
             "web_researcher",
             "file_worker",
@@ -415,10 +429,11 @@ class TestBuildAllSpecialists:
         ):
             specialists = build_all_specialists()
 
-        assert len(specialists) == 6
+        assert len(specialists) == 7
         names = {s.name for s in specialists}
         assert "mcp_things3" in names
         assert "workflow_runner" in names
+        assert "vault_keeper" in names
 
     @patch("src.agent.specialists.ToolCallingAgent")
     @patch("src.agent.specialists.LiteLLMModel")
@@ -459,9 +474,10 @@ class TestBuildAllSpecialists:
         ):
             specialists = build_all_specialists()
 
-        assert len(specialists) == 5
+        assert len(specialists) == 6
         assert {specialist.name for specialist in specialists} == {
             "memory_keeper",
+            "vault_keeper",
             "goal_planner",
             "web_researcher",
             "file_worker",

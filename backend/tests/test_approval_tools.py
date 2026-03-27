@@ -1,9 +1,12 @@
 """Tests for high-risk tool approval wrappers."""
 
+import asyncio
+
 from smolagents import Tool
 import pytest
 
 from src.approval.exceptions import ApprovalRequired
+from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
 
@@ -16,6 +19,32 @@ class DummyExecuteCodeTool(Tool):
 
     def forward(self, code: str) -> str:
         return f"ran:{code}"
+
+
+class DummyPrivilegedWorkflowTool(Tool):
+    name = "workflow_release_repair"
+    description = "Dummy workflow-shaped privileged tool"
+    inputs = {"file_path": {"type": "string", "description": "Path"}}
+    output_type = "string"
+
+    def __init__(self, *, boundary: str = "workspace_write"):
+        super().__init__()
+        self.boundary = boundary
+        self.calls: list[str] = []
+        self.is_initialized = True
+
+    def forward(self, file_path: str) -> str:
+        self.calls.append(file_path)
+        return f"saved:{file_path}"
+
+    def get_approval_context(self, _arguments):
+        return {
+            "workflow_name": "release-repair",
+            "risk_level": "high",
+            "execution_boundaries": [self.boundary],
+            "accepts_secret_refs": False,
+            "step_tools": ["write_file"],
+        }
 
 
 def test_high_risk_tool_requires_approval_before_execution(async_db):
@@ -45,3 +74,22 @@ def test_forced_approval_tool_requires_confirmation_even_when_global_mode_off(as
             tool(code="print('hi')")
     finally:
         reset_runtime_context(tokens)
+
+
+def test_forced_approval_does_not_consume_approval_after_boundary_context_changes(async_db):
+    tool_impl = DummyPrivilegedWorkflowTool(boundary="workspace_write")
+    tool = wrap_tools_with_forced_approval([tool_impl])[0]
+    tokens = set_runtime_context("s1", "off")
+    try:
+        with pytest.raises(ApprovalRequired) as excinfo:
+            tool(file_path="notes/release.md")
+        approval_id = excinfo.value.approval_id
+        assert asyncio.run(approval_repository.resolve(approval_id, "approved")) is not None
+
+        tool_impl.boundary = "secret_injection"
+        with pytest.raises(ApprovalRequired):
+            tool(file_path="notes/release.md")
+    finally:
+        reset_runtime_context(tokens)
+
+    assert tool_impl.calls == []

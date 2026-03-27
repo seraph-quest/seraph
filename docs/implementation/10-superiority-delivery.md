@@ -76,7 +76,7 @@ This file explains:
 
 ### 7. Execution hardening
 
-- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, forced approval wrapping for high-risk/approval-mode workflow paths, explicit secret-ref containment to injection-safe surfaces, rejection of underdeclared workflow runtimes, workflow-run replay metadata that keeps risk/approval/boundary context visible at the operator surface, and stricter replay/native-resume guardrails around high-risk or secret-bearing workflow surfaces
+- [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, forced approval wrapping for high-risk/approval-mode workflow paths, explicit secret-ref containment to injection-safe surfaces, rejection of underdeclared workflow runtimes, workflow-run replay metadata that keeps risk/approval/boundary context visible at the operator surface, stricter replay/native-resume guardrails around high-risk or secret-bearing workflow surfaces, approval-context-bound workflow replay/resume plus stale-approval blocking when the privileged surface changes, vault-backed MCP credential storage plus credential-source audit for manual connector auth paths, and a dedicated `vault_keeper` delegation surface so generic memory planning no longer inherits direct secret-management tools
 - [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that operator-aware replay/native-resume hardening pass
 - owners: Workstream 01, Workstream 02
 

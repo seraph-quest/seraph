@@ -51,6 +51,25 @@ def _custom_call_payload(tool: Any, arguments: dict[str, Any]) -> tuple[str, dic
     return None
 
 
+def _custom_failure_payload(
+    tool: Any,
+    arguments: dict[str, Any],
+    error: Exception,
+) -> tuple[str, dict[str, Any]] | None:
+    hook = getattr(tool, "get_audit_failure_payload", None)
+    if not callable(hook):
+        return None
+    payload = hook(arguments, error)
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == 2
+        and isinstance(payload[0], str)
+        and isinstance(payload[1], dict)
+    ):
+        return payload
+    return None
+
+
 def _custom_audit_arguments(tool: Any, arguments: dict[str, Any]) -> dict[str, Any] | None:
     hook = getattr(tool, "get_audit_arguments", None)
     if not callable(hook):
@@ -119,14 +138,20 @@ class AuditedTool(Tool):
         try:
             result = self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
         except Exception as exc:
+            custom_failure_payload = _custom_failure_payload(self.wrapped_tool, arguments, exc)
+            if custom_failure_payload is not None:
+                failure_summary, failure_details = custom_failure_payload
+            else:
+                failure_summary = f"{self.name} raised an error"
+                failure_details = {
+                    "arguments": audit_arguments,
+                    "error": redact_for_audit(str(exc)),
+                }
             self._log_event(
                 session_id=session_id,
                 event_type="tool_failed",
-                summary=f"{self.name} raised an error",
-                details={
-                    "arguments": audit_arguments,
-                    "error": redact_for_audit(str(exc)),
-                },
+                summary=failure_summary,
+                details=failure_details,
             )
             raise
 

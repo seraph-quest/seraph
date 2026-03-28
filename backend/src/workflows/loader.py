@@ -181,11 +181,17 @@ def parse_workflow_content(
         if not isinstance(input_name, str) or not isinstance(input_spec, dict):
             _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid input definition")
             return None
+        artifact_types = input_spec.get("artifact_types", [])
+        if not isinstance(artifact_types, list) or not all(isinstance(item, str) for item in artifact_types):
+            _record_workflow_error(errors, path=path, message=f"Workflow file {path} has invalid artifact_types for input '{input_name}'")
+            return None
         normalized_inputs[input_name] = {
             "type": input_spec.get("type", "string"),
             "description": input_spec.get("description", ""),
             "required": bool(input_spec.get("required", True)),
             "default": input_spec.get("default"),
+            "artifact_input": bool(input_spec.get("artifact_input", False)),
+            "artifact_types": [item.strip() for item in artifact_types if item.strip()],
         }
 
     step_tools = list(dict.fromkeys(step.tool for step in parsed_steps))

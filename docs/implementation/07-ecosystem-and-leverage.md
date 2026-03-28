@@ -34,6 +34,7 @@
 - [x] separate activity-ledger surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, surfaced failures, and attributed LLM spend instead of leaving autonomous work opaque
 - [x] cockpit-native extension studio for workflows, skills, and MCP configs with validation, diagnostics, save flows, and repair handoff
 - [x] first workflow branch/resume control with checkpoint candidates, lineage metadata, approval-gated resume plans, and resume drafts tied to existing inputs
+- [x] typed artifact-input handoff plus checkpoint-truthful branch actions in the cockpit, so follow-on workflow drafts now respect declared artifact compatibility and failed-step controls only appear when the runtime persisted reusable checkpoint state
 - [x] Hermes runtime-parity primitives including `execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`, stronger scheduled execution, and tighter runtime security controls
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel routing through the extension platform instead of ad hoc side paths
 - [x] operator-surface imported reach, extension governance, and LLM spend attribution by runtime path and capability family
@@ -61,12 +62,21 @@
 - [x] new authored skills/workflows now land in the managed `workspace/extensions/workspace-capabilities/` package, while bundled catalog skill installs now land as manifest-backed extension packages under `workspace/extensions/`; old loose loaders remain read-only compatibility during the final cleanup window
 - [x] the trusted-code-plugins RFC is now closed for the current architecture with an explicit negative decision: Seraph continues with typed extension packs, MCP, managed connectors, and bundled native tools, not a general arbitrary-code plugin runtime
 - [x] the five-wave Hermes/OpenClaw capability import program is now complete on `develop`, including packaged reach parity, selective OpenClaw imports, operator-surface governance, benchmark refresh, and deterministic eval proof
+- [x] `workflow-autonomy-and-artifact-control-v1` now ships reusable checkpoint-backed workflow recovery, truthful unsupported-checkpoint fallback in the runs API, declared-type artifact handoff in the cockpit, and operator-visible branch actions instead of generic retry-only copy
+
+## Review Follow-Up
+
+- local regression fixed while landing `workflow-autonomy-and-artifact-control-v1`:
+  - `GET /api/workflows/runs` could return `409` for degraded later-step runs whose parent run did not persist reusable checkpoint state, because the list endpoint eagerly selected `resume_from_step` even when that checkpoint candidate was already marked unsupported
+  - fixed by suppressing implicit resume-plan selection for unsupported checkpoints while keeping explicit `resume-plan` requests fail-closed with `409`
+- review pass:
+  - targeted review of checkpoint resume truthfulness, runs-API fallback behavior, cockpit artifact compatibility, and stale test assumptions found no remaining material issues after the list-endpoint fix and regression coverage updates
 
 ## Still To Do On `develop`
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the current install/recommendation, preflight/autorepair, policy-aware recovery, catalog-install, and bounded bootstrap flow
 - [ ] richer extension health/test surfaces and production-grade connector hardening beyond the current lifecycle API, governance queue, and deterministic eval coverage
-- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, step records, branch/resume checkpoints, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
+- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, typed artifact handoff, step records, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the current operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, extension studio, and skill-registry loop
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

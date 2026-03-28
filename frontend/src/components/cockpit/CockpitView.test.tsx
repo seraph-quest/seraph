@@ -101,7 +101,13 @@ describe("CockpitView", () => {
                 tool_name: "workflow_summarize_file",
                 description: "Summarize an existing workspace file",
                 inputs: {
-                  file_path: { type: "string", description: "Workspace file", required: true },
+                  source_path: {
+                    type: "string",
+                    description: "Workspace file",
+                    required: true,
+                    artifact_input: true,
+                    artifact_types: ["markdown_document", "workspace_file"],
+                  },
                 },
                 requires_tools: ["read_file"],
                 requires_skills: [],
@@ -109,6 +115,34 @@ describe("CockpitView", () => {
                 enabled: true,
                 step_count: 1,
                 file_path: "defaults/workflows/summarize-file.json",
+                policy_modes: ["balanced", "full"],
+                execution_boundaries: ["workspace"],
+                risk_level: "low",
+                requires_approval: false,
+                approval_behavior: "direct",
+                is_available: true,
+                missing_tools: [],
+                missing_skills: [],
+              },
+              {
+                name: "annotate-image",
+                tool_name: "workflow_annotate_image",
+                description: "Annotate an image asset",
+                inputs: {
+                  image_path: {
+                    type: "string",
+                    description: "Image file",
+                    required: true,
+                    artifact_input: true,
+                    artifact_types: ["image"],
+                  },
+                },
+                requires_tools: ["read_file"],
+                requires_skills: [],
+                user_invocable: true,
+                enabled: true,
+                step_count: 1,
+                file_path: "defaults/workflows/annotate-image.json",
                 policy_modes: ["balanced", "full"],
                 execution_boundaries: ["workspace"],
                 risk_level: "low",
@@ -268,10 +302,31 @@ describe("CockpitView", () => {
                 thread_source: "session",
                 run_fingerprint: "fp-1",
                 run_identity: "session-1:workflow_web_brief_to_file:fp-1",
+                branch_kind: "retry_failed_step",
+                branch_depth: 0,
+                checkpoint_context_available: true,
                 replay_allowed: true,
                 replay_block_reason: null,
                 replay_draft: "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
                 retry_from_step_draft: "Retry workflow \"web-brief-to-file\" from step \"write_file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+                checkpoint_candidates: [
+                  {
+                    step_id: "web_search",
+                    kind: "branch_from_checkpoint",
+                    status: "succeeded",
+                    resume_supported: true,
+                    resume_draft:
+                      "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\", _seraph_resume_from_step=\"web_search\".",
+                  },
+                  {
+                    step_id: "write_file",
+                    kind: "retry_failed_step",
+                    status: "degraded",
+                    resume_supported: true,
+                    resume_draft:
+                      "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\", _seraph_resume_from_step=\"write_file\".",
+                  },
+                ],
                 step_records: [
                   {
                     id: "web_search",
@@ -433,7 +488,7 @@ describe("CockpitView", () => {
     expect(screen.getByText("ready · reflect_goal")).toBeInTheDocument();
     expect(screen.getByText("calendar-planning")).toBeInTheDocument();
     expect(screen.getByText("disabled · calendar_events")).toBeInTheDocument();
-    expect(screen.getByText("invocable 1/2 available")).toBeInTheDocument();
+    expect(screen.getByText("invocable 2/3 available")).toBeInTheDocument();
     expect(screen.getByText("approval 0 · blocked 1")).toBeInTheDocument();
     expect(screen.getByText("blocked web-brief-to-file")).toBeInTheDocument();
     expect(screen.getByText("tools write_file")).toBeInTheDocument();
@@ -475,13 +530,15 @@ describe("CockpitView", () => {
     expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
     expect(screen.getByText(/web_search succeeded · 2 web results/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Branch web_search" })).toBeInTheDocument();
     expect(screen.getByText("Use Output")).toBeInTheDocument();
     const runButton = screen.getByRole("button", { name: "Run summarize-file" });
     expect(runButton).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run annotate-image" })).not.toBeInTheDocument();
     fireEvent.click(runButton);
     await waitFor(() =>
       expect(
-        screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/brief.md"\./),
+        screen.getByDisplayValue(/Run workflow "summarize-file" with source_path="notes\/brief.md"\./),
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByText("Dismiss"));
@@ -2283,6 +2340,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
 
     await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });

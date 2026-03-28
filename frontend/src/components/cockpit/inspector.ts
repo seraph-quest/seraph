@@ -101,6 +101,7 @@ export interface WorkflowRunRecord {
   branchDepth?: number | null;
   isBranchRun?: boolean;
   retryFromStepDraft?: string | null;
+  checkpointContextAvailable?: boolean;
   checkpointCandidates?: Array<Record<string, unknown>>;
   resumePlan?: Record<string, unknown> | null;
   timeline?: WorkflowTimelineEntry[];

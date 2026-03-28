@@ -8,7 +8,12 @@ import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
-import { buildWorkflowDraft, type WorkflowInfo } from "../settings/workflowDraft";
+import {
+  buildWorkflowDraft,
+  workflowAcceptsArtifact,
+  workflowArtifactInputs,
+  type WorkflowInfo,
+} from "../settings/workflowDraft";
 import { useDragResize } from "../../hooks/useDragResize";
 import { ResizeHandles } from "../ResizeHandles";
 import {
@@ -1358,12 +1363,45 @@ function workflowResumeDetails(workflow: WorkflowRunRecord): string[] {
   if (workflow.runIdentity) details.push(`run ${shortIdentifier(workflow.runIdentity)}`);
   if (workflow.branchKind) details.push(workflow.branchKind.replace(/_/g, " "));
   if (typeof workflow.branchDepth === "number" && workflow.branchDepth > 0) details.push(`depth ${workflow.branchDepth}`);
+  if (workflow.parentRunIdentity) details.push(`parent ${shortIdentifier(workflow.parentRunIdentity)}`);
+  if (
+    workflow.rootRunIdentity
+    && workflow.rootRunIdentity !== workflow.runIdentity
+  ) {
+    details.push(`root ${shortIdentifier(workflow.rootRunIdentity)}`);
+  }
   if (workflow.runFingerprint) details.push(`fingerprint ${shortIdentifier(workflow.runFingerprint)}`);
   if (workflow.resumeCheckpointLabel) details.push(`checkpoint ${workflow.resumeCheckpointLabel}`);
   if (workflow.resumeFromStep) details.push(`resume ${workflow.resumeFromStep}`);
+  if (workflow.checkpointContextAvailable === true) details.push("checkpoint state ready");
+  if (workflow.checkpointContextAvailable === false && workflow.continuedErrorSteps.length > 0) {
+    details.push("checkpoint state missing");
+  }
   if (workflow.threadContinueMessage) details.push("thread continue ready");
   if (workflow.approvalRecoveryMessage) details.push("approval recovery ready");
   return details;
+}
+
+function workflowCheckpointActions(
+  workflow: WorkflowRunRecord,
+): Array<{ stepId: string; draft: string; label: string }> {
+  if (!Array.isArray(workflow.checkpointCandidates)) {
+    return [];
+  }
+  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string }>>((actions, candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return actions;
+    const record = candidate as Record<string, unknown>;
+    const stepId = typeof record.step_id === "string" ? record.step_id : "";
+    const draft = typeof record.resume_draft === "string" ? record.resume_draft : "";
+    if (!stepId || !draft) return actions;
+    const kind = typeof record.kind === "string" ? record.kind : "branch_from_checkpoint";
+    actions.push({
+      stepId,
+      draft,
+      label: kind === "retry_failed_step" ? `Retry ${stepId}` : `Branch ${stepId}`,
+    });
+    return actions;
+  }, []);
 }
 
 const RUNBOOK_MACROS_KEY = "seraph_operator_runbook_macros";
@@ -1554,6 +1592,10 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     isBranchRun: typeof value.is_branch_run === "boolean" ? value.is_branch_run : undefined,
     retryFromStepDraft:
       typeof value.retry_from_step_draft === "string" ? value.retry_from_step_draft : null,
+    checkpointContextAvailable:
+      typeof value.checkpoint_context_available === "boolean"
+        ? value.checkpoint_context_available
+        : undefined,
     checkpointCandidates: Array.isArray(value.checkpoint_candidates)
       ? value.checkpoint_candidates.filter(
           (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
@@ -1607,6 +1649,9 @@ function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
   }
   if (workflow.acceptsSecretRefs) {
     warnings.push("This workflow can cross secret-reference injection boundaries.");
+  }
+  if (workflow.checkpointContextAvailable === false && workflow.continuedErrorSteps.length > 0) {
+    warnings.push("Checkpoint state was not persisted for the failed step, so only a full rerun is available.");
   }
   return [base, ...warnings].join("\n");
 }
@@ -2070,7 +2115,7 @@ function normalizeActivityLedgerEntry(raw: Record<string, unknown>): ActivityLed
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
-  return Object.prototype.hasOwnProperty.call(workflow.inputs, "file_path");
+  return workflowArtifactInputs(workflow).length > 0;
 }
 
 const COCKPIT_GLOBAL_HINTS = [
@@ -2627,6 +2672,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ),
     [workflows],
   );
+  const workflowDefinitionByName = useMemo(
+    () => new Map(workflows.map((workflow) => [workflow.name, workflow])),
+    [workflows],
+  );
+  function compatibleArtifactWorkflows(
+    artifactPath: string,
+    producedArtifactTypes?: string[],
+  ): WorkflowInfo[] {
+    return artifactRoundtripWorkflows.filter((workflow) =>
+      workflowAcceptsArtifact(workflow, artifactPath, producedArtifactTypes),
+    );
+  }
   const availableWorkflows = useMemo(
     () => workflows.filter((workflow) => workflow.is_available !== false),
     [workflows],
@@ -4134,8 +4191,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
-  function queueArtifactWorkflowDraft(workflow: WorkflowInfo, artifactPath: string) {
-    queueComposerDraft(buildWorkflowDraft(workflow, artifactPath));
+  function queueArtifactWorkflowDraft(
+    workflow: WorkflowInfo,
+    artifactPath: string,
+    producedArtifactTypes?: string[],
+  ) {
+    queueComposerDraft(buildWorkflowDraft(workflow, artifactPath, producedArtifactTypes));
   }
 
   async function reloadOperatorSurface(path: "skills" | "workflows") {
@@ -4747,12 +4808,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: workflow.status,
         run_fingerprint: workflow.runFingerprint ?? "n/a",
         run_identity: workflow.runIdentity ?? "n/a",
+        parent_run_identity: workflow.parentRunIdentity ?? "none",
+        root_run_identity: workflow.rootRunIdentity ?? "n/a",
+        branch_kind: workflow.branchKind ?? "none",
+        branch_depth: workflow.branchDepth ?? 0,
         risk_level: workflow.riskLevel ?? "unknown",
         execution_boundaries: workflow.executionBoundaries ?? [],
         accepts_secret_refs: workflow.acceptsSecretRefs ?? false,
         step_tools: workflow.stepTools,
         step_records: workflow.stepRecords ?? [],
         continued_error_steps: workflow.continuedErrorSteps,
+        checkpoint_context_available: workflow.checkpointContextAvailable ?? false,
         artifact_paths: workflow.artifactPaths,
         pending_approval: approval ? approval.id : "none",
         pending_approval_count: workflow.pendingApprovalCount ?? 0,
@@ -4840,19 +4906,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     ? "Draft Boundary-Aware Rerun"
                     : "Draft Rerun"}
                 </button>
-                {selectedInspector.workflow.retryFromStepDraft && (
-                  <button
-                    className="cockpit-feedback-button"
-                    onClick={() =>
-                      queueComposerDraft(
-                        selectedInspector.workflow.retryFromStepDraft
-                        ?? buildWorkflowReplayDraft(selectedInspector.workflow),
-                      )
-                    }
-                  >
-                    Retry From Step
-                  </button>
-                )}
+                {(() => {
+                  const checkpointActions = workflowCheckpointActions(selectedInspector.workflow).slice(0, 2);
+                  if (checkpointActions.length > 0) {
+                    return checkpointActions.map((action) => (
+                      <button
+                        key={`${selectedInspector.workflow.id}:${action.stepId}`}
+                        className="cockpit-feedback-button"
+                        onClick={() => queueComposerDraft(action.draft)}
+                      >
+                        {action.label}
+                      </button>
+                    ));
+                  }
+                  if (!selectedInspector.workflow.retryFromStepDraft) {
+                    return null;
+                  }
+                  return (
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() =>
+                        queueComposerDraft(
+                          selectedInspector.workflow.retryFromStepDraft
+                          ?? buildWorkflowReplayDraft(selectedInspector.workflow),
+                        )
+                      }
+                    >
+                      Retry From Step
+                    </button>
+                  );
+                })()}
                 {studioEntryForWorkflowRun(selectedInspector.workflow) && (
                   <button
                     className="cockpit-feedback-button"
@@ -4867,6 +4950,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 Replay blocked: {replayBlockCopy(selectedInspector.workflow.replayBlockReason)}
               </span>
             )}
+            {(() => {
+              const attachedApproval = approvalForWorkflow(selectedInspector.workflow);
+              if (!attachedApproval) return null;
+              return (
+                <>
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => void handleApprovalDecision(attachedApproval, "approve")}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => void handleApprovalDecision(attachedApproval, "deny")}
+                  >
+                    Deny
+                  </button>
+                </>
+              );
+            })()}
             {selectedInspector.workflow.threadId && (
               <button
                 className="cockpit-feedback-button"
@@ -4883,12 +4986,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     `Use the workspace file "${selectedInspector.workflow.artifactPaths[0]}" as context for the next action.`,
                   )
                 }
-                >
-                  Use Output
-                </button>
-              )}
+              >
+                Use Output
+              </button>
+            )}
               {selectedInspector.workflow.artifactPaths[0]
-                && artifactRoundtripWorkflows.slice(0, 2).map((workflow) => (
+                && compatibleArtifactWorkflows(
+                  selectedInspector.workflow.artifactPaths[0]!,
+                  workflowDefinitionByName.get(selectedInspector.workflow.workflowName)?.output_surface_artifact_types,
+                ).slice(0, 2).map((workflow) => (
                   <button
                     key={`${selectedInspector.workflow.id}:${workflow.name}`}
                     className="cockpit-feedback-button"
@@ -4896,6 +5002,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       queueArtifactWorkflowDraft(
                         workflow,
                         selectedInspector.workflow.artifactPaths[0]!,
+                        workflowDefinitionByName.get(selectedInspector.workflow.workflowName)?.output_surface_artifact_types,
                       )
                     }
                   >
@@ -4905,6 +5012,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             {selectedInspector.workflow.approvalRecoveryMessage && (
               <span className="cockpit-feedback-status">
                 {selectedInspector.workflow.approvalRecoveryMessage}
+              </span>
+            )}
+            {selectedInspector.workflow.continuedErrorSteps.length > 0
+              && selectedInspector.workflow.checkpointContextAvailable === false && (
+              <span className="cockpit-feedback-status">
+                Checkpoint state was not persisted for this failure. Only a full rerun is currently safe.
               </span>
             )}
           </div>
@@ -5014,7 +5127,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               >
                 Use In Command Bar
               </button>
-            {artifactRoundtripWorkflows.slice(0, 2).map((workflow) => (
+            {compatibleArtifactWorkflows(selectedInspector.artifact.filePath).slice(0, 2).map((workflow) => (
               <button
                 key={`${selectedInspector.artifact.id}:${workflow.name}`}
                 className="cockpit-feedback-button"
@@ -5782,6 +5895,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           >
                             Continue
                           </button>
+                        )}
+                        {approval && (
+                          <>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => void handleApprovalDecision(approval, "approve")}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => void handleApprovalDecision(approval, "deny")}
+                            >
+                              Deny
+                            </button>
+                          </>
                         )}
                         {(workflow.threadId || workflow.sessionId) && (
                           <button

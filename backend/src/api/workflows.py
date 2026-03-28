@@ -372,14 +372,22 @@ def _workflow_run_approval_key(run: dict[str, Any]) -> str:
     )
 
 
-def _workflow_replay_draft(workflow_name: str, arguments: dict[str, Any] | None) -> str:
-    if not arguments:
+def _workflow_replay_draft(
+    workflow_name: str,
+    arguments: dict[str, Any] | None,
+    *,
+    control_inputs: dict[str, Any] | None = None,
+) -> str:
+    serialized_items: list[str] = []
+    for key, value in (arguments or {}).items():
+        serialized_items.append(f"{key}={json.dumps(value, ensure_ascii=False)}")
+    for key, value in (control_inputs or {}).items():
+        if value is None:
+            continue
+        serialized_items.append(f"{key}={json.dumps(value, ensure_ascii=False)}")
+    if not serialized_items:
         return f'Run workflow "{workflow_name}".'
-    rendered = ", ".join(
-        f"{key}={json.dumps(value, ensure_ascii=False)}"
-        for key, value in arguments.items()
-    )
-    return f'Run workflow "{workflow_name}" with {rendered}.'
+    return f'Run workflow "{workflow_name}" with {", ".join(serialized_items)}.'
 
 
 def _workflow_retry_from_step_draft(
@@ -387,10 +395,25 @@ def _workflow_retry_from_step_draft(
     *,
     step_id: str,
     arguments: dict[str, Any] | None,
+    parent_run_identity: str | None = None,
+    root_run_identity: str | None = None,
+    branch_kind: str = "retry_failed_step",
+    branch_depth: int | None = None,
 ) -> str:
-    return (
-        f"{_workflow_replay_draft(workflow_name, arguments).rstrip('.')} "
-        f"Resume from step \"{step_id}\"."
+    control_inputs: dict[str, Any] = {
+        "_seraph_resume_from_step": step_id,
+        "_seraph_branch_kind": branch_kind,
+    }
+    if parent_run_identity:
+        control_inputs["_seraph_parent_run_identity"] = parent_run_identity
+    if root_run_identity:
+        control_inputs["_seraph_root_run_identity"] = root_run_identity
+    if isinstance(branch_depth, int):
+        control_inputs["_seraph_branch_depth"] = branch_depth
+    return _workflow_replay_draft(
+        workflow_name,
+        arguments,
+        control_inputs=control_inputs,
     )
 
 
@@ -435,6 +458,16 @@ def _workflow_checkpoint_candidates(
     workflow_name = str(run["workflow_name"])
     arguments = run.get("arguments")
     continued_error_steps = set(str(step_id) for step_id in run.get("continued_error_steps", []))
+    root_run_identity = (
+        str(run.get("root_run_identity"))
+        if isinstance(run.get("root_run_identity"), str) and str(run.get("root_run_identity")).strip()
+        else str(run.get("run_identity") or "")
+    )
+    next_branch_depth = (
+        int(run.get("branch_depth")) + 1
+        if isinstance(run.get("branch_depth"), int) and int(run.get("branch_depth")) >= 0
+        else (1 if run.get("run_identity") else 0)
+    )
     candidates: list[dict[str, Any]] = []
     if approvals:
         candidates.append({
@@ -450,7 +483,7 @@ def _workflow_checkpoint_candidates(
                 else None
             ),
         })
-    for step in run.get("step_records", []) or []:
+    for index, step in enumerate(run.get("step_records", []) or []):
         if not isinstance(step, dict):
             continue
         step_id = str(step.get("id") or "").strip()
@@ -459,18 +492,28 @@ def _workflow_checkpoint_candidates(
         step_tool = str(step.get("tool") or "tool")
         step_status = str(step.get("status") or "unknown")
         is_failed = step_id in continued_error_steps or step_status in {"failed", "continued_error"}
+        resume_supported = bool(run.get("checkpoint_context_available")) or index == 0
         candidates.append({
             "step_id": step_id,
             "label": f"{step_id} ({step_tool})",
             "kind": "retry_failed_step" if is_failed else "branch_from_checkpoint",
             "status": step_status,
             "step_tool": step_tool,
-            "resume_draft": _workflow_retry_from_step_draft(
-                workflow_name,
-                step_id=step_id,
-                arguments=arguments,
+            "resume_draft": (
+                _workflow_retry_from_step_draft(
+                    workflow_name,
+                    step_id=step_id,
+                    arguments=arguments,
+                    parent_run_identity=str(run.get("run_identity") or "") or None,
+                    root_run_identity=root_run_identity or None,
+                    branch_kind="retry_failed_step" if is_failed else "branch_from_checkpoint",
+                    branch_depth=next_branch_depth,
+                )
+                if resume_supported
+                else None
             ),
             "continue_message": None,
+            "resume_supported": resume_supported,
         })
     return candidates
 
@@ -505,6 +548,19 @@ def _resolve_resume_step_id(
     if run.get("resume_from_step"):
         normalized = str(run["resume_from_step"])
         if normalized in candidate_ids:
+            selected_checkpoint = next(
+                (
+                    checkpoint for checkpoint in checkpoint_candidates
+                    if str(checkpoint.get("step_id") or "") == normalized
+                ),
+                None,
+            )
+            if (
+                normalized != "approval_gate"
+                and isinstance(selected_checkpoint, dict)
+                and selected_checkpoint.get("resume_supported") is False
+            ):
+                return None
             return normalized
     return None
 
@@ -528,6 +584,19 @@ def _workflow_resume_plan(
         ),
         None,
     )
+    if (
+        isinstance(selected_checkpoint, dict)
+        and resume_step_id is not None
+        and resume_step_id != "approval_gate"
+        and selected_checkpoint.get("resume_supported") is False
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Workflow run '{run['run_identity']}' cannot branch from checkpoint "
+                f"'{resume_step_id}' because the parent run did not persist reusable checkpoint state"
+            ),
+        )
     branch_kind = str(run.get("branch_kind") or "replay_from_start")
     if resume_step_id == "approval_gate":
         branch_kind = "approval_resume"
@@ -999,6 +1068,10 @@ async def _list_workflow_runs(
                 if isinstance(details.get("canvas_output"), dict)
                 else run.get("canvas_output")
             ),
+            "checkpoint_context_available": bool(
+                details.get("checkpoint_context_available")
+                or isinstance(details.get("checkpoint_context"), dict)
+            ),
             "approval_context": effective_approval_context,
             "recorded_approval_context": recorded_approval_context,
             "current_approval_context": current_approval_context,
@@ -1070,8 +1143,21 @@ async def _list_workflow_runs(
                 str(run["workflow_name"]),
                 step_id=str(run["continued_error_steps"][0]),
                 arguments=run.get("arguments"),
+                parent_run_identity=run_identity,
+                root_run_identity=str(lineage.get("root_run_identity") or run_identity),
+                branch_kind="retry_failed_step",
+                branch_depth=int(lineage.get("branch_depth") or 0) + 1,
             )
-            if replay_allowed and run.get("continued_error_steps")
+            if replay_allowed
+            and run.get("continued_error_steps")
+            and (
+                bool(run.get("checkpoint_context_available"))
+                or (
+                    isinstance(run.get("step_records"), list)
+                    and run.get("step_records")
+                    and str(run["continued_error_steps"][0]) == str(run["step_records"][0].get("id") or "")
+                )
+            )
             else None
         )
         run.update({
@@ -1159,6 +1245,7 @@ async def _list_workflow_runs(
                 "recorded_approval_context": recorded_approval_context,
                 "current_approval_context": current_approval_context,
                 "approval_context_mismatch": approval_context_mismatch,
+                "checkpoint_context_available": bool(run.get("checkpoint_context_available")),
                 "risk_level": (
                     str(effective_approval_context.get("risk_level"))
                     if effective_approval_context is not None
@@ -1245,8 +1332,21 @@ async def _list_workflow_runs(
                         str(run["workflow_name"]),
                         step_id=str(run["continued_error_steps"][0]),
                         arguments=run.get("arguments"),
+                        parent_run_identity=run_identity,
+                        root_run_identity=str(lineage.get("root_run_identity") or run_identity),
+                        branch_kind="retry_failed_step",
+                        branch_depth=int(lineage.get("branch_depth") or 0) + 1,
                     )
-                    if replay_allowed and run.get("continued_error_steps")
+                    if replay_allowed
+                    and run.get("continued_error_steps")
+                    and (
+                        bool(run.get("checkpoint_context_available"))
+                        or (
+                            isinstance(run.get("step_records"), list)
+                            and run.get("step_records")
+                            and str(run["continued_error_steps"][0]) == str(run["step_records"][0].get("id") or "")
+                        )
+                    )
                     else None
                 ),
                 "resume_checkpoint_label": _resume_checkpoint_label(

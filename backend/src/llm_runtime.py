@@ -698,6 +698,53 @@ def _tier_within_guardrail(actual: str | None, maximum: str | None) -> bool:
     return _GUARDRAIL_TIERS[actual] <= _GUARDRAIL_TIERS[maximum]
 
 
+def _tier_rank(actual: str | None) -> int | None:
+    if actual is None:
+        return None
+    return _GUARDRAIL_TIERS.get(actual)
+
+
+def _budget_headroom(actual: str | None, maximum: str | None) -> int | None:
+    actual_rank = _tier_rank(actual)
+    maximum_rank = _tier_rank(maximum)
+    if actual_rank is None or maximum_rank is None:
+        return None
+    return maximum_rank - actual_rank
+
+
+def _budget_steering_mode(
+    *,
+    policy_intents: list[str],
+    max_budget_class: str | None,
+) -> str:
+    if "cheap" in policy_intents:
+        return "prefer_lower_budget"
+    if max_budget_class in {"low", "medium"}:
+        return "preserve_budget_headroom"
+    if max_budget_class is not None:
+        return "stay_within_guardrail"
+    return "none"
+
+
+def _budget_preference_score(
+    *,
+    budget_class: str | None,
+    max_budget_class: str | None,
+    steering_mode: str,
+) -> float:
+    budget_rank = _tier_rank(budget_class)
+    if budget_rank is None:
+        return 0.0
+    if steering_mode == "prefer_lower_budget":
+        return float(len(_GUARDRAIL_TIERS) - 1 - budget_rank)
+    if steering_mode == "preserve_budget_headroom":
+        headroom = _budget_headroom(budget_class, max_budget_class)
+        return float(headroom) if headroom is not None else 0.0
+    if steering_mode == "stay_within_guardrail" and _tier_within_guardrail(budget_class, max_budget_class):
+        return 0.5
+    return 0.0
+
+
 def _target_policy_assessment(
     *,
     model_id: str,
@@ -761,6 +808,11 @@ def _order_targets_by_policy(
 ) -> list[dict[str, Any]]:
     intents = runtime_policy_intents(runtime_path)
     score_weights = runtime_policy_scores(runtime_path)
+    max_budget_class = runtime_max_budget_class(runtime_path)
+    budget_steering_mode = _budget_steering_mode(
+        policy_intents=intents,
+        max_budget_class=max_budget_class,
+    )
     annotated_targets: list[tuple[int, dict[str, Any]]] = []
     any_compliant = False
     for index, target in enumerate(targets):
@@ -771,6 +823,16 @@ def _order_targets_by_policy(
             runtime_path=runtime_path,
         )
         annotated_target["policy_assessment"] = assessment
+        annotated_target["budget_steering_mode"] = budget_steering_mode
+        annotated_target["budget_headroom"] = _budget_headroom(
+            assessment["budget_class"],
+            assessment["max_budget_class"],
+        )
+        annotated_target["budget_preference_score"] = _budget_preference_score(
+            budget_class=assessment["budget_class"],
+            max_budget_class=assessment["max_budget_class"],
+            steering_mode=budget_steering_mode,
+        )
         if assessment["policy_compliant"]:
             any_compliant = True
         annotated_targets.append((index, annotated_target))
@@ -788,7 +850,7 @@ def _order_targets_by_policy(
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], float, int]:
         index, target = item
         assessment = target["policy_assessment"]
         capabilities = set(
@@ -822,7 +884,14 @@ def _order_targets_by_policy(
                 safeguard_penalty += 1
             if not assessment["within_budget_guardrail"]:
                 safeguard_penalty += 1
-        return (compliance_penalty, safeguard_penalty, -local_score - capability_score, capability_priority, index)
+        return (
+            compliance_penalty,
+            safeguard_penalty,
+            -local_score - capability_score,
+            capability_priority,
+            -float(target.get("budget_preference_score", 0.0)),
+            index,
+        )
 
     return [
         target
@@ -985,6 +1054,10 @@ def _build_routing_decision_details(
     max_latency_tier = runtime_max_latency_tier(runtime_path)
     required_task_class = runtime_task_class(runtime_path)
     max_budget_class = runtime_max_budget_class(runtime_path)
+    budget_steering_mode = _budget_steering_mode(
+        policy_intents=policy_intents,
+        max_budget_class=max_budget_class,
+    )
     primary_unhealthy = not _is_target_healthy(
         model_id=primary_model,
         api_base=primary_api_base,
@@ -1027,6 +1100,20 @@ def _build_routing_decision_details(
         else:
             decision = "deferred"
 
+        budget_headroom = target.get("budget_headroom")
+        budget_preference_score = float(target.get("budget_preference_score", 0.0))
+        policy_score = _policy_score(
+            model_id=str(target["model_id"]),
+            profile=target.get("profile"),
+            policy_intents=policy_intents,
+            policy_scores=policy_scores,
+        )
+        simulation_score = policy_score + budget_preference_score
+        if compliant_targets_present and not assessment["policy_compliant"]:
+            simulation_score -= 100.0 + len(assessment["missing_required_intents"])
+        if not healthy:
+            simulation_score -= 10.0
+
         candidate_targets.append(
             {
                 "model_id": str(target["model_id"]),
@@ -1053,12 +1140,11 @@ def _build_routing_decision_details(
                 "max_budget_class": assessment["max_budget_class"],
                 "within_budget_guardrail": assessment["within_budget_guardrail"],
                 "policy_compliant": assessment["policy_compliant"],
-                "policy_score": _policy_score(
-                    model_id=str(target["model_id"]),
-                    profile=target.get("profile"),
-                    policy_intents=policy_intents,
-                    policy_scores=policy_scores,
-                ),
+                "policy_score": policy_score,
+                "budget_steering_mode": budget_steering_mode,
+                "budget_headroom": budget_headroom,
+                "budget_preference_score": budget_preference_score,
+                "simulation_score": simulation_score,
                 "reason_codes": _candidate_reason_codes(
                     source=target["source"],
                     decision=decision,
@@ -1071,6 +1157,48 @@ def _build_routing_decision_details(
                     within_budget_guardrail=assessment["within_budget_guardrail"],
                     guardrail_fallback_only=not compliant_targets_present and not assessment["policy_compliant"],
                 ),
+            }
+        )
+
+    attemptable_candidate_targets = [
+        target
+        for target in candidate_targets
+        if target["policy_compliant"] or not compliant_targets_present
+    ]
+    simulated_routes: list[dict[str, Any]] = []
+    for route_rank, candidate in enumerate(candidate_targets, start=1):
+        attempt_order: list[str] = []
+        if any(
+            attemptable["model_id"] == candidate["model_id"]
+            and attemptable.get("profile") == candidate.get("profile")
+            and attemptable["source"] == candidate["source"]
+            for attemptable in attemptable_candidate_targets
+        ):
+            attempt_order = [candidate["model_id"]] + [
+                other["model_id"]
+                for other in attemptable_candidate_targets
+                if not (
+                    other["model_id"] == candidate["model_id"]
+                    and other.get("profile") == candidate.get("profile")
+                    and other["source"] == candidate["source"]
+                )
+            ]
+        simulated_routes.append(
+            {
+                "rank": route_rank,
+                "entry_model": candidate["model_id"],
+                "entry_profile": candidate.get("profile"),
+                "entry_source": candidate["source"],
+                "healthy_entry_target": candidate["healthy"],
+                "policy_compliant_entry_target": candidate["policy_compliant"],
+                "policy_score": candidate["policy_score"],
+                "budget_steering_mode": candidate["budget_steering_mode"],
+                "budget_headroom": candidate["budget_headroom"],
+                "budget_preference_score": candidate["budget_preference_score"],
+                "route_score": candidate["simulation_score"],
+                "attempt_order": attempt_order,
+                "selected": candidate["decision"] == "selected",
+                "reason_codes": candidate["reason_codes"],
             }
         )
 
@@ -1105,18 +1233,23 @@ def _build_routing_decision_details(
         "max_latency_tier": max_latency_tier,
         "required_task_class": required_task_class,
         "max_budget_class": max_budget_class,
+        "budget_steering_mode": budget_steering_mode,
         "primary_model": primary_model,
         "selected_model": str(selected_target["model_id"]),
         "selected_profile": selected_target.get("profile"),
         "selected_source": selected_target["source"],
         "selected_reason_codes": selected_candidate["reason_codes"],
         "selected_policy_score": selected_candidate["policy_score"],
+        "selected_budget_headroom": selected_candidate["budget_headroom"],
+        "selected_budget_preference_score": selected_candidate["budget_preference_score"],
+        "selected_route_score": selected_candidate["simulation_score"],
         "attempt_order": attempt_order,
         "reroute_cause": reroute_cause,
         "rerouted_from_unhealthy_primary": rerouted and primary_unhealthy,
         "rerouted_from_policy_guardrails": rerouted_due_to_policy,
         "guardrail_compliant_targets_present": compliant_targets_present,
         "candidate_targets": candidate_targets,
+        "simulated_routes": simulated_routes,
         "rejected_targets": rejected_targets,
         "rejected_target_count": len(rejected_targets),
     }

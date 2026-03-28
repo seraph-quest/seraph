@@ -1705,6 +1705,137 @@ def test_completion_with_fallback_reroutes_to_guardrail_compliant_target(async_d
     assert primary_candidate["decision"] == "skipped"
 
 
+def test_completion_with_fallback_prefers_lower_budget_compliant_route_on_score_tie(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="budget-steered path"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                "openai/gpt-4o-mini=tool_use|fast;"
+                "openai/gpt-4.1-nano=tool_use|fast"
+            ),
+        ),
+        patch.object(
+            settings,
+            "provider_budget_classes",
+            (
+                "openrouter/anthropic/claude-sonnet-4=high;"
+                "openai/gpt-4o-mini=medium;"
+                "openai/gpt-4.1-nano=low"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast"),
+        patch.object(settings, "runtime_policy_requirements", "session_title_generation=tool_use"),
+        patch.object(settings, "runtime_policy_scores", "session_title_generation=fast:1"),
+        patch.object(settings, "runtime_max_budget_class", "session_title_generation=medium"),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick the lower-budget compliant route"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openai/gpt-4.1-nano",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4.1-nano"
+    assert details["budget_steering_mode"] == "preserve_budget_headroom"
+    assert details["selected_budget_headroom"] == 1
+    assert details["selected_budget_preference_score"] == 1.0
+    assert details["selected_route_score"] == 2.0
+    assert details["attempt_order"] == [
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4o-mini",
+    ]
+    assert details["simulated_routes"][0]["entry_model"] == "openai/gpt-4.1-nano"
+    assert details["simulated_routes"][0]["selected"] is True
+    assert details["simulated_routes"][1]["entry_model"] == "openai/gpt-4o-mini"
+    assert details["simulated_routes"][1]["route_score"] == 1.0
+
+
+def test_completion_with_fallback_keeps_intent_match_ahead_of_budget_steering(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="intent-first path"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                "openai/gpt-4o-mini=fast;"
+                "openai/gpt-4.1-nano=tool_use"
+            ),
+        ),
+        patch.object(
+            settings,
+            "provider_budget_classes",
+            (
+                "openrouter/anthropic/claude-sonnet-4=high;"
+                "openai/gpt-4o-mini=medium;"
+                "openai/gpt-4.1-nano=low"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast"),
+        patch.object(settings, "runtime_max_budget_class", "session_title_generation=medium"),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "prefer the fast route, not just the cheapest one"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openai/gpt-4o-mini",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4o-mini"
+    assert details["budget_steering_mode"] == "preserve_budget_headroom"
+    assert details["attempt_order"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
+    ]
+    assert details["simulated_routes"][0]["entry_model"] == "openai/gpt-4o-mini"
+    assert details["simulated_routes"][0]["selected"] is True
+    assert details["simulated_routes"][1]["entry_model"] == "openai/gpt-4.1-nano"
+    assert details["simulated_routes"][1]["selected"] is False
+
+
 def test_completion_with_fallback_degrades_open_when_no_guardrail_compliant_target(async_db):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="degrade-open path"))]

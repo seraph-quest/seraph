@@ -478,6 +478,9 @@ async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_fam
                             "runtime_path": "chat_agent",
                             "selected_source": "primary",
                             "max_budget_class": "medium",
+                            "budget_steering_mode": "prefer_lower_budget",
+                            "selected_route_score": 9.5,
+                            "selected_budget_preference_score": 1.0,
                         },
                     },
                     {
@@ -578,6 +581,8 @@ async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_fam
     ]
     assert by_request["agent-ws:session-1:chat"]["capability_family"] == "conversation"
     assert by_request["agent-ws:session-1:chat"]["max_budget_class"] == "medium"
+    assert by_request["agent-ws:session-1:chat"]["budget_steering_mode"] == "prefer_lower_budget"
+    assert by_request["agent-ws:session-1:chat"]["selected_route_score"] == 9.5
     assert by_request["agent-ws:session-1:browser"]["capability_family"] == "browser"
     assert by_request["agent-ws:session-1:browser"]["selected_source"] == "browser_provider"
 

@@ -850,7 +850,7 @@ def _order_targets_by_policy(
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], float, int]:
         index, target = item
         assessment = target["policy_assessment"]
         capabilities = set(
@@ -888,8 +888,8 @@ def _order_targets_by_policy(
             compliance_penalty,
             safeguard_penalty,
             -local_score - capability_score,
-            -float(target.get("budget_preference_score", 0.0)),
             capability_priority,
+            -float(target.get("budget_preference_score", 0.0)),
             index,
         )
 

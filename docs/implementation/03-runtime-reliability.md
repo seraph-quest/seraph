@@ -86,6 +86,10 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
   - the first activity-ledger patch still dropped the new routing fields because `_request_metadata_value(...)` only passed through non-empty strings and the final `llm_call` metadata projection copied only a narrower legacy subset of routing metadata
   - that meant `budget_steering_mode` and numeric route scores were present in runtime audit events but silently disappeared from the Activity Ledger projection
   - fixed by teaching `_request_metadata_value(...)` to preserve numeric routing metadata and widening the `llm_call` projection to carry the new budget-steering and route-score fields
+- PR review follow-up fixed on the same batch branch:
+  - the first route-planning sort key let budget steering outrank plain intent matching when `runtime_policy_scores` was unset, because budget preference was applied before `capability_priority`
+  - that could route a lower-budget but less-capable model ahead of the target that actually matched the requested runtime intents
+  - fixed by restoring capability-priority ordering ahead of budget steering and adding a regression test that pins intent-first behavior when budget steering is active without explicit runtime score weights
 - validation:
   - `python3 -m py_compile backend/src/llm_runtime.py backend/src/api/activity.py backend/src/api/operator.py backend/src/evals/harness.py backend/tests/test_llm_runtime.py backend/tests/test_activity_api.py backend/tests/test_operator_api.py backend/tests/test_eval_harness.py`
   - `cd backend && .venv/bin/python -m pytest tests/test_llm_runtime.py tests/test_activity_api.py tests/test_operator_api.py tests/test_eval_harness.py -q`

@@ -2828,6 +2828,174 @@ describe("CockpitView", () => {
     expect(within(studio).getByText("Resume a review workflow")).toBeInTheDocument();
   }, 15000);
 
+  it("surfaces workflow branch families and can continue the latest branch", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [{
+            name: "resume-review",
+            tool_name: "workflow_resume_review",
+            description: "Resume a review workflow",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "defaults/workflows/resume-review.md",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "never",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: [],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "replay_from_start",
+              branch_depth: 0,
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:00:00Z", summary: "Workflow started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:05:00Z", summary: "root review workflow completed" },
+              ],
+            },
+            {
+              id: "run-child",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-20T09:06:00Z",
+              updated_at: "2026-03-20T09:08:00Z",
+              summary: "branch review needs continuation",
+              step_tools: ["read_file"],
+              artifact_paths: [],
+              continued_error_steps: ["review_checkpoint"],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-child-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "review_checkpoint",
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              thread_continue_message: "Continue child branch from the review checkpoint.",
+              retry_from_step_draft:
+                'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:06:00Z", summary: "Branch workflow started" },
+                { kind: "workflow_degraded", at: "2026-03-20T09:08:00Z", summary: "branch review needs continuation" },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const rootSummary = await screen.findByText("root review workflow completed");
+    const rootRow = rootSummary.closest(".cockpit-row");
+    expect(rootRow).not.toBeNull();
+    expect(within(rootRow as HTMLElement).getByText(/supervision branched/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/1 child branch/i)).toBeInTheDocument();
+
+    fireEvent.click(rootSummary);
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Open Latest Branch" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue Latest Branch" })).toBeInTheDocument();
+    expect(within(inspector).getByText("child branch")).toBeInTheDocument();
+    expect(within(inspector).getByText(/recovery ready/i)).toBeInTheDocument();
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue child branch from the review checkpoint.")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Open Latest Branch" }));
+    await waitFor(() =>
+      expect((inspector.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("branch review needs continuation"),
+    );
+    expect(within(inspector).getByRole("button", { name: "Open Parent" })).toBeInTheDocument();
+    expect(within(inspector).getByText("parent run")).toBeInTheDocument();
+  });
+
   it("lets operators edit MCP config from the extension studio", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

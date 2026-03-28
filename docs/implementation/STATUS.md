@@ -22,7 +22,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian workspace, not a village-first shell.
 - [x] The guardian workspace is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
-- [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, typed artifact-to-workflow handoff, truthful checkpoint branch control, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
+- [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, typed artifact-to-workflow handoff, truthful checkpoint branch control, branch-family supervision with latest-branch continue/open-parent controls, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
 - [x] The capability import program is now complete through all five waves, including Hermes-style runtime primitives, packaged reach surfaces, selective OpenClaw imports, operator-surface visibility, and deterministic proof for the imported capability families.
 - [ ] No workstream is complete yet.
@@ -63,7 +63,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] non-browser presence through a first coherent desktop surface, notifications, native reach, and action-card continuation payloads
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops
 - [x] workflow diagnostics with stored load errors, step timestamps and durations, error summaries, and recovery hints
-- [x] first branch/resume workflow control with checkpoint candidates, lineage metadata, persisted reusable checkpoint state, truthful unsupported-checkpoint fallback, resume drafts based on existing inputs, and safer approval-gated resume plans
+- [x] first branch/resume workflow control with checkpoint candidates, lineage metadata, persisted reusable checkpoint state, truthful unsupported-checkpoint fallback, branch-family supervision in the cockpit, resume drafts based on existing inputs, and safer approval-gated resume plans
 
 ## Shipped On `develop`
 
@@ -107,6 +107,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] workflow history endpoint now also exposes timeline events, replay guardrails, parameterized replay drafts, approval-recovery messaging, pending-approval details, and explicit thread metadata for replay/open-thread control
 - [x] workflow approvals and workflow history now persist approval-context snapshots plus context-aware run fingerprints, so replay/resume and approval reuse fail closed when the privileged workflow surface changes
 - [x] workflow runtime and history now persist reusable checkpoint context for safe branches, record structured failed-step payloads, and surface checkpoint availability truthfully so the runs API stops advertising retry paths the runtime cannot actually resume
+- [x] cockpit workflow supervision now derives parent/peer/child branch families from persisted lineage, so operators can inspect branch families and continue the latest branch directly from the workflow surface instead of reconstructing lineage manually
 - [x] operator timeline API now unifies workflow runs, approvals, notifications, queued insights, recent interventions, and surfaced failures into one threaded live operator feed
 - [x] activity ledger API now projects workflow runs, approvals, guardian events, audit activity, tool steps, and attributed LLM call spend into one separate accountability feed for the browser workspace
 - [x] catalog/install surfaces for skills and MCP servers
@@ -153,6 +154,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] cockpit workflow and artifact inspectors can now draft compatible follow-on workflows directly from existing artifact paths by declared artifact-input type instead of only inserting generic file-context commands
 - [x] cockpit workflow controls now show checkpoint-state visibility plus real branch/retry actions driven by persisted checkpoint candidates instead of generic retry copy
 - [x] workflow rows and inspectors can now carry attached approval decisions directly, so operators can approve, deny, continue, or open the relevant thread from the workflow surface instead of jumping to a separate approval pane first
+- [x] workflow rows and inspectors now also surface branch-family supervision with parent/peer/child run inspection plus latest-branch continue/open-parent actions instead of leaving branch lineage buried in raw metadata
 - [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching, per-layout save, and per-layout reset now define the main cockpit workspace
 - [x] the pane workspace now also supports per-pane close/hide controls, a dedicated Windows menu for visibility and focus, and flatter Godel-style window chrome
 - [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up, continue, and dismiss controls

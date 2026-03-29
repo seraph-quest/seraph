@@ -135,11 +135,11 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] vector memory retrieval and consolidation
 - [x] hierarchical goals and progress APIs
 - [x] explicit guardian-state synthesis for chat, WebSocket, and strategist paths
-- [x] guardian world model now includes active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, continuity threads, and recent execution pressure from degraded workflow/tool outcomes, not only focus, commitments, open loops or pressure, alignment, and receptivity
+- [x] guardian world model now includes active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, continuity threads, recent execution pressure from degraded workflow/tool outcomes, focus provenance, and judgment risks, not only focus, commitments, open loops or pressure, alignment, and receptivity
 - [x] observer salience, confidence, and interruption-cost scoring for observer refresh, guardian state, and proactive policy
 - [x] explicit intervention-policy decisions for proactive delivery, including act / bundle / defer / request-approval / stay-silent classifications
 - [x] persisted guardian intervention outcome tracking plus explicit feedback capture, including notification acknowledgement and feedback API flows
-- [x] evidence-weighted guardian learning that can now arbitrate between live heuristics and durable procedural memory at policy time, prefer direct delivery or reduce interruptions from weighted delivery evidence, strengthen timing/channel/blocked-state lessons from actual routing outcomes, and emit grounded channel, escalation, timing, suppression, and blocked-state guidance back into guardian state and intervention policy while leaving phrasing/cadence/thread neutral until runtime records those variants explicitly
+- [x] evidence-weighted guardian learning that now resolves the strongest live guidance across global, thread, project, and thread-plus-project scopes before arbitrating with durable procedural memory at policy time, can prefer direct delivery or reduce interruptions from weighted delivery evidence, strengthens timing/channel/blocked-state lessons from actual routing outcomes, and emits grounded channel, escalation, timing, suppression, and blocked-state guidance back into guardian state and intervention policy while leaving phrasing/cadence/thread neutral until runtime records those variants explicitly
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to cut through generic high-interruption bundling outside focus mode
 - [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] deterministic guardian behavioral proof that strategist tick can use learned direct/native-delivery bias and still surface the resulting intervention through continuity state
@@ -191,7 +191,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 ### Guardian intelligence
 
 - [ ] stronger learning and feedback loops beyond the current evidence-weighted delivery/channel/timing/blocked-state/suppression layer and first live-versus-durable procedural arbitration pass
-- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer
+- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer plus the first focus-provenance and contradiction-aware confidence pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 
 ### Interface and presence

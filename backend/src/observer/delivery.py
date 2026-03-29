@@ -292,6 +292,8 @@ async def deliver_or_queue(
     learning_signal = GuardianLearningSignal.neutral(intervention_type)
     effective_learning_signal = learning_signal
     learning_signal_source = "heuristic_only"
+    live_learning_scope = "global"
+    live_learning_scope_axes: dict[str, str] = {}
     procedural_lesson_types: tuple[str, ...] = ()
     learning_arbitration_sources: dict[str, str] = {}
     learning_arbitration_reasons: dict[str, str] = {}
@@ -299,10 +301,15 @@ async def deliver_or_queue(
 
     try:
         try:
-            learning_signal = await guardian_feedback_repository.get_learning_signal(
+            live_learning_resolution = await guardian_feedback_repository.resolve_learning_signal(
                 intervention_type=intervention_type,
                 limit=12,
+                session_id=session_id,
+                active_project=ctx.active_project,
             )
+            learning_signal = live_learning_resolution.effective_signal
+            live_learning_scope = live_learning_resolution.dominant_scope
+            live_learning_scope_axes = live_learning_resolution.selected_scopes()
         except Exception:
             logger.debug("Failed to compute guardian learning signal", exc_info=True)
         try:
@@ -363,6 +370,8 @@ async def deliver_or_queue(
             "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
             "learning_signal_source": learning_signal_source,
+            "live_learning_scope": live_learning_scope,
+            "live_learning_scope_axes": live_learning_scope_axes,
             "learning_bias": effective_learning_signal.bias,
             "learning_phrasing_bias": effective_learning_signal.phrasing_bias,
             "learning_cadence_bias": effective_learning_signal.cadence_bias,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from sqlmodel import select
@@ -16,6 +16,7 @@ from src.guardian.learning_evidence import (
     data_quality_score,
     guardian_confidence_score,
     learning_field_for_axis,
+    learning_evidence_weight,
     neutral_axis_evidence,
     ordered_learning_axes,
     recency_score_for_timestamp,
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _WEIGHTED_BIAS_THRESHOLD = 1.25
 _WEIGHTED_BIAS_MARGIN = 0.1
+_SCOPE_WEIGHT_TIE_TOLERANCE = 0.05
 _MEMORY_REFRESH_OUTCOMES = frozenset({"failed", "delivered", "feedback_received"})
 _BIAS_CANDIDATES: dict[str, tuple[str, ...]] = {
     "delivery": ("reduce_interruptions", "prefer_direct_delivery"),
@@ -33,6 +35,12 @@ _BIAS_CANDIDATES: dict[str, tuple[str, ...]] = {
     "timing": ("avoid_focus_windows", "prefer_available_windows"),
     "blocked_state": ("avoid_blocked_state_interruptions", "prefer_async_for_blocked_state"),
     "suppression": ("extend_suppression", "resume_faster"),
+}
+_LIVE_SCOPE_PRIORITY = {
+    "global": 0,
+    "thread": 1,
+    "project": 2,
+    "thread_project": 3,
 }
 
 
@@ -114,10 +122,60 @@ class GuardianLearningSignal:
         )
 
 
+@dataclass(frozen=True)
+class GuardianLearningScopeDecision:
+    axis: str
+    field_name: str
+    selected_scope: str
+    selected_bias: str
+    selected_weight: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class ScopedGuardianLearningResolution:
+    effective_signal: GuardianLearningSignal
+    dominant_scope: str
+    decisions: tuple[GuardianLearningScopeDecision, ...]
+
+    @property
+    def source_label(self) -> str:
+        return "scoped_live_signal" if self.dominant_scope != "global" else "global_live_signal"
+
+    def selected_scopes(self) -> dict[str, str]:
+        return {decision.axis: decision.selected_scope for decision in self.decisions}
+
+    def selected_reasons(self) -> dict[str, str]:
+        return {decision.axis: decision.reason for decision in self.decisions}
+
+
 def _average_score(values: list[float]) -> float:
     if not values:
         return 0.0
     return round(sum(values) / len(values), 3)
+
+
+def _scope_priority(scope: str) -> int:
+    return _LIVE_SCOPE_PRIORITY.get(scope, -1)
+
+
+def _scope_filters(
+    *,
+    scope: str,
+    session_id: str | None,
+    active_project: str | None,
+) -> dict[str, str | None]:
+    normalized_active_project = _normalized_active_project(active_project)
+    if scope == "thread":
+        return {"session_id": session_id, "active_project": None}
+    if scope == "project":
+        return {"session_id": None, "active_project": normalized_active_project}
+    if scope == "thread_project":
+        return {
+            "session_id": session_id,
+            "active_project": normalized_active_project,
+        }
+    return {"session_id": None, "active_project": None}
 
 
 def _intervention_reliability(item: GuardianIntervention) -> float:
@@ -375,6 +433,92 @@ def _build_live_axis_evidence(
     return tuple(evidence_items)
 
 
+def _normalize_live_axis_evidence(
+    *,
+    axis: str,
+    signal: GuardianLearningSignal,
+) -> GuardianLearningAxisEvidence:
+    field_name = learning_field_for_axis(axis)
+    evidence = signal.evidence_for_axis(axis)
+    if (
+        evidence.axis != axis
+        or evidence.field_name != field_name
+        or evidence.source != "live_signal"
+        or evidence.bias != getattr(signal, field_name)
+    ):
+        return replace(
+            evidence,
+            axis=axis,
+            field_name=field_name,
+            source="live_signal",
+            bias=getattr(signal, field_name),
+        )
+    return evidence
+
+
+def _select_learning_scope_for_axis(
+    *,
+    axis: str,
+    candidate_signals: dict[str, GuardianLearningSignal],
+) -> tuple[GuardianLearningAxisEvidence, GuardianLearningScopeDecision]:
+    field_name = learning_field_for_axis(axis)
+    weighted_candidates: list[tuple[str, GuardianLearningAxisEvidence, float]] = []
+    for scope, signal in candidate_signals.items():
+        evidence = _normalize_live_axis_evidence(axis=axis, signal=signal)
+        weight = learning_evidence_weight(evidence)
+        if weight <= 0.0:
+            continue
+        weighted_candidates.append((scope, evidence, weight))
+
+    if not weighted_candidates:
+        neutral = neutral_axis_evidence(axis, source="live_signal")
+        return neutral, GuardianLearningScopeDecision(
+            axis=axis,
+            field_name=field_name,
+            selected_scope="global",
+            selected_bias="neutral",
+            selected_weight=0.0,
+            reason="no_supported_bias",
+        )
+
+    weighted_candidates.sort(key=lambda item: item[2], reverse=True)
+    selected_scope, selected_evidence, selected_weight = weighted_candidates[0]
+    reason = "strongest_scope"
+    if len(weighted_candidates) > 1:
+        tie_candidates = [
+            item
+            for item in weighted_candidates
+            if abs(selected_weight - item[2]) <= _SCOPE_WEIGHT_TIE_TOLERANCE
+        ]
+        if len(tie_candidates) > 1:
+            original_scope, original_evidence, original_weight = selected_scope, selected_evidence, selected_weight
+            tie_candidates.sort(
+                key=lambda item: (
+                    _scope_priority(item[0]),
+                    item[1].recency_score,
+                    item[1].confidence_score,
+                    item[1].quality_score,
+                    item[2],
+                ),
+                reverse=True,
+            )
+            selected_scope, selected_evidence, selected_weight = tie_candidates[0]
+            if _scope_priority(selected_scope) > _scope_priority(original_scope):
+                reason = "tie_prefers_more_specific_scope"
+            elif selected_evidence.recency_score > original_evidence.recency_score:
+                reason = "tie_prefers_fresher_scope"
+            elif selected_scope != original_scope or selected_weight != original_weight:
+                reason = "tie_prefers_stronger_runner_up"
+    return selected_evidence, GuardianLearningScopeDecision(
+        axis=axis,
+        field_name=field_name,
+        selected_scope=selected_scope,
+        selected_bias=selected_evidence.bias,
+        selected_weight=selected_weight,
+        reason=reason,
+    )
+
+
 class GuardianFeedbackRepository:
     async def _refresh_learning_memories(
         self,
@@ -574,18 +718,32 @@ class GuardianFeedbackRepository:
         *,
         limit: int = 5,
         session_id: str | None = None,
+        active_project: str | None = None,
     ) -> list[GuardianIntervention]:
         async with get_session() as db:
             query = select(GuardianIntervention)
             if session_id:
                 query = query.where(GuardianIntervention.session_id == session_id)
+            normalized_active_project = _normalized_active_project(active_project)
+            if normalized_active_project is not None:
+                query = query.where(GuardianIntervention.active_project == normalized_active_project)
             result = await db.execute(
                 query.order_by(GuardianIntervention.updated_at.desc()).limit(limit)
             )
             return list(result.scalars().all())
 
-    async def summarize_recent(self, *, limit: int = 5) -> str:
-        interventions = await self.list_recent(limit=limit)
+    async def summarize_recent(
+        self,
+        *,
+        limit: int = 5,
+        session_id: str | None = None,
+        active_project: str | None = None,
+    ) -> str:
+        interventions = await self.list_recent(
+            limit=limit,
+            session_id=session_id,
+            active_project=active_project,
+        )
         lines: list[str] = []
         for item in interventions:
             parts = [item.intervention_type]
@@ -602,6 +760,109 @@ class GuardianFeedbackRepository:
                 summary += f": {item.content_excerpt}"
             lines.append(f"- {summary}")
         return "\n".join(lines)
+
+    async def summarize_recent_for_scope(
+        self,
+        *,
+        scope: str,
+        limit: int = 5,
+        session_id: str | None = None,
+        active_project: str | None = None,
+    ) -> str:
+        return await self.summarize_recent(
+            limit=limit,
+            **_scope_filters(
+                scope=scope,
+                session_id=session_id,
+                active_project=active_project,
+            ),
+        )
+
+    async def resolve_learning_signal(
+        self,
+        *,
+        intervention_type: str,
+        limit: int = 12,
+        session_id: str | None = None,
+        active_project: str | None = None,
+    ) -> ScopedGuardianLearningResolution:
+        candidate_signals: dict[str, GuardianLearningSignal] = {
+            "global": await self.get_learning_signal(
+                intervention_type=intervention_type,
+                limit=limit,
+            )
+        }
+        normalized_active_project = _normalized_active_project(active_project)
+        if session_id is not None:
+            candidate_signals["thread"] = await self.get_learning_signal(
+                intervention_type=intervention_type,
+                limit=limit,
+                session_id=session_id,
+            )
+        if normalized_active_project is not None:
+            candidate_signals["project"] = await self.get_learning_signal(
+                intervention_type=intervention_type,
+                limit=limit,
+                active_project=normalized_active_project,
+            )
+        if session_id is not None and normalized_active_project is not None:
+            candidate_signals["thread_project"] = await self.get_learning_signal(
+                intervention_type=intervention_type,
+                limit=limit,
+                session_id=session_id,
+                active_project=normalized_active_project,
+            )
+
+        decisions: list[GuardianLearningScopeDecision] = []
+        selected_axis_evidence: list[GuardianLearningAxisEvidence] = []
+        selected_biases: dict[str, str] = {}
+        scope_weights: dict[str, float] = {}
+        for axis in ordered_learning_axes():
+            selected_evidence, decision = _select_learning_scope_for_axis(
+                axis=axis,
+                candidate_signals=candidate_signals,
+            )
+            decisions.append(decision)
+            selected_axis_evidence.append(selected_evidence)
+            selected_biases[decision.field_name] = selected_evidence.bias
+            if decision.selected_weight > 0.0:
+                scope_weights[decision.selected_scope] = round(
+                    scope_weights.get(decision.selected_scope, 0.0) + decision.selected_weight,
+                    3,
+                )
+
+        dominant_scope = "global"
+        for preferred_axis in ("delivery", "suppression", "blocked_state", "timing"):
+            preferred_decision = next(
+                (
+                    item
+                    for item in decisions
+                    if item.axis == preferred_axis
+                    and item.selected_scope != "global"
+                    and item.selected_weight > 0.0
+                ),
+                None,
+            )
+            if preferred_decision is not None:
+                dominant_scope = preferred_decision.selected_scope
+                break
+        if dominant_scope == "global" and scope_weights:
+            dominant_scope = sorted(
+                scope_weights.items(),
+                key=lambda item: (item[1], _scope_priority(item[0])),
+                reverse=True,
+            )[0][0]
+
+        effective_signal = replace(
+            candidate_signals[dominant_scope],
+            axis_evidence=tuple(selected_axis_evidence),
+            **selected_biases,
+        )
+        return ScopedGuardianLearningResolution(
+            effective_signal=effective_signal,
+            dominant_scope=dominant_scope,
+            decisions=tuple(decisions),
+        )
 
     async def get_learning_signal(
         self,

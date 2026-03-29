@@ -25,9 +25,10 @@
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to bypass generic high-interruption bundling outside focus mode
 - [x] deeper guardian behavioral eval coverage that proves grounded high-salience delivery versus degraded-confidence defer behavior at the delivery gate
 - [x] deeper guardian behavioral eval coverage that proves strategist tick can combine learned delivery bias, native delivery, and continuity-state visibility in one deterministic contract
-- [x] guardian world model that now carries current focus, active commitments, active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, corroboration sources, continuity threads, open loops or pressure, recent execution pressure, focus alignment, and intervention receptivity inside guardian state
+- [x] guardian world model that now carries current focus, focus provenance, active commitments, active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, corroboration sources, continuity threads, open loops or pressure, recent execution pressure, focus alignment, intervention receptivity, and explicit judgment-risk notes inside guardian state
 - [x] guardian state now also carries learned communication guidance derived from recent intervention outcomes, including timing, suppression, blocked-state, and thread-preference bias, instead of only raw outcome history
 - [x] guardian world-model receptivity and intervention policy can now learn blocked-state async handling instead of only direct/native/timing bias
+- [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
 
 ## Working On Now
 
@@ -38,8 +39,8 @@
 
 ## Still To Do On `develop`
 
-- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, and corroboration-source grounding
-- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted delivery/channel/escalation/timing/suppression/blocked-state layer and first live-versus-durable arbitration pass
+- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, judgment-risk grounding, and contradiction-aware confidence downgrades
+- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, and first live-versus-durable arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 
@@ -906,6 +907,59 @@ This section records the internal Batch C slices on the feature branch before th
     - phrasing, cadence, and thread biases were still being inferred from generic outcomes even though the runtime never records which phrasing style, cadence strategy, or thread mode was used
     - the negative side of the delivery axis still counted transport-agnostic failures, so bad native-notification outcomes could teach `reduce_interruptions` and then be persisted as a lesson about direct interruptions
   - fixed by routing arbitration through `weighted_support`, neutralizing unsupported axes until explicit runtime instrumentation exists, and scoping negative delivery evidence to explicit direct transports only
+
+## Batch J Branch Review Log
+
+### `durable-world-model-evidence-fusion-v1`
+
+- status: complete on `feat/guardian-world-model-batch-j-v1`, pending inclusion in the aggregate Batch J PR
+- scope:
+  - extended `backend/src/guardian/world_model.py` so `GuardianWorldModel` now records `focus_source` and `judgment_risks`, making guardian-state synthesis distinguish live observer focus from session or memory fallback and surface when the world model should stay cautious
+  - updated `backend/src/guardian/state.py` so world-model confidence no longer stays artificially grounded when focus is only inferred from history, when durable project recall conflicts with the live observer project, or when recent intervention outcomes skew negative enough to keep receptivity selective
+  - added `guardian_judgment_behavior` to `backend/src/evals/harness.py` plus targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_strategist_tick.py` proving the new focus provenance, contradiction-aware confidence downgrade, and medium-urgency defer path
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/guardian/state.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details backend/tests/test_eval_harness.py::test_guardian_judgment_runtime_eval_exposes_conflict_suppression -q`
+    - result: `28 passed`
+- subagent review:
+  - reviewer: `Singer` (`019d3a5f-aefc-79f1-86fe-3f8ff454d587`)
+  - initial finding:
+    - the first project-mismatch downgrade was treating `get_recent_projects()` screen recency as recalled project context, so it could lower confidence from observer-timing skew instead of a true durable-recall conflict
+  - fixed before the slice stayed marked complete:
+    - split durable project recall from recent screen-project signals in `backend/src/guardian/world_model.py`, so only durable `project_memory` can trigger the recalled-project mismatch risk while recent project activity stays visible context
+    - updated the project-mismatch unit test and runtime eval fixture so the degraded path is now proven by durable project memory alone instead of `get_recent_projects()` noise
+  - final recheck:
+    - `Singer` reported no remaining material findings after the durable-recall mismatch fix and updated proof path
+
+### `intervention-quality-learning-from-longer-horizon-outcomes-v1`
+
+- status: complete on `feat/guardian-world-model-batch-j-v1`, pending inclusion in the aggregate Batch J PR
+- scope:
+  - added scoped live-learning resolution in `backend/src/guardian/feedback.py`, so guardian policy now resolves per-axis live evidence across `global`, `thread`, `project`, and `thread_project` lanes before comparing that guidance against durable procedural memory
+  - updated `backend/src/guardian/state.py` and `backend/src/observer/delivery.py` so both guardian-state synthesis and live delivery use the same scoped live-learning result instead of flattening everything through the global recent-feedback window
+  - aligned guardian-state recent-feedback summaries with the same dominant scope that is actually driving interruption behavior, and exposed `live_learning_scope` plus per-axis `live_learning_scope_axes` in delivery audit details
+  - added targeted regressions in `backend/tests/test_guardian_feedback.py`, `backend/tests/test_guardian_state.py`, and `backend/tests/test_delivery.py` proving project-specific negative outcome history can override unrelated global direct-delivery success
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/learning_arbitration.py backend/src/guardian/feedback.py backend/src/guardian/state.py backend/src/observer/delivery.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details backend/tests/test_eval_harness.py::test_guardian_judgment_runtime_eval_exposes_conflict_suppression -q`
+    - result: `103 passed`
+- subagent review:
+  - reviewer: `Singer` (`019d3a5f-aefc-79f1-86fe-3f8ff454d587`)
+  - initial findings:
+    - the first scoped resolver could still report `effective_signal` counts from a scope that was not actually driving the selected behavioral axes, so audit and guardian-state summaries could misstate the evidence behind an interruption decision
+    - guardian-state recent-feedback summaries were still intersecting strictly on `session_id + active_project`, which could hide the broader project-only or thread-only outcomes that the new scoped resolver was already using
+  - fixed before the slice stayed marked complete:
+    - made dominant-scope selection prioritize the actual interruption-driving axes (`delivery`, `suppression`, `blocked_state`, and `timing`) before falling back to aggregate scope weight
+    - changed guardian-state feedback summarization to follow the same dominant scope that is actually driving the resolved live learning signal
+    - pinned both fixes in the state and delivery regression tests so the surfaced counts, friction wording, and audit scope stay aligned
+  - final recheck:
+    - `Singer` reported no remaining material findings after the dominant-scope and scoped-summary fixes
+
+- aggregate PR follow-up on `#254`:
+  - GitHub review caught that `backend/src/guardian/world_model.py` was still treating `current_event` as a non-observer focus source in the competing-project risk gate, which could incorrectly downgrade world-model confidence when multiple project signals were present without `active_project`
+  - the same review also caught that `backend/src/guardian/feedback.py` sorted live scope candidates by raw weight before the tie-tolerance branch ran, so `_SCOPE_WEIGHT_TIE_TOLERANCE` only changed the explanation string and never the selected scope
+  - fixed by treating `current_event` as a live observer focus anchor in the project-risk gate, and by applying tie selection across all near-tied live scope candidates before choosing the winning scope
+  - added regressions in `backend/tests/test_guardian_state.py` and `backend/tests/test_guardian_feedback.py` so current-event anchoring and near-tie scope specificity stay pinned
 
 ## Non-Goals
 

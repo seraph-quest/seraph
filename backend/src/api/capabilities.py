@@ -779,9 +779,10 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
 
     install_item_names = [str(item) for item in pack.get("install_items", [])]
     for item_name in install_item_names:
-        await require_catalog_install_approval(item_name)
+        await require_catalog_install_approval(item_name, consume=False)
 
     for item_name in install_item_names:
+        await require_catalog_install_approval(item_name)
         install_result = install_catalog_item_by_name(item_name)
         if install_result["ok"] or install_result["status"] == "already_installed":
             installed_catalog_items.append({

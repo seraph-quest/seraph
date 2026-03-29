@@ -706,6 +706,25 @@ class TestCatalogAPI:
         assert "browser_session" in preset["include_tools"]
 
     @pytest.mark.asyncio
+    async def test_catalog_install_preflight_does_not_consume_approved_lifecycle_request(self, client, catalog_extension_runtime):
+        from src.api.catalog import require_catalog_install_approval
+
+        install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        await require_catalog_install_approval("seraph.hermes-browserbase", consume=False)
+
+        install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.hermes-browserbase"
+
+    @pytest.mark.asyncio
     async def test_install_catalog_remote_cdp_pack_surfaces_staged_browser_provider_metadata(self, client, catalog_extension_runtime):
         install = await client.post("/api/catalog/install/seraph.openclaw-remote-cdp")
 

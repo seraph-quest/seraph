@@ -275,7 +275,12 @@ def _configure_request_uses_new_secret_values(
     return False
 
 
-async def _require_extension_lifecycle_approval(action: str, preview: dict[str, Any]) -> None:
+async def _require_extension_lifecycle_approval(
+    action: str,
+    preview: dict[str, Any],
+    *,
+    consume: bool = True,
+) -> None:
     approval_profile = preview.get("approval_profile")
     if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
         return
@@ -307,11 +312,20 @@ async def _require_extension_lifecycle_approval(action: str, preview: dict[str, 
         "permissions": preview.get("permissions"),
     }
     fingerprint = fingerprint_tool_call(tool_name, arguments)
-    if await approval_repository.consume_approved(
-        session_id=None,
-        tool_name=tool_name,
-        fingerprint=fingerprint,
-    ):
+    approval_satisfied = (
+        await approval_repository.consume_approved(
+            session_id=None,
+            tool_name=tool_name,
+            fingerprint=fingerprint,
+        )
+        if consume
+        else await approval_repository.has_approved(
+            session_id=None,
+            tool_name=tool_name,
+            fingerprint=fingerprint,
+        )
+    )
+    if approval_satisfied:
         return
 
     summary = (

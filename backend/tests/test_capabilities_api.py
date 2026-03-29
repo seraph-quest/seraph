@@ -933,6 +933,71 @@ async def test_activate_starter_pack_requires_catalog_install_approval(client):
     install_item.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_activate_starter_pack_preflights_all_approvals_without_consuming_them(client):
+    from src.api.capabilities import _activate_starter_pack_by_name
+
+    events: list[tuple[str, str, bool | None]] = []
+
+    async def approval_side_effect(name: str, *, consume: bool = True):
+        events.append(("approval", name, consume))
+
+    def install_side_effect(name: str):
+        events.append(("install", name, None))
+        return {"ok": True, "status": "installed", "name": name, "type": "mcp_server", "bundled": True}
+
+    with (
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "privileged-pack",
+                    "label": "Privileged Pack",
+                    "description": "",
+                    "skills": [],
+                    "workflows": [],
+                    "install_items": ["alpha", "beta"],
+                }
+            ],
+        ),
+        patch(
+            "src.api.capabilities.require_catalog_install_approval",
+            AsyncMock(side_effect=approval_side_effect),
+        ),
+        patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            return_value={
+                "starter_packs": [
+                    {
+                        "name": "privileged-pack",
+                        "availability": "ready",
+                        "missing_install_items": [],
+                        "blocked_skills": [],
+                        "blocked_workflows": [],
+                    }
+                ]
+            },
+        ),
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        payload = await _activate_starter_pack_by_name("privileged-pack")
+
+    assert payload["status"] == "activated"
+    assert payload["installed_catalog_items"] == [
+        {"name": "alpha", "type": "mcp_server", "status": "installed"},
+        {"name": "beta", "type": "mcp_server", "status": "installed"},
+    ]
+    assert events == [
+        ("approval", "alpha", False),
+        ("approval", "beta", False),
+        ("approval", "alpha", True),
+        ("install", "alpha", None),
+        ("approval", "beta", True),
+        ("install", "beta", None),
+    ]
+
+
 def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_path):
     from src.api.capabilities import _ensure_bundled_workflow_available
     from src.workflows.manager import workflow_manager

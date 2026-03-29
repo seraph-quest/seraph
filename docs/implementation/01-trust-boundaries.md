@@ -92,6 +92,8 @@
 - review pass:
   - direct review against bugs and hallucinated assumptions caught one bad generalization in the first test update: bundled catalog skill installs were treated as universally approval-gated even when the validated package had no lifecycle-risk boundaries
   - fixed by keeping approval enforcement risk-based and aligning the catalog tests with the actual permission-summary contract instead of broadening the boundary without evidence
+  - PR review then found one real retry-loop bug in the shared starter-pack path: the first approval preflight was consuming approved lifecycle requests before any install happened, so a multi-item privileged pack could burn approval for item A, hit `approval_required` on item B, and then force the operator to re-approve item A on the next retry
+  - fixed by making the starter-pack approval preflight non-consuming and consuming each lifecycle approval only at the corresponding install mutation point
 
 ### `privileged-repair-bundle-gating-v1`
 

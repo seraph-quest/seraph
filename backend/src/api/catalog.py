@@ -440,14 +440,14 @@ def _catalog_install_approval_preview(name: str) -> tuple[str, dict[str, Any]] |
     return None
 
 
-async def require_catalog_install_approval(name: str) -> None:
+async def require_catalog_install_approval(name: str, *, consume: bool = True) -> None:
     lifecycle_preview = _catalog_install_approval_preview(name)
     if lifecycle_preview is None:
         return
     action, preview = lifecycle_preview
     from src.api.extensions import _require_extension_lifecycle_approval
 
-    await _require_extension_lifecycle_approval(action, preview)
+    await _require_extension_lifecycle_approval(action, preview, consume=consume)
 
 
 def install_catalog_item_by_name(name: str) -> dict[str, Any]:

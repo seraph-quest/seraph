@@ -73,20 +73,79 @@ def _delivery_route_name(*, message: WSResponse, is_scheduled: bool) -> str:
 
 
 def _route_transport_order(route_name: str, *, active_channel_adapters: set[str]) -> tuple[dict[str, str | None], list[str]]:
-    from src.extensions.channel_routing import ordered_route_transports
+    from src.extensions.channel_routing import route_runtime_status
     from src.extensions.state import load_extension_state_payload
+    from src.observer.manager import context_manager
+    from src.scheduler.connection_manager import ws_manager
 
     state_payload = load_extension_state_payload()
-    binding, ordered = ordered_route_transports(
+    _, route_status = route_runtime_status(
         state_payload,
         route=route_name,
         active_transports=active_channel_adapters,
+        websocket_connection_count=ws_manager.active_count,
+        daemon_connected=context_manager.is_daemon_connected(),
     )
+    return route_status, list(route_status.get("delivery_order") or [])
+
+
+def _bundle_continuation_payload(items: list[object], *, bundle_content: str) -> dict[str, str | None]:
+    session_ids = []
+    for item in items:
+        raw_session_id = getattr(item, "session_id", None)
+        session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else None
+        if not session_id:
+            return {
+                "session_id": None,
+                "thread_id": None,
+                "thread_source": "ambient",
+                "continuation_mode": "open_thread",
+                "resume_message": "Review the queued guardian updates.",
+            }
+        session_ids.append(session_id)
+
+    common_session_id = session_ids[0] if session_ids else None
+    if common_session_id and all(session_id == common_session_id for session_id in session_ids):
+        return {
+            "session_id": common_session_id,
+            "thread_id": common_session_id,
+            "thread_source": "session",
+            "continuation_mode": "resume_thread",
+            "resume_message": f"Continue from these guardian updates: {bundle_content}",
+        }
+
     return {
-        "route": binding.route,
-        "primary_transport": binding.primary_transport,
-        "fallback_transport": binding.fallback_transport,
-    }, ordered
+        "session_id": None,
+        "thread_id": None,
+        "thread_source": "ambient",
+        "continuation_mode": "open_thread",
+        "resume_message": "Review the queued guardian updates.",
+    }
+
+
+def _bundle_content(items: list[object]) -> str:
+    parts = [f"- {item.content}" for item in items]
+    return f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
+
+
+def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
+    session_groups: dict[str, list[object]] = {}
+    ambient_items: list[object] = []
+    for item in items:
+        raw_session_id = getattr(item, "session_id", None)
+        session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else ""
+        if session_id:
+            session_groups.setdefault(session_id, []).append(item)
+            continue
+        ambient_items.append(item)
+
+    if len(session_groups) <= 1 and not ambient_items:
+        return [items]
+
+    grouped_items = list(session_groups.values())
+    if ambient_items:
+        grouped_items.append(ambient_items)
+    return grouped_items
 
 
 def _apply_native_channel_preference(
@@ -359,6 +418,12 @@ async def deliver_or_queue(
                     "channel_route": route_binding["route"],
                     "primary_transport": route_binding["primary_transport"],
                     "fallback_transport": route_binding["fallback_transport"],
+                    "configured_transport_order": route_binding.get("configured_order") or [],
+                    "route_status": route_binding.get("status"),
+                    "route_summary": route_binding.get("summary"),
+                    "route_failure_reason": route_binding.get("failure_reason"),
+                    "route_repair_hint": route_binding.get("repair_hint"),
+                    "transport_statuses": route_binding.get("transports") or [],
                     "transport_order": adjusted_transport_order,
                 }
             )
@@ -366,7 +431,11 @@ async def deliver_or_queue(
                 event_details["transport_order_adjustment"] = "learned_native_channel_preference"
             transport_order = adjusted_transport_order
 
-            last_error = _route_disabled_error(primary_transport=route_binding["primary_transport"])
+            last_error = (
+                str(route_binding.get("failure_reason"))
+                if isinstance(route_binding.get("failure_reason"), str) and route_binding.get("failure_reason")
+                else _route_disabled_error(primary_transport=route_binding["primary_transport"])
+            )
             for transport in transport_order:
                 if transport == "websocket":
                     websocket_enabled = "websocket" in active_channel_adapters
@@ -589,6 +658,12 @@ async def deliver_queued_bundle() -> int:
         "bundle_delivery",
         active_channel_adapters=active_channel_adapters,
     )
+    bundle_content = _bundle_content(items)
+    native_bundle_groups = _group_native_bundle_items(items)
+    group_continuations = [
+        _bundle_continuation_payload(group, bundle_content=_bundle_content(group))
+        for group in native_bundle_groups
+    ]
     details = {
         "bundle_item_count": len(items),
         "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
@@ -597,10 +672,20 @@ async def deliver_queued_bundle() -> int:
         "channel_route": route_binding["route"],
         "primary_transport": route_binding["primary_transport"],
         "fallback_transport": route_binding["fallback_transport"],
+        "configured_transport_order": route_binding.get("configured_order") or [],
+        "route_status": route_binding.get("status"),
+        "route_summary": route_binding.get("summary"),
+        "route_failure_reason": route_binding.get("failure_reason"),
+        "route_repair_hint": route_binding.get("repair_hint"),
+        "transport_statuses": route_binding.get("transports") or [],
         "transport_order": transport_order,
+        "bundle_group_count": len(native_bundle_groups),
+        "bundle_thread_ids": [item["thread_id"] for item in group_continuations if item.get("thread_id")],
+        "bundle_continuation_modes": [
+            str(item.get("continuation_mode") or "open_thread")
+            for item in group_continuations
+        ],
     }
-    parts = [f"- {item.content}" for item in items]
-    bundle_content = f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
     message = WSResponse(
         type="proactive",
         content=bundle_content,
@@ -609,39 +694,53 @@ async def deliver_queued_bundle() -> int:
         reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
     )
 
-    last_error = _route_disabled_error(primary_transport=route_binding["primary_transport"])
+    last_error = (
+        str(route_binding.get("failure_reason"))
+        if isinstance(route_binding.get("failure_reason"), str) and route_binding.get("failure_reason")
+        else _route_disabled_error(primary_transport=route_binding["primary_transport"])
+    )
     for transport in transport_order:
         if transport == "native_notification":
             if not context_manager.is_daemon_connected():
                 last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
                 continue
-            notification = await native_notification_queue.enqueue(
-                intervention_id=None,
-                title="Seraph update",
-                body=bundle_content,
-                intervention_type="proactive_bundle",
-                urgency=3,
-                surface="action_card",
-                session_id=None,
-                thread_id=None,
-                thread_source="ambient",
-                continuation_mode="open_thread",
-                resume_message="Review the queued guardian updates.",
-            )
+            notifications = []
+            for group_items in native_bundle_groups:
+                group_content = _bundle_content(group_items)
+                group_continuation = _bundle_continuation_payload(group_items, bundle_content=group_content)
+                notification = await native_notification_queue.enqueue(
+                    intervention_id=None,
+                    title="Seraph update",
+                    body=group_content,
+                    intervention_type="proactive_bundle",
+                    urgency=3,
+                    surface="action_card",
+                    session_id=group_continuation["session_id"],
+                    thread_id=group_continuation["thread_id"],
+                    thread_source=str(group_continuation["thread_source"] or "ambient"),
+                    continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
+                    resume_message=group_continuation["resume_message"],
+                )
+                context_manager.record_native_notification(
+                    title=notification.title,
+                    outcome="queued",
+                )
+                notifications.append((notification, group_items))
             await insight_queue.delete_many(
                 [item.id for item in items if getattr(item, "id", None)]
             )
-            for item in items:
-                await _update_intervention_outcome(
-                    item.intervention_id,
-                    latest_outcome="bundle_delivered",
-                    transport="native_notification_bundle",
-                    notification_id=notification.id,
-                )
+            for notification, group_items in notifications:
+                for item in group_items:
+                    await _update_intervention_outcome(
+                        item.intervention_id,
+                        latest_outcome="bundle_delivered",
+                        transport="native_notification_bundle",
+                        notification_id=notification.id,
+                    )
             details.update(
                 {
-                    "attempted_connections": 1,
-                    "delivered_connections": 1,
+                    "attempted_connections": len(notifications),
+                    "delivered_connections": len(notifications),
                     "failed_connections": 0,
                 }
             )
@@ -654,7 +753,8 @@ async def deliver_queued_bundle() -> int:
                 details={
                     **details,
                     "transport": "native_notification",
-                    "notification_id": notification.id,
+                    "notification_id": notifications[0][0].id if notifications else None,
+                    "notification_ids": [notification.id for notification, _ in notifications],
                 },
             )
             return len(items)

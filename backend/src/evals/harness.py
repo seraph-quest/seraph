@@ -4657,6 +4657,11 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             body="Desktop fallback is active.",
             intervention_type="alert",
             urgency=5,
+            session_id="continuity-session",
+            thread_id="continuity-session",
+            thread_source="session",
+            continuation_mode="resume_thread",
+            resume_message="Continue from this guardian intervention: Desktop fallback is active.",
         )
         await guardian_feedback_repository.update_outcome(
             native_intervention.id,
@@ -4688,6 +4693,7 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             urgency=3,
             reasoning="high_interruption_cost",
             intervention_id=bundle_intervention.id,
+            session_id="continuity-session",
         )
 
         with patch("src.api.observer.context_manager", mgr):
@@ -4699,12 +4705,24 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         await native_notification_queue.clear()
 
     surfaces = {item["continuity_surface"] for item in continuity["recent_interventions"]}
+    live_route = next(item for item in continuity["reach"]["route_statuses"] if item["route"] == "live_delivery")
+    notification = continuity["notifications"][0]
+    queued_item = continuity["queued_insights"][0]
+    recent_item = continuity["recent_interventions"][0]
     return {
         "daemon_pending_notifications": continuity["daemon"]["pending_notification_count"],
         "notification_count": len(continuity["notifications"]),
-        "notification_intervention_matches": continuity["notifications"][0]["intervention_id"] == native_intervention.id,
+        "notification_intervention_matches": notification["intervention_id"] == native_intervention.id,
+        "notification_continuation_mode": notification["continuation_mode"],
+        "notification_thread_id": notification["thread_id"],
         "queued_insight_count": continuity["queued_insight_count"],
-        "queued_bundle_matches": continuity["queued_insights"][0]["intervention_id"] == bundle_intervention.id,
+        "queued_bundle_matches": queued_item["intervention_id"] == bundle_intervention.id,
+        "queued_continuation_mode": queued_item["continuation_mode"],
+        "queued_thread_id": queued_item["thread_id"],
+        "recent_continuation_mode": recent_item["continuation_mode"],
+        "recent_thread_id": recent_item["thread_id"],
+        "live_route_status": live_route["status"],
+        "live_route_transport": live_route["selected_transport"],
         "recent_surfaces": sorted(surfaces),
         "native_surface_present": "native_notification" in surfaces,
         "bundle_surface_present": "bundle_queue" in surfaces,

@@ -56,6 +56,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] cockpit-native extension authoring and validation for workflows, skills, and MCP configs with diagnostics, save, and repair handoff
 - [x] first browser reload and reconnect continuity for the active thread, with explicit fresh-thread semantics and background-activity badges
 - [x] explicit cross-surface thread model that links approvals, workflow runs, notifications, queued interventions, and recent interventions back to browser threads
+- [x] runtime reach snapshots now show whether browser websocket and native delivery are actually reachable, which route is falling back, and how queued/native continuity should resume instead of leaving reach health implicit
 - [x] activity-ledger routing summaries, native thread metadata, and LLM spend attribution that make both live continuation state and day-scale budget use easier to inspect
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel-routing surfaces that stay visible and governed through the same extension lifecycle
 - [x] typed longitudinal memory and explicit guardian state
@@ -146,7 +147,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] daily briefing, evening review, activity digest, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
-- [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, native-notification fallback delivery when browser sockets are unavailable but the daemon is connected, browser-side inspect/dismiss controls for queued desktop notifications, a unified continuity snapshot for daemon state, queued bundle items, and recent interventions, and an actionable cockpit desktop-shell card for follow-up, dismiss, and continue flows
+- [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, native-notification fallback delivery when browser sockets are unavailable but the daemon is connected, browser-side inspect/dismiss controls for queued desktop notifications, runtime route-health visibility for ready/fallback/unavailable delivery, a unified continuity snapshot for daemon state, queued bundle items, route reachability, and recent interventions, and an actionable cockpit desktop-shell card for follow-up, dismiss, continue, and fallback inspection flows
+- [x] queued native bundles now preserve same-thread resume when every deferred item shares one session, and queued continuity keeps the stored `session_id` even when the matching intervention is no longer in the recent-intervention window
 
 ### Current interface surface
 
@@ -158,6 +160,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] grid-snapped draggable panes plus packed persisted `default` / `focus` / `review` layouts with keyboard switching, per-layout save, and per-layout reset now define the main cockpit workspace
 - [x] the pane workspace now also supports per-pane close/hide controls, a dedicated Windows menu for visibility and focus, and flatter Godel-style window chrome
 - [x] the cockpit now includes a first desktop-shell rail for pending native notifications, queued bundle items, and recent interventions with direct follow-up, continue, and dismiss controls
+- [x] cockpit desktop-shell and settings surfaces now also expose shared route-health summaries and continuation metadata for queued/native delivery instead of reconstructing fallback state per surface
 - [x] the cockpit now includes a first operator surface for tool/MCP policy state, workflow availability, tools, skills, starter packs, and MCP server visibility with direct reload and activation controls
 - [x] the cockpit now also includes a searchable capability palette plus a denser operator terminal for recommendations, repair actions, installable items, reusable runbooks, capability preflight, live operator-feed status, and saved runbook macros
 - [x] the workspace now includes a separate Activity Ledger window that links workflow runs, approvals, queued continuity, recent interventions, surfaced failures, tool steps, and attributed LLM calls back to one browser thread model
@@ -194,7 +197,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 ### Interface and presence
 
 - [ ] richer cockpit density and broader keyboard/operator control beyond the current workflow, activity-ledger, imported-reach, and governance surfaces
-- [ ] richer cross-surface continuity and broader non-browser presence beyond the current desktop presence shell, channel routing, messaging connectors, browser mode matrix, automation triggers, node adapters, and canvas outputs
+- [ ] richer cross-surface continuity and broader non-browser presence beyond the current desktop presence shell, runtime route-health snapshot, channel routing, messaging connectors, browser mode matrix, automation triggers, node adapters, and canvas outputs
 - [ ] stronger explicit threading between ambient observation, workflow runs, native notifications, approvals, and deliberate interaction beyond the new shared thread metadata and continue/open-thread layer
 
 ### Workflow and leverage

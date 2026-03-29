@@ -42,6 +42,7 @@ def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
     mock_cm.get_context.return_value = ctx
     mock_cm.is_daemon_connected.return_value = False
     mock_ws = MagicMock()
+    mock_ws.active_count = 1
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
         delivered_connections=1,
@@ -143,6 +144,37 @@ async def test_native_channel_adapter_can_deliver_without_websocket():
 
 
 @pytest.mark.asyncio
+async def test_live_delivery_falls_back_to_native_when_browser_runtime_is_unavailable():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
+        attempted_connections=0,
+        delivered_connections=0,
+        failed_connections=0,
+    ))
+    mock_ws.active_count = 0
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        msg = WSResponse(type="proactive", content="Fallback to native", intervention_type="advisory", urgency=3)
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"websocket", "native_notification"}):
+            decision = await deliver_or_queue(msg)
+
+        assert decision.action == InterventionAction.act
+        mock_ws.broadcast.assert_not_called()
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.body == "Fallback to native"
+        assert notification.continuation_mode == "open_thread"
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_channel_routing_can_prefer_native_notification_for_live_delivery(tmp_path):
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
@@ -207,6 +239,88 @@ async def test_native_channel_adapter_can_deliver_queued_bundle_without_websocke
         notification = await native_notification_queue.peek()
         assert notification is not None
         assert "Queued update" in notification.body
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_bundle_delivery_preserves_shared_thread_continuity():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_iq.peek_all = AsyncMock(
+        return_value=[
+            MagicMock(
+                id="queued-1",
+                content="Queued update one",
+                intervention_id="intervention-1",
+                session_id="session-123",
+            ),
+            MagicMock(
+                id="queued-2",
+                content="Queued update two",
+                intervention_id="intervention-2",
+                session_id="session-123",
+            ),
+        ]
+    )
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
+            delivered = await deliver_queued_bundle()
+
+        assert delivered == 2
+        notification = await native_notification_queue.peek()
+        assert notification is not None
+        assert notification.session_id == "session-123"
+        assert notification.thread_id == "session-123"
+        assert notification.thread_source == "session"
+        assert notification.continuation_mode == "resume_thread"
+        assert "Queued update one" in (notification.resume_message or "")
+    finally:
+        await native_notification_queue.clear()
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_bundle_delivery_partitions_mixed_sessions_into_separate_notifications():
+    ctx = _make_context()
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx)
+    mock_cm.is_daemon_connected.return_value = True
+    mock_iq.peek_all = AsyncMock(
+        return_value=[
+            MagicMock(
+                id="queued-1",
+                content="Queued update one",
+                intervention_id="intervention-1",
+                session_id="session-123",
+            ),
+            MagicMock(
+                id="queued-2",
+                content="Queued update two",
+                intervention_id="intervention-2",
+                session_id="session-456",
+            ),
+        ]
+    )
+    for p in patches:
+        p.start()
+    try:
+        await native_notification_queue.clear()
+        with patch("src.observer.delivery._active_channel_adapters", return_value={"native_notification"}):
+            delivered = await deliver_queued_bundle()
+
+        assert delivered == 2
+        notifications = await native_notification_queue.list()
+        assert len(notifications) == 2
+        assert {notification.thread_id for notification in notifications} == {"session-123", "session-456"}
+        assert {notification.continuation_mode for notification in notifications} == {"resume_thread"}
+        assert mock_iq.delete_many.await_count == 1
     finally:
         await native_notification_queue.clear()
         for p in patches:
@@ -1498,6 +1612,7 @@ async def test_deliver_queued_bundle_empty():
     mock_iq.peek_all = AsyncMock(return_value=[])
     mock_iq.delete_many = AsyncMock(return_value=0)
     mock_ws = MagicMock()
+    mock_ws.active_count = 1
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
         delivered_connections=1,
@@ -1523,6 +1638,7 @@ async def test_deliver_queued_bundle_formats_correctly():
     mock_iq.peek_all = AsyncMock(return_value=[mock_item1, mock_item2])
     mock_iq.delete_many = AsyncMock(return_value=2)
     mock_ws = MagicMock()
+    mock_ws.active_count = 1
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
         delivered_connections=1,
@@ -1554,6 +1670,7 @@ async def test_deliver_queued_bundle_single_item():
     mock_iq.peek_all = AsyncMock(return_value=[mock_item])
     mock_iq.delete_many = AsyncMock(return_value=1)
     mock_ws = MagicMock()
+    mock_ws.active_count = 1
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
         delivered_connections=1,
@@ -1580,6 +1697,7 @@ async def test_deliver_queued_bundle_logs_delivery_runtime_audit(async_db):
     mock_iq.peek_all = AsyncMock(return_value=[mock_item])
     mock_iq.delete_many = AsyncMock(return_value=1)
     mock_ws = MagicMock()
+    mock_ws.active_count = 2
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=2,
         delivered_connections=2,
@@ -1612,6 +1730,7 @@ async def test_deliver_queued_bundle_logs_transport_failure(async_db):
     mock_iq.peek_all = AsyncMock(return_value=[mock_item])
     mock_iq.delete_many = AsyncMock(return_value=0)
     mock_ws = MagicMock()
+    mock_ws.active_count = 1
     mock_ws.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=1,
         delivered_connections=0,
@@ -1646,6 +1765,7 @@ async def test_deliver_queued_bundle_with_no_active_channel_adapters_retains_que
     mock_iq.peek_all = AsyncMock(return_value=[mock_item])
     mock_iq.delete_many = AsyncMock(return_value=0)
     mock_ws = MagicMock()
+    mock_ws.active_count = 0
     mock_ws.broadcast = AsyncMock()
 
     with (
@@ -1664,7 +1784,8 @@ async def test_deliver_queued_bundle_with_no_active_channel_adapters_retains_que
         and event["tool_name"] == "observer_delivery_gate"
         and event["details"]["intervention_type"] == "proactive_bundle"
         and event["details"]["bundle_item_count"] == 1
-        and event["details"]["error"] == "websocket_adapter_disabled"
+        and event["details"]["error"] == "inactive+inactive"
+        and event["details"]["route_status"] == "unavailable"
         and event["details"]["queue_retained"] is True
         and event["details"]["active_channel_adapters"] == []
         for event in events

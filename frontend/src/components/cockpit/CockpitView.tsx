@@ -96,6 +96,7 @@ interface GuardianContinuityIntervention {
   session_id?: string | null;
   thread_id?: string | null;
   thread_label?: string | null;
+  thread_source?: string | null;
   intervention_type: string;
   content_excerpt: string;
   policy_action: string;
@@ -105,8 +106,20 @@ interface GuardianContinuityIntervention {
   transport?: string | null;
   notification_id?: string | null;
   feedback_type?: string | null;
+  continuation_mode?: string | null;
+  resume_message?: string | null;
   updated_at: string;
   continuity_surface: string;
+}
+
+interface ObserverReachRouteStatus {
+  route: string;
+  label: string;
+  status: string;
+  summary: string;
+  selected_transport?: string | null;
+  selected_mode?: string | null;
+  repair_hint?: string | null;
 }
 
 interface ObserverContinuitySnapshot {
@@ -134,12 +147,19 @@ interface ObserverContinuitySnapshot {
     intervention_type: string;
     urgency: number;
     reasoning: string;
+    session_id?: string | null;
     thread_id?: string | null;
     thread_label?: string | null;
+    thread_source?: string | null;
+    continuation_mode?: string | null;
+    resume_message?: string | null;
     created_at: string;
   }>;
   queued_insight_count: number;
   recent_interventions: GuardianContinuityIntervention[];
+  reach?: {
+    route_statuses?: ObserverReachRouteStatus[];
+  };
 }
 
 interface SkillInfo {
@@ -2274,6 +2294,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [queuedInsights, setQueuedInsights] = useState<ObserverContinuitySnapshot["queued_insights"]>([]);
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
+  const [desktopRouteStatuses, setDesktopRouteStatuses] = useState<ObserverReachRouteStatus[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -2501,6 +2522,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setQueuedInsights(continuityPayload.queued_insights ?? []);
       setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
       setRecentInterventions(continuityPayload.recent_interventions ?? []);
+      setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
@@ -6527,6 +6549,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-sublist-item">
                     capture {daemonPresence?.capture_mode ?? "unknown"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
                   </div>
+                  {desktopRouteStatuses.map((route) => (
+                    <div key={route.route} className="cockpit-sublist-item">
+                      {route.label}: {formatContinuityLabel(route.status)}
+                      {route.selected_transport ? ` via ${formatContinuityLabel(route.selected_transport)}` : ""}
+                      {route.repair_hint ? ` · ${route.repair_hint}` : ""}
+                    </div>
+                  ))}
                 </div>
                 <div className="cockpit-list">
                   {desktopNotifications.slice(0, 3).map((notification) => (
@@ -6551,7 +6580,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           onClick={() =>
                             void queueThreadDraft(
                               notification.resume_message
-                              || `Follow up on this desktop alert: ${notification.body}`,
+                                || `Follow up on this desktop alert: ${notification.body}`,
                               notification.thread_id ?? notification.session_id,
                             )
                           }
@@ -6588,6 +6617,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                       <div className="cockpit-row-body">{item.content_excerpt}</div>
                       <div className="cockpit-row-meta">
+                        {item.continuation_mode ? `${formatContinuityLabel(item.continuation_mode)} · ` : ""}
                         {item.thread_label
                           ?? (item.thread_id ? sessionTitleById[item.thread_id] ?? `thread ${item.thread_id.slice(0, 6)}` : "ambient queue")}
                       </div>
@@ -6596,17 +6626,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           className="cockpit-feedback-button"
                           onClick={() =>
                             void queueThreadDraft(
-                              `Follow up on this deferred guardian item: ${item.content_excerpt}`,
-                              item.thread_id,
+                              item.resume_message ?? `Follow up on this deferred guardian item: ${item.content_excerpt}`,
+                              item.thread_id ?? item.session_id,
                             )
                           }
                         >
                           Draft Follow-up
                         </button>
-                        {item.thread_id && (
+                        {(item.thread_id || item.session_id) && (
                           <button
                             className="cockpit-feedback-button"
-                            onClick={() => void openThread(item.thread_id)}
+                            onClick={() => void openThread(item.thread_id ?? item.session_id)}
                           >
                             Open Thread
                           </button>
@@ -6623,13 +6653,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{item.content_excerpt}</div>
                       <div className="cockpit-row-meta">
                         {formatContinuityLabel(item.continuity_surface)} · {formatContinuityLabel(item.latest_outcome)}
+                        {item.continuation_mode ? ` · ${formatContinuityLabel(item.continuation_mode)}` : ""}
                       </div>
                       <div className="cockpit-feedback-row">
                         <button
                           className="cockpit-feedback-button"
                           onClick={() =>
                             void queueThreadDraft(
-                              `Continue from this guardian intervention: ${item.content_excerpt}`,
+                              item.resume_message ?? `Continue from this guardian intervention: ${item.content_excerpt}`,
                               item.thread_id ?? item.session_id,
                             )
                           }

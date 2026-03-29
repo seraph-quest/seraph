@@ -2310,11 +2310,17 @@ async def test_duplicate_automation_trigger_name_invalidates_all_colliding_defin
 
 @pytest.mark.asyncio
 async def test_channel_routing_defaults_surface_active_adapters(client, extension_runtime):
-    response = await client.get("/api/extensions/channel-routing")
+    with (
+        patch("src.observer.manager.context_manager.is_daemon_connected", return_value=False),
+        patch("src.scheduler.connection_manager.ws_manager._connections", set()),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
 
     assert response.status_code == 200
     payload = response.json()
     bindings = {item["route"]: item for item in payload["bindings"]}
+    transport_statuses = {item["transport"]: item for item in payload["transport_statuses"]}
+    route_statuses = {item["route"]: item for item in payload["route_statuses"]}
 
     assert payload["supported_transports"] == ["websocket", "native_notification"]
     assert payload["active_transports"] == ["native_notification", "websocket"]
@@ -2325,6 +2331,10 @@ async def test_channel_routing_defaults_surface_active_adapters(client, extensio
     assert bindings["live_delivery"]["primary_transport"] == "websocket"
     assert bindings["live_delivery"]["fallback_transport"] == "native_notification"
     assert bindings["alert_delivery"]["primary_transport"] == "native_notification"
+    assert transport_statuses["websocket"]["status"] == "waiting_for_browser"
+    assert transport_statuses["native_notification"]["status"] == "daemon_offline"
+    assert route_statuses["live_delivery"]["status"] == "unavailable"
+    assert route_statuses["live_delivery"]["failure_reason"] == "waiting_for_browser+daemon_offline"
 
 
 @pytest.mark.asyncio

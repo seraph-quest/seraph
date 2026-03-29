@@ -298,7 +298,7 @@ class TestCatalogAPI:
              patch("src.api.catalog.settings") as mock_settings, \
              patch("src.api.catalog.bundled_manifest_root", return_value=bundled_skills_dir), \
              patch("src.api.catalog._skill_installed", return_value=False), \
-             patch("src.api.catalog._skill_loaded", side_effect=[False, False, True]), \
+             patch("src.api.catalog._skill_loaded", side_effect=[False, False, False, True]), \
              patch("src.api.catalog.install_extension_path", side_effect=capture_package):
             mock_settings.workspace_dir = workspace_dir
 
@@ -326,6 +326,14 @@ class TestCatalogAPI:
              patch("src.api.catalog.install_extension_path", side_effect=capture_package):
             mock_settings.workspace_dir = workspace_dir
             mock_mcp._config = {}
+
+            resp = await client.post("/api/catalog/install/test-mcp")
+            assert resp.status_code == 409
+            approval_detail = resp.json()["detail"]
+            assert approval_detail["type"] == "approval_required"
+
+            approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+            assert approve.status_code == 200
 
             resp = await client.post("/api/catalog/install/test-mcp")
             assert resp.status_code == 201
@@ -369,6 +377,14 @@ class TestCatalogAPI:
             mock_mcp._config = {}
 
             resp = await client.post("/api/catalog/install/toggl")
+            assert resp.status_code == 409
+            approval_detail = resp.json()["detail"]
+            assert approval_detail["type"] == "approval_required"
+
+            approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+            assert approve.status_code == 200
+
+            resp = await client.post("/api/catalog/install/toggl")
             assert resp.status_code == 201
             connector_payload = json.loads(captured_package["connector_payload"])
             assert connector_payload["headers"] == {"Authorization": "Bearer ${TOGGL_API_KEY}"}
@@ -379,6 +395,17 @@ class TestCatalogAPI:
     async def test_install_mcp_success_registers_runtime_connector(
         self, client, catalog_data, catalog_extension_runtime
     ):
+        with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
+             patch.object(mcp_manager, "connect") as connect_mock:
+            resp = await client.post("/api/catalog/install/test-mcp")
+
+        assert resp.status_code == 409
+        approval_detail = resp.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
         with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
              patch.object(mcp_manager, "connect") as connect_mock:
             resp = await client.post("/api/catalog/install/test-mcp")
@@ -424,6 +451,7 @@ class TestCatalogAPI:
         with patch("src.api.catalog._load_catalog", return_value=catalog_data), \
              patch("src.api.catalog.settings") as mock_settings, \
              patch("src.api.catalog.mcp_manager") as mock_mcp, \
+             patch("src.api.catalog.require_catalog_install_approval", return_value=None), \
              patch("src.api.catalog.install_extension_path", side_effect=FileExistsError("duplicate")):
             mock_settings.workspace_dir = workspace_dir
             mock_mcp._config = {}
@@ -676,6 +704,25 @@ class TestCatalogAPI:
         assert provider["status"] == "requires_config"
         assert preset["name"] == "browserbase-ops"
         assert "browser_session" in preset["include_tools"]
+
+    @pytest.mark.asyncio
+    async def test_catalog_install_preflight_does_not_consume_approved_lifecycle_request(self, client, catalog_extension_runtime):
+        from src.api.catalog import require_catalog_install_approval
+
+        install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
+
+        assert install.status_code == 409
+        approval_detail = install.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve.status_code == 200
+
+        await require_catalog_install_approval("seraph.hermes-browserbase", consume=False)
+
+        install = await client.post("/api/catalog/install/seraph.hermes-browserbase")
+        assert install.status_code == 201
+        assert install.json()["extension_id"] == "seraph.hermes-browserbase"
 
     @pytest.mark.asyncio
     async def test_install_catalog_remote_cdp_pack_surfaces_staged_browser_provider_metadata(self, client, catalog_extension_runtime):
@@ -966,7 +1013,7 @@ class TestCatalogAPI:
              patch("src.api.catalog.settings") as mock_settings, \
              patch("src.api.catalog.bundled_manifest_root", return_value=bundled_skills_dir), \
              patch("src.api.catalog._skill_installed", return_value=False), \
-             patch("src.api.catalog._skill_loaded", side_effect=[False, False, False]), \
+             patch("src.api.catalog._skill_loaded", side_effect=[False, False, False, False]), \
              patch("src.api.catalog.install_extension_path"):
             mock_settings.workspace_dir = workspace_dir
 

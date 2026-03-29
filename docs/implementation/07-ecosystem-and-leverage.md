@@ -28,7 +28,7 @@
 - [x] guided repair and install flows for blocked skills, workflows, tools, and MCP servers instead of only static blocked-state reasons
 - [x] policy-aware starter-pack repair guidance, live operator-feed status, saved runbook macros, and approval-aware workflow timeline actions in the cockpit
 - [x] capability preflight and autorepair payloads for workflows, starter packs, and runbooks before execution
-- [x] bounded capability bootstrap that can apply safe install/repair actions for workflows, runbooks, and starter packs from the cockpit
+- [x] bounded capability bootstrap that can apply low-risk local workflow or runbook repair actions from the cockpit while leaving policy lifts, external server enables, installs, and starter-pack activation as explicit operator decisions, with starter-pack install flows now prechecking the same lifecycle approvals as direct catalog installs
 - [x] workflow diagnostics that expose stored load errors plus richer step timing, error summaries, and recovery hints for extension debugging
 - [x] threaded operator timeline surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, and surfaced failures
 - [x] separate activity-ledger surfaces for workflow runs, approvals, notifications, queued continuity, recent interventions, surfaced failures, and attributed LLM spend instead of leaving autonomous work opaque

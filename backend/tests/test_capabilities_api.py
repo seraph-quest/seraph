@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 import pytest
 
 from src.observer.context import CurrentContext
@@ -708,6 +709,7 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
     with (
         patch("src.api.capabilities.skill_manager.get_skill", return_value=None),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=None),
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
         patch("src.api.capabilities._ensure_bundled_workflow_available", return_value=True),
         patch("src.api.capabilities.workflow_manager.reload", return_value=[]),
@@ -750,6 +752,7 @@ async def test_activate_manifest_backed_starter_pack_works(client, _setup_manife
     with (
         patch("src.api.capabilities.skill_manager.get_skill", return_value=None),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=SimpleNamespace(name="web-brief-to-file")),
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect) as install_item,
         patch("src.api.capabilities.skill_manager.enable", return_value=True) as enable_skill,
         patch("src.api.capabilities.workflow_manager.enable", return_value=True) as enable_workflow,
@@ -832,6 +835,7 @@ async def test_activate_bundled_core_capability_pack_uses_manifest_runtime(_setu
         return {"ok": False, "status": "not_found", "name": name, "type": "unknown", "bundled": False}
 
     with (
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
         patch(
             "src.api.capabilities.get_base_tools_and_active_skills",
@@ -875,6 +879,7 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
 
     try:
         with (
+            patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
             patch(
                 "src.api.capabilities.install_catalog_item_by_name",
                 side_effect=real_install_catalog_item_by_name,
@@ -910,6 +915,87 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
     assert payload["enabled_skills"] == ["web-briefing"]
     assert payload["enabled_workflows"] == ["web-brief-to-file"]
     assert [call.args[0] for call in install_item.call_args_list] == ["http-request"]
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_requires_catalog_install_approval(client):
+    with (
+        patch(
+            "src.api.capabilities.require_catalog_install_approval",
+            AsyncMock(side_effect=HTTPException(status_code=409, detail={"type": "approval_required", "approval_id": "approval-catalog-install"})),
+        ),
+        patch("src.api.capabilities.install_catalog_item_by_name") as install_item,
+    ):
+        resp = await client.post("/api/capabilities/starter-packs/research-briefing/activate")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["type"] == "approval_required"
+    install_item.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_preflights_all_approvals_without_consuming_them(client):
+    from src.api.capabilities import _activate_starter_pack_by_name
+
+    events: list[tuple[str, str, bool | None]] = []
+
+    async def approval_side_effect(name: str, *, consume: bool = True):
+        events.append(("approval", name, consume))
+
+    def install_side_effect(name: str):
+        events.append(("install", name, None))
+        return {"ok": True, "status": "installed", "name": name, "type": "mcp_server", "bundled": True}
+
+    with (
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "privileged-pack",
+                    "label": "Privileged Pack",
+                    "description": "",
+                    "skills": [],
+                    "workflows": [],
+                    "install_items": ["alpha", "beta"],
+                }
+            ],
+        ),
+        patch(
+            "src.api.capabilities.require_catalog_install_approval",
+            AsyncMock(side_effect=approval_side_effect),
+        ),
+        patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            return_value={
+                "starter_packs": [
+                    {
+                        "name": "privileged-pack",
+                        "availability": "ready",
+                        "missing_install_items": [],
+                        "blocked_skills": [],
+                        "blocked_workflows": [],
+                    }
+                ]
+            },
+        ),
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        payload = await _activate_starter_pack_by_name("privileged-pack")
+
+    assert payload["status"] == "activated"
+    assert payload["installed_catalog_items"] == [
+        {"name": "alpha", "type": "mcp_server", "status": "installed"},
+        {"name": "beta", "type": "mcp_server", "status": "installed"},
+    ]
+    assert events == [
+        ("approval", "alpha", False),
+        ("approval", "beta", False),
+        ("approval", "alpha", True),
+        ("install", "alpha", None),
+        ("approval", "beta", True),
+        ("install", "beta", None),
+    ]
 
 
 def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_path):
@@ -986,6 +1072,7 @@ async def test_activate_starter_pack_reports_degraded_when_enable_fails(client):
     with (
         patch("src.api.capabilities.skill_manager.get_skill", return_value=SimpleNamespace(name="web-briefing")),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=SimpleNamespace(name="web-brief-to-file")),
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.skill_manager.enable", return_value=False),
         patch("src.api.capabilities.workflow_manager.enable", return_value=True),
         patch(
@@ -1179,8 +1266,8 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
     workflow_payload = workflow_resp.json()
     assert workflow_payload["availability"] == "blocked"
     assert workflow_payload["blocking_reasons"] == ["missing tool: write_file"]
-    assert workflow_payload["can_autorepair"] is True
-    assert workflow_payload["autorepair_actions"][0]["type"] == "set_tool_policy"
+    assert workflow_payload["can_autorepair"] is False
+    assert workflow_payload["autorepair_actions"] == []
     assert workflow_payload["parameter_schema"]["file_path"]["type"] == "string"
     assert workflow_payload["doctor_plan"]["repair_actions"][0]["type"] == "set_tool_policy"
 
@@ -1190,7 +1277,8 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
     assert runbook_payload["blocking_reasons"] == ["missing tool: write_file"]
     assert runbook_payload["risk_level"] == "medium"
     assert runbook_payload["execution_boundaries"] == ["external_read", "workspace_write"]
-    assert runbook_payload["autorepair_actions"][0]["type"] == "set_tool_policy"
+    assert runbook_payload["can_autorepair"] is False
+    assert runbook_payload["autorepair_actions"] == []
     assert runbook_payload["doctor_plan"]["command_preview"]
 
 
@@ -1327,7 +1415,7 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
 
 
 @pytest.mark.asyncio
-async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
+async def test_capability_bootstrap_leaves_policy_changes_manual(client):
     blocked_preflight = {
         "target_type": "workflow",
         "name": "web-brief-to-file",
@@ -1340,7 +1428,109 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
         "parameter_schema": {"query": {"type": "string"}},
         "risk_level": "medium",
         "execution_boundaries": ["external_read", "workspace_write"],
-        "autorepair_actions": [{"type": "set_tool_policy", "label": "Set tool policy to full", "mode": "full"}],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": False,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"workflows_ready": 1}},
+                {"summary": {"workflows_ready": 1}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, blocked_preflight],
+        ),
+        patch("src.api.capabilities._apply_safe_capability_action", AsyncMock()) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()) as log_event,
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "workflow", "name": "web-brief-to-file"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "blocked"
+    assert payload["ready"] is False
+    assert payload["availability"] == "blocked"
+    assert payload["applied_actions"] == []
+    assert payload["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["command"] is None
+    assert payload["doctor_plan"]["command_ready"] is False
+    assert payload["doctor_plan"]["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["overview"]["summary"]["workflows_ready"] == 1
+    apply_action.assert_not_awaited()
+    log_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_leaves_mcp_enable_actions_manual(client):
+    blocked_preflight = {
+        "target_type": "runbook",
+        "name": "starter-pack:research-briefing",
+        "label": "Research briefing",
+        "description": "Repair MCP dependency",
+        "availability": "blocked",
+        "blocking_reasons": ["mcp server browser disabled"],
+        "recommended_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph".',
+        "parameter_schema": {},
+        "risk_level": "medium",
+        "execution_boundaries": ["capability_activation"],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": False,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"mcp_servers_ready": 0}},
+                {"summary": {"mcp_servers_ready": 0}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, blocked_preflight],
+        ),
+        patch("src.api.capabilities._apply_safe_capability_action", AsyncMock()) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "runbook", "name": "starter-pack:research-briefing"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "blocked"
+    assert payload["applied_actions"] == []
+    assert payload["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["doctor_plan"]["manual_actions"] == blocked_preflight["recommended_actions"]
+    apply_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_can_apply_low_risk_toggle_actions(client):
+    blocked_preflight = {
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Enable a disabled workflow",
+        "availability": "disabled",
+        "blocking_reasons": ["workflow disabled"],
+        "recommended_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "parameter_schema": {"query": {"type": "string"}},
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "autorepair_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
         "can_autorepair": True,
         "ready": False,
     }
@@ -1358,9 +1548,9 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
         patch(
             "src.api.capabilities._build_capability_overview",
             side_effect=[
+                {"summary": {"workflows_ready": 0}},
                 {"summary": {"workflows_ready": 1}},
-                {"summary": {"workflows_ready": 2}},
-                {"summary": {"workflows_ready": 2}},
+                {"summary": {"workflows_ready": 1}},
             ],
         ),
         patch(
@@ -1369,7 +1559,7 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
         ),
         patch(
             "src.api.capabilities._apply_safe_capability_action",
-            return_value={"type": "set_tool_policy", "mode": "full", "status": "applied"},
+            return_value={"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "applied"},
         ) as apply_action,
         patch("src.api.capabilities.log_integration_event", AsyncMock()) as log_event,
     ):
@@ -1383,73 +1573,66 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
     assert payload["status"] == "ready"
     assert payload["ready"] is True
     assert payload["availability"] == "ready"
-    assert payload["applied_actions"] == [{"type": "set_tool_policy", "mode": "full", "status": "applied"}]
+    assert payload["applied_actions"] == [{"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "applied"}]
     assert payload["manual_actions"] == []
     assert payload["command"] == blocked_preflight["command"]
     assert payload["doctor_plan"]["command_ready"] is True
-    assert payload["doctor_plan"]["applied_actions"][0]["type"] == "set_tool_policy"
-    assert payload["overview"]["summary"]["workflows_ready"] == 2
+    assert payload["doctor_plan"]["applied_actions"][0]["type"] == "toggle_workflow"
+    assert payload["overview"]["summary"]["workflows_ready"] == 1
     apply_action.assert_awaited_once()
     log_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_capability_bootstrap_can_apply_mcp_toggle_actions(client):
+async def test_capability_bootstrap_does_not_reclassify_low_risk_actions_as_manual_after_failed_apply(client):
     blocked_preflight = {
-        "target_type": "runbook",
-        "name": "starter-pack:research-briefing",
-        "label": "Research briefing",
-        "description": "Repair MCP dependency",
-        "availability": "blocked",
-        "blocking_reasons": ["mcp server browser disabled"],
-        "recommended_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
-        "command": 'Run workflow "web-brief-to-file" with query="seraph".',
-        "parameter_schema": {},
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Enable a disabled workflow",
+        "availability": "disabled",
+        "blocking_reasons": ["workflow disabled"],
+        "recommended_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "parameter_schema": {"query": {"type": "string"}},
         "risk_level": "medium",
-        "execution_boundaries": ["capability_activation"],
-        "autorepair_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "autorepair_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
         "can_autorepair": True,
         "ready": False,
-    }
-    ready_preflight = {
-        **blocked_preflight,
-        "availability": "ready",
-        "blocking_reasons": [],
-        "recommended_actions": [],
-        "autorepair_actions": [],
-        "can_autorepair": False,
-        "ready": True,
     }
 
     with (
         patch(
             "src.api.capabilities._build_capability_overview",
             side_effect=[
-                {"summary": {"mcp_servers_ready": 0}},
-                {"summary": {"mcp_servers_ready": 1}},
-                {"summary": {"mcp_servers_ready": 1}},
+                {"summary": {"workflows_ready": 0}},
+                {"summary": {"workflows_ready": 0}},
+                {"summary": {"workflows_ready": 0}},
             ],
         ),
         patch(
             "src.api.capabilities._capability_preflight_payload",
-            side_effect=[blocked_preflight, ready_preflight],
+            side_effect=[blocked_preflight, blocked_preflight],
         ),
         patch(
             "src.api.capabilities._apply_safe_capability_action",
-            return_value={"type": "toggle_mcp_server", "name": "browser", "enabled": True, "status": "applied"},
+            return_value={"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "failed"},
         ) as apply_action,
         patch("src.api.capabilities.log_integration_event", AsyncMock()),
     ):
         resp = await client.post(
             "/api/capabilities/bootstrap",
-            json={"target_type": "runbook", "name": "starter-pack:research-briefing"},
+            json={"target_type": "workflow", "name": "web-brief-to-file"},
         )
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["status"] == "ready"
-    assert payload["applied_actions"][0]["type"] == "toggle_mcp_server"
-    assert payload["doctor_plan"]["applied_actions"][0]["type"] == "toggle_mcp_server"
+    assert payload["status"] == "blocked"
+    assert payload["applied_actions"] == [{"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "failed"}]
+    assert payload["manual_actions"] == []
+    assert payload["doctor_plan"]["manual_actions"] == []
+    assert payload["doctor_plan"]["applied_actions"][0]["status"] == "failed"
     apply_action.assert_awaited_once()
 
 

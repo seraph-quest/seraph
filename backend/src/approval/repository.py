@@ -131,6 +131,24 @@ class ApprovalRepository:
             db.add(request)
             return True
 
+    async def has_approved(
+        self,
+        *,
+        session_id: str | None,
+        tool_name: str,
+        fingerprint: str,
+    ) -> bool:
+        async with get_session() as db:
+            result = await db.execute(
+                select(ApprovalRequest)
+                .where(ApprovalRequest.session_id == session_id)
+                .where(ApprovalRequest.tool_name == tool_name)
+                .where(ApprovalRequest.fingerprint == fingerprint)
+                .where(ApprovalRequest.status == "approved")
+                .order_by(col(ApprovalRequest.created_at).desc())
+            )
+            return result.scalars().first() is not None
+
     async def list_pending(
         self,
         *,

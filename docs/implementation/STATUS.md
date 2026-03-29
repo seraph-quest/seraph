@@ -52,7 +52,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 - [x] dense guardian workspace as the primary operator surface
 - [x] first clear capability discovery, activation, preflight, and repair for tools, skills, workflows, MCP surfaces, starter packs, installable catalog items, and runbooks from inside that cockpit
-- [x] bounded capability bootstrap that can apply safe install or repair actions for workflows, runbooks, and starter packs directly from the operator surface
+- [x] bounded capability bootstrap that can apply low-risk local enable or repair actions from the operator surface while leaving policy lifts, external server enables, installs, and starter-pack activation as explicit operator repair steps, with multi-step privileged repair bundles now gated behind step-by-step execution instead of one-click chaining
 - [x] cockpit-native extension authoring and validation for workflows, skills, and MCP configs with diagnostics, save, and repair handoff
 - [x] first browser reload and reconnect continuity for the active thread, with explicit fresh-thread semantics and background-activity badges
 - [x] explicit cross-surface thread model that links approvals, workflow runs, notifications, queued interventions, and recent interventions back to browser threads

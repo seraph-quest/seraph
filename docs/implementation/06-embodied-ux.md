@@ -22,7 +22,7 @@
 - [x] separate Activity Ledger window that links workflow runs, approvals, notifications, queued interventions, recent guardian outputs, surfaced failures, tool steps, and attributed LLM calls back into one live browser control surface
 - [x] flatter terminal-style workspace windows with close controls, visible resize grip, and a dedicated Windows menu for per-pane visibility and focus
 - [x] cockpit capability preflight and autorepair flows for runbooks, starter packs, and workflows before the operator drafts or reruns them
-- [x] cockpit capability bootstrap now applies bounded safe install/repair actions for workflows, runbooks, and starter packs instead of leaving preflight as a separate manual operator step
+- [x] cockpit capability bootstrap now applies only bounded low-risk local repair actions, while policy lifts, external server enables, installs, and starter-pack activation stay visible as explicit manual repair steps instead of silent operator-surface side effects, and multi-step privileged repair bundles now stop at a step-by-step execution boundary instead of chaining from one button
 - [x] cockpit workflow views now expose richer step timestamps, duration, error summaries, recovery hints, and stored workflow diagnostics
 - [x] cockpit now includes a first extension studio for workflows, skills, and MCP configs with validation, diagnostics, save flows, and repair handoff from operator surfaces
 - [x] cockpit workflow views now expose first branch/resume checkpoints, lineage metadata, and resume drafts tied to existing inputs instead of only replay-from-start or retry-from-step cues

@@ -705,7 +705,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert details_by_name["capability_repair_behavior"]["runbooks_ready"] >= 1
     assert details_by_name["capability_preflight_behavior"]["workflow_ready"] is False
-    assert details_by_name["capability_preflight_behavior"]["workflow_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["workflow_can_autorepair"] is False
     assert details_by_name["capability_preflight_behavior"]["workflow_blocking_reasons"] == [
         "missing tool: write_file",
     ]
@@ -716,19 +716,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["capability_preflight_behavior"]["workflow_recommended_action_types"] == [
         "set_tool_policy",
     ]
-    assert details_by_name["capability_preflight_behavior"]["workflow_autorepair_action_types"] == [
-        "set_tool_policy",
-    ]
-    assert details_by_name["capability_preflight_behavior"]["starter_pack_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["workflow_autorepair_action_types"] == []
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_can_autorepair"] is False
     assert "skill web-briefing missing tool: write_file" in (
         details_by_name["capability_preflight_behavior"]["starter_pack_blocking_reasons"]
     )
     assert details_by_name["capability_preflight_behavior"]["starter_pack_command_present"] is True
-    assert details_by_name["capability_preflight_behavior"]["starter_pack_autorepair_action_types"] == [
-        "set_tool_policy",
-    ]
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_autorepair_action_types"] == []
     assert details_by_name["capability_preflight_behavior"]["runbook_ready"] is False
-    assert details_by_name["capability_preflight_behavior"]["runbook_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["runbook_can_autorepair"] is False
     assert details_by_name["capability_preflight_behavior"]["runbook_parameter_schema_keys"] == [
         "file_path",
         "query",
@@ -741,9 +737,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["capability_preflight_behavior"]["runbook_blocking_reasons"] == [
         "missing tool: write_file",
     ]
-    assert details_by_name["capability_preflight_behavior"]["runbook_autorepair_action_types"] == [
-        "set_tool_policy",
-    ]
+    assert details_by_name["capability_preflight_behavior"]["runbook_autorepair_action_types"] == []
     assert details_by_name["activity_ledger_attribution_behavior"]["runtime_path_bucket_keys"] == [
         "browser_agent",
         "chat_agent",

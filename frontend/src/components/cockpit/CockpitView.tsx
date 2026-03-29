@@ -748,6 +748,32 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
 }
 
+const SUPPORTED_CAPABILITY_ACTION_TYPES = new Set<CapabilityAction["type"]>([
+  "enable_extension",
+  "toggle_skill",
+  "toggle_workflow",
+  "toggle_mcp_server",
+  "test_mcp_server",
+  "test_native_notification",
+  "set_tool_policy",
+  "set_mcp_policy",
+  "install_catalog_item",
+  "activate_starter_pack",
+  "open_settings",
+]);
+
+const LOW_RISK_BATCH_CAPABILITY_ACTION_TYPES = new Set<CapabilityAction["type"]>([
+  "toggle_skill",
+  "toggle_workflow",
+  "test_mcp_server",
+  "test_native_notification",
+  "open_settings",
+]);
+
+function isLowRiskBatchCapabilityAction(action: CapabilityAction): boolean {
+  return LOW_RISK_BATCH_CAPABILITY_ACTION_TYPES.has(action.type);
+}
+
 const IMPORTED_CAPABILITY_FAMILY_DEFS = [
   { type: "toolset_presets", label: "toolsets" },
   { type: "context_packs", label: "context packs" },
@@ -4456,7 +4482,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         `${label}: ${result.manual_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
         "info",
       );
-      await runCapabilityActions(result.manual_actions, `${label} bootstrap`);
     }
     if (result.ready) {
       setOperatorStatus(`${label} ready`);
@@ -4610,23 +4635,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     actions: CapabilityAction[],
     label: string,
   ) {
-    const safeTypes = new Set<CapabilityAction["type"]>([
-      "enable_extension",
-      "toggle_skill",
-      "toggle_workflow",
-      "toggle_mcp_server",
-      "test_mcp_server",
-      "test_native_notification",
-      "set_tool_policy",
-      "set_mcp_policy",
-      "install_catalog_item",
-      "activate_starter_pack",
-      "open_settings",
-    ]);
-    const allowedActions = actions.filter((action) => safeTypes.has(action.type));
+    const allowedActions = actions.filter((action) => SUPPORTED_CAPABILITY_ACTION_TYPES.has(action.type));
     if (allowedActions.length === 0) {
       setOperatorStatus(`No safe repair actions available for ${label}`);
       appendOperatorFeed(`No safe repair actions available for ${label}`, "failed");
+      return;
+    }
+    const requiresStepByStepExecution = (
+      allowedActions.length > 1
+      && allowedActions.some((action) => !isLowRiskBatchCapabilityAction(action))
+    );
+    if (requiresStepByStepExecution) {
+      const actionSummary = allowedActions.map((action) => formatCapabilityAction(action)).join(" · ");
+      setOperatorStatus(`${label} requires step-by-step execution`);
+      appendOperatorFeed(
+        `${label} requires step-by-step execution: ${actionSummary}`,
+        "info",
+      );
       return;
     }
     setOperatorStatus(`Repairing ${label}...`);

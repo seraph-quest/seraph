@@ -814,7 +814,7 @@ describe("CockpitView", () => {
     );
   });
 
-  it("runs manual bootstrap actions for blocked runbooks before stopping", async () => {
+  it("surfaces manual bootstrap actions for blocked runbooks without auto-running them", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -928,6 +928,9 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("GitHub sync")).toBeInTheDocument());
     const runbookRow = screen.getByText("GitHub sync").closest(".cockpit-operator-row");
     expect(runbookRow).not.toBeNull();
+    const mcpTestCallCountBefore = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/mcp/servers/github/test") && init?.method === "POST",
+    ).length;
     fireEvent.click(within(runbookRow as HTMLElement).getByRole("button", { name: "repair" }));
 
     await waitFor(() =>
@@ -936,15 +939,14 @@ describe("CockpitView", () => {
         expect.objectContaining({ method: "POST" }),
       ),
     );
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringMatching(/\/api\/mcp\/servers\/.+\/test/),
-        expect.objectContaining({ method: "POST" }),
-      ),
-    );
+    await waitFor(() => expect(screen.getByText("doctor plans")).toBeInTheDocument());
+    const mcpTestCallCountAfter = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/mcp/servers/github/test") && init?.method === "POST",
+    ).length;
+    expect(mcpTestCallCountAfter).toBe(mcpTestCallCountBefore);
   });
 
-  it("routes manual bootstrap extension enables through the lifecycle approval path", async () => {
+  it("routes explicit manual bootstrap extension enables through the lifecycle approval path", async () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1118,6 +1120,14 @@ describe("CockpitView", () => {
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/bootstrap"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "run manual" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/extensions/seraph.research-pack/enable"),
         expect.objectContaining({ method: "POST" }),
       ),
@@ -1125,6 +1135,145 @@ describe("CockpitView", () => {
     expect(await screen.findByText("Enable Research Pack contributions with high-risk capabilities")).toBeInTheDocument();
     expect(await screen.findByText("approval-extension-enable")).toBeInTheDocument();
     expect(screen.queryByText("Research briefing repair sequence applied")).not.toBeInTheDocument();
+  });
+
+  it("blocks generated multi-step privileged repair bundles from running in one click", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [{
+            id: "runbook:research-briefing",
+            name: "research-briefing",
+            label: "Research briefing",
+            description: "Enable the pack and repair policy",
+            source: "workflow",
+            command: null,
+            availability: "blocked",
+            blocking_reasons: ["missing policy and extension enablement"],
+            recommended_actions: [
+              { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+              { type: "enable_extension", label: "Enable extension", name: "seraph.research-pack" },
+            ],
+            parameter_schema: {},
+            risk_level: "high",
+            execution_boundaries: ["workspace_write"],
+            action: { type: "draft_workflow", label: "Draft workflow", name: "research-briefing" },
+          }],
+        }));
+      }
+      if (url.includes("/api/capabilities/preflight")) {
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:research-briefing",
+          label: "Research briefing",
+          description: "Enable the pack and repair policy",
+          availability: "blocked",
+          blocking_reasons: ["missing policy and extension enablement"],
+          autorepair_actions: [],
+          recommended_actions: [
+            { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+            { type: "enable_extension", label: "Enable extension", name: "seraph.research-pack" },
+          ],
+          ready: false,
+          can_autorepair: false,
+        }));
+      }
+      if (url.includes("/api/capabilities/bootstrap")) {
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:research-briefing",
+          label: "Research briefing",
+          status: "blocked",
+          ready: false,
+          availability: "blocked",
+          blocking_reasons: ["missing policy and extension enablement"],
+          applied_actions: [],
+          manual_actions: [
+            { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+            { type: "enable_extension", label: "Enable extension", name: "seraph.research-pack" },
+          ],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "full" }));
+      if (url.includes("/api/extensions/seraph.research-pack/enable")) return Promise.resolve(mockResponse({ status: "enabled" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
+    const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
+    expect(runbookRow).not.toBeNull();
+    fireEvent.click(within(runbookRow as HTMLElement).getByRole("button", { name: "repair" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/bootstrap"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    const toolPolicyUpdateCountBefore = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/settings/tool-policy-mode") && init?.method === "PUT",
+    ).length;
+    const extensionEnableCountBefore = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/extensions/seraph.research-pack/enable") && init?.method === "POST",
+    ).length;
+    fireEvent.click(await screen.findByRole("button", { name: "run manual" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Research briefing requires step-by-step execution/)).toBeInTheDocument(),
+    );
+    const toolPolicyUpdateCountAfter = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/settings/tool-policy-mode") && init?.method === "PUT",
+    ).length;
+    const extensionEnableCountAfter = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/extensions/seraph.research-pack/enable") && init?.method === "POST",
+    ).length;
+    expect(toolPolicyUpdateCountAfter).toBe(toolPolicyUpdateCountBefore);
+    expect(extensionEnableCountAfter).toBe(extensionEnableCountBefore);
   });
 
   it("keeps step repair visible even when replay is blocked", async () => {

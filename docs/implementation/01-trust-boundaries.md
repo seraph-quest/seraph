@@ -23,6 +23,9 @@
 - [x] approval records now preserve fingerprints, resume context, and thread labels so replay and resume surfaces can recover safely instead of guessing the target thread
 - [x] reusable workflow approvals and workflow replay/resume now bind to explicit approval-context snapshots so stale approvals or replay plans fail closed when the privileged surface changes instead of trusting only tool name plus arguments
 - [x] built-in delegation now keeps vault-backed secret operations on a dedicated `vault_keeper` specialist so generic memory delegation no longer inherits direct secret read/write tools, and secret-bearing tasks route to that privileged surface before generic memory cues can capture them
+- [x] capability bootstrap and cockpit repair now keep privileged mutation on an explicit operator path by limiting automatic repair to low-risk local workflow or skill toggles while leaving policy lifts, external server enables, installs, and starter-pack activation manual
+- [x] catalog installs and starter-pack activation now preflight lifecycle approvals before bundled MCP-backed capability expansion instead of letting approval-required installs surface only after mutation starts
+- [x] generated doctor-plan and replay repair bundles no longer batch-apply multiple privileged mutations from one click; multi-step privileged fixes now require step-by-step operator execution
 
 ## Working On Now
 
@@ -31,6 +34,9 @@
 - [x] this workstream now also ships `execution-safety-hardening-v5`
 - [x] manual MCP token setup now moves through vault-backed placeholders instead of raw config headers, and workflow approval/replay now preserves trust-boundary context instead of reusing stale approval assumptions
 - [x] built-in delegation now separates generic memory planning from vault-backed secret management, with a dedicated privileged specialist plus deterministic eval coverage for secret-routing precedence and specialist tool isolation
+- [x] this workstream now also ships `capability-bootstrap-autonomy-boundary-v1`
+- [x] this workstream now also ships `catalog-install-lifecycle-approval-v1`
+- [x] this workstream now also ships `privileged-repair-bundle-gating-v1`
 
 ## Still To Do On `develop`
 
@@ -52,9 +58,59 @@
 
 ## Current Slice Record
 
+### `capability-bootstrap-autonomy-boundary-v1`
+
+- status: complete on `feat/privileged-autonomy-boundary-hardening-batch-h-v1`, intended for the aggregate Batch H PR for `#248`
+- root cause addressed:
+  - capability preflight recommendations for tool-policy elevation, MCP enablement, catalog install, and starter-pack activation had drifted into `autorepair_actions`, so `/api/capabilities/bootstrap` could mutate policy or expand capability reach directly from an advisory planning surface
+  - the cockpit bootstrap path then auto-ran any returned `manual_actions`, which meant even actions intentionally left outside backend autorepair could still execute implicitly after a single repair click
+- scope:
+  - capability bootstrap now limits automatic repair to low-risk local workflow and skill toggles instead of treating policy lifts, external server enables, catalog installs, or starter-pack activation as safe autorepair
+  - capability preflight and doctor plans still surface the broader repair sequence, but higher-risk steps now stay in explicit manual actions rather than crossing from planning into execution automatically
+  - cockpit bootstrap now records and surfaces manual repair actions without auto-running them, so capability bootstrap preserves the operator boundary instead of silently replaying privileged mutations
+- validation:
+  - `python3 -m py_compile backend/src/api/capabilities.py backend/tests/test_capabilities_api.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_capabilities_api.py tests/test_eval_harness.py -q`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npm test -- --run src/components/cockpit/CockpitView.test.tsx`
+- review pass:
+  - direct review against bugs, regressions, and hallucinated assumptions found a second real boundary leak after the backend audit: the cockpit bootstrap flow was auto-running returned `manual_actions`, so high-risk repair steps could still execute implicitly after bootstrap stopped applying them server-side
+  - fixed by keeping manual actions operator-visible and doctor-plan-accessible without auto-running them during bootstrap itself
+
+### `catalog-install-lifecycle-approval-v1`
+
+- status: complete on `feat/privileged-autonomy-boundary-hardening-batch-h-v1`, intended for the aggregate Batch H PR for `#248`
+- root cause addressed:
+  - direct catalog MCP installs already routed through lifecycle approval, but the shared catalog-install path still let starter-pack activation call `install_catalog_item_by_name()` directly, so bundled capability expansion could bypass the same approval envelope once it moved through capability bootstrap instead of the catalog endpoint
+  - the first patch assumption also overgeneralized catalog approval as universal; review against the real install contract showed lifecycle approval is risk-based, not required for every low-risk bundled skill package
+- scope:
+  - catalog install now exposes one shared `require_catalog_install_approval()` seam and starter-pack activation prechecks all bundled install items against it before mutating runtime state
+  - bundled MCP-backed capability expansion now requires the same extension-lifecycle approval path whether it starts from the catalog surface or a starter-pack activation path
+  - low-risk bundled skill installs remain direct when their validated package carries no lifecycle-risk boundaries, so the approval contract stays narrow instead of turning every install into ceremony
+- validation:
+  - `python3 -m py_compile backend/src/api/catalog.py backend/src/api/capabilities.py backend/tests/test_catalog_api.py backend/tests/test_capabilities_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_catalog_api.py tests/test_capabilities_api.py -q`
+- review pass:
+  - direct review against bugs and hallucinated assumptions caught one bad generalization in the first test update: bundled catalog skill installs were treated as universally approval-gated even when the validated package had no lifecycle-risk boundaries
+  - fixed by keeping approval enforcement risk-based and aligning the catalog tests with the actual permission-summary contract instead of broadening the boundary without evidence
+
+### `privileged-repair-bundle-gating-v1`
+
+- status: complete on `feat/privileged-autonomy-boundary-hardening-batch-h-v1`, intended for the aggregate Batch H PR for `#248`
+- root cause addressed:
+  - after bootstrap stopped auto-running manual actions, the cockpit still let generated doctor plans and replay repair bundles run multiple privileged mutations in one click, which collapsed inspection and execution back into one opaque operator gesture
+- scope:
+  - cockpit repair execution now distinguishes low-risk batchable actions from privileged mutations
+  - low-risk local toggles and test actions can still run as a repair sequence, but generated bundles that mix or stack privilege-changing actions now stop at an explicit "step-by-step execution" boundary instead of chaining them automatically
+  - single explicit privileged actions remain runnable so existing operator recovery paths still work when the user intentionally executes one concrete mutation
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npm test -- --run src/components/cockpit/CockpitView.test.tsx`
+- review pass:
+  - direct review against execution-envelope drift found that the operator surface was still treating a machine-generated privileged repair bundle as a safe batch operation even after backend bootstrap hardening
+  - fixed by adding a cockpit-side batch gate so generated privileged repair plans cannot silently chain multiple mutations from one click
+
 ### `mcp-vault-credential-injection-v1`
 
-- status: complete on `feat/trust-boundary-hardening-batch-e-v1`, pending inclusion in the aggregate `#235` PR
+- status: complete on `develop` via PR `#245`
 - scope:
   - manual MCP token updates now store bearer tokens in the vault and persist only `${vault:...}` placeholders in `mcp-servers.json`
   - MCP server validate and mutation APIs now reject raw sensitive credential headers so new manual connector auth paths stay on env or vault-backed placeholders
@@ -75,7 +131,7 @@
 
 ### `approval-replay-boundary-enforcement-v1`
 
-- status: complete on `feat/trust-boundary-hardening-batch-e-v1`, pending inclusion in the aggregate `#235` PR
+- status: complete on `develop` via PR `#245`
 - scope:
   - workflow approvals now fingerprint an explicit approval context instead of only workflow tool name plus arguments, so changed privileged workflow surfaces cannot silently consume earlier approvals
   - workflow audit and workflow-run history now persist approval-context snapshots and context-aware run fingerprints, so pending-approval projection and replay reasoning stay tied to the privileged surface that actually ran
@@ -91,7 +147,7 @@
 
 ### `planner-secret-surface-isolation-v1`
 
-- status: complete on `feat/trust-boundary-hardening-batch-e-v1`, pending inclusion in the aggregate `#235` PR
+- status: complete on `develop` via PR `#245`
 - scope:
   - built-in specialist routing now splits generic guardian-record handling from vault-backed secret management by moving `store_secret`, `get_secret`, `get_secret_ref`, `list_secrets`, and `delete_secret` onto a dedicated `vault_keeper`
   - explicit delegation aliases and auto-routing now treat `vault`, `secret`, `credential`, and `api key` work as a privileged vault surface instead of letting generic memory delegation inherit those tools

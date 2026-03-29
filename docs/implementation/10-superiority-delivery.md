@@ -26,6 +26,8 @@ This file explains:
 3. which workstreams own each remaining gap
 4. how active execution should be tracked without duplicating this translation layer
 
+- [x] post-import hardening on `develop` now includes bounded capability bootstrap, risk-based catalog install approval reuse, and a step-by-step gate for generated privileged repair bundles instead of one-click mutation chains
+
 ## Docs Contract
 
 - [x] `docs/research/00-synthesis.md` defines the target product shape.
@@ -64,7 +66,7 @@ This file explains:
 
 ### 5. Operator cockpit
 
-- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, declared-type artifact-to-workflow handoff, checkpoint-truthful branch actions, branch-family supervision with latest-branch continue/open-parent controls, direct workflow-attached approve or deny controls, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, per-layout save/reset composition, first browser-session continuity restore, a first actionable desktop shell, a first cockpit-native capability/operator surface for policy/extension/workflow state, a searchable capability palette, a threaded operator timeline, capability preflight/autorepair, and a denser operator terminal with recommendations, repair actions, installable items, live operator-feed status, and runbooks
+- [x] shipped foundations: distinct visual surface, current world UI, first guardian cockpit shell, fixed command bar, guardian-state/intervention/audit/trace panes, linked recent-output and pending-approval panes, dedicated workflow-run views, richer workflow inspector actions, artifact round-trip into the command bar, declared-type artifact-to-workflow handoff, checkpoint-truthful branch actions, branch-family supervision with latest-branch continue/open-parent controls, direct workflow-attached approve or deny controls, persisted `default` / `focus` / `review` layouts, inspector visibility persistence, keyboard switching, per-layout save/reset composition, first browser-session continuity restore, a first actionable desktop shell, a first cockpit-native capability/operator surface for policy/extension/workflow state, a searchable capability palette, a threaded operator timeline, capability preflight/autorepair, and a denser operator terminal with recommendations, repair actions, installable items, live operator-feed status, runbooks, plus explicit manual-vs-safe separation for bootstrap repairs
 - [ ] still missing: richer workflow debugging density and more flexible workspace control beyond the shipped step records, branch-family supervision, checkpoint branch controls, and first dedicated workflow and operator timeline layers
 - owners: Workstream 06
 

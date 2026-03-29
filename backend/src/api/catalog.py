@@ -381,6 +381,75 @@ def _validation_detail(report: Any) -> str:
     return "extension package failed validation"
 
 
+def _stable_catalog_install_preview(preview: dict[str, Any], *, reference: str) -> dict[str, Any]:
+    stable_preview = dict(preview)
+    stable_preview["path"] = reference
+    stable_preview["root_path"] = reference
+    return stable_preview
+
+
+def _catalog_install_approval_preview(name: str) -> tuple[str, dict[str, Any]] | None:
+    catalog_extension = _find_catalog_extension(name)
+    if catalog_extension is not None:
+        lifecycle_action = _catalog_extension_lifecycle_action(catalog_extension)
+        if lifecycle_action is None:
+            return None
+        action, package_path = lifecycle_action
+        preview = validate_extension_path(package_path)
+        if not preview.get("ok"):
+            return None
+        return action, preview
+
+    catalog_skill = catalog_skill_by_name().get(name)
+    if catalog_skill is not None:
+        if _skill_loaded(name) or _skill_installed(name) or not bool(catalog_skill.get("bundled", False)):
+            return None
+        source = _bundled_skill_source_by_name(name)
+        if not source or not os.path.isfile(source):
+            return None
+        with tempfile.TemporaryDirectory(prefix="seraph-catalog-skill-preview-") as temp_dir:
+            try:
+                package_path = _write_catalog_skill_package(temp_dir, catalog_skill, source)
+            except ValueError:
+                return None
+            preview = validate_extension_path(package_path)
+        if not preview.get("ok"):
+            return None
+        return "install", _stable_catalog_install_preview(
+            preview,
+            reference=f"catalog://skill/{name}",
+        )
+
+    catalog_mcp = catalog_mcp_by_name().get(name)
+    if catalog_mcp is not None:
+        if _mcp_installed(name):
+            return None
+        with tempfile.TemporaryDirectory(prefix="seraph-catalog-mcp-preview-") as temp_dir:
+            try:
+                package_path = _write_catalog_mcp_package(temp_dir, catalog_mcp)
+            except ValueError:
+                return None
+            preview = validate_extension_path(package_path)
+        if not preview.get("ok"):
+            return None
+        return "install", _stable_catalog_install_preview(
+            preview,
+            reference=f"catalog://mcp_server/{name}",
+        )
+
+    return None
+
+
+async def require_catalog_install_approval(name: str) -> None:
+    lifecycle_preview = _catalog_install_approval_preview(name)
+    if lifecycle_preview is None:
+        return
+    action, preview = lifecycle_preview
+    from src.api.extensions import _require_extension_lifecycle_approval
+
+    await _require_extension_lifecycle_approval(action, preview)
+
+
 def install_catalog_item_by_name(name: str) -> dict[str, Any]:
     """Install a bundled skill or MCP server from the catalog."""
     catalog_extension = _find_catalog_extension(name)
@@ -704,16 +773,7 @@ async def get_catalog():
 @router.post("/catalog/install/{name}", status_code=201)
 async def install_item(name: str):
     """Install a skill or MCP server from the catalog."""
-    catalog_extension = _find_catalog_extension(name)
-    if catalog_extension is not None:
-        lifecycle_action = _catalog_extension_lifecycle_action(catalog_extension)
-        if lifecycle_action is not None:
-            action, package_path = lifecycle_action
-            preview = validate_extension_path(package_path)
-            if preview.get("ok"):
-                from src.api.extensions import _require_extension_lifecycle_approval
-
-                await _require_extension_lifecycle_approval(action, preview)
+    await require_catalog_install_approval(name)
     result = install_catalog_item_by_name(name)
     if result["ok"]:
         payload = {"status": result["status"], "name": name, "type": result["type"]}

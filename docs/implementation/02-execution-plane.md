@@ -31,6 +31,7 @@
 - [x] workflow runtime now persists reusable checkpoint context for safe branches, records structured failed-step payloads for later recovery, and keeps workflow-run listing truthful when a later checkpoint cannot actually be resumed
 - [x] cockpit workflow surfaces now derive branch-family supervision from persisted lineage, including child/peer branch inspection plus latest-branch continue/open-parent controls, instead of treating every workflow run as an isolated replay row
 - [x] built-in delegation now exposes a separate `vault_keeper` specialist for secret-management tools so generic memory delegation stops carrying direct vault read/write capability
+- [x] capability bootstrap now limits automatic repair to low-risk local workflow or skill toggles, leaving policy lifts and capability-surface expansion as explicit operator actions instead of workflow-planning side effects, and generated repair bundles no longer batch-run multiple privileged mutations from one cockpit click
 
 ## Working On Now
 
@@ -49,7 +50,7 @@
 
 ### `workflow-autonomy-supervision-and-artifact-control-v1`
 
-- status: complete on `feat/workflow-autonomy-batch-g-v1`, pending inclusion in the aggregate Batch G PR for `#247`
+- status: complete on `develop` via PR `#251`
 - root cause addressed:
   - workflow recovery metadata already advertised retry-from-step and branch control, but later-step failures without reusable checkpoint state could still make the runs API behave as if that branch path was available
   - cockpit artifact chaining still assumed any workflow with a `file_path` input could consume any produced artifact, which made artifact-to-workflow handoff broad but not truthful

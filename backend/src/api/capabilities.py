@@ -18,6 +18,7 @@ from src.api.catalog import (
     catalog_skill_by_name,
     install_catalog_item_by_name,
     load_catalog_items,
+    require_catalog_install_approval,
 )
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
@@ -47,14 +48,9 @@ router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
 _BUNDLED_CORE_CAPABILITIES_DIR = os.path.join(_DEFAULTS_DIR, "extensions", "core-capabilities")
-_SAFE_AUTOREPAIR_ACTION_TYPES = {
+_LOW_RISK_AUTOREPAIR_ACTION_TYPES = {
     "toggle_skill",
     "toggle_workflow",
-    "toggle_mcp_server",
-    "set_tool_policy",
-    "set_mcp_policy",
-    "install_catalog_item",
-    "activate_starter_pack",
 }
 _BOOTSTRAP_ACTION_PRIORITY = {
     "install_catalog_item": 0,
@@ -781,7 +777,11 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
     installed_catalog_items: list[dict[str, Any]] = []
     missing_entries: list[str] = []
 
-    for item_name in [str(item) for item in pack.get("install_items", [])]:
+    install_item_names = [str(item) for item in pack.get("install_items", [])]
+    for item_name in install_item_names:
+        await require_catalog_install_approval(item_name)
+
+    for item_name in install_item_names:
         install_result = install_catalog_item_by_name(item_name)
         if install_result["ok"] or install_result["status"] == "already_installed":
             installed_catalog_items.append({
@@ -924,7 +924,7 @@ async def _apply_safe_capability_action(action: dict[str, Any]) -> dict[str, Any
     name = str(action.get("name") or "") or None
     mode = str(action.get("mode") or "") or None
 
-    if action_type not in _SAFE_AUTOREPAIR_ACTION_TYPES:
+    if action_type not in _LOW_RISK_AUTOREPAIR_ACTION_TYPES:
         return {"type": action_type, "label": label, "status": "unsupported"}
 
     match action_type:
@@ -1018,7 +1018,7 @@ def _manual_bootstrap_actions(preflight: dict[str, Any], *, seen: set[tuple[str,
             continue
         if _action_key(action) in seen:
             continue
-        if str(action.get("type") or "") in _SAFE_AUTOREPAIR_ACTION_TYPES:
+        if str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES:
             continue
         results.append(action)
     return results
@@ -1609,7 +1609,7 @@ def _capability_preflight_payload(
     autorepair_actions = [
         action
         for action in recommended_actions
-        if isinstance(action.get("type"), str) and action["type"] in _SAFE_AUTOREPAIR_ACTION_TYPES
+        if isinstance(action.get("type"), str) and action["type"] in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
     ]
 
     return {
@@ -1752,7 +1752,7 @@ async def bootstrap_capability(body: CapabilityBootstrapRequest):
             for action in preflight.get("autorepair_actions", []) or []
             if (
                 isinstance(action, dict)
-                and str(action.get("type") or "") in _SAFE_AUTOREPAIR_ACTION_TYPES
+                and str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
                 and _action_key(action) not in seen_actions
             )
         ]

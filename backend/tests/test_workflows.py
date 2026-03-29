@@ -18,7 +18,9 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import get_tools
 from src.agent.session import SessionManager
+from src.audit.repository import audit_repository
 from src.tools.approval import ApprovalTool
+from src.workflows.run_identity import build_workflow_run_identity
 
 
 class DummyTool:
@@ -717,6 +719,129 @@ class TestWorkflowManager:
         assert details["step_records"][1]["status"] == "failed"
         assert details["step_records"][1]["error_kind"] == "PermissionError"
         assert details["error"] == "denied"
+
+    def test_workflow_tool_audit_call_payload_uses_normalized_control_inputs_for_fingerprint(self):
+        workflow = Workflow(
+            name="web-brief",
+            description="Search the web",
+            inputs={"query": {"type": "string", "required": True}},
+            steps=[
+                WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+            ],
+            requires_tools=["web_search"],
+            result_template="{{ steps.search.result }}",
+        )
+        search = DummyTool("web_search", lambda query: f"fresh result for {query}")
+        workflow_tool = WorkflowTool(workflow, {"web_search": search})
+
+        call_payload = workflow_tool.get_audit_call_payload(
+            {"query": "seraph", "_seraph_branch_depth": "1"}
+        )
+        result = workflow_tool(query="seraph", _seraph_branch_depth="1")
+        result_payload = workflow_tool.get_audit_result_payload({}, result)
+
+        assert result_payload is not None
+        assert call_payload[1]["branch_depth"] == 1
+        assert call_payload[1]["run_fingerprint"] == result_payload[1]["run_fingerprint"]
+
+    def test_workflow_tool_audit_call_payload_keeps_precall_validation_boundary(self):
+        workflow = Workflow(
+            name="web-brief",
+            description="Search the web",
+            inputs={"query": {"type": "string", "required": True}},
+            steps=[
+                WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+            ],
+            requires_tools=["web_search"],
+            result_template="{{ steps.search.result }}",
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {"web_search": DummyTool("web_search", lambda query: f"fresh result for {query}")},
+        )
+
+        call_payload = workflow_tool.get_audit_call_payload({"_seraph_branch_depth": "1"})
+
+        assert call_payload[1]["branch_depth"] == 1
+        assert isinstance(call_payload[1]["run_fingerprint"], str)
+        assert call_payload[1]["run_fingerprint"]
+
+    @pytest.mark.asyncio
+    async def test_load_workflow_checkpoint_payload_uses_call_event_id_to_disambiguate_duplicate_fingerprints(
+        self,
+        async_db,
+    ):
+        with patch("src.workflows.manager.get_session", async_db):
+            older_call = await audit_repository.log_event(
+                session_id="session-1",
+                actor="agent",
+                event_type="tool_call",
+                tool_name="workflow_web_brief_to_file",
+                summary="Calling workflow",
+                details={"run_fingerprint": "shared-fingerprint", "arguments": {"query": "seraph"}},
+            )
+            await audit_repository.log_event(
+                session_id="session-1",
+                actor="agent",
+                event_type="tool_result",
+                tool_name="workflow_web_brief_to_file",
+                summary="workflow_web_brief_to_file succeeded",
+                details={
+                    "workflow_name": "web-brief-to-file",
+                    "run_fingerprint": "shared-fingerprint",
+                    "call_event_id": older_call.id,
+                    "checkpoint_context": {
+                        "search": {
+                            "tool": "web_search",
+                            "arguments": {"query": "seraph"},
+                            "result": "older cached result",
+                        }
+                    },
+                    "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+                },
+            )
+            newer_call = await audit_repository.log_event(
+                session_id="session-1",
+                actor="agent",
+                event_type="tool_call",
+                tool_name="workflow_web_brief_to_file",
+                summary="Calling workflow",
+                details={"run_fingerprint": "shared-fingerprint", "arguments": {"query": "seraph"}},
+            )
+            await audit_repository.log_event(
+                session_id="session-1",
+                actor="agent",
+                event_type="tool_result",
+                tool_name="workflow_web_brief_to_file",
+                summary="workflow_web_brief_to_file succeeded",
+                details={
+                    "workflow_name": "web-brief-to-file",
+                    "run_fingerprint": "shared-fingerprint",
+                    "call_event_id": newer_call.id,
+                    "checkpoint_context": {
+                        "search": {
+                            "tool": "web_search",
+                            "arguments": {"query": "seraph"},
+                            "result": "newer cached result",
+                        }
+                    },
+                    "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+                },
+            )
+
+            from src.workflows.manager import _load_workflow_checkpoint_payload
+
+            details = await _load_workflow_checkpoint_payload(
+                build_workflow_run_identity(
+                    "session-1",
+                    "workflow_web_brief_to_file",
+                    "shared-fingerprint",
+                    run_discriminator=older_call.id,
+                )
+            )
+
+        assert details is not None
+        assert details["checkpoint_context"]["search"]["result"] == "older cached result"
 
     def test_manifest_backed_workflow_with_missing_manifest_permissions_is_not_active(self, tmp_path):
         workflows_dir = tmp_path / "workflows"
@@ -1963,6 +2088,114 @@ async def test_workflow_resume_plan_falls_back_to_scoped_run_lookup(client):
     assert payload["resume_plan"]["resume_from_step"] == "save"
     assert list_runs.await_count == 2
     load_events.assert_awaited_once_with(run_identity)
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs_by_call_event_id(client):
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-call-older",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "shared-fingerprint",
+                        "arguments": {"query": "older", "file_path": "notes/older.md"},
+                    },
+                },
+                {
+                    "id": "evt-result-older",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded",
+                    "created_at": "2026-03-18T12:01:10Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "shared-fingerprint",
+                        "call_event_id": "evt-call-older",
+                        "step_tools": ["web_search", "write_file"],
+                        "step_records": [],
+                        "artifact_paths": ["notes/older.md"],
+                        "continued_error_steps": [],
+                    },
+                },
+                {
+                    "id": "evt-call-newer",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:02:00Z",
+                    "details": {
+                        "run_fingerprint": "shared-fingerprint",
+                        "arguments": {"query": "newer", "file_path": "notes/newer.md"},
+                    },
+                },
+                {
+                    "id": "evt-result-newer",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded",
+                    "created_at": "2026-03-18T12:02:10Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "shared-fingerprint",
+                        "call_event_id": "evt-call-newer",
+                        "step_tools": ["web_search", "write_file"],
+                        "step_records": [],
+                        "artifact_paths": ["notes/newer.md"],
+                        "continued_error_steps": [],
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert len(runs) == 2
+    assert runs[0]["run_identity"] == "session-1:workflow_web_brief_to_file:shared-fingerprint:evt-call-newer"
+    assert runs[0]["replay_inputs"] == {"query": "newer", "file_path": "notes/newer.md"}
+    assert runs[1]["run_identity"] == "session-1:workflow_web_brief_to_file:shared-fingerprint:evt-call-older"
+    assert runs[1]["replay_inputs"] == {"query": "older", "file_path": "notes/older.md"}
 
 
 @pytest.mark.asyncio

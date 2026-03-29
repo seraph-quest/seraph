@@ -63,10 +63,14 @@
 - local regression fixed before the slice stayed complete:
   - the first API pass still auto-selected the failed step as the default resume target even when that checkpoint had no reusable state, which made some degraded `GET /api/workflows/runs` responses fail with `409 Conflict`
   - fixed by skipping unsupported checkpoints for implicit/default resume selection while keeping explicit `/resume-plan` requests fail-closed for those same checkpoints
+- PR review follow-up fixed before merge:
+  - workflow parent-run checkpoint lookup still treated `session_id + tool_name + fingerprint` as unique, which meant two runs with identical arguments could restore checkpoint state from the wrong sibling run
+  - workflow audit-call fingerprinting still hashed raw control inputs while execution hashed normalized controls, which could split `tool_call` and `tool_result` events for semantically identical runs
+  - fixed by carrying a unique `call_event_id` discriminator from the audit call into workflow result/failure payloads, using that discriminator in workflow run identity and checkpoint restore lookup, and fingerprinting audit-call payloads from the same normalized inputs that execution uses
 - validation:
-  - `python3 -m py_compile backend/src/tools/audit.py backend/src/workflows/loader.py backend/src/workflows/manager.py backend/src/api/workflows.py backend/tests/test_workflows.py`
+  - `python3 -m py_compile backend/src/tools/audit.py backend/src/workflows/loader.py backend/src/workflows/manager.py backend/src/workflows/run_identity.py backend/src/api/workflows.py backend/tests/test_workflows.py`
   - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -q`
-    - result: `60 passed`
+    - result: `64 passed`
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npm test -- --run src/components/settings/workflowDraft.test.ts src/components/cockpit/CockpitView.test.tsx`
     - result: `52 passed`
   - `cd frontend && npm run build`

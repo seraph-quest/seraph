@@ -128,7 +128,7 @@ class AuditedTool(Tool):
         else:
             call_summary = format_tool_call_summary(self.name, arguments, set())
             call_details = {"arguments": audit_arguments}
-        self._log_event(
+        call_event_id = self._log_event(
             session_id=session_id,
             event_type="tool_call",
             summary=call_summary,
@@ -147,6 +147,11 @@ class AuditedTool(Tool):
                     "arguments": audit_arguments,
                     "error": redact_for_audit(str(exc)),
                 }
+            if call_event_id and "call_event_id" not in failure_details:
+                failure_details = {
+                    **failure_details,
+                    "call_event_id": call_event_id,
+                }
             self._log_event(
                 session_id=session_id,
                 event_type="tool_failed",
@@ -160,6 +165,11 @@ class AuditedTool(Tool):
             result_summary, result_details = custom_payload
         else:
             result_summary, result_details = summarize_tool_result(self.name, str(result))
+        if call_event_id and "call_event_id" not in result_details:
+            result_details = {
+                **result_details,
+                "call_event_id": call_event_id,
+            }
         self._log_event(
             session_id=session_id,
             event_type="tool_result",
@@ -190,10 +200,10 @@ class AuditedTool(Tool):
         event_type: str,
         summary: str,
         details: dict[str, Any],
-    ) -> None:
+    ) -> str | None:
         request_id = get_current_llm_request_id()
         try:
-            _run_async(
+            event = _run_async(
                 audit_repository.log_event(
                     session_id=session_id,
                     actor="agent",
@@ -208,8 +218,10 @@ class AuditedTool(Tool):
                     },
                 )
             )
+            return str(event.id)
         except Exception:
             logger.debug("Failed to record tool execution audit event", exc_info=True)
+            return None
 
 
 def wrap_tools_for_audit(tools: list[Tool], *, treat_all_as_mcp: bool = False) -> list[Tool]:

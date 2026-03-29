@@ -28,6 +28,7 @@ from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import workflow_manager
+from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 router = APIRouter()
 
@@ -333,11 +334,34 @@ def _workflow_event_fingerprint(tool_name: str, details: dict[str, Any]) -> str:
 def _workflow_projection_key(event: dict[str, Any], details: dict[str, Any]) -> str:
     tool_name = str(event.get("tool_name") or "workflow")
     fingerprint = _workflow_event_fingerprint(tool_name, details)
-    return f"{event.get('session_id') or 'global'}:{tool_name}:{fingerprint}"
+    return build_workflow_run_identity(
+        event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+        tool_name,
+        fingerprint,
+        run_discriminator=_workflow_run_discriminator(details),
+    )
 
 
 def _workflow_projection_prefix(session_id: str | None, tool_name: str) -> str:
     return f"{session_id or 'global'}:{tool_name}:"
+
+
+def _workflow_run_discriminator(details: dict[str, Any]) -> str | None:
+    call_event_id = details.get("call_event_id")
+    if isinstance(call_event_id, str) and call_event_id.strip():
+        return call_event_id.strip()
+    return None
+
+
+def _workflow_identity_discriminator(event: dict[str, Any], details: dict[str, Any]) -> str | None:
+    run_discriminator = _workflow_run_discriminator(details)
+    if run_discriminator is not None:
+        return run_discriminator
+    if str(event.get("event_type") or "") == "tool_call":
+        event_id = event.get("id")
+        if isinstance(event_id, str) and event_id.strip():
+            return event_id.strip()
+    return None
 
 
 def _approval_projection_key(
@@ -637,12 +661,11 @@ def _workflow_resume_plan(
     }
 
 
-def _parse_run_identity(run_identity: str) -> tuple[str | None, str, str]:
+def _parse_run_identity(run_identity: str) -> tuple[str | None, str, str, str | None]:
     try:
-        session_key, tool_name, run_fingerprint = run_identity.rsplit(":", 2)
+        return parse_workflow_run_identity(run_identity)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found") from exc
-    return (None if session_key == "global" else session_key, tool_name, run_fingerprint)
 
 
 def _serialize_audit_event(event: AuditEvent) -> dict[str, Any]:
@@ -661,7 +684,7 @@ def _serialize_audit_event(event: AuditEvent) -> dict[str, Any]:
 
 
 async def _load_workflow_events_for_identity(run_identity: str) -> tuple[list[dict[str, Any]], str | None]:
-    session_id, tool_name, _ = _parse_run_identity(run_identity)
+    session_id, tool_name, _run_fingerprint, run_discriminator = _parse_run_identity(run_identity)
     async with get_session() as db:
         stmt = (
             select(AuditEvent)
@@ -674,7 +697,14 @@ async def _load_workflow_events_for_identity(run_identity: str) -> tuple[list[di
             stmt = stmt.where(AuditEvent.session_id == session_id)
         result = await db.execute(stmt)
         events = result.scalars().all()
-    return [_serialize_audit_event(event) for event in events], session_id
+    serialized = [_serialize_audit_event(event) for event in events]
+    if run_discriminator is None:
+        return serialized, session_id
+    return [
+        event
+        for event in serialized
+        if _workflow_identity_discriminator(event, _as_record(event.get("details"))) == run_discriminator
+    ], session_id
 
 
 def _workflow_replay_policy(
@@ -952,6 +982,30 @@ async def _list_workflow_runs(
             continue
 
         run_queue = pending_by_key.get(key, [])
+        run_discriminator = _workflow_run_discriminator(details)
+        if not run_queue and run_discriminator is not None:
+            legacy_key = build_workflow_run_identity(
+                event.get("session_id") if isinstance(event.get("session_id"), str) else None,
+                tool_name,
+                run_fingerprint,
+            )
+            legacy_queue = pending_by_key.get(legacy_key, [])
+            legacy_index = next(
+                (
+                    index
+                    for index, pending_run in enumerate(legacy_queue)
+                    if str(pending_run.get("id") or "") == run_discriminator
+                ),
+                None,
+            )
+            if legacy_index is not None:
+                key = legacy_key
+                run_queue = pending_by_key.get(legacy_key, [])
+                run = run_queue.pop(legacy_index)
+            else:
+                run = None
+        else:
+            run = None
         if not run_queue and run_fingerprint == "none":
             prefix = _workflow_projection_prefix(
                 event.get("session_id") if isinstance(event.get("session_id"), str) else None,
@@ -967,7 +1021,8 @@ async def _list_workflow_runs(
             if fallback_key is not None:
                 key = fallback_key
                 run_queue = pending_by_key.get(fallback_key, [])
-        run = run_queue.pop(0) if run_queue else {
+        if run is None:
+            run = run_queue.pop(0) if run_queue else {
             "id": event["id"],
             "tool_name": tool_name,
             "workflow_name": str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
@@ -988,7 +1043,7 @@ async def _list_workflow_runs(
                 details.get("approval_context"),
                 workflow_name=str(details.get("workflow_name") or _workflow_name_from_tool(tool_name)),
             ),
-        }
+            }
         if not run_queue and key in pending_by_key:
             pending_by_key.pop(key, None)
 
@@ -1126,7 +1181,12 @@ async def _list_workflow_runs(
             pending_approval_count=len(approvals),
             approval_context_mismatch=bool(run.get("approval_context_mismatch")),
         )
-        run_identity = f"{run.get('session_id') or 'global'}:{tool_name}:{run_fingerprint}"
+        run_identity = build_workflow_run_identity(
+            run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+            tool_name,
+            run_fingerprint,
+            run_discriminator=run_discriminator,
+        )
         lineage = _workflow_branch_lineage(
             run_identity=run_identity,
             details=details,
@@ -1299,7 +1359,16 @@ async def _list_workflow_runs(
                 pending_approval_count=len(approvals),
                 approval_context_mismatch=bool(run.get("approval_context_mismatch")),
             )
-            run_identity = f"{run.get('session_id') or 'global'}:{run['tool_name']}:{run.get('run_fingerprint') or 'none'}"
+            run_identity = build_workflow_run_identity(
+                run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+                str(run["tool_name"]),
+                str(run.get("run_fingerprint") or "none"),
+                run_discriminator=(
+                    str(run.get("id"))
+                    if isinstance(run.get("id"), str) and str(run.get("id")).strip()
+                    else None
+                ),
+            )
             lineage = _workflow_branch_lineage(
                 run_identity=run_identity,
                 details={},

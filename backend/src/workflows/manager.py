@@ -24,6 +24,7 @@ from src.memory.flush import flush_session_memory_sync
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
 from src.workflows.loader import Workflow, scan_workflow_paths
+from src.workflows.run_identity import parse_workflow_run_identity
 
 logger = logging.getLogger(__name__)
 
@@ -248,14 +249,9 @@ def _checkpoint_context_allowed(approval_context: dict[str, Any] | None) -> bool
     )
 
 
-def _parse_workflow_run_identity(run_identity: str) -> tuple[str | None, str, str]:
-    session_key, tool_name, run_fingerprint = run_identity.rsplit(":", 2)
-    return (None if session_key == "global" else session_key, tool_name, run_fingerprint)
-
-
 async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any] | None:
     try:
-        session_id, tool_name, run_fingerprint = _parse_workflow_run_identity(run_identity)
+        session_id, tool_name, run_fingerprint, run_discriminator = parse_workflow_run_identity(run_identity)
     except ValueError:
         return None
     async with get_session() as db:
@@ -271,6 +267,7 @@ async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any]
             stmt = stmt.where(AuditEvent.session_id == session_id)
         result = await db.execute(stmt)
         events = result.scalars().all()
+    matching_by_fingerprint: list[dict[str, Any]] = []
     for event in events:
         if not event.details_json:
             continue
@@ -280,8 +277,16 @@ async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any]
             continue
         if not isinstance(details, dict):
             continue
-        if str(details.get("run_fingerprint") or "none") == run_fingerprint:
+        if str(details.get("run_fingerprint") or "none") != run_fingerprint:
+            continue
+        matching_by_fingerprint.append(details)
+        if (
+            run_discriminator is None
+            or str(details.get("call_event_id") or "").strip() == run_discriminator
+        ):
             return details
+    if run_discriminator is not None and len(matching_by_fingerprint) == 1:
+        return matching_by_fingerprint[0]
     return None
 
 
@@ -543,7 +548,11 @@ class WorkflowTool(Tool):
         return self._last_audit_failure_payload
 
     def get_audit_call_payload(self, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        workflow_inputs, control_inputs = self._split_inputs(arguments)
+        workflow_inputs, control_inputs = self._normalize_provided_inputs(
+            arguments,
+            require_required_inputs=False,
+        )
+        normalized_audit_arguments = {**workflow_inputs, **control_inputs}
         approval_context = self.get_approval_context(workflow_inputs)
         return (
             format_tool_call_summary(self.name, arguments, set()),
@@ -552,7 +561,7 @@ class WorkflowTool(Tool):
                 "workflow_name": self.workflow.name,
                 "run_fingerprint": fingerprint_tool_call(
                     self.name,
-                    arguments,
+                    normalized_audit_arguments,
                     approval_context=approval_context,
                 ),
                 "approval_context": approval_context,
@@ -762,7 +771,14 @@ class WorkflowTool(Tool):
                 for idx, name in enumerate(input_names)
                 if idx < len(args)
             }
+        return self._normalize_provided_inputs(provided)
 
+    def _normalize_provided_inputs(
+        self,
+        provided: dict[str, Any],
+        *,
+        require_required_inputs: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         provided_workflow_inputs, control_inputs = self._split_inputs(provided)
         normalized: dict[str, Any] = {}
         for input_name, spec in self.workflow.inputs.items():
@@ -772,7 +788,7 @@ class WorkflowTool(Tool):
             if "default" in spec and spec["default"] is not None:
                 normalized[input_name] = spec["default"]
                 continue
-            if spec.get("required", True):
+            if require_required_inputs and spec.get("required", True):
                 raise ValueError(
                     f"Workflow '{self.workflow.name}' missing required input '{input_name}'"
                 )

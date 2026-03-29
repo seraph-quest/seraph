@@ -41,6 +41,7 @@ def _make_guardian_state() -> GuardianState:
         observer_context=_make_context(),
         world_model=GuardianWorldModel(
             current_focus="2 active goals",
+            focus_source="observer_goals",
             active_commitments=("2 active goals",),
             open_loops_or_pressure=("Attention budget is nearly exhausted",),
             focus_alignment="medium",

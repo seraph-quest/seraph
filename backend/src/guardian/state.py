@@ -131,6 +131,10 @@ def _overall_confidence(
     current_session_status: str,
     recent_sessions_status: str,
 ) -> str:
+    if observer_confidence == "degraded":
+        return "degraded"
+    if world_model_status == "degraded":
+        return "partial" if observer_confidence == "grounded" else "degraded"
     degraded_signals = sum(
         1
         for status in (
@@ -151,18 +155,25 @@ def _overall_confidence(
         )
         if status == "grounded"
     )
-    if observer_confidence == "degraded":
-        return "degraded"
     if observer_confidence == "partial":
         return "partial" if grounded_signals or degraded_signals else "degraded"
     if degraded_signals:
         return "partial"
-    if grounded_signals >= 2 and world_model_status != "empty":
+    if world_model_status == "partial":
+        return "partial"
+    if grounded_signals >= 2 and world_model_status == "grounded":
         return "grounded"
     return "partial"
 
 
 def _world_model_status(world_model: GuardianWorldModel) -> str:
+    if any(
+        "does not match recalled project context" in item
+        for item in world_model.judgment_risks
+    ):
+        return "degraded"
+    if world_model.judgment_risks:
+        return "partial"
     if (
         world_model.current_focus != "No clear focus signal"
         and world_model.active_commitments
@@ -335,11 +346,19 @@ async def build_guardian_state(
     recent_sessions_summary = await session_manager.get_recent_sessions_summary(
         exclude_session_id=session_id
     )
-    recent_intervention_feedback = await guardian_feedback_repository.summarize_recent(limit=5)
-    advisory_learning_signal = await guardian_feedback_repository.get_learning_signal(
+    live_learning_resolution = await guardian_feedback_repository.resolve_learning_signal(
         intervention_type=normalized_intervention_type,
         limit=12,
+        session_id=session_id,
+        active_project=observer_context.active_project,
     )
+    recent_intervention_feedback = await guardian_feedback_repository.summarize_recent_for_scope(
+        scope=live_learning_resolution.dominant_scope,
+        limit=5,
+        session_id=session_id,
+        active_project=observer_context.active_project,
+    )
+    advisory_learning_signal = live_learning_resolution.effective_signal
     effective_learning_signal = advisory_learning_signal
     try:
         procedural_guidance = await load_procedural_memory_guidance(

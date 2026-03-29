@@ -63,7 +63,11 @@ def _patch_deps(ctx, *, use_actual_learning_signal: bool = False):
         patches.append(
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
-                AsyncMock(side_effect=lambda intervention_type, limit=12: GuardianLearningSignal.neutral(intervention_type)),
+                AsyncMock(
+                    side_effect=lambda intervention_type, limit=12, **kwargs: GuardianLearningSignal.neutral(
+                        intervention_type
+                    )
+                ),
             )
         )
     return patches, mock_cm, mock_ws, mock_iq
@@ -1249,6 +1253,97 @@ async def test_learned_direct_delivery_overrides_high_interrupt_bundle(async_db)
             event["event_type"] == "observer_delivery_delivered"
             and event["details"]["learning_bias"] == "prefer_direct_delivery"
             and event["details"]["policy_reason"] == "learned_direct_delivery"
+            for event in events
+        )
+    finally:
+        for p in patches:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_project_scoped_negative_learning_overrides_global_direct_delivery(async_db):
+    for content in ("Global success one.", "Global success two."):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
+
+    for content in ("Atlas interruption failed once.", "Atlas interruption failed twice."):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            active_project="Atlas",
+        )
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="not_helpful")
+
+    ctx = _make_context(
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="high",
+        active_project="Atlas",
+    )
+    patches, mock_cm, mock_ws, mock_iq = _patch_deps(ctx, use_actual_learning_signal=True)
+    for p in patches:
+        p.start()
+    try:
+        msg = WSResponse(
+            type="proactive",
+            content="Interrupt Atlas work now.",
+            intervention_type="advisory",
+            urgency=2,
+        )
+        decision = await deliver_or_queue(msg, guardian_confidence="grounded")
+
+        assert decision.action == InterventionAction.bundle
+        assert decision.reason == "recent_negative_feedback"
+        mock_ws.broadcast.assert_not_called()
+        mock_iq.enqueue.assert_called_once()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "observer_delivery_queued"
+            and event["details"]["learning_bias"] == "reduce_interruptions"
+            and event["details"]["live_learning_scope"] == "project"
+            and event["details"]["learning_not_helpful_count"] == 2
+            and event["details"]["policy_reason"] == "recent_negative_feedback"
             for event in events
         )
     finally:

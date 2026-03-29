@@ -12,11 +12,13 @@ if TYPE_CHECKING:
     from src.guardian.feedback import GuardianLearningSignal
 
 _TAG_PREFIX_RE = re.compile(r"^\[[^\]]+\]\s*")
+_ROLE_PREFIX_RE = re.compile(r"^(user|assistant|system):\s*", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
 class GuardianWorldModel:
     current_focus: str
+    focus_source: str
     active_commitments: tuple[str, ...]
     open_loops_or_pressure: tuple[str, ...]
     focus_alignment: str
@@ -36,15 +38,20 @@ class GuardianWorldModel:
     recurring_obligations: tuple[str, ...] = ()
     project_timeline: tuple[str, ...] = ()
     corroboration_sources: tuple[str, ...] = ()
+    judgment_risks: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
         lines = [
             f"Current focus: {self.current_focus}",
+            f"Focus source: {self.focus_source.replace('_', ' ')}",
             f"Focus alignment: {self.focus_alignment}",
             f"Intervention receptivity: {self.intervention_receptivity}",
         ]
         if self.corroboration_sources:
             lines.append(f"Corroboration sources: {', '.join(self.corroboration_sources)}")
+        if self.judgment_risks:
+            lines.append("Judgment risks:")
+            lines.extend(f"- {item}" for item in self.judgment_risks)
 
         if self.active_commitments:
             lines.append("Active commitments:")
@@ -150,6 +157,15 @@ def _extract_tagged_memory(block: str, tag: str, *, limit: int = 2) -> list[str]
     return results
 
 
+def _extract_session_focus(block: str) -> str:
+    for raw_line in reversed(block.splitlines()):
+        line = _clean_line(raw_line)
+        if not line:
+            continue
+        return _ROLE_PREFIX_RE.sub("", line).strip()
+    return ""
+
+
 def _dedupe(items: list[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -159,6 +175,21 @@ def _dedupe(items: list[str]) -> tuple[str, ...]:
         seen.add(item)
         ordered.append(item)
     return tuple(ordered)
+
+
+def _normalize_topic(value: str | None) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _text_matches_topic(candidate: str, topic: str | None) -> bool:
+    normalized_candidate = _normalize_topic(candidate)
+    normalized_topic = _normalize_topic(topic)
+    if not normalized_candidate or not normalized_topic:
+        return False
+    return (
+        normalized_topic in normalized_candidate
+        or normalized_candidate in normalized_topic
+    )
 
 
 def _derive_focus_alignment(observer_context: CurrentContext) -> str:
@@ -177,6 +208,15 @@ def _derive_intervention_receptivity(
     observer_context: CurrentContext,
     learning_signal: GuardianLearningSignal | None,
 ) -> str:
+    negative_outcomes = 0
+    positive_outcomes = 0
+    if learning_signal is not None:
+        negative_outcomes = int(
+            learning_signal.not_helpful_count + learning_signal.failed_count
+        )
+        positive_outcomes = int(
+            learning_signal.helpful_count + learning_signal.acknowledged_count
+        )
     if (
         observer_context.interruption_mode == "focus"
         or observer_context.user_state in {"deep_work", "in_meeting", "away"}
@@ -190,6 +230,12 @@ def _derive_intervention_receptivity(
         ):
             return "guarded_async"
         return "low"
+    if (
+        learning_signal is not None
+        and negative_outcomes >= 2
+        and negative_outcomes > positive_outcomes
+    ):
+        return "medium"
     if (
         learning_signal is not None
         and learning_signal.timing_bias == "prefer_available_windows"
@@ -251,22 +297,33 @@ def build_guardian_world_model(
     continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
 
     current_focus = "No clear focus signal"
+    focus_source = "unknown"
     if observer_context.current_event:
         current_focus = observer_context.current_event
+        focus_source = "current_event"
     elif observer_context.active_goals_summary and observer_context.active_window:
         current_focus = f"{observer_context.active_goals_summary} while in {observer_context.active_window}"
+        focus_source = "observer_goal_window"
     elif observer_context.active_goals_summary:
         current_focus = observer_context.active_goals_summary
+        focus_source = "observer_goals"
     elif observer_context.active_window:
         current_focus = observer_context.active_window
+        focus_source = "observer_window"
     elif observer_context.screen_context:
         current_focus = observer_context.screen_context.strip().splitlines()[0][:120]
+        focus_source = "observer_screen"
     elif current_session_history.strip():
-        current_focus = _extract_lines(current_session_history, limit=1)[0]
+        session_focus = _extract_session_focus(current_session_history)
+        if session_focus:
+            current_focus = session_focus
+            focus_source = "current_session"
     elif goal_memory:
         current_focus = goal_memory[0]
+        focus_source = "memory"
     elif recent_session_lines:
         current_focus = recent_session_lines[0]
+        focus_source = "recent_sessions"
 
     commitments: list[str] = []
     if observer_context.current_event:
@@ -323,7 +380,14 @@ def build_guardian_world_model(
         active_constraints.append(f"Current state is {observer_context.user_state}")
     active_constraints.extend(preference_constraints)
     active_constraints.extend(procedural_constraints)
-    active_project_signals = _dedupe(project_memory[:2] + list(active_projects[:3]))
+    observer_project = _clean_line(observer_context.active_project or "")
+    durable_project_signals = _dedupe(project_memory[:2])
+    recent_project_signals = _dedupe(list(active_projects[:3]))
+    active_project_signals = _dedupe(
+        ([observer_project] if observer_project else [])
+        + list(durable_project_signals)
+        + list(recent_project_signals)
+    )
     project_state = _dedupe(list(active_project_signals) + execution_pressure[:2])
     has_observer_focus_signal = any(
         (
@@ -348,8 +412,40 @@ def build_guardian_world_model(
     if execution_pressure:
         corroboration_sources.append("execution")
 
+    judgment_risks: list[str] = []
+    if focus_source in {"current_session", "memory", "recent_sessions"}:
+        judgment_risks.append(
+            f"Current focus is inferred from {focus_source.replace('_', ' ')} instead of live observer signals."
+        )
+    if (
+        observer_project
+        and durable_project_signals
+        and not any(_text_matches_topic(item, observer_project) for item in durable_project_signals)
+    ):
+        judgment_risks.append(
+            f"Live observer project '{observer_project}' does not match recalled project context."
+        )
+    if (
+        not observer_project
+        and len(active_project_signals) >= 2
+        and not focus_source.startswith("observer_")
+    ):
+        judgment_risks.append(
+            "Multiple active projects are competing without a live observer project anchor."
+        )
+    if (
+        learning_signal is not None
+        and (learning_signal.not_helpful_count + learning_signal.failed_count) >= 2
+        and (learning_signal.not_helpful_count + learning_signal.failed_count)
+        > (learning_signal.helpful_count + learning_signal.acknowledged_count)
+    ):
+        judgment_risks.append(
+            "Recent intervention outcomes skew negative, so the guardian should stay selective."
+        )
+
     return GuardianWorldModel(
         current_focus=current_focus,
+        focus_source=focus_source,
         active_commitments=_dedupe(commitments),
         open_loops_or_pressure=_dedupe(open_loops),
         focus_alignment=_derive_focus_alignment(observer_context),
@@ -369,4 +465,5 @@ def build_guardian_world_model(
         recurring_obligations=_dedupe(recurring_obligations),
         project_timeline=project_timeline,
         corroboration_sources=_dedupe(corroboration_sources),
+        judgment_risks=_dedupe(judgment_risks),
     )

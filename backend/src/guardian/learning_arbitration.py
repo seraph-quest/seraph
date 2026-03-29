@@ -8,6 +8,7 @@ from src.guardian.learning_evidence import (
     GuardianLearningAxisEvidence,
     clamp_unit_interval,
     learning_field_for_axis,
+    learning_evidence_weight,
     neutral_axis_evidence,
     ordered_learning_axes,
 )
@@ -100,21 +101,7 @@ def _procedural_axis_evidence(
 
 
 def _axis_weight(evidence: GuardianLearningAxisEvidence) -> float:
-    if evidence.bias == "neutral":
-        return 0.0
-    support_basis = evidence.weighted_support
-    if support_basis <= 0.0:
-        support_basis = float(evidence.support_count)
-    support_score = clamp_unit_interval(support_basis / 4.0)
-    weight = (
-        (0.35 * support_score)
-        + (0.25 * clamp_unit_interval(evidence.confidence_score))
-        + (0.20 * clamp_unit_interval(evidence.quality_score))
-        + (0.20 * clamp_unit_interval(evidence.recency_score))
-    )
-    if evidence.source == "procedural_memory" and not evidence.metadata_complete:
-        weight *= 0.7
-    return round(clamp_unit_interval(weight), 3)
+    return learning_evidence_weight(evidence)
 
 
 def _select_axis_bias(

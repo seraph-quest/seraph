@@ -8,7 +8,7 @@ from src.agent.factory import create_agent
 from src.agent.session import SessionManager
 from src.agent.strategist import create_strategist_agent
 from src.db.models import MemoryKind
-from src.guardian.feedback import GuardianLearningSignal
+from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
 from src.guardian.learning_evidence import (
     GuardianLearningAxisEvidence,
     learning_field_for_axis,
@@ -41,6 +41,7 @@ def _make_guardian_state() -> GuardianState:
         ),
         world_model=GuardianWorldModel(
             current_focus="Ship guardian state while in VS Code",
+            focus_source="observer_goal_window",
             active_commitments=("Ship guardian state",),
             open_loops_or_pressure=('Prior roadmap: assistant said "Land guardian-state synthesis next"',),
             focus_alignment="medium",
@@ -178,6 +179,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert state.confidence.current_session == "grounded"
     assert state.confidence.recent_sessions == "grounded"
     assert state.world_model.current_focus == "Ship guardian state while in VS Code"
+    assert state.world_model.focus_source == "observer_goal_window"
     assert "Ship guardian state" in state.world_model.active_commitments
     assert "Guardian cockpit" in state.world_model.active_projects
     assert "Ship guardian state" in state.world_model.memory_signals
@@ -199,6 +201,296 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
     assert "Ship guardian state" in state.memory_context
     assert "feedback=helpful" in state.recent_intervention_feedback
     assert "brief-sync degraded" in state.recent_execution_summary
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_marks_history_inferred_focus_as_partial(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Where should attention go next?")
+    await sm.add_message("current", "assistant", "Finish the Atlas launch checklist first.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="low",
+        salience_reason="background",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=[],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Where should attention go next?",
+        )
+
+    assert state.world_model.current_focus == "Finish the Atlas launch checklist first."
+    assert state.world_model.focus_source == "current_session"
+    assert (
+        "Current focus is inferred from current session instead of live observer signals."
+        in state.world_model.judgment_risks
+    )
+    assert state.confidence.world_model == "partial"
+    assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_degrades_world_model_on_project_mismatch(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me reconcile the project signals.")
+
+    await memory_repository.create_memory(
+        content="Hermes migration remains the live delivery project.",
+        kind=MemoryKind.project,
+        summary="Hermes migration",
+        importance=0.92,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=[],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What matters for Atlas today?",
+        )
+
+    assert "Atlas" in state.world_model.active_projects
+    assert "Hermes migration" in state.world_model.active_projects
+    assert (
+        "Live observer project 'Atlas' does not match recalled project context."
+        in state.world_model.judgment_risks
+    )
+    assert state.confidence.world_model == "degraded"
+    assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_lowers_receptivity_after_negative_outcome_trend(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should Seraph interrupt right now?")
+    await sm.add_message("current", "assistant", "Let me check the recent intervention signal.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect current flow",
+        active_window="VS Code",
+        screen_context="Coding through a long task list",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="low",
+        user_state="available",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.get_learning_signal",
+            AsyncMock(
+                return_value=GuardianLearningSignal(
+                    intervention_type="advisory",
+                    helpful_count=0,
+                    not_helpful_count=2,
+                    acknowledged_count=0,
+                    failed_count=1,
+                    bias="reduce_interruptions",
+                    phrasing_bias="neutral",
+                    cadence_bias="neutral",
+                    channel_bias="neutral",
+                    escalation_bias="neutral",
+                    timing_bias="neutral",
+                    blocked_state_bias="neutral",
+                    suppression_bias="extend_suppression",
+                    thread_preference_bias="neutral",
+                    blocked_direct_failure_count=0,
+                    blocked_native_success_count=0,
+                    available_direct_success_count=0,
+                )
+            ),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should Seraph interrupt right now?",
+        )
+
+    assert state.world_model.intervention_receptivity == "medium"
+    assert (
+        "Recent intervention outcomes skew negative, so the guardian should stay selective."
+        in state.world_model.judgment_risks
+    )
+    assert state.confidence.world_model == "partial"
+    assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_prefers_project_scoped_negative_learning(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should Atlas work be interrupted right now?")
+    await sm.add_message("current", "assistant", "Let me check the Atlas-specific intervention history.")
+
+    for content in ("Global success one.", "Global success two."):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+        )
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="helpful")
+
+    for content in ("Atlas interruption failed once.", "Atlas interruption failed twice."):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content=content,
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            active_project="Atlas",
+        )
+        await guardian_feedback_repository.update_outcome(
+            intervention.id,
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type="not_helpful")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect Atlas focus blocks",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Deep in Atlas implementation",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="low",
+        user_state="available",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should Atlas work be interrupted right now?",
+        )
+
+    assert state.world_model.intervention_receptivity == "medium"
+    assert (
+        "Recent intervention outcomes skew negative, so the guardian should stay selective."
+        in state.world_model.judgment_risks
+    )
+    assert "Recent intervention friction is present" in state.world_model.open_loops_or_pressure
+    assert state.confidence.world_model == "partial"
+    assert state.confidence.overall == "partial"
 
 
 @pytest.mark.asyncio
@@ -870,7 +1162,24 @@ async def test_build_guardian_state_uses_requested_intervention_type_for_learnin
             intervention_type="alert",
         )
 
-    get_learning_signal.assert_awaited_once_with(intervention_type="alert", limit=12)
+    assert get_learning_signal.await_count == 4
+    get_learning_signal.assert_any_await(intervention_type="alert", limit=12)
+    get_learning_signal.assert_any_await(
+        intervention_type="alert",
+        limit=12,
+        session_id="current",
+    )
+    get_learning_signal.assert_any_await(
+        intervention_type="alert",
+        limit=12,
+        active_project="Atlas",
+    )
+    get_learning_signal.assert_any_await(
+        intervention_type="alert",
+        limit=12,
+        session_id="current",
+        active_project="Atlas",
+    )
     load_guidance.assert_awaited_once_with(
         "alert",
         continuity_thread_id="current",
@@ -1372,7 +1681,12 @@ def test_world_model_does_not_count_session_fallback_focus_as_observer_corrobora
         recent_intervention_feedback="",
     )
 
-    assert model.current_focus == "User: Continue the deployment review."
+    assert model.current_focus == "Continue the deployment review."
+    assert model.focus_source == "current_session"
+    assert (
+        "Current focus is inferred from current session instead of live observer signals."
+        in model.judgment_risks
+    )
     assert "observer" not in model.corroboration_sources
     assert set(model.corroboration_sources) == {"current_session", "recent_sessions"}
 

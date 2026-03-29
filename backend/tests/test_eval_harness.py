@@ -54,6 +54,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "strategist_tick_learning_continuity_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
+    assert "guardian_judgment_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
@@ -168,6 +169,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "strategist_tick_learning_continuity_behavior",
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
+                "guardian_judgment_behavior",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
@@ -368,6 +370,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
     assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "grounded"
     assert details_by_name["guardian_world_model_behavior"]["current_focus"] == "Prepare investor brief while in Arc"
+    assert details_by_name["guardian_world_model_behavior"]["focus_source"] == "observer_goal_window"
     assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
     assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
     assert details_by_name["guardian_world_model_behavior"]["active_blockers"] == [
@@ -399,6 +402,13 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_dominant_thread"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_memory_signals"] is False
     assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
+    assert details_by_name["guardian_judgment_behavior"]["overall_confidence"] == "partial"
+    assert details_by_name["guardian_judgment_behavior"]["world_model_confidence"] == "degraded"
+    assert details_by_name["guardian_judgment_behavior"]["focus_source"] == "observer_goal_window"
+    assert details_by_name["guardian_judgment_behavior"]["judgment_risk_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["includes_project_mismatch"] is True
+    assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
+    assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
     assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"
@@ -1143,6 +1153,28 @@ def test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit():
 
     assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
     assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "degraded"
+
+
+def test_guardian_judgment_runtime_eval_exposes_conflict_suppression():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "guardian_judgment_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert details["overall_confidence"] == "partial"
+    assert details["world_model_confidence"] == "degraded"
+    assert details["focus_source"] == "observer_goal_window"
+    assert details["judgment_risk_count"] >= 1
+    assert details["includes_project_mismatch"] is True
+    assert details["decision_action"] == "defer"
+    assert details["decision_reason"] == "low_guardian_confidence"
 
 
 def test_memory_runtime_eval_scenarios_expose_expected_details():

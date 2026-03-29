@@ -58,6 +58,7 @@ from src.api.observer import (
 from src.api.skills import UpdateSkillRequest, reload_skills as reload_skill_api, update_skill as update_skill_api
 from src.audit.repository import audit_repository
 from src.app import create_app
+from src.db.models import MemoryKind
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.memory.embedder import _reset_embedder_state, embed
 from src.memory.repository import memory_repository
@@ -4167,6 +4168,7 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
         return {
             "world_model_confidence": state.confidence.world_model,
             "current_focus": state.world_model.current_focus,
+            "focus_source": state.world_model.focus_source,
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
             "active_blockers": list(state.world_model.active_blockers),
@@ -4203,6 +4205,83 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
                 "Intervention receptivity: low" in strategist_agent.instructions
             ),
         }
+
+
+async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
+    async with _patched_async_db(
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("current")
+        await session_manager.add_message("current", "user", "What matters for Atlas today?")
+        await session_manager.add_message("current", "assistant", "Let me reconcile the project signals.")
+
+        await memory_repository.create_memory(
+            content="Hermes migration remains the live delivery project.",
+            kind=MemoryKind.project,
+            summary="Hermes migration",
+            importance=0.92,
+        )
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_project="Atlas",
+            active_window="VS Code",
+            screen_context="Reviewing Atlas release notes",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="medium",
+            salience_reason="active_goals",
+            interruption_cost="medium",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=[],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                return_value="",
+            ),
+        ):
+            state = await build_guardian_state(
+                session_id="current",
+                user_message="What matters for Atlas today?",
+            )
+
+        decision = decide_intervention(
+            message_type="proactive",
+            intervention_type="advisory",
+            content="Quick Atlas check-in.",
+            urgency=3,
+            user_state=ctx.user_state,
+            interruption_mode=ctx.interruption_mode,
+            attention_budget_remaining=ctx.attention_budget_remaining,
+            guardian_confidence=state.confidence.overall,
+            observer_confidence=ctx.observer_confidence,
+            salience_level=ctx.salience_level,
+            salience_reason=ctx.salience_reason,
+            interruption_cost=ctx.interruption_cost,
+        )
+
+    return {
+        "overall_confidence": state.confidence.overall,
+        "world_model_confidence": state.confidence.world_model,
+        "focus_source": state.world_model.focus_source,
+        "judgment_risk_count": len(state.world_model.judgment_risks),
+        "includes_project_mismatch": any(
+            "does not match recalled project context" in item
+            for item in state.world_model.judgment_risks
+        ),
+        "decision_action": decision.action.value,
+        "decision_reason": decision.reason,
+    }
 
 
 async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
@@ -6727,6 +6806,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Guardian state now carries a first explicit world model for focus, commitments, pressure, and intervention receptivity.",
         runner=_eval_guardian_world_model_behavior,
+    ),
+    EvalScenario(
+        name="guardian_judgment_behavior",
+        category="guardian",
+        description="Conflicting or weakly corroborated world-model evidence lowers guardian confidence and suppresses medium-urgency nudges.",
+        runner=_eval_guardian_judgment_behavior,
     ),
     EvalScenario(
         name="observer_refresh_behavior",

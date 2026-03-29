@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 import logging
@@ -11,19 +12,55 @@ import time
 from typing import Any
 
 from smolagents import Tool
+from sqlmodel import col, select
 
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
 from src.approval.runtime import get_current_session_id
+from src.db.engine import get_session
+from src.db.models import AuditEvent
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.memory.flush import flush_session_memory_sync
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
 from src.workflows.loader import Workflow, scan_workflow_paths
+from src.workflows.run_identity import parse_workflow_run_identity
 
 logger = logging.getLogger(__name__)
 
 _TEMPLATE_RE = re.compile(r"{{\s*([^}]+)\s*}}")
+_WORKFLOW_CONTROL_INPUTS: dict[str, dict[str, Any]] = {
+    "_seraph_parent_run_identity": {
+        "type": "string",
+        "description": "Optional Seraph workflow lineage parent run identity.",
+        "nullable": True,
+    },
+    "_seraph_root_run_identity": {
+        "type": "string",
+        "description": "Optional Seraph workflow lineage root run identity.",
+        "nullable": True,
+    },
+    "_seraph_branch_kind": {
+        "type": "string",
+        "description": "Optional Seraph workflow control mode such as replay_from_start or retry_failed_step.",
+        "nullable": True,
+    },
+    "_seraph_branch_depth": {
+        "type": "integer",
+        "description": "Optional Seraph workflow lineage depth.",
+        "nullable": True,
+    },
+    "_seraph_resume_from_step": {
+        "type": "string",
+        "description": "Optional checkpoint step id to resume or branch from.",
+        "nullable": True,
+    },
+}
+_WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
+
+
+def _run_async(coro):
+    return asyncio.run(coro)
 
 
 def _resolve_context_expr(expr: str, context: dict[str, Any]) -> Any:
@@ -190,6 +227,69 @@ def _canonicalize_tool_names(tool_names: list[str]) -> list[str]:
     return list(dict.fromkeys(canonical_tool_name(tool_name) for tool_name in tool_names))
 
 
+def _json_safe_value(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except TypeError:
+        return str(value)
+
+
+def _checkpoint_context_allowed(approval_context: dict[str, Any] | None) -> bool:
+    if approval_context is None:
+        return True
+    if bool(approval_context.get("accepts_secret_refs", False)):
+        return False
+    boundaries = {
+        str(boundary)
+        for boundary in approval_context.get("execution_boundaries", [])
+        if isinstance(boundary, str)
+    }
+    return not bool(
+        boundaries & {"secret_management", "secret_read", "secret_injection"}
+    )
+
+
+async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any] | None:
+    try:
+        session_id, tool_name, run_fingerprint, run_discriminator = parse_workflow_run_identity(run_identity)
+    except ValueError:
+        return None
+    async with get_session() as db:
+        stmt = (
+            select(AuditEvent)
+            .where(AuditEvent.tool_name == tool_name)
+            .where(AuditEvent.event_type.in_(("tool_result", "tool_failed")))
+            .order_by(col(AuditEvent.created_at).desc())
+        )
+        if session_id is None:
+            stmt = stmt.where(col(AuditEvent.session_id).is_(None))
+        else:
+            stmt = stmt.where(AuditEvent.session_id == session_id)
+        result = await db.execute(stmt)
+        events = result.scalars().all()
+    matching_by_fingerprint: list[dict[str, Any]] = []
+    for event in events:
+        if not event.details_json:
+            continue
+        try:
+            details = json.loads(event.details_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(details, dict):
+            continue
+        if str(details.get("run_fingerprint") or "none") != run_fingerprint:
+            continue
+        matching_by_fingerprint.append(details)
+        if (
+            run_discriminator is None
+            or str(details.get("call_event_id") or "").strip() == run_discriminator
+        ):
+            return details
+    if run_discriminator is not None and len(matching_by_fingerprint) == 1:
+        return matching_by_fingerprint[0]
+    return None
+
+
 def _approval_context_for_workflow(workflow: Workflow) -> dict[str, Any]:
     canonical_step_tools = _canonicalize_tool_names(workflow.step_tools)
     execution_boundaries: list[str] = []
@@ -246,19 +346,24 @@ class WorkflowTool(Tool):
             }
             for input_name, spec in workflow.inputs.items()
         }
+        self.inputs.update(_WORKFLOW_CONTROL_INPUTS)
         self.output_type = "string"
         self.is_initialized = True
         self._last_audit_payload: tuple[str, dict[str, Any]] | None = None
+        self._last_audit_failure_payload: tuple[str, dict[str, Any]] | None = None
 
     def forward(self, *args, **kwargs):
         return self.__call__(*args, **kwargs)
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
-        workflow_inputs = self._normalize_inputs(args, kwargs)
+        self._last_audit_payload = None
+        self._last_audit_failure_payload = None
+        workflow_inputs, control_inputs = self._normalize_inputs(args, kwargs)
+        audit_arguments = {**workflow_inputs, **control_inputs}
         approval_context = self.get_approval_context(workflow_inputs)
         run_fingerprint = fingerprint_tool_call(
             self.name,
-            workflow_inputs,
+            audit_arguments,
             approval_context=approval_context,
         )
         current_session_id = get_current_session_id()
@@ -272,8 +377,26 @@ class WorkflowTool(Tool):
         artifact_paths = _collect_artifact_paths(workflow_inputs)
         step_records: list[dict[str, Any]] = []
         canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
+        checkpoint_context_allowed = _checkpoint_context_allowed(approval_context)
+        checkpoint_context: dict[str, dict[str, Any]] = {}
+        start_index = 0
+        if control_inputs.get("_seraph_resume_from_step"):
+            start_index, restored_step_records, restored_artifact_paths, restored_context = self._restore_checkpoint_context(
+                control_inputs=control_inputs,
+                canonical_step_tools=canonical_step_tools,
+            )
+            for step_id, state in restored_context.items():
+                context["steps"][step_id] = state
+                context["last_result"] = state.get("result", "")
+                checkpoint_context[step_id] = _json_safe_value(state)
+            step_records.extend(restored_step_records)
+            for path in restored_artifact_paths:
+                if path not in artifact_paths:
+                    artifact_paths.append(path)
 
-        for step, canonical_step_tool in zip(self.workflow.steps, canonical_step_tools, strict=False):
+        for index, (step, canonical_step_tool) in enumerate(zip(self.workflow.steps, canonical_step_tools, strict=False)):
+            if index < start_index:
+                continue
             tool = self.tools_by_name.get(step.tool)
             if tool is None:
                 tool = self.tools_by_name.get(canonical_step_tool)
@@ -294,21 +417,59 @@ class WorkflowTool(Tool):
                     sanitize_inputs_outputs=sanitize_inputs_outputs,
                 )
             except Exception as exc:
+                step_completed_at = _utc_now_iso()
+                duration_ms = int((time.perf_counter() - started) * 1000)
                 if not step.continue_on_error:
+                    step_records.append({
+                        "id": step.id,
+                        "index": len(step_records) + 1,
+                        "tool": canonical_step_tool,
+                        "status": "failed",
+                        "argument_keys": (
+                            sorted(str(key) for key in rendered_arguments.keys())
+                            if isinstance(rendered_arguments, dict)
+                            else []
+                        ),
+                        "artifact_paths": step_artifact_paths,
+                        "result_summary": None,
+                        "error_kind": type(exc).__name__,
+                        "error_summary": str(exc).strip()[:160] or type(exc).__name__,
+                        "started_at": step_started_at,
+                        "completed_at": step_completed_at,
+                        "duration_ms": duration_ms,
+                    })
+                    self._last_audit_failure_payload = self._build_audit_payload(
+                        status="failed",
+                        run_fingerprint=run_fingerprint,
+                        approval_context=approval_context,
+                        canonical_step_tools=canonical_step_tools,
+                        step_records=step_records,
+                        artifact_paths=artifact_paths,
+                        continued_error_steps=continued_error_steps,
+                        canvas_output=None,
+                        checkpoint_context=checkpoint_context,
+                        checkpoint_context_allowed=checkpoint_context_allowed,
+                        control_inputs=control_inputs,
+                        error=str(exc),
+                    )
                     raise
                 result = f"Error: {exc}"
                 continued_error_steps.append(step.id)
                 step_status = "continued_error"
                 error_kind = type(exc).__name__
                 error_summary = str(exc).strip()[:160] or error_kind
-            step_completed_at = _utc_now_iso()
-            duration_ms = int((time.perf_counter() - started) * 1000)
+                step_completed_at = _utc_now_iso()
+                duration_ms = int((time.perf_counter() - started) * 1000)
+            else:
+                step_completed_at = _utc_now_iso()
+                duration_ms = int((time.perf_counter() - started) * 1000)
             context["steps"][step.id] = {
                 "tool": canonical_step_tool,
                 "arguments": rendered_arguments,
                 "result": result,
             }
             context["last_result"] = result
+            checkpoint_context[step.id] = _json_safe_value(context["steps"][step.id])
             for path in step_artifact_paths:
                 if path not in artifact_paths:
                     artifact_paths.append(path)
@@ -350,34 +511,19 @@ class WorkflowTool(Tool):
             summary += f" with {len(continued_error_steps)} continued error step"
             if len(continued_error_steps) != 1:
                 summary += "s"
-        self._last_audit_payload = (
-            summary,
-            {
-                "workflow_name": self.workflow.name,
-                "run_fingerprint": run_fingerprint,
-                "approval_context": approval_context,
-                "step_count": len(self.workflow.steps),
-                "step_tools": canonical_step_tools,
-                "step_records": step_records,
-                "checkpoint_step_ids": [str(step["id"]) for step in step_records if step.get("id")],
-                "last_completed_step_id": (
-                    next(
-                        (
-                            str(step["id"])
-                            for step in reversed(step_records)
-                            if step.get("id") and str(step.get("status") or "") not in {"failed", "continued_error"}
-                        ),
-                        None,
-                    )
-                ),
-                "artifact_paths": artifact_paths,
-                "continued_error_steps": continued_error_steps,
-                "failed_step_ids": continued_error_steps,
-                "runtime_profile": self.workflow.runtime_profile,
-                "output_surface": self.workflow.output_surface,
-                "canvas_output": _redact_canvas_output(canvas_output),
-                "content_redacted": True,
-            },
+        self._last_audit_payload = self._build_audit_payload(
+            status=status,
+            run_fingerprint=run_fingerprint,
+            approval_context=approval_context,
+            canonical_step_tools=canonical_step_tools,
+            step_records=step_records,
+            artifact_paths=artifact_paths,
+            continued_error_steps=continued_error_steps,
+            canvas_output=canvas_output,
+            checkpoint_context=checkpoint_context,
+            checkpoint_context_allowed=checkpoint_context_allowed,
+            control_inputs=control_inputs,
+            summary=summary,
         )
         if current_session_id:
             flush_session_memory_sync(
@@ -394,8 +540,20 @@ class WorkflowTool(Tool):
     ) -> tuple[str, dict[str, Any]] | None:
         return self._last_audit_payload
 
+    def get_audit_failure_payload(
+        self,
+        _arguments: dict[str, Any],
+        _error: Exception,
+    ) -> tuple[str, dict[str, Any]] | None:
+        return self._last_audit_failure_payload
+
     def get_audit_call_payload(self, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        approval_context = self.get_approval_context(arguments)
+        workflow_inputs, control_inputs = self._normalize_provided_inputs(
+            arguments,
+            require_required_inputs=False,
+        )
+        normalized_audit_arguments = {**workflow_inputs, **control_inputs}
+        approval_context = self.get_approval_context(workflow_inputs)
         return (
             format_tool_call_summary(self.name, arguments, set()),
             {
@@ -403,17 +561,205 @@ class WorkflowTool(Tool):
                 "workflow_name": self.workflow.name,
                 "run_fingerprint": fingerprint_tool_call(
                     self.name,
-                    arguments,
+                    normalized_audit_arguments,
                     approval_context=approval_context,
                 ),
                 "approval_context": approval_context,
+                **self._control_audit_details(control_inputs),
             },
         )
 
     def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return _approval_context_for_workflow(self.workflow)
 
-    def _normalize_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _control_audit_details(self, control_inputs: dict[str, Any]) -> dict[str, Any]:
+        details: dict[str, Any] = {}
+        if isinstance(control_inputs.get("_seraph_parent_run_identity"), str):
+            details["parent_run_identity"] = control_inputs["_seraph_parent_run_identity"]
+        if isinstance(control_inputs.get("_seraph_root_run_identity"), str):
+            details["root_run_identity"] = control_inputs["_seraph_root_run_identity"]
+        if isinstance(control_inputs.get("_seraph_branch_kind"), str):
+            details["branch_kind"] = control_inputs["_seraph_branch_kind"]
+        if isinstance(control_inputs.get("_seraph_resume_from_step"), str):
+            details["resume_from_step"] = control_inputs["_seraph_resume_from_step"]
+        if isinstance(control_inputs.get("_seraph_branch_depth"), int):
+            details["branch_depth"] = control_inputs["_seraph_branch_depth"]
+        return details
+
+    def _build_audit_payload(
+        self,
+        *,
+        status: str,
+        run_fingerprint: str,
+        approval_context: dict[str, Any],
+        canonical_step_tools: list[str],
+        step_records: list[dict[str, Any]],
+        artifact_paths: list[str],
+        continued_error_steps: list[str],
+        canvas_output: dict[str, Any] | None,
+        checkpoint_context: dict[str, dict[str, Any]],
+        checkpoint_context_allowed: bool,
+        control_inputs: dict[str, Any],
+        summary: str | None = None,
+        error: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        payload_summary = summary or f"{self.name} {status}"
+        payload = {
+            "workflow_name": self.workflow.name,
+            "run_fingerprint": run_fingerprint,
+            "approval_context": approval_context,
+            "step_count": len(self.workflow.steps),
+            "step_tools": canonical_step_tools,
+            "step_records": step_records,
+            "checkpoint_step_ids": [str(step["id"]) for step in step_records if step.get("id")],
+            "last_completed_step_id": (
+                next(
+                    (
+                        str(step["id"])
+                        for step in reversed(step_records)
+                        if step.get("id") and str(step.get("status") or "") not in {"failed", "continued_error"}
+                    ),
+                    None,
+                )
+            ),
+            "artifact_paths": artifact_paths,
+            "continued_error_steps": continued_error_steps,
+            "failed_step_ids": [
+                str(step["id"])
+                for step in step_records
+                if str(step.get("status") or "") in {"failed", "continued_error"}
+            ],
+            "runtime_profile": self.workflow.runtime_profile,
+            "output_surface": self.workflow.output_surface,
+            "canvas_output": _redact_canvas_output(canvas_output),
+            "content_redacted": True,
+            "checkpoint_context_available": checkpoint_context_allowed and bool(checkpoint_context),
+            **self._control_audit_details(control_inputs),
+        }
+        if checkpoint_context_allowed and checkpoint_context:
+            payload["checkpoint_context"] = checkpoint_context
+        if error is not None:
+            payload["error"] = redact_for_audit(error)
+        return payload_summary, payload
+
+    def _restore_checkpoint_context(
+        self,
+        *,
+        control_inputs: dict[str, Any],
+        canonical_step_tools: list[str],
+    ) -> tuple[int, list[dict[str, Any]], list[str], dict[str, dict[str, Any]]]:
+        requested_step_id = str(control_inputs.get("_seraph_resume_from_step") or "").strip()
+        if not requested_step_id:
+            return 0, [], [], {}
+        step_ids = [step.id for step in self.workflow.steps]
+        if requested_step_id not in step_ids:
+            raise ValueError(
+                f"Workflow '{self.workflow.name}' has no step '{requested_step_id}'"
+            )
+        start_index = step_ids.index(requested_step_id)
+        if start_index == 0:
+            return 0, [], [], {}
+        parent_run_identity = str(control_inputs.get("_seraph_parent_run_identity") or "").strip()
+        if not parent_run_identity:
+            raise RuntimeError(
+                f"Workflow '{self.workflow.name}' requires a parent run identity to resume from step '{requested_step_id}'"
+            )
+        details = _run_async(_load_workflow_checkpoint_payload(parent_run_identity))
+        if not isinstance(details, dict):
+            raise RuntimeError(
+                f"Workflow '{self.workflow.name}' could not load checkpoint state from '{parent_run_identity}'"
+            )
+        if str(details.get("workflow_name") or self.workflow.name) != self.workflow.name:
+            raise RuntimeError(
+                f"Workflow '{self.workflow.name}' cannot reuse checkpoint state from a different workflow"
+            )
+        raw_checkpoint_context = details.get("checkpoint_context")
+        if not isinstance(raw_checkpoint_context, dict):
+            raise RuntimeError(
+                f"Workflow '{self.workflow.name}' cannot resume from step '{requested_step_id}' because the parent run has no reusable checkpoint context"
+            )
+        parent_step_records = details.get("step_records")
+        parent_step_records = parent_step_records if isinstance(parent_step_records, list) else []
+        restored_step_records: list[dict[str, Any]] = []
+        restored_artifact_paths: list[str] = []
+        restored_context: dict[str, dict[str, Any]] = {}
+        for index, step in enumerate(self.workflow.steps[:start_index], start=1):
+            raw_state = raw_checkpoint_context.get(step.id)
+            if not isinstance(raw_state, dict):
+                raise RuntimeError(
+                    f"Workflow '{self.workflow.name}' is missing checkpoint state for step '{step.id}'"
+                )
+            step_arguments = raw_state.get("arguments")
+            if not isinstance(step_arguments, dict):
+                step_arguments = {}
+            restored_state = {
+                "tool": str(raw_state.get("tool") or canonical_step_tools[index - 1]),
+                "arguments": step_arguments,
+                "result": raw_state.get("result"),
+            }
+            restored_context[step.id] = restored_state
+            parent_step_record = next(
+                (
+                    item for item in parent_step_records
+                    if isinstance(item, dict) and str(item.get("id") or "") == step.id
+                ),
+                {},
+            )
+            step_artifact_paths = [
+                path for path in parent_step_record.get("artifact_paths", [])
+                if isinstance(path, str) and path.strip()
+            ] if isinstance(parent_step_record, dict) else []
+            for path in _collect_artifact_paths(step_arguments):
+                if path not in step_artifact_paths:
+                    step_artifact_paths.append(path)
+            for path in step_artifact_paths:
+                if path not in restored_artifact_paths:
+                    restored_artifact_paths.append(path)
+            restored_step_records.append({
+                "id": step.id,
+                "index": len(restored_step_records) + 1,
+                "tool": canonical_step_tools[index - 1],
+                "status": "checkpoint_reused",
+                "argument_keys": sorted(str(key) for key in step_arguments.keys()),
+                "artifact_paths": step_artifact_paths,
+                "result_summary": _summarize_value_shape(restored_state["result"]),
+                "error_kind": None,
+                "error_summary": None,
+                "started_at": parent_step_record.get("started_at") if isinstance(parent_step_record, dict) else None,
+                "completed_at": parent_step_record.get("completed_at") if isinstance(parent_step_record, dict) else None,
+                "duration_ms": parent_step_record.get("duration_ms") if isinstance(parent_step_record, dict) else None,
+                "reused_from_run_identity": parent_run_identity,
+                "source_step_status": (
+                    parent_step_record.get("status")
+                    if isinstance(parent_step_record, dict)
+                    else None
+                ),
+            })
+        return start_index, restored_step_records, restored_artifact_paths, restored_context
+
+    def _split_inputs(self, provided: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        workflow_inputs = {
+            key: value
+            for key, value in provided.items()
+            if key in self.workflow.inputs
+        }
+        control_inputs: dict[str, Any] = {}
+        for key in _WORKFLOW_CONTROL_FIELD_NAMES:
+            if key not in provided:
+                continue
+            value = provided[key]
+            if value is None or value == "":
+                continue
+            if key == "_seraph_branch_depth":
+                try:
+                    control_inputs[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                control_inputs[key] = str(value)
+        return workflow_inputs, control_inputs
+
+    def _normalize_inputs(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
             provided = dict(args[0])
         elif kwargs:
@@ -425,20 +771,28 @@ class WorkflowTool(Tool):
                 for idx, name in enumerate(input_names)
                 if idx < len(args)
             }
+        return self._normalize_provided_inputs(provided)
 
+    def _normalize_provided_inputs(
+        self,
+        provided: dict[str, Any],
+        *,
+        require_required_inputs: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        provided_workflow_inputs, control_inputs = self._split_inputs(provided)
         normalized: dict[str, Any] = {}
         for input_name, spec in self.workflow.inputs.items():
-            if input_name in provided:
-                normalized[input_name] = provided[input_name]
+            if input_name in provided_workflow_inputs:
+                normalized[input_name] = provided_workflow_inputs[input_name]
                 continue
             if "default" in spec and spec["default"] is not None:
                 normalized[input_name] = spec["default"]
                 continue
-            if spec.get("required", True):
+            if require_required_inputs and spec.get("required", True):
                 raise ValueError(
                     f"Workflow '{self.workflow.name}' missing required input '{input_name}'"
                 )
-        return normalized
+        return normalized, control_inputs
 
 
 class WorkflowManager:

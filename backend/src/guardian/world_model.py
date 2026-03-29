@@ -425,10 +425,11 @@ def build_guardian_world_model(
         judgment_risks.append(
             f"Live observer project '{observer_project}' does not match recalled project context."
         )
+    has_live_focus_anchor = focus_source == "current_event" or focus_source.startswith("observer_")
     if (
         not observer_project
         and len(active_project_signals) >= 2
-        and not focus_source.startswith("observer_")
+        and not has_live_focus_anchor
     ):
         judgment_risks.append(
             "Multiple active projects are competing without a live observer project anchor."

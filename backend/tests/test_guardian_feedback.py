@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,10 +10,49 @@ from sqlmodel import select
 
 from src.agent.session import SessionManager
 from src.db.models import GuardianIntervention, MemoryKind
-from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+from src.guardian.feedback import (
+    GuardianLearningSignal,
+    _select_learning_scope_for_axis,
+    guardian_feedback_repository,
+)
+from src.guardian.learning_evidence import (
+    GuardianLearningAxisEvidence,
+    learning_field_for_axis,
+    neutral_axis_evidence,
+    ordered_learning_axes,
+)
 from src.memory.procedural import sync_learning_signal_memories
 from src.memory.procedural_guidance import load_procedural_memory_guidance
 from src.memory.repository import memory_repository
+
+
+def _axis_evidence_tuple(
+    axis: str,
+    *,
+    bias: str,
+    support_count: int,
+    weighted_support: float,
+    recency_score: float,
+    confidence_score: float,
+    quality_score: float,
+) -> tuple[GuardianLearningAxisEvidence, ...]:
+    evidence_by_axis = {
+        axis: GuardianLearningAxisEvidence(
+            axis=axis,
+            field_name=learning_field_for_axis(axis),
+            source="live_signal",
+            bias=bias,
+            support_count=support_count,
+            weighted_support=weighted_support,
+            recency_score=recency_score,
+            confidence_score=confidence_score,
+            quality_score=quality_score,
+        )
+    }
+    return tuple(
+        evidence_by_axis.get(item_axis, neutral_axis_evidence(item_axis, source="live_signal"))
+        for item_axis in ordered_learning_axes()
+    )
 
 
 async def test_create_intervention_and_feedback_summary(async_db):
@@ -382,6 +422,47 @@ async def test_resolve_learning_signal_prefers_project_scope_over_global(async_d
     assert resolution.selected_scopes()["delivery"] == "project"
     assert "Atlas interruption failed twice." in scoped_summary
     assert "Global success two." not in scoped_summary
+
+
+def test_select_learning_scope_prefers_more_specific_scope_within_tie_tolerance():
+    global_signal = replace(
+        GuardianLearningSignal.neutral("advisory"),
+        bias="prefer_direct_delivery",
+        axis_evidence=_axis_evidence_tuple(
+            "delivery",
+            bias="prefer_direct_delivery",
+            support_count=3,
+            weighted_support=3.0,
+            recency_score=0.6,
+            confidence_score=1.0,
+            quality_score=0.9,
+        ),
+    )
+    project_signal = replace(
+        GuardianLearningSignal.neutral("advisory"),
+        bias="reduce_interruptions",
+        axis_evidence=_axis_evidence_tuple(
+            "delivery",
+            bias="reduce_interruptions",
+            support_count=3,
+            weighted_support=3.0,
+            recency_score=0.6,
+            confidence_score=0.9,
+            quality_score=0.9,
+        ),
+    )
+
+    selected_evidence, decision = _select_learning_scope_for_axis(
+        axis="delivery",
+        candidate_signals={
+            "global": global_signal,
+            "project": project_signal,
+        },
+    )
+
+    assert decision.selected_scope == "project"
+    assert decision.reason == "tie_prefers_more_specific_scope"
+    assert selected_evidence.bias == "reduce_interruptions"
 
 
 async def test_feedback_updates_materialize_procedural_memories(async_db):

@@ -955,6 +955,12 @@ This section records the internal Batch C slices on the feature branch before th
   - final recheck:
     - `Singer` reported no remaining material findings after the dominant-scope and scoped-summary fixes
 
+- aggregate PR follow-up on `#254`:
+  - GitHub review caught that `backend/src/guardian/world_model.py` was still treating `current_event` as a non-observer focus source in the competing-project risk gate, which could incorrectly downgrade world-model confidence when multiple project signals were present without `active_project`
+  - the same review also caught that `backend/src/guardian/feedback.py` sorted live scope candidates by raw weight before the tie-tolerance branch ran, so `_SCOPE_WEIGHT_TIE_TOLERANCE` only changed the explanation string and never the selected scope
+  - fixed by treating `current_event` as a live observer focus anchor in the project-risk gate, and by applying tie selection across all near-tied live scope candidates before choosing the winning scope
+  - added regressions in `backend/tests/test_guardian_state.py` and `backend/tests/test_guardian_feedback.py` so current-event anchoring and near-tie scope specificity stay pinned
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

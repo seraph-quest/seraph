@@ -315,6 +315,55 @@ async def test_build_guardian_state_degrades_world_model_on_project_mismatch(asy
 
 
 @pytest.mark.asyncio
+async def test_build_guardian_state_treats_current_event_as_live_project_anchor(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        current_event="Atlas launch review",
+        active_window="Calendar",
+        screen_context="Reviewing release and migration notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="current_event",
+        interruption_cost="medium",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas launch", "Hermes migration"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should Seraph interrupt during the launch review?",
+        )
+
+    assert state.world_model.focus_source == "current_event"
+    assert (
+        "Multiple active projects are competing without a live observer project anchor."
+        not in state.world_model.judgment_risks
+    )
+    assert state.confidence.world_model == "grounded"
+
+
+@pytest.mark.asyncio
 async def test_build_guardian_state_lowers_receptivity_after_negative_outcome_trend(async_db):
     sm = SessionManager()
     await sm.get_or_create("current")

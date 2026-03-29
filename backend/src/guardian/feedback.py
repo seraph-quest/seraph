@@ -481,26 +481,33 @@ def _select_learning_scope_for_axis(
             reason="no_supported_bias",
         )
 
-    weighted_candidates.sort(
-        key=lambda item: (
-            item[2],
-            _scope_priority(item[0]),
-            item[1].recency_score,
-            item[1].confidence_score,
-            item[1].quality_score,
-        ),
-        reverse=True,
-    )
+    weighted_candidates.sort(key=lambda item: item[2], reverse=True)
     selected_scope, selected_evidence, selected_weight = weighted_candidates[0]
     reason = "strongest_scope"
     if len(weighted_candidates) > 1:
-        runner_up_scope, runner_up_evidence, runner_up_weight = weighted_candidates[1]
-        if abs(selected_weight - runner_up_weight) <= _SCOPE_WEIGHT_TIE_TOLERANCE:
-            if _scope_priority(selected_scope) > _scope_priority(runner_up_scope):
+        tie_candidates = [
+            item
+            for item in weighted_candidates
+            if abs(selected_weight - item[2]) <= _SCOPE_WEIGHT_TIE_TOLERANCE
+        ]
+        if len(tie_candidates) > 1:
+            original_scope, original_evidence, original_weight = selected_scope, selected_evidence, selected_weight
+            tie_candidates.sort(
+                key=lambda item: (
+                    _scope_priority(item[0]),
+                    item[1].recency_score,
+                    item[1].confidence_score,
+                    item[1].quality_score,
+                    item[2],
+                ),
+                reverse=True,
+            )
+            selected_scope, selected_evidence, selected_weight = tie_candidates[0]
+            if _scope_priority(selected_scope) > _scope_priority(original_scope):
                 reason = "tie_prefers_more_specific_scope"
-            elif selected_evidence.recency_score >= runner_up_evidence.recency_score:
+            elif selected_evidence.recency_score > original_evidence.recency_score:
                 reason = "tie_prefers_fresher_scope"
-            else:
+            elif selected_scope != original_scope or selected_weight != original_weight:
                 reason = "tie_prefers_stronger_runner_up"
     return selected_evidence, GuardianLearningScopeDecision(
         axis=axis,

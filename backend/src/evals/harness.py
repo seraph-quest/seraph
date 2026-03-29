@@ -3275,6 +3275,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
             '"intervention_type": "advisory", "urgency": 2, "reasoning": "Aligned work"}'
         )
         mock_ws_manager = MagicMock()
+        mock_ws_manager.active_count = 0
         mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
         mock_log_event = AsyncMock()
         guardian_state = types.SimpleNamespace(
@@ -4211,6 +4212,7 @@ async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
     mock_context_manager.get_context.side_effect = [delivered_ctx, queued_ctx]
     mock_context_manager.decrement_attention_budget = MagicMock()
     mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = 2
     mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(
         attempted_connections=2,
         delivered_connections=2,
@@ -4268,6 +4270,7 @@ async def _eval_observer_delivery_transport_audit() -> dict[str, Any]:
     # failed here rather than rerouting through the native-notification lane.
     mock_context_manager.is_daemon_connected.return_value = False
     mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = 2
     mock_ws_manager.broadcast = AsyncMock(
         side_effect=[
             BroadcastResult(attempted_connections=2, delivered_connections=2, failed_connections=0),
@@ -4415,6 +4418,7 @@ async def _eval_observer_delivery_decision_behavior() -> dict[str, Any]:
     mock_context_manager.get_context.side_effect = [available_ctx, blocked_ctx]
     mock_context_manager.decrement_attention_budget = MagicMock()
     mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = 1
     mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
     mock_insight_queue = MagicMock()
     mock_insight_queue.enqueue = AsyncMock()
@@ -4476,6 +4480,7 @@ async def _eval_native_presence_notification_behavior() -> dict[str, Any]:
     mock_context_manager.decrement_attention_budget = MagicMock()
     mock_context_manager.is_daemon_connected.return_value = True
     mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = 0
     mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
     mock_log_event = AsyncMock()
     message = WSResponse(
@@ -4762,6 +4767,7 @@ async def _eval_guardian_feedback_loop() -> dict[str, Any]:
         mock_context_manager.decrement_attention_budget = MagicMock()
         mock_context_manager.is_daemon_connected.return_value = True
         mock_ws_manager = MagicMock()
+        mock_ws_manager.active_count = 0
         mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(0, 0, 0))
         mock_log_event = AsyncMock()
         message = WSResponse(
@@ -4905,6 +4911,7 @@ async def _eval_guardian_outcome_learning() -> dict[str, Any]:
         mock_context_manager.decrement_attention_budget = MagicMock()
         mock_context_manager.is_daemon_connected.return_value = False
         mock_ws_manager = MagicMock()
+        mock_ws_manager.active_count = 1
         mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
         mock_insight_queue = MagicMock()
         mock_insight_queue.enqueue = AsyncMock()
@@ -6039,6 +6046,7 @@ async def _eval_observer_delivery_salience_confidence_behavior() -> dict[str, An
     mock_context_manager.decrement_attention_budget = MagicMock()
     mock_context_manager.is_daemon_connected.return_value = False
     mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = 1
     mock_ws_manager.broadcast = AsyncMock(return_value=BroadcastResult(1, 1, 0))
     mock_insight_queue = MagicMock()
     mock_insight_queue.enqueue = AsyncMock()

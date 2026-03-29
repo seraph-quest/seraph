@@ -2338,6 +2338,28 @@ async def test_channel_routing_defaults_surface_active_adapters(client, extensio
 
 
 @pytest.mark.asyncio
+async def test_channel_routing_runtime_status_tolerates_non_scalar_mock_state(client, extension_runtime):
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = MagicMock()
+
+    with (
+        patch("src.observer.manager.context_manager.is_daemon_connected", return_value=MagicMock()),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    transport_statuses = {item["transport"]: item for item in payload["transport_statuses"]}
+    route_statuses = {item["route"]: item for item in payload["route_statuses"]}
+
+    assert transport_statuses["websocket"]["status"] == "waiting_for_browser"
+    assert transport_statuses["native_notification"]["status"] == "daemon_offline"
+    assert route_statuses["live_delivery"]["status"] == "unavailable"
+    assert route_statuses["live_delivery"]["failure_reason"] == "waiting_for_browser+daemon_offline"
+
+
+@pytest.mark.asyncio
 async def test_channel_routing_defaults_to_builtin_transports_when_no_channel_adapters_are_active(client, extension_runtime):
     snapshot = MagicMock()
     snapshot.list_contributions.return_value = [MagicMock()]

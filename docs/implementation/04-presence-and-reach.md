@@ -79,6 +79,8 @@
 - review follow-up captured during validation:
   - the new runtime-health path now reads `ws_manager.active_count`, so delivery tests that only mocked broadcast results needed explicit active-count fixtures to model a real connected browser runtime
   - the synthetic “no active adapters” bundle-failure contract now correctly reports `inactive+inactive` because route health records the actual unavailable transports instead of collapsing everything to the old websocket-disabled code
+  - GitHub CI then exposed the same contract drift inside the eval harness: several reach and delivery scenarios were still using bare websocket or daemon mocks with non-scalar state, so runtime reach inspection could read `MagicMock` values as transport health instead of explicit connected/disconnected state
+  - that follow-up was fixed in the Batch I branch by normalizing non-scalar websocket and daemon runtime inputs at the `channel_routing` helper boundary and by pinning explicit `active_count` fixtures in eval scenarios that are meant to model a live browser websocket path
   - reviewer: `Einstein` (`019d39cb-8f3b-7e83-8874-9659016bf404`)
   - reviewer findings fixed on the same branch:
     - mixed-session native bundle delivery was still collapsing unrelated sessions into one ambient notification, so the native bundle path now partitions queued items by session before enqueuing notifications and preserves thread-specific continuation for each session-owned group

@@ -181,6 +181,18 @@ def _transport_label(transport: str) -> str:
     return _TRANSPORT_LABELS.get(transport, transport.replace("_", " "))
 
 
+def _normalized_websocket_connection_count(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(value, 0)
+    return 0
+
+
+def _normalized_daemon_connected(value: Any) -> bool:
+    return value if isinstance(value, bool) else False
+
+
 def transport_runtime_status(
     transport: str,
     *,
@@ -188,6 +200,8 @@ def transport_runtime_status(
     websocket_connection_count: int,
     daemon_connected: bool,
 ) -> dict[str, Any]:
+    websocket_connection_count = _normalized_websocket_connection_count(websocket_connection_count)
+    daemon_connected = _normalized_daemon_connected(daemon_connected)
     if transport not in active_transports:
         return {
             "transport": transport,

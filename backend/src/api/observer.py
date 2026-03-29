@@ -2,6 +2,7 @@
 
 import logging
 from datetime import date, datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -86,12 +87,16 @@ class DaemonStatusResponse(BaseModel):
 class QueuedInsightResponse(BaseModel):
     id: str
     intervention_id: str | None = None
+    session_id: str | None = None
     content_excerpt: str
     intervention_type: str
     urgency: int
     reasoning: str
     thread_id: str | None = None
     thread_label: str | None = None
+    thread_source: str = "ambient"
+    continuation_mode: str = "open_thread"
+    resume_message: str | None = None
     created_at: str
 
 
@@ -109,8 +114,16 @@ class RecentInterventionResponse(BaseModel):
     feedback_type: str | None = None
     thread_id: str | None = None
     thread_label: str | None = None
+    thread_source: str = "ambient"
+    continuation_mode: str = "open_thread"
+    resume_message: str | None = None
     updated_at: str
     continuity_surface: str
+
+
+class ObserverReachResponse(BaseModel):
+    transport_statuses: list[dict[str, Any]]
+    route_statuses: list[dict[str, Any]]
 
 
 class ObserverContinuityResponse(BaseModel):
@@ -119,6 +132,7 @@ class ObserverContinuityResponse(BaseModel):
     queued_insights: list[QueuedInsightResponse]
     queued_insight_count: int
     recent_interventions: list[RecentInterventionResponse]
+    reach: ObserverReachResponse
 
 
 class InterventionFeedbackRequest(BaseModel):
@@ -239,6 +253,49 @@ async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]
     }
 
 
+def _thread_label(thread_id: str | None, session_titles: dict[str, str]) -> str | None:
+    if not thread_id:
+        return None
+    return session_titles.get(thread_id)
+
+
+def _continuation_mode(thread_id: str | None) -> str:
+    return "resume_thread" if thread_id else "open_thread"
+
+
+def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
+    from src.extensions.channel_routing import (
+        SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
+        route_runtime_statuses,
+        transport_runtime_status,
+    )
+    from src.extensions.state import load_extension_state_payload
+    from src.observer.delivery import _active_channel_adapters
+    from src.scheduler.connection_manager import ws_manager
+
+    active_transports = _active_channel_adapters()
+    websocket_connection_count = ws_manager.active_count
+    daemon_connected = context_manager.is_daemon_connected()
+    state_payload = load_extension_state_payload()
+    return {
+        "transport_statuses": [
+            transport_runtime_status(
+                transport,
+                active_transports=active_transports,
+                websocket_connection_count=websocket_connection_count,
+                daemon_connected=daemon_connected,
+            )
+            for transport in SUPPORTED_CHANNEL_ROUTE_TRANSPORTS
+        ],
+        "route_statuses": route_runtime_statuses(
+            state_payload,
+            active_transports=active_transports,
+            websocket_connection_count=websocket_connection_count,
+            daemon_connected=daemon_connected,
+        ),
+    }
+
+
 @router.get("/observer/continuity", response_model=ObserverContinuityResponse)
 async def get_observer_continuity():
     """Return a single continuity snapshot for browser and daemon surfaces."""
@@ -260,6 +317,23 @@ async def get_observer_continuity():
             thread_id,
             session_titles.get(thread_id) if thread_id else None,
         )
+    missing_intervention_ids = {
+        str(item.intervention_id)
+        for item in queued_insights
+        if item.intervention_id
+        and not item.session_id
+        and str(item.intervention_id) not in intervention_thread_map
+    }
+    for intervention_id in missing_intervention_ids:
+        fallback_intervention = await guardian_feedback_repository.get(intervention_id)
+        if fallback_intervention is None or not fallback_intervention.session_id:
+            continue
+        intervention_thread_map[intervention_id] = (
+            fallback_intervention.session_id,
+            session_titles.get(fallback_intervention.session_id),
+        )
+
+    reach_payload = _observer_reach_payload()
 
     return {
         "daemon": await _daemon_status_payload(),
@@ -267,10 +341,11 @@ async def get_observer_continuity():
             {
                 **item,
                 "thread_id": item.get("thread_id") or item.get("session_id"),
-                "thread_label": (
-                    session_titles.get(str(item.get("thread_id") or item.get("session_id")))
+                "thread_label": _thread_label(
+                    str(item.get("thread_id") or item.get("session_id"))
                     if item.get("thread_id") or item.get("session_id")
-                    else None
+                    else None,
+                    session_titles,
                 ),
             }
             for item in notifications
@@ -283,15 +358,41 @@ async def get_observer_continuity():
                 "intervention_type": item.intervention_type,
                 "urgency": item.urgency,
                 "reasoning": item.reasoning,
-                "thread_id": (
+                "session_id": item.session_id,
+                "thread_id": item.session_id or (
                     intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                     if item.intervention_id
                     else None
                 ),
-                "thread_label": (
+                "thread_label": _thread_label(
+                    item.session_id or (
+                        intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
+                        if item.intervention_id
+                        else None
+                    ),
+                    session_titles,
+                ) or (
                     intervention_thread_map.get(item.intervention_id or "", (None, None))[1]
                     if item.intervention_id
                     else None
+                ),
+                "thread_source": (
+                    "session"
+                    if item.session_id
+                    else "intervention_session"
+                    if item.intervention_id and intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
+                    else "ambient"
+                ),
+                "continuation_mode": _continuation_mode(
+                    item.session_id or (
+                        intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
+                        if item.intervention_id
+                        else None
+                    )
+                ),
+                "resume_message": (
+                    f"Follow up on this deferred guardian item: "
+                    f"{item.content[:157] + '...' if len(item.content) > 160 else item.content}"
                 ),
                 "created_at": item.created_at.isoformat(),
             }
@@ -312,7 +413,10 @@ async def get_observer_continuity():
                 "notification_id": item.notification_id,
                 "feedback_type": item.feedback_type,
                 "thread_id": item.session_id,
-                "thread_label": session_titles.get(item.session_id) if item.session_id else None,
+                "thread_label": _thread_label(item.session_id, session_titles),
+                "thread_source": "session" if item.session_id else "ambient",
+                "continuation_mode": _continuation_mode(item.session_id),
+                "resume_message": f"Continue from this guardian intervention: {item.content_excerpt}",
                 "updated_at": item.updated_at.isoformat(),
                 "continuity_surface": _continuity_surface(
                     latest_outcome=item.latest_outcome,
@@ -322,6 +426,7 @@ async def get_observer_continuity():
             }
             for item in recent_interventions
         ],
+        "reach": reach_payload,
     }
 
 

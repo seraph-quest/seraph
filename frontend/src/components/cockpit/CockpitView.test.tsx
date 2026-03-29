@@ -418,6 +418,42 @@ describe("CockpitView", () => {
                 continuity_surface: "bundle_queue",
               },
             ],
+            reach: {
+              route_statuses: [
+                {
+                  route: "live_delivery",
+                  label: "Live delivery",
+                  status: "fallback_active",
+                  selected_transport: "native_notification",
+                  repair_hint: "Keep a cockpit tab connected or route this delivery class to native notifications first.",
+                  summary: "Live delivery is falling back to native notification because no live browser session is connected for websocket delivery.",
+                },
+                {
+                  route: "alert_delivery",
+                  label: "Alert delivery",
+                  status: "ready",
+                  selected_transport: "native_notification",
+                  repair_hint: null,
+                  summary: "Alert delivery will use native notification.",
+                },
+                {
+                  route: "scheduled_delivery",
+                  label: "Scheduled delivery",
+                  status: "unavailable",
+                  selected_transport: null,
+                  repair_hint: "Reconnect the native daemon or route this delivery class to websocket first.",
+                  summary: "Scheduled delivery has no available transport.",
+                },
+                {
+                  route: "bundle_delivery",
+                  label: "Bundle delivery",
+                  status: "unavailable",
+                  selected_transport: null,
+                  repair_hint: "Reconnect the native daemon or route this delivery class to websocket first.",
+                  summary: "Bundle delivery has no available transport.",
+                },
+              ],
+            },
           }),
         );
       }
@@ -499,6 +535,7 @@ describe("CockpitView", () => {
     fireEvent.click(windowsMenu.closest("button") as HTMLButtonElement);
 
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
+    expect(screen.getByText(/Bundle delivery: unavailable/i)).toBeInTheDocument();
     expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
     await waitFor(() =>

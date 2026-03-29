@@ -16,6 +16,8 @@ from src.audit.runtime import log_integration_event
 from src.extensions.channel_routing import (
     SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
     list_channel_route_bindings,
+    route_runtime_statuses,
+    transport_runtime_status,
     set_channel_route_binding,
 )
 from src.extensions.channels import select_active_channel_adapters
@@ -138,11 +140,34 @@ def _active_channel_adapter_payloads(state_payload: dict[str, Any]) -> list[dict
 
 def _channel_routing_response(state_payload: dict[str, Any]) -> dict[str, Any]:
     adapters = _active_channel_adapter_payloads(state_payload)
+    from src.observer.manager import context_manager
+    from src.scheduler.connection_manager import ws_manager
+
+    active_transports = {item["transport"] for item in adapters}
+    transport_statuses = [
+        {
+            **transport_runtime_status(
+                transport,
+                active_transports=active_transports,
+                websocket_connection_count=ws_manager.active_count,
+                daemon_connected=context_manager.is_daemon_connected(),
+            ),
+            "adapter": next((item for item in adapters if item["transport"] == transport), None),
+        }
+        for transport in SUPPORTED_CHANNEL_ROUTE_TRANSPORTS
+    ]
     return {
         "bindings": [item.as_payload() for item in list_channel_route_bindings(state_payload)],
         "supported_transports": list(SUPPORTED_CHANNEL_ROUTE_TRANSPORTS),
-        "active_transports": sorted({item["transport"] for item in adapters}),
+        "active_transports": sorted(active_transports),
         "active_adapters": adapters,
+        "transport_statuses": transport_statuses,
+        "route_statuses": route_runtime_statuses(
+            state_payload,
+            active_transports=active_transports,
+            websocket_connection_count=ws_manager.active_count,
+            daemon_connected=context_manager.is_daemon_connected(),
+        ),
     }
 
 

@@ -386,6 +386,11 @@ class TestObserverAPI:
             body="Desktop fallback is active.",
             intervention_type="alert",
             urgency=5,
+            session_id="session-1",
+            thread_id="session-1",
+            thread_source="session",
+            continuation_mode="resume_thread",
+            resume_message="Continue from this guardian intervention: Desktop fallback is active.",
         )
         await guardian_feedback_repository.update_outcome(
             native_intervention.id,
@@ -401,9 +406,21 @@ class TestObserverAPI:
             urgency=3,
             reasoning="high_interruption_cost",
             intervention_id=bundle_intervention.id,
+            session_id="session-2",
         )
 
-        with patch("src.api.observer.context_manager", mgr):
+        with (
+            patch("src.api.observer.context_manager", mgr),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(
+                    return_value=[
+                        {"id": "session-1", "title": "Native thread"},
+                        {"id": "session-2", "title": "Bundle thread"},
+                    ]
+                ),
+            ),
+        ):
             resp = await client.get("/api/observer/continuity")
 
         assert resp.status_code == 200
@@ -413,9 +430,17 @@ class TestObserverAPI:
         assert payload["daemon"]["pending_notification_count"] == 1
         assert payload["notifications"][0]["id"] == notification.id
         assert payload["notifications"][0]["intervention_id"] == native_intervention.id
+        assert payload["notifications"][0]["thread_id"] == "session-1"
+        assert payload["notifications"][0]["thread_label"] == "Native thread"
+        assert payload["notifications"][0]["continuation_mode"] == "resume_thread"
         assert payload["queued_insight_count"] == 1
         assert payload["queued_insights"][0]["intervention_id"] == bundle_intervention.id
         assert payload["queued_insights"][0]["content_excerpt"] == "Bundle this until the next browser check-in."
+        assert payload["queued_insights"][0]["session_id"] == "session-2"
+        assert payload["queued_insights"][0]["thread_id"] == "session-2"
+        assert payload["queued_insights"][0]["thread_label"] == "Bundle thread"
+        assert payload["queued_insights"][0]["thread_source"] == "session"
+        assert payload["queued_insights"][0]["continuation_mode"] == "resume_thread"
         assert {item["continuity_surface"] for item in payload["recent_interventions"]} >= {
             "native_notification",
             "bundle_queue",
@@ -424,7 +449,91 @@ class TestObserverAPI:
             item["id"] == native_intervention.id and item["notification_id"] == notification.id
             for item in payload["recent_interventions"]
         )
+        assert any(
+            item["id"] == native_intervention.id
+            and item["thread_id"] == "session-1"
+            and item["thread_label"] == "Native thread"
+            and item["continuation_mode"] == "resume_thread"
+            for item in payload["recent_interventions"]
+        )
+        live_route = next(item for item in payload["reach"]["route_statuses"] if item["route"] == "live_delivery")
+        assert live_route["status"] == "fallback_active"
+        assert live_route["selected_transport"] == "native_notification"
 
+        await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
+    async def test_observer_continuity_recovers_queued_thread_from_intervention_outside_recent_window(self, async_db, client):
+        await native_notification_queue.clear()
+        target_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-fallback",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Recover the older queued thread.",
+            reasoning="high_interruption_cost",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="bundle",
+            policy_reason="high_interruption_cost",
+            delivery_decision="queue",
+            latest_outcome="queued",
+        )
+        recent_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-recent",
+            message_type="proactive",
+            intervention_type="alert",
+            urgency=5,
+            content="Newer intervention still in recent window.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        from src.observer.insight_queue import insight_queue
+
+        await insight_queue.enqueue(
+            content="Recover the older queued thread.",
+            intervention_type="advisory",
+            urgency=3,
+            reasoning="high_interruption_cost",
+            intervention_id=target_intervention.id,
+            session_id=None,
+        )
+
+        with (
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.list_recent",
+                AsyncMock(return_value=[recent_intervention]),
+            ),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(return_value=[{"id": "session-fallback", "title": "Fallback thread"}]),
+            ),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["queued_insights"][0]["intervention_id"] == target_intervention.id
+        assert payload["queued_insights"][0]["thread_id"] == "session-fallback"
+        assert payload["queued_insights"][0]["thread_label"] == "Fallback thread"
+        assert payload["queued_insights"][0]["thread_source"] == "intervention_session"
+        assert payload["queued_insights"][0]["continuation_mode"] == "resume_thread"
+
+        queued_ids = [item.id for item in await insight_queue.peek_all()]
+        if queued_ids:
+            await insight_queue.delete_many(queued_ids)
         await native_notification_queue.clear()
 
     @pytest.mark.asyncio

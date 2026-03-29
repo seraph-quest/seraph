@@ -21,15 +21,27 @@ interface PendingNotification {
   intervention_type: string | null;
   urgency: number | null;
   created_at: string;
+  session_id?: string | null;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  thread_source?: string | null;
+  continuation_mode?: string | null;
+  resume_message?: string | null;
 }
 
 interface QueuedInsightItem {
   id: string;
   intervention_id: string | null;
+  session_id?: string | null;
   content_excerpt: string;
   intervention_type: string;
   urgency: number;
   reasoning: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  thread_source?: string | null;
+  continuation_mode?: string | null;
+  resume_message?: string | null;
   created_at: string;
 }
 
@@ -45,8 +57,23 @@ interface RecentInterventionItem {
   transport: string | null;
   notification_id: string | null;
   feedback_type: string | null;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  thread_source?: string | null;
+  continuation_mode?: string | null;
+  resume_message?: string | null;
   updated_at: string;
   continuity_surface: string;
+}
+
+interface ReachRouteStatus {
+  route: string;
+  label: string;
+  status: string;
+  summary: string;
+  selected_transport?: string | null;
+  selected_mode?: string | null;
+  repair_hint?: string | null;
 }
 
 interface ContinuitySnapshot {
@@ -55,6 +82,9 @@ interface ContinuitySnapshot {
   queued_insights: QueuedInsightItem[];
   queued_insight_count: number;
   recent_interventions: RecentInterventionItem[];
+  reach?: {
+    route_statuses?: ReachRouteStatus[];
+  };
 }
 
 function formatSurfaceLabel(value: string): string {
@@ -66,6 +96,7 @@ export function DaemonStatus() {
   const [notifications, setNotifications] = useState<PendingNotification[]>([]);
   const [queuedInsights, setQueuedInsights] = useState<QueuedInsightItem[]>([]);
   const [recentInterventions, setRecentInterventions] = useState<RecentInterventionItem[]>([]);
+  const [routeStatuses, setRouteStatuses] = useState<ReachRouteStatus[]>([]);
   const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
   const [dismissState, setDismissState] = useState<"idle" | "dismissing" | "dismissed" | "failed">("idle");
 
@@ -78,6 +109,7 @@ export function DaemonStatus() {
         setNotifications(data.notifications ?? []);
         setQueuedInsights(data.queued_insights ?? []);
         setRecentInterventions(data.recent_interventions ?? []);
+        setRouteStatuses(data.reach?.route_statuses ?? []);
       }
     } catch {
       // ignore
@@ -272,6 +304,38 @@ export function DaemonStatus() {
                 : dismissState === "failed"
                   ? "Dismiss failed"
                   : "Updating"}
+            </div>
+          )}
+        </div>
+
+        <div className="text-[9px] text-retro-text/50">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-retro-text/30 uppercase tracking-wider">Delivery routing</div>
+            <div className="text-retro-text/40">{routeStatuses.length}</div>
+          </div>
+          {routeStatuses.length === 0 ? (
+            <div className="text-retro-text/40">No routing health available.</div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {routeStatuses.map((route) => (
+                <div key={route.route} className="border border-retro-text/10 rounded px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-retro-text truncate">{route.label}</div>
+                    <div className="text-retro-text/40 uppercase tracking-wider">
+                      {formatSurfaceLabel(route.status)}
+                    </div>
+                  </div>
+                  <div className="text-retro-text/40">{route.summary}</div>
+                  {(route.selected_transport || route.repair_hint) && (
+                    <div className="text-retro-text/30 truncate">
+                      {route.selected_transport
+                        ? `via ${formatSurfaceLabel(route.selected_transport)}`
+                        : "no active route"}
+                      {route.repair_hint ? ` · ${route.repair_hint}` : ""}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>

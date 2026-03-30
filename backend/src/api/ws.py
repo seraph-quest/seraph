@@ -65,7 +65,7 @@ async def _build_agent(session_id: str, message: str):
     profile = await get_or_create_profile()
 
     if not profile.onboarding_completed:
-        return create_onboarding_agent(), True, set()
+        return create_onboarding_agent(message), True, set()
 
     guardian_state = await build_guardian_state(
         session_id=session_id,

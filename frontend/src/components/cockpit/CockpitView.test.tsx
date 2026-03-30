@@ -754,16 +754,18 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const triage = await screen.findByLabelText("Active triage");
-    expect(within(triage).getByText("approval: shell_execute")).toBeInTheDocument();
-    expect(within(triage).getByText("awaiting approval · Approve Atlas shell command")).toBeInTheDocument();
-    expect(within(triage).getByText("workflow degraded: web-brief-to-file")).toBeInTheDocument();
-    expect(within(triage).getByText("workflow running: web-brief-to-file")).toBeInTheDocument();
-    expect(within(triage).getByText("degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
-    expect(within(triage).getByText("queued: advisory")).toBeInTheDocument();
-    expect(within(triage).getByText("queued follow-up · Draft Atlas follow-up")).toBeInTheDocument();
-    expect(within(triage).getByText("reach: Bundle delivery")).toBeInTheDocument();
-    expect(within(triage).getByText("unavailable · Bundle delivery waiting on browser reconnect")).toBeInTheDocument();
-    expect(within(triage).getAllByRole("button", { name: /Inspect latest branch for workflow .*: web-brief-to-file/ })).toHaveLength(1);
+    await waitFor(() => {
+      expect(within(triage).getByText("approval: shell_execute")).toBeInTheDocument();
+      expect(within(triage).getByText("awaiting approval · Approve Atlas shell command")).toBeInTheDocument();
+      expect(within(triage).getByText("workflow degraded: web-brief-to-file")).toBeInTheDocument();
+      expect(within(triage).getByText("workflow running: web-brief-to-file")).toBeInTheDocument();
+      expect(within(triage).getByText("degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
+      expect(within(triage).getByText("queued: advisory")).toBeInTheDocument();
+      expect(within(triage).getByText("queued follow-up · Draft Atlas follow-up")).toBeInTheDocument();
+      expect(within(triage).getByText("reach: Bundle delivery")).toBeInTheDocument();
+      expect(within(triage).getByText("unavailable · Bundle delivery waiting on browser reconnect")).toBeInTheDocument();
+      expect(within(triage).getAllByRole("button", { name: /Inspect latest branch for workflow .*: web-brief-to-file/ })).toHaveLength(1);
+    });
 
     const approvalRow = within(triage).getByText("approval: shell_execute").closest(".cockpit-operator-row--entry");
     expect(approvalRow).not.toBeNull();

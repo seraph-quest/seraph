@@ -30,6 +30,7 @@
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
 - [x] cockpit operator-terminal density now also includes an active triage lane for pending approvals, workflow branch families, queued guardian items, and reach failures with direct continue, open-thread, latest-branch, approve or deny, and desktop-shell actions instead of forcing operators to scan four separate panes for the next action
 - [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
+- [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
 - [x] cockpit is now the active browser shell on load rather than merely the default mode
@@ -57,6 +58,32 @@
 - [ ] stronger mobile and cross-surface UX coherence
 
 ## Current Branch Record
+
+### `onboarding-web-context-v1`
+
+- status: in progress on `feat/onboarding-web-context-v1`
+- root causes addressed:
+  - onboarding was intentionally limited to guardian-record and goal-capture tools, but that also meant Seraph could not inspect a homepage, portfolio, company page, or similar source even when the user pasted the exact URL into onboarding
+  - simply enabling general browser/search tools in onboarding would over-widen the boundary instead of honoring only explicit user-provided context
+- scope:
+  - onboarding now derives a narrow browser allowance from the current user message
+  - `browse_webpage` is only exposed when the onboarding turn includes an explicit `http(s)` URL
+  - onboarding instructions now bind the agent to the exact pasted URL set and explicitly forbid general browsing or web search in onboarding mode
+  - the onboarding browser wrapper now also enforces that exact URL set at runtime instead of relying on prompt text alone
+- validation:
+  - `python3 -m py_compile backend/src/agent/onboarding.py backend/src/api/chat.py backend/src/api/ws.py backend/tests/test_tool_audit.py backend/tests/test_chat_api.py backend/tests/test_websocket.py`
+    - result: `passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_tool_audit.py tests/test_chat_api.py tests/test_websocket.py tests/test_browser_tool.py tests/test_onboarding_edge_cases.py -q`
+    - result: `27 passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
+- review:
+  - focused branch review against bugs, regressions, and hallucinated assumptions found two material issues in the first pass
+  - the first implementation only described the “exact URL only” onboarding boundary in prompt text while still exposing the generic browser tool underneath, which would have widened onboarding to any globally allowed site instead of only the pasted URL set
+  - the first URL normalizer also left trailing quotes on commonly pasted links, which could make the onboarding browser wrapper reject or mis-browse the page the user actually provided
+  - fixed by wrapping `browse_webpage` in an onboarding-specific runtime gate bound to the extracted URL set and by normalizing quoted/punctuated links before both instruction rendering and runtime comparison
 
 ### `cockpit-density-and-cross-surface-command-control-v2`
 

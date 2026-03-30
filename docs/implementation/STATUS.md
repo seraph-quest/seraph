@@ -22,7 +22,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian workspace, not a village-first shell.
 - [x] The guardian workspace is the only supported browser shell; the village/editor line is removed from the active repo path and should not be revived.
-- [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, typed artifact-to-workflow handoff, truthful checkpoint branch control, branch-family supervision with latest-branch continue/open-parent controls, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
+- [x] The workspace now exposes capability discovery, starter packs, workflow history, step records, typed artifact-to-workflow handoff, truthful checkpoint branch control, branch-family supervision with latest-branch continue/open-parent controls, parameterized replay, reload continuity, a searchable capability palette, capability preflight/autorepair, a separate Activity Ledger window, a denser operator terminal, live operator feed, saved runbook macros, active triage, evidence shortcuts, keyboard-first inspect or approve or continue or redirect flows, and explicit continue/open-thread controls instead of leaving those as implicit operator knowledge.
 - [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
 - [x] The capability import program is now complete through all five waves, including Hermes-style runtime primitives, packaged reach surfaces, selective OpenClaw imports, operator-surface visibility, and deterministic proof for the imported capability families.
 - [ ] No workstream is complete yet.
@@ -166,6 +166,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] the workspace now includes a separate Activity Ledger window that links workflow runs, approvals, queued continuity, recent interventions, surfaced failures, tool steps, and attributed LLM calls back to one browser thread model
 - [x] activity ledger rows now group request-scoped work into compact parent rows with emoji/icon scanability, child tool or routing rows, and completion summaries so operators can skim what Seraph did without opening raw trace panes
 - [x] the operator terminal now also surfaces imported capability reach and extension-governance state, while the activity ledger now shows top runtime-path and capability-family spend buckets for attributed LLM use
+- [x] the operator terminal now also surfaces active triage for approvals, workflow branch families, queued guardian items, and degraded reach plus evidence shortcuts for approval context, artifact lineage, and recent trace, with keyboard-first inspect, approve, continue, open-thread, and redirect control over the highest-priority items
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
 - [x] larger more readable settings and priorities overlays now support the guardian workspace directly
 - [x] capability state, workflow history, the activity ledger, and live status are now visible in the current cockpit surface
@@ -196,7 +197,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Interface and presence
 
-- [ ] richer cockpit density and broader keyboard/operator control beyond the current workflow, activity-ledger, imported-reach, and governance surfaces
+- [ ] richer cockpit density and broader keyboard/operator control beyond the current workflow, activity-ledger, imported-reach, governance, active-triage, evidence-shortcut, and first keyboard-first command surfaces
 - [ ] richer cross-surface continuity and broader non-browser presence beyond the current desktop presence shell, runtime route-health snapshot, channel routing, messaging connectors, browser mode matrix, automation triggers, node adapters, and canvas outputs
 - [ ] stronger explicit threading between ambient observation, workflow runs, native notifications, approvals, and deliberate interaction beyond the new shared thread metadata and continue/open-thread layer
 
@@ -209,7 +210,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 - [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
-- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser workflow/operator debugging, stronger intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, and production-grade hardening for the broadened reach surface.
+- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser step-level workflow/operator debugging beyond the new triage and evidence-control layer, stronger intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, and production-grade hardening for the broadened reach surface.
 - [ ] The next major step is to harden and deepen the imported capability surface without losing the existing guardian trust and memory foundations.
 
 ## Workstream View

@@ -28,6 +28,8 @@
 - [x] cockpit workflow views now expose first branch/resume checkpoints, lineage metadata, and resume drafts tied to existing inputs instead of only replay-from-start or retry-from-step cues
 - [x] cockpit session continuity now restores the active thread on reload, preserves explicit fresh-thread semantics, and marks background thread activity in the session list
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
+- [x] cockpit operator-terminal density now also includes an active triage lane for pending approvals, workflow branch families, queued guardian items, and reach failures with direct continue, open-thread, latest-branch, approve or deny, and desktop-shell actions instead of forcing operators to scan four separate panes for the next action
+- [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
 - [x] cockpit is now the active browser shell on load rather than merely the default mode
@@ -44,6 +46,7 @@
 - [x] this workstream now ships `artifact-evidence-roundtrip-v2`
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships the denser operator-terminal layer with live operator feed, saved runbook macros, approval-aware workflow timeline actions, and a separate Activity Ledger window
+- [x] this workstream now ships `cockpit-density-and-cross-surface-command-control-v2` with active triage, denser evidence shortcuts, and keyboard-first operator control for approvals, workflow recovery, queued guardian items, degraded reach, artifacts, and trace
 - [x] this workstream now hands the queue forward to a visual workflow debugger, richer cockpit density, and deeper studio ergonomics rather than first-pass branch/resume control
 
 ## Still To Do On `develop`
@@ -52,6 +55,38 @@
 - [ ] richer workflow history, broader keyboard/operator control, visual branch/resume step-level visibility, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
+
+## Current Branch Record
+
+### `cockpit-density-and-cross-surface-command-control-v2`
+
+- status: complete on `feat/cockpit-density-batch-k-v1` and ready for PR
+- root causes addressed:
+  - the cockpit already exposed approvals, workflow families, queued guardian items, artifacts, trace, and reach health, but operators still had to scan multiple panes and inspector stacks to find the next blocked or time-sensitive action
+  - cockpit command control was still too mouse-heavy for active workflow supervision, especially when operators needed to inspect, approve, continue, redirect, or reopen the most urgent item quickly
+  - the first Batch K density pass reused existing approval and workflow labels verbatim, which made the denser surface ambiguous and broke test assumptions about unique row text and generic action names
+- scope:
+  - the operator terminal now derives one active triage list from pending approvals, workflow families, queued guardian items, and non-ready reach routes
+  - triage entries carry contextual labels plus direct continue, approve or deny, open-thread, latest-branch, inspect, and desktop-shell actions without leaving the operator terminal
+  - the operator terminal now also surfaces evidence shortcuts for the freshest artifact output, recent trace evidence, and approval context so operators can inspect and act on linked evidence without pane-hopping
+  - keyboard-first shortcuts now cover inspect, approve, continue, open-thread, workflow redirect, and evidence inspection flows for the top active items, while still deferring when focus is inside editable inputs
+- review findings fixed before the batch stayed complete:
+  - the first density pass duplicated approval and workflow row text exactly, which caused cockpit tests to fail because the new triage and evidence rows collided with older operator and studio assertions
+  - the first workflow-density inspector query was too broad for the denser surface and could match duplicated approval context text outside the intended inspector stack
+  - the branch-family helper could also point a branch row's "latest branch" control back at the parent/root run instead of a real branch descendant or peer
+  - the first evidence-shortcut pass advertised `Shift+E` as "inspect latest evidence" while still picking the first inserted evidence row instead of the newest one, and the new evidence-shortcut test mock expected a compatible workflow draft without actually publishing that workflow
+  - the artifact shortcut was still choosing the newest workflow before the newest artifact, so a run with fresher workflow metadata could hide a newer artifact produced by a different run
+  - the first GitHub frontend run also showed the new evidence-shortcut test was asserting as soon as the section mounted, before the asynchronous workflow and approval rows had populated in CI
+  - fixed by switching triage and evidence labels plus action `aria-label`s to contextual names, tightening the inspector test scope, excluding ancestor/root fallbacks from latest-branch resolution, selecting artifact shortcuts by actual artifact recency instead of workflow recency, sorting evidence shortcuts by actual recency before binding `Shift+E`, and waiting for the evidence rows themselves instead of the section shell before asserting dense-control behavior
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `52 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `git diff --check`
+- review:
+  - focused branch review against bugs, regressions, and hallucinated assumptions found the branch-family latest-branch bug plus the stale-evidence `Shift+E` shortcut bug and the inconsistent evidence-shortcut workflow mock above
+  - no additional material issues remained after those fixes and the targeted frontend validation
 
 ## Non-Goals
 

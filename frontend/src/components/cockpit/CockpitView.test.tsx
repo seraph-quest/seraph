@@ -595,6 +595,560 @@ describe("CockpitView", () => {
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   }, 30000);
 
+  it("surfaces active triage for approvals, workflows, queued guardian items, and reach failures", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+          { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/approval-run/approve")) return Promise.resolve(mockResponse({ status: "approved" }));
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "approval-run",
+            session_id: "session-2",
+            thread_id: "session-2",
+            thread_label: "Atlas thread",
+            tool_name: "shell_execute",
+            risk_level: "high",
+            status: "pending",
+            summary: "Approve Atlas shell command",
+            created_at: "2026-03-18T12:03:00Z",
+            resume_message: "Continue Atlas shell approval",
+          },
+        ]));
+      }
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [
+            {
+              id: "queued-1",
+              intervention_id: null,
+              content_excerpt: "Draft Atlas follow-up",
+              intervention_type: "advisory",
+              urgency: 2,
+              reasoning: "bundle_delivery",
+              session_id: "session-2",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continuation_mode: "same_thread",
+              resume_message: "Continue Atlas queued item",
+              created_at: "2026-03-18T12:02:00Z",
+            },
+          ],
+          queued_insight_count: 1,
+          recent_interventions: [],
+          reach: {
+            route_statuses: [
+              {
+                route: "bundle_delivery",
+                label: "Bundle delivery",
+                status: "unavailable",
+                summary: "Bundle delivery waiting on browser reconnect",
+                selected_transport: "websocket",
+                repair_hint: "Keep a cockpit tab connected.",
+              },
+            ],
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              step_records: [],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: ["write_file"],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas workflow",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              checkpoint_context_available: true,
+            },
+            {
+              id: "run-branch",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "running",
+              started_at: "2026-03-18T12:05:00Z",
+              updated_at: "2026-03-18T12:06:00Z",
+              summary: "workflow_web_brief_to_file branch running",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas branch",
+              run_identity: "branch-1",
+              parent_run_identity: "root-1",
+              root_run_identity: "root-1",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const triage = await screen.findByLabelText("Active triage");
+    expect(within(triage).getByText("approval: shell_execute")).toBeInTheDocument();
+    expect(within(triage).getByText("awaiting approval · Approve Atlas shell command")).toBeInTheDocument();
+    expect(within(triage).getByText("workflow degraded: web-brief-to-file")).toBeInTheDocument();
+    expect(within(triage).getByText("workflow running: web-brief-to-file")).toBeInTheDocument();
+    expect(within(triage).getByText("degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
+    expect(within(triage).getByText("queued: advisory")).toBeInTheDocument();
+    expect(within(triage).getByText("queued follow-up · Draft Atlas follow-up")).toBeInTheDocument();
+    expect(within(triage).getByText("reach: Bundle delivery")).toBeInTheDocument();
+    expect(within(triage).getByText("unavailable · Bundle delivery waiting on browser reconnect")).toBeInTheDocument();
+    expect(within(triage).getAllByRole("button", { name: /Inspect latest branch for workflow .*: web-brief-to-file/ })).toHaveLength(1);
+
+    const approvalRow = within(triage).getByText("approval: shell_execute").closest(".cockpit-operator-row--entry");
+    expect(approvalRow).not.toBeNull();
+    fireEvent.click(within(approvalRow as HTMLElement).getByRole("button", { name: "Approve approval: shell_execute" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run/approve"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    const queuedRow = within(triage).getByText("queued: advisory").closest(".cockpit-operator-row--entry");
+    expect(queuedRow).not.toBeNull();
+    fireEvent.click(within(queuedRow as HTMLElement).getByRole("button", { name: "Continue queued: advisory" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas queued item")).toBeInTheDocument());
+
+    const routeRow = within(triage).getByText("reach: Bundle delivery").closest(".cockpit-operator-row--entry");
+    expect(routeRow).not.toBeNull();
+    fireEvent.click(within(routeRow as HTMLElement).getByRole("button", { name: "Open desktop shell for reach: Bundle delivery" }));
+    await waitFor(() => expect(screen.getByText("Desktop shell")).toBeInTheDocument());
+  }, 30000);
+
+  it("surfaces evidence shortcuts and keyboard-first triage control", async () => {
+    useChatStore.setState({
+      messages: [{
+        id: "trace-1",
+        role: "step",
+        content: "write_file saved notes/brief.md",
+        timestamp: new Date("2026-03-18T12:06:30Z").getTime(),
+        sessionId: "session-2",
+        stepNumber: 2,
+        toolUsed: "write_file",
+      }],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+          { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-write",
+            session_id: "session-2",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "Saved brief draft",
+            created_at: "2026-03-18T12:06:00Z",
+            details: {
+              arguments: { file_path: "notes/brief.md" },
+            },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/approval-run/approve")) {
+        return Promise.resolve(mockResponse({ status: "approved" }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "approval-run",
+            session_id: "session-2",
+            thread_id: "session-2",
+            thread_label: "Atlas thread",
+            tool_name: "shell_execute",
+            risk_level: "high",
+            status: "pending",
+            summary: "Approve Atlas shell command",
+            created_at: "2026-03-18T12:03:00Z",
+            resume_message: "Continue Atlas shell approval",
+          },
+        ]));
+      }
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              step_records: [],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: ["write_file"],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas workflow",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              checkpoint_context_available: true,
+            },
+            {
+              id: "run-branch",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "running",
+              started_at: "2026-03-18T12:05:00Z",
+              updated_at: "2026-03-18T12:06:00Z",
+              summary: "workflow_web_brief_to_file branch running",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas branch",
+              run_identity: "branch-1",
+              parent_run_identity: "root-1",
+              root_run_identity: "root-1",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(await within(evidence).findByText("artifact: notes/brief.md")).toBeInTheDocument();
+    expect(await within(evidence).findByText("trace: write_file")).toBeInTheDocument();
+    expect(await within(evidence).findByText("approval context: shell_execute")).toBeInTheDocument();
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/brief.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "I", shiftKey: true });
+    await waitFor(() => expect(screen.getByText("approval-run")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "A", shiftKey: true });
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run/approve"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    fireEvent.keyDown(window, { key: "C", shiftKey: true });
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas shell approval")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "R", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Redirect workflow "web-brief-to-file" from its current state\./)).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "E", shiftKey: true });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Use In Command Bar" })).toBeInTheDocument());
+  }, 30000);
+
+  it("prefers the newest artifact across workflow runs for evidence shortcuts", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-older-artifact",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "Saved older notes artifact",
+            created_at: "2026-03-18T12:02:00Z",
+            details: {
+              arguments: { file_path: "notes/older.md" },
+            },
+          },
+          {
+            id: "audit-newer-artifact",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved newer notes artifact",
+            created_at: "2026-03-18T12:05:30Z",
+            details: {
+              arguments: { file_path: "notes/newer.md" },
+            },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-older-artifact",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:10:00Z",
+              summary: "older artifact with newer workflow metadata",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/older.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-older-artifact",
+              root_run_identity: "run-older-artifact",
+            },
+            {
+              id: "run-newer-artifact",
+              tool_name: "workflow_daily_summary",
+              workflow_name: "daily-summary",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-18T12:01:00Z",
+              updated_at: "2026-03-18T12:09:00Z",
+              summary: "newer artifact with older workflow metadata",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/newer.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-newer-artifact",
+              root_run_identity: "run-newer-artifact",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    await waitFor(
+      () => expect(within(evidence).getByText("artifact: notes/newer.md")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(within(evidence).queryByText("artifact: notes/older.md")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "E", shiftKey: true });
+    const useButton = await screen.findByRole("button", { name: "Use In Command Bar" });
+    fireEvent.click(useButton);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/newer.md" as context for the next action.')).toBeInTheDocument(),
+    );
+  }, 30000);
+
   it("supports starter-pack repairs and saved runbook macros", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -728,7 +1282,7 @@ describe("CockpitView", () => {
   });
 
   it("drafts the starter-pack command after a successful bootstrap", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -811,7 +1365,6 @@ describe("CockpitView", () => {
         }));
       }
       if (url.includes("/api/capabilities/bootstrap")) {
-        expect(init?.method).toBe("POST");
         return Promise.resolve(mockResponse({
           target_type: "starter_pack",
           name: "research-briefing",
@@ -852,7 +1405,7 @@ describe("CockpitView", () => {
   });
 
   it("surfaces manual bootstrap actions for blocked runbooks without auto-running them", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -937,7 +1490,6 @@ describe("CockpitView", () => {
         }));
       }
       if (url.includes("/api/capabilities/bootstrap")) {
-        expect(init?.method).toBe("POST");
         return Promise.resolve(mockResponse({
           target_type: "runbook",
           name: "runbook:github-sync",
@@ -1169,7 +1721,7 @@ describe("CockpitView", () => {
         expect.objectContaining({ method: "POST" }),
       ),
     );
-    expect(await screen.findByText("Enable Research Pack contributions with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Enable Research Pack contributions with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-enable")).toBeInTheDocument();
     expect(screen.queryByText("Research briefing repair sequence applied")).not.toBeInTheDocument();
   });
@@ -3182,6 +3734,223 @@ describe("CockpitView", () => {
     expect(within(inspector).getByText("parent run")).toBeInTheDocument();
   });
 
+  it("surfaces workflow approval, artifact, and trace density inside the inspector", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Atlas thread" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "evt-file",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "write_file saved notes/brief.md",
+            details: { arguments: { file_path: "notes/brief.md" } },
+            created_at: "2026-03-26T09:01:00Z",
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/approval-run/approve")) {
+        return Promise.resolve(mockResponse({ status: "approved" }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "approval-run",
+            session_id: "session-1",
+            thread_id: "session-1",
+            thread_label: "Atlas thread",
+            tool_name: "write_file",
+            risk_level: "high",
+            status: "pending",
+            summary: "Approve write_file for Atlas brief",
+            created_at: "2026-03-26T09:02:00Z",
+            resume_message: "Continue Atlas brief approval",
+          },
+        ]));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 2,
+            workflows_total: 2,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [
+            {
+              name: "atlas-brief",
+              tool_name: "workflow_atlas_brief",
+              description: "Create an Atlas brief",
+              inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/atlas-brief.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+              output_surface_artifact_types: ["document"],
+            },
+            {
+              name: "summarize-file",
+              tool_name: "workflow_summarize_file",
+              description: "Summarize a workspace file",
+              inputs: {
+                file_path: {
+                  type: "string",
+                  description: "Workspace file",
+                  required: true,
+                  artifact_input: true,
+                  artifact_types: ["document"],
+                },
+              },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/summarize-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+            },
+          ],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [{
+            id: "run-1",
+            tool_name: "workflow_atlas_brief",
+            workflow_name: "atlas-brief",
+            session_id: "session-1",
+            status: "awaiting_approval",
+            started_at: "2026-03-26T09:00:00Z",
+            updated_at: "2026-03-26T09:03:00Z",
+            summary: "atlas-brief waiting on write_file approval",
+            step_tools: ["read_file", "write_file"],
+            artifact_paths: ["notes/brief.md"],
+            continued_error_steps: ["write_file"],
+            risk_level: "medium",
+            pending_approval_count: 1,
+            pending_approval_ids: ["approval-run"],
+            thread_id: "session-1",
+            thread_label: "Atlas thread",
+            replay_allowed: true,
+            replay_draft: "Run workflow \"atlas-brief\" with file_path=\"notes/brief.md\".",
+            checkpoint_context_available: true,
+            checkpoint_candidates: [{
+              step_id: "write_file",
+              kind: "retry_failed_step",
+              status: "degraded",
+              resume_supported: true,
+              resume_draft:
+                "Run workflow \"atlas-brief\" with file_path=\"notes/brief.md\", _seraph_resume_from_step=\"write_file\".",
+            }],
+            timeline: [
+              {
+                kind: "workflow_step_failed",
+                at: "2026-03-26T09:02:00Z",
+                summary: "write_file blocked by approval",
+                step_id: "write_file",
+                duration_ms: 320,
+              },
+            ],
+          }],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const workflowSummary = await screen.findByText("atlas-brief waiting on write_file approval");
+    fireEvent.click(workflowSummary);
+
+    const inspectorWindow = screen.getByText("Operations inspector").closest(".cockpit-window");
+    expect(inspectorWindow).not.toBeNull();
+    const approvalButton = await within(inspectorWindow as HTMLElement).findByRole("button", {
+      name: "Approve approval context for atlas-brief",
+    });
+    const approvalStackRow = approvalButton.closest(".cockpit-inspector-stack-row");
+    expect(approvalStackRow).not.toBeNull();
+    fireEvent.click(approvalButton);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run/approve"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    const artifactRow = screen.getByText(/artifact output · notes\/brief\.md/i).closest(".cockpit-inspector-stack-row");
+    expect(artifactRow).not.toBeNull();
+    fireEvent.click(within(artifactRow as HTMLElement).getByRole("button", { name: "Use artifact output notes/brief.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    expect(within(artifactRow as HTMLElement).getByRole("button", { name: "Run summarize-file from artifact output notes/brief.md" })).toBeInTheDocument();
+
+    const traceRow = screen.getByText(/write_file blocked by approval · write_file · 320ms/i).closest(".cockpit-inspector-stack-row");
+    expect(traceRow).not.toBeNull();
+    fireEvent.click(within(traceRow as HTMLElement).getByRole("button", { name: "Draft retry from write_file for atlas-brief" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).toBeInTheDocument(),
+    );
+  }, 15000);
+
   it("lets operators edit MCP config from the extension studio", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -4769,7 +5538,7 @@ describe("CockpitView", () => {
     fireEvent.click(installButton);
 
     expect(await within(studio).findByText(/Review Pending approvals, then retry\./)).toBeInTheDocument();
-    expect(await screen.findByText("Install Test Installable with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Install Test Installable with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-install")).toBeInTheDocument();
     expect(await screen.findByText("seraph.test-installable")).toBeInTheDocument();
     expect(await screen.findByText("/tmp/extensions/test-installable")).toBeInTheDocument();
@@ -5105,7 +5874,7 @@ describe("CockpitView", () => {
     fireEvent.click(within(studio).getByRole("button", { name: "Update package" }));
 
     expect(await within(studio).findByText(/Review Pending approvals, then retry\./)).toBeInTheDocument();
-    expect(await screen.findByText("Update Test Installable with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Update Test Installable with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-update")).toBeInTheDocument();
   }, 15000);
 
@@ -5586,7 +6355,7 @@ describe("CockpitView", () => {
     fireEvent.click(await within(studio).findByRole("button", { name: "Enable contributions" }));
 
     expect(await within(studio).findByText(/Review Pending approvals, then retry\./)).toBeInTheDocument();
-    expect(await screen.findByText("Enable Test Installable contributions with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Enable Test Installable contributions with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-enable")).toBeInTheDocument();
   }, 15000);
 

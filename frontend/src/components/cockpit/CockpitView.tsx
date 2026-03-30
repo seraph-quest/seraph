@@ -719,6 +719,36 @@ interface ExtensionGovernanceSummary {
   packageInfo: ExtensionPackageInfo;
 }
 
+interface OperatorTriageEntry {
+  id: string;
+  kind: "approval" | "workflow" | "queued" | "reach";
+  label: string;
+  detail: string;
+  meta: string;
+  priority: number;
+  threadId?: string | null;
+  continueMessage?: string | null;
+  approval?: PendingApproval;
+  workflow?: WorkflowRunRecord;
+  route?: ObserverReachRouteStatus;
+}
+
+interface OperatorEvidenceEntry {
+  id: string;
+  kind: "approval" | "artifact" | "trace";
+  label: string;
+  detail: string;
+  meta: string;
+  sortKey: number;
+  threadId?: string | null;
+  continueMessage?: string | null;
+  approval?: PendingApproval;
+  artifact?: ArtifactRecord;
+  workflow?: WorkflowRunRecord;
+  trace?: ChatMessage;
+  audit?: CockpitAuditEvent | null;
+}
+
 type ToolPolicyMode = "safe" | "balanced" | "full";
 type McpPolicyMode = "disabled" | "approval" | "full";
 type ApprovalMode = "off" | "high_risk";
@@ -748,6 +778,14 @@ function labelForRole(message: ChatMessage): string {
   if (message.role === "proactive") return message.interventionType ?? "proactive";
   if (message.role === "step") return message.toolUsed ?? "step";
   return message.role;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(
+    target.isContentEditable
+    || target.closest("input, textarea, select, [contenteditable=\"true\"]"),
+  );
 }
 
 function formatContinuityLabel(value: string | null | undefined): string {
@@ -2776,8 +2814,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function compatibleArtifactWorkflows(
     artifactPath: string,
     producedArtifactTypes?: string[],
+    excludeWorkflowNames: string[] = [],
   ): WorkflowInfo[] {
     return artifactRoundtripWorkflows.filter((workflow) =>
+      !excludeWorkflowNames.includes(workflow.name)
+      && !excludeWorkflowNames.includes(workflow.tool_name)
+      &&
       workflowAcceptsArtifact(workflow, artifactPath, producedArtifactTypes),
     );
   }
@@ -2813,8 +2855,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const childRuns = workflowChildRuns(workflow);
     if (childRuns.length > 0) return childRuns[0] ?? null;
     if (!workflow.runIdentity) return null;
+    const ancestorIds = new Set(workflowAncestorRuns(workflow).map((entry) => entry.runIdentity).filter(Boolean));
     const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [];
-    return familyRuns.find((entry) => entry.runIdentity !== workflow.runIdentity) ?? null;
+    return familyRuns.find((entry) => (
+      entry.runIdentity !== workflow.runIdentity
+      && !!entry.parentRunIdentity
+      && !ancestorIds.has(entry.runIdentity)
+    )) ?? null;
   }
   function workflowSupervisionLabel(workflow: WorkflowRunRecord): string {
     const childRuns = workflowChildRuns(workflow);
@@ -2873,6 +2920,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (resolved.replayAllowed !== false) {
       queueComposerDraft(resolved.replayDraft ?? buildWorkflowReplayDraft(resolved));
     }
+  }
+  function buildWorkflowRedirectDraft(workflow: WorkflowRunRecord): string {
+    const resolved = resolveWorkflowRun(workflow);
+    const parts = [
+      `Redirect workflow "${resolved.workflowName}" from its current state.`,
+      `Current status: ${resolved.status}.`,
+      `Current summary: ${resolved.summary}.`,
+    ];
+    if (resolved.threadContinueMessage) {
+      parts.push("Keep the current thread continuity instead of starting a fresh run.");
+    }
+    if (resolved.artifactPaths[0]) {
+      parts.push(`Consider the latest artifact at "${resolved.artifactPaths[0]}".`);
+    }
+    return parts.join(" ");
   }
   const availableWorkflows = useMemo(
     () => workflows.filter((workflow) => workflow.is_available !== false),
@@ -3088,6 +3150,315 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       }),
     [extensionPackages],
   );
+  const operatorTriageEntries = useMemo<OperatorTriageEntry[]>(() => {
+    const entries: OperatorTriageEntry[] = [];
+
+    pendingApprovals.forEach((approval) => {
+      const threadLabel = approval.thread_label
+        ?? (approval.thread_id ? sessionTitleById[approval.thread_id] : null)
+        ?? (approval.thread_id ? `thread ${approval.thread_id.slice(0, 6)}` : null);
+      entries.push({
+        id: `approval:${approval.id}`,
+        kind: "approval",
+        label: `approval: ${approval.tool_name}`,
+        detail: `awaiting approval · ${approval.summary}`,
+        meta: [approval.risk_level, threadLabel, formatAge(approval.created_at)].filter(Boolean).join(" · "),
+        priority: 100,
+        threadId: approval.thread_id ?? approval.session_id ?? null,
+        continueMessage: approval.resume_message ?? null,
+        approval,
+      });
+    });
+
+    workflowRunsWithArtifacts.forEach((workflow) => {
+      const approval = approvalForWorkflow(workflow);
+      const latestBranch = workflowLatestBranchRun(workflow);
+      const needsAttention = (
+        !!approval
+        || workflow.status === "running"
+        || workflow.status === "awaiting_approval"
+        || workflow.status === "failed"
+        || workflow.status === "degraded"
+        || workflow.replayAllowed === false
+        || workflow.checkpointContextAvailable === true
+        || latestBranch !== null
+      );
+      if (!needsAttention) return;
+
+      let priority = 78;
+      if (approval) priority = 96;
+      else if (workflow.status === "running") priority = 92;
+      else if (workflow.status === "awaiting_approval") priority = 90;
+      else if (workflow.status === "failed" || workflow.status === "degraded") priority = 88;
+      else if (workflow.replayAllowed === false) priority = 82;
+
+      const threadLabel = workflow.threadLabel
+        ?? (workflow.threadId ? sessionTitleById[workflow.threadId] : null)
+        ?? (workflow.threadId ? `thread ${workflow.threadId.slice(0, 6)}` : null);
+      entries.push({
+        id: `workflow:${workflow.id}`,
+        kind: "workflow",
+        label: `workflow ${formatContinuityLabel(workflow.status)}: ${workflow.workflowName}`,
+        detail: `${formatContinuityLabel(workflow.status)} · ${workflow.summary}`,
+        meta: [
+          workflowSupervisionLabel(workflow),
+          approval ? "approval waiting" : null,
+          latestBranch ? `latest branch ${latestBranch.workflowName}` : null,
+          threadLabel,
+          formatAge(workflow.updatedAt),
+        ].filter(Boolean).join(" · "),
+        priority,
+        threadId: approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId ?? null,
+        continueMessage: approval?.resume_message ?? workflow.threadContinueMessage ?? null,
+        workflow,
+      });
+    });
+
+    queuedInsights.forEach((item) => {
+      const threadLabel = item.thread_label
+        ?? (item.thread_id ? sessionTitleById[item.thread_id] : null)
+        ?? (item.thread_id ? `thread ${item.thread_id.slice(0, 6)}` : "ambient queue");
+      entries.push({
+        id: `queued:${item.id}`,
+        kind: "queued",
+        label: `queued: ${item.intervention_type}`,
+        detail: `queued follow-up · ${item.content_excerpt}`,
+        meta: [
+          item.continuation_mode ? formatContinuityLabel(item.continuation_mode) : "queued",
+          threadLabel,
+          formatAge(item.created_at),
+        ].filter(Boolean).join(" · "),
+        priority: 84,
+        threadId: item.thread_id ?? item.session_id ?? null,
+        continueMessage: item.resume_message ?? `Follow up on this deferred guardian item: ${item.content_excerpt}`,
+      });
+    });
+
+    desktopRouteStatuses
+      .filter((route) => route.status !== "ready")
+      .forEach((route) => {
+        entries.push({
+          id: `reach:${route.route}`,
+          kind: "reach",
+          label: `reach: ${route.label}`,
+          detail: `${formatContinuityLabel(route.status)} · ${route.summary}`,
+          meta: [
+            formatContinuityLabel(route.status),
+            route.selected_transport ? `via ${formatContinuityLabel(route.selected_transport)}` : null,
+            route.repair_hint,
+          ].filter(Boolean).join(" · "),
+          priority: route.status === "unavailable" ? 86 : 72,
+          route,
+        });
+      });
+
+    return entries
+      .sort((left, right) => right.priority - left.priority || left.label.localeCompare(right.label))
+      .slice(0, 8);
+  }, [
+    desktopRouteStatuses,
+    pendingApprovals,
+    queuedInsights,
+    sessionTitleById,
+    workflowRunsWithArtifacts,
+  ]);
+  const operatorEvidenceEntries = useMemo<OperatorEvidenceEntry[]>(() => {
+    const entries: OperatorEvidenceEntry[] = [];
+    const workflowWithArtifact = [...workflowRunsWithArtifacts]
+      .filter((workflow) => workflow.artifacts.length > 0)
+      .sort(compareWorkflowRunsNewestFirst)[0] ?? null;
+    if (workflowWithArtifact) {
+      const artifact = [...workflowWithArtifact.artifacts]
+        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
+      const threadLabel = workflowWithArtifact.threadLabel
+        ?? (workflowWithArtifact.threadId ? sessionTitleById[workflowWithArtifact.threadId] : null)
+        ?? (workflowWithArtifact.threadId ? `thread ${workflowWithArtifact.threadId.slice(0, 6)}` : null);
+      entries.push({
+        id: `artifact:${artifact.id}`,
+        kind: "artifact",
+        label: `artifact: ${artifact.filePath}`,
+        detail: `${workflowWithArtifact.workflowName} · ${formatContinuityLabel(workflowWithArtifact.status)} · ${artifact.summary}`,
+        meta: [artifact.source, threadLabel, formatAge(artifact.createdAt)].filter(Boolean).join(" · "),
+        sortKey: new Date(artifact.createdAt).getTime(),
+        threadId: workflowWithArtifact.threadId ?? workflowWithArtifact.sessionId ?? artifact.sessionId ?? null,
+        artifact,
+        workflow: workflowWithArtifact,
+      });
+    }
+
+    const latestTrace = recentTrace[0];
+    if (latestTrace) {
+      const relatedAudit = auditEvents.find((event) => event.tool_name === latestTrace.toolUsed) ?? null;
+      entries.push({
+        id: `trace:${latestTrace.id}`,
+        kind: "trace",
+        label: `trace: ${latestTrace.toolUsed ?? labelForRole(latestTrace)}`,
+        detail: latestTrace.content,
+        meta: [
+          latestTrace.stepNumber != null ? `step ${latestTrace.stepNumber}` : null,
+          relatedAudit?.summary ?? null,
+          formatAge(latestTrace.timestamp),
+        ].filter(Boolean).join(" · "),
+        sortKey: latestTrace.timestamp,
+        trace: latestTrace,
+        audit: relatedAudit,
+      });
+    }
+
+    const approval = pendingApprovals[0] ?? null;
+    if (approval) {
+      const threadLabel = approval.thread_label
+        ?? (approval.thread_id ? sessionTitleById[approval.thread_id] : null)
+        ?? (approval.thread_id ? `thread ${approval.thread_id.slice(0, 6)}` : null);
+      entries.push({
+        id: `approval-context:${approval.id}`,
+        kind: "approval",
+        label: `approval context: ${approval.tool_name}`,
+        detail: `approval context · ${approval.summary}`,
+        meta: [
+          approval.risk_level,
+          approval.extension_action ? `extension ${approval.extension_action}` : null,
+          threadLabel,
+          formatAge(approval.created_at),
+        ].filter(Boolean).join(" · "),
+        sortKey: new Date(approval.created_at).getTime(),
+        threadId: approval.thread_id ?? approval.session_id ?? null,
+        continueMessage: approval.resume_message ?? null,
+        approval,
+      });
+    }
+
+    return entries
+      .sort((left, right) => right.sortKey - left.sortKey || left.label.localeCompare(right.label))
+      .slice(0, 3);
+  }, [
+    auditEvents,
+    pendingApprovals,
+    recentTrace,
+    sessionTitleById,
+    workflowRunsWithArtifacts,
+  ]);
+  const primaryTriageEntry = operatorTriageEntries[0] ?? null;
+  const primaryApprovalTriageEntry = operatorTriageEntries.find((entry) => entry.approval) ?? null;
+  const primaryWorkflowTriageEntry = operatorTriageEntries.find((entry) => entry.workflow) ?? null;
+  const primaryEvidenceEntry = operatorEvidenceEntries[0] ?? null;
+  function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.approval) {
+      setSelectedInspector({ kind: "approval", approval: entry.approval });
+      return;
+    }
+    if (entry.workflow) {
+      inspectWorkflowRun(entry.workflow);
+      return;
+    }
+    focusPane("desktop_shell_pane");
+  }
+  function continueOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+      return;
+    }
+    if (entry.workflow) {
+      continueWorkflowRun(entry.workflow);
+    }
+  }
+  function approveOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.approval) return;
+    void handleApprovalDecision(entry.approval, "approve");
+  }
+  function openOperatorTriageThread(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.threadId || !canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds)) return;
+    void openThread(entry.threadId);
+  }
+  function redirectOperatorWorkflowEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    queueComposerDraft(buildWorkflowRedirectDraft(entry.workflow));
+  }
+  function inspectOperatorEvidenceEntry(entry: OperatorEvidenceEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.approval) {
+      setSelectedInspector({ kind: "approval", approval: entry.approval });
+      return;
+    }
+    if (entry.artifact) {
+      setSelectedInspector({ kind: "artifact", artifact: entry.artifact });
+      return;
+    }
+    if (entry.trace) {
+      setSelectedInspector({ kind: "trace", message: entry.trace });
+    }
+  }
+  function draftOperatorEvidenceEntry(entry: OperatorEvidenceEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.approval?.resume_message) {
+      void queueThreadDraft(entry.approval.resume_message, entry.threadId ?? undefined);
+      return;
+    }
+    if (entry.artifact) {
+      const workflow = compatibleArtifactWorkflows(
+        entry.artifact.filePath,
+        undefined,
+        entry.workflow ? [entry.workflow.workflowName, entry.workflow.toolName] : [],
+      )[0];
+      if (workflow) {
+        queueArtifactWorkflowDraft(workflow, entry.artifact.filePath);
+        return;
+      }
+      queueComposerDraft(`Use the workspace file "${entry.artifact.filePath}" as context for the next action.`);
+    }
+  }
+  useEffect(() => {
+    const handleOperatorShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === "k") {
+        event.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      if (paletteOpen || studioOpen || windowsMenuOpen || isEditableTarget(event.target)) return;
+      if (!event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (key === "k") {
+        event.preventDefault();
+        setPaletteOpen(true);
+      } else if (key === "i") {
+        event.preventDefault();
+        inspectOperatorTriageEntry(primaryTriageEntry);
+      } else if (key === "a") {
+        event.preventDefault();
+        approveOperatorTriageEntry(primaryApprovalTriageEntry);
+      } else if (key === "c") {
+        event.preventDefault();
+        continueOperatorTriageEntry(primaryTriageEntry);
+      } else if (key === "o") {
+        event.preventDefault();
+        openOperatorTriageThread(primaryTriageEntry);
+      } else if (key === "r") {
+        event.preventDefault();
+        redirectOperatorWorkflowEntry(primaryWorkflowTriageEntry);
+      } else if (key === "e") {
+        event.preventDefault();
+        inspectOperatorEvidenceEntry(primaryEvidenceEntry);
+      }
+    };
+    window.addEventListener("keydown", handleOperatorShortcut);
+    return () => window.removeEventListener("keydown", handleOperatorShortcut);
+  }, [
+    approveOperatorTriageEntry,
+    continueOperatorTriageEntry,
+    inspectOperatorEvidenceEntry,
+    inspectOperatorTriageEntry,
+    openOperatorTriageThread,
+    paletteOpen,
+    primaryApprovalTriageEntry,
+    primaryEvidenceEntry,
+    primaryTriageEntry,
+    primaryWorkflowTriageEntry,
+    redirectOperatorWorkflowEntry,
+    studioOpen,
+    windowsMenuOpen,
+  ]);
   const activitySpendByCapabilityFamily = useMemo(
     () => (activitySummary?.llm_cost_by_capability_family ?? []).slice(0, 3),
     [activitySummary],
@@ -4966,12 +5337,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const selectedWorkflow = selectedInspector?.kind === "workflow"
       ? resolveWorkflowRun(selectedInspector.workflow)
       : null;
+    const selectedWorkflowApproval = selectedWorkflow ? approvalForWorkflow(selectedWorkflow) : null;
+    const selectedWorkflowLatestBranch = selectedWorkflow ? workflowLatestBranchRun(selectedWorkflow) : null;
+    const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
+    const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
+    const selectedWorkflowCheckpointDraftByStep = new Map(
+      selectedWorkflowCheckpointActions.map((action) => [action.stepId, action.draft]),
+    );
 
     if (selectedInspector.kind === "approval") {
       const approval = selectedInspector.approval;
       title = approval.tool_name;
       meta = `${approval.risk_level} approval`;
-      body = approval.summary;
+      body = `approval request · ${approval.summary}`;
       details = {
         approval_id: approval.id,
         session_id: approval.session_id ?? "n/a",
@@ -4988,7 +5366,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       };
     } else if (selectedInspector.kind === "workflow") {
       const workflow = selectedWorkflow!;
-      const approval = approvalForWorkflow(workflow);
       const linkedInterventions = interventionsForWorkflow(workflow);
       const childRuns = workflowChildRuns(workflow);
       const peerRuns = workflowPeerRuns(workflow);
@@ -5019,7 +5396,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         continued_error_steps: workflow.continuedErrorSteps,
         checkpoint_context_available: workflow.checkpointContextAvailable ?? false,
         artifact_paths: workflow.artifactPaths,
-        pending_approval: approval ? approval.id : "none",
+        pending_approval: selectedWorkflowApproval ? selectedWorkflowApproval.id : "none",
         pending_approval_count: workflow.pendingApprovalCount ?? 0,
         pending_approvals: workflow.pendingApprovals?.map((item) => item.summary).join(" | ") || "none",
         replay_allowed: workflow.replayAllowed ?? false,
@@ -5106,7 +5483,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     : "Draft Rerun"}
                 </button>
                 {(() => {
-                  const checkpointActions = workflowCheckpointActions(selectedWorkflow).slice(0, 2);
+                  const checkpointActions = selectedWorkflowCheckpointActions.slice(0, 2);
                   if (checkpointActions.length > 0) {
                     return checkpointActions.map((action) => (
                       <button
@@ -5143,17 +5520,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     Open Studio
                   </button>
                 )}
-                {workflowLatestBranchRun(selectedWorkflow) && (
+                {selectedWorkflowLatestBranch && (
                   <>
                     <button
                       className="cockpit-feedback-button"
-                      onClick={() => inspectWorkflowRun(workflowLatestBranchRun(selectedWorkflow))}
+                      onClick={() => inspectWorkflowRun(selectedWorkflowLatestBranch)}
                     >
                       Open Latest Branch
                     </button>
                     <button
                       className="cockpit-feedback-button"
-                      onClick={() => continueWorkflowRun(workflowLatestBranchRun(selectedWorkflow))}
+                      onClick={() => continueWorkflowRun(selectedWorkflowLatestBranch)}
                     >
                       Continue Latest Branch
                     </button>
@@ -5165,26 +5542,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 Replay blocked: {replayBlockCopy(selectedWorkflow.replayBlockReason)}
               </span>
             )}
-            {(() => {
-              const attachedApproval = approvalForWorkflow(selectedWorkflow);
-              if (!attachedApproval) return null;
-              return (
-                <>
-                  <button
-                    className="cockpit-feedback-button"
-                    onClick={() => void handleApprovalDecision(attachedApproval, "approve")}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    className="cockpit-feedback-button"
-                    onClick={() => void handleApprovalDecision(attachedApproval, "deny")}
-                  >
-                    Deny
-                  </button>
-                </>
-              );
-            })()}
+            {selectedWorkflowApproval && (
+              <>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
+                >
+                  Approve
+                </button>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "deny")}
+                >
+                  Deny
+                </button>
+              </>
+            )}
             {selectedWorkflow.threadId && (
               <button
                 className="cockpit-feedback-button"
@@ -5209,6 +5582,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 && compatibleArtifactWorkflows(
                   selectedWorkflow.artifactPaths[0]!,
                   workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
+                  [selectedWorkflow.workflowName, selectedWorkflow.toolName],
                 ).slice(0, 2).map((workflow) => (
                   <button
                     key={`${selectedWorkflow.id}:${workflow.name}`}
@@ -5269,6 +5643,118 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 {detail}
               </span>
             ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflowApproval && (
+          <div className="cockpit-inspector-stack">
+            <div className="cockpit-inspector-stack-row">
+              <div className="cockpit-key">pending approval</div>
+              <div className="cockpit-value">
+                approval context · {selectedWorkflowApproval.summary}
+                {selectedWorkflowApproval.thread_label
+                  ? ` · ${selectedWorkflowApproval.thread_label}`
+                  : selectedWorkflowApproval.thread_id
+                    ? ` · thread ${selectedWorkflowApproval.thread_id.slice(0, 6)}`
+                    : ""}
+                {` · ${selectedWorkflowApproval.risk_level} risk`}
+              </div>
+              {selectedWorkflowApproval.resume_message && (
+                <button
+                  className="cockpit-feedback-button"
+                  aria-label={`Continue approval context for ${selectedWorkflowName}`}
+                  onClick={() =>
+                    void queueThreadDraft(
+                      selectedWorkflowApproval.resume_message ?? "",
+                      selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id,
+                    )
+                  }
+                >
+                  Continue
+                </button>
+              )}
+              {(() => {
+                const threadTarget = selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id;
+                if (!threadTarget) return null;
+                return (
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open approval thread for ${selectedWorkflowName}`}
+                    onClick={() => void openThread(threadTarget)}
+                  >
+                    Open Thread
+                  </button>
+                );
+              })()}
+              <button
+                className="cockpit-feedback-button"
+                aria-label={`Approve approval context for ${selectedWorkflowName}`}
+                onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
+              >
+                Approve
+              </button>
+              <button
+                className="cockpit-feedback-button"
+                aria-label={`Deny approval context for ${selectedWorkflowName}`}
+                onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "deny")}
+              >
+                Deny
+              </button>
+            </div>
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflow.artifacts.length > 0 && (
+          <div className="cockpit-inspector-stack">
+            {selectedWorkflow.artifacts.slice(0, 3).map((artifact) => {
+              const compatible = compatibleArtifactWorkflows(
+                artifact.filePath,
+                workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
+                [selectedWorkflow.workflowName, selectedWorkflow.toolName],
+              ).slice(0, 1);
+              return (
+                <div key={`${selectedWorkflow.id}:artifact:${artifact.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">artifact output</div>
+                  <div className="cockpit-value">
+                    artifact output · {artifact.filePath} · {artifact.source} · {formatAge(artifact.createdAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Inspect artifact output ${artifact.filePath}`}
+                    onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                  >
+                    Inspect
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use artifact output ${artifact.filePath}`}
+                    onClick={() =>
+                      queueComposerDraft(
+                        `Use the workspace file "${artifact.filePath}" as context for the next action.`,
+                      )
+                    }
+                  >
+                    Use
+                  </button>
+                  {compatible.map((workflow) => (
+                    <button
+                      key={`${selectedWorkflow.id}:${artifact.id}:${workflow.name}`}
+                      className="cockpit-feedback-button"
+                      aria-label={`Run ${workflow.name} from artifact output ${artifact.filePath}`}
+                      onClick={() => queueArtifactWorkflowDraft(workflow, artifact.filePath)}
+                    >
+                      Run {workflow.name}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+            {selectedWorkflow.artifacts.length > 3 && (
+              <div className="cockpit-inspector-stack-row">
+                <div className="cockpit-key">artifact output</div>
+                <div className="cockpit-value">
+                  {selectedWorkflow.artifacts.length - 3} more artifact outputs remain available in Recent outputs.
+                </div>
+              </div>
+            )}
           </div>
         )}
         {selectedInspector.kind === "workflow" && selectedWorkflow && (() => {
@@ -5334,14 +5820,31 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         {selectedInspector.kind === "workflow" && selectedWorkflow?.timeline?.length && (
           <div className="cockpit-inspector-stack">
             {selectedWorkflow.timeline.map((entry) => (
-              <div key={`${selectedWorkflow.id}:${entry.kind}:${entry.at}`} className="cockpit-inspector-stack-row">
-                <div className="cockpit-key">{entry.kind.replace(/_/g, " ")}</div>
-                <div className="cockpit-value">
-                  {entry.summary}
-                  {entry.stepId ? ` · ${entry.stepId}` : ""}
-                  {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
-                </div>
-              </div>
+              (() => {
+                const checkpointStepId = entry.stepId ?? null;
+                const checkpointDraft = checkpointStepId
+                  ? selectedWorkflowCheckpointDraftByStep.get(checkpointStepId) ?? null
+                  : null;
+                return (
+                  <div key={`${selectedWorkflow.id}:${entry.kind}:${entry.at}`} className="cockpit-inspector-stack-row">
+                    <div className="cockpit-key">{entry.kind.replace(/_/g, " ")}</div>
+                    <div className="cockpit-value">
+                      {entry.summary}
+                      {entry.stepId ? ` · ${entry.stepId}` : ""}
+                      {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
+                    </div>
+                    {checkpointDraft && (
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Draft retry from ${checkpointStepId} for ${selectedWorkflowName}`}
+                        onClick={() => queueComposerDraft(checkpointDraft)}
+                      >
+                        Draft Retry
+                      </button>
+                    )}
+                  </div>
+                );
+              })()
             ))}
           </div>
         )}
@@ -6791,7 +7294,165 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         Search commands, install missing capabilities, and run starter packs from one place.
                       </div>
                     )}
+                    <div className="cockpit-sublist-item">
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence
+                    </div>
                   </div>
+
+                  <section className="cockpit-operator-section" aria-label="Active triage">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">active triage</span>
+                      <span className="cockpit-operator-link">{operatorTriageEntries.length} requiring action</span>
+                    </div>
+                    {operatorTriageEntries.map((entry) => {
+                      const latestBranch = entry.workflow ? workflowLatestBranchRun(entry.workflow) : null;
+                      return (
+                      <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          aria-label={`Inspect ${entry.label}`}
+                          onClick={() => inspectOperatorTriageEntry(entry)}
+                        >
+                          <div className="cockpit-value">{entry.label}</div>
+                          <div className="cockpit-operator-note">{entry.detail}</div>
+                          <div className="cockpit-operator-note">{entry.meta}</div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {entry.continueMessage && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Continue ${entry.label}`}
+                              onClick={() => continueOperatorTriageEntry(entry)}
+                            >
+                              continue
+                            </button>
+                          )}
+                          {entry.approval && (
+                            <>
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Approve ${entry.label}`}
+                                onClick={() => approveOperatorTriageEntry(entry)}
+                              >
+                                approve
+                              </button>
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Deny ${entry.label}`}
+                                onClick={() => void handleApprovalDecision(entry.approval!, "deny")}
+                              >
+                                deny
+                              </button>
+                            </>
+                          )}
+                          {entry.workflow && latestBranch && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Inspect latest branch for ${entry.label}`}
+                              onClick={() => inspectWorkflowRun(latestBranch)}
+                            >
+                              latest branch
+                            </button>
+                          )}
+                          {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open thread for ${entry.label}`}
+                              onClick={() => openOperatorTriageThread(entry)}
+                            >
+                              open thread
+                            </button>
+                          )}
+                          {entry.route && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open desktop shell for ${entry.label}`}
+                              onClick={() => inspectOperatorTriageEntry(entry)}
+                            >
+                              desktop shell
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      );
+                    })}
+                    {operatorTriageEntries.length === 0 && (
+                      <div className="cockpit-empty">No active workflows, approvals, queued guardian items, or reach failures need action.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Evidence shortcuts">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">evidence shortcuts</span>
+                      <span className="cockpit-operator-link">{operatorEvidenceEntries.length} surfaced</span>
+                    </div>
+                    {operatorEvidenceEntries.map((entry) => (
+                      <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          aria-label={`Inspect ${entry.label}`}
+                          onClick={() => inspectOperatorEvidenceEntry(entry)}
+                        >
+                          <div className="cockpit-value">{entry.label}</div>
+                          <div className="cockpit-operator-note">{entry.detail}</div>
+                          <div className="cockpit-operator-note">{entry.meta}</div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {(entry.artifact || entry.approval?.resume_message) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft next step for ${entry.label}`}
+                              onClick={() => draftOperatorEvidenceEntry(entry)}
+                            >
+                              draft
+                            </button>
+                          )}
+                          {entry.approval && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Approve ${entry.label}`}
+                              onClick={() => void handleApprovalDecision(entry.approval!, "approve")}
+                            >
+                              approve
+                            </button>
+                          )}
+                          {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open thread for ${entry.label}`}
+                              onClick={() => void openThread(entry.threadId)}
+                            >
+                              open thread
+                            </button>
+                          )}
+                          {entry.trace?.toolUsed && entry.audit && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Inspect audit for ${entry.label}`}
+                              onClick={() => setSelectedInspector({ kind: "audit", event: entry.audit! })}
+                            >
+                              audit
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {operatorEvidenceEntries.length === 0 && (
+                      <div className="cockpit-empty">No artifact, trace, or approval evidence needs surfacing yet.</div>
+                    )}
+                  </section>
 
                   <div className="cockpit-operator-section">
                     <div className="cockpit-operator-row">

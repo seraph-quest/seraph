@@ -75,8 +75,9 @@
   - the first workflow-density inspector query was too broad for the denser surface and could match duplicated approval context text outside the intended inspector stack
   - the branch-family helper could also point a branch row's "latest branch" control back at the parent/root run instead of a real branch descendant or peer
   - the first evidence-shortcut pass advertised `Shift+E` as "inspect latest evidence" while still picking the first inserted evidence row instead of the newest one, and the new evidence-shortcut test mock expected a compatible workflow draft without actually publishing that workflow
+  - the artifact shortcut was still choosing the newest workflow before the newest artifact, so a run with fresher workflow metadata could hide a newer artifact produced by a different run
   - the first GitHub frontend run also showed the new evidence-shortcut test was asserting as soon as the section mounted, before the asynchronous workflow and approval rows had populated in CI
-  - fixed by switching triage and evidence labels plus action `aria-label`s to contextual names, tightening the inspector test scope, excluding ancestor/root fallbacks from latest-branch resolution, sorting evidence shortcuts by actual recency before binding `Shift+E`, and waiting for the evidence rows themselves instead of the section shell before asserting dense-control behavior
+  - fixed by switching triage and evidence labels plus action `aria-label`s to contextual names, tightening the inspector test scope, excluding ancestor/root fallbacks from latest-branch resolution, selecting artifact shortcuts by actual artifact recency instead of workflow recency, sorting evidence shortcuts by actual recency before binding `Shift+E`, and waiting for the evidence rows themselves instead of the section shell before asserting dense-control behavior
 - validation:
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
     - result: `52 passed`

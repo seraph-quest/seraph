@@ -3264,12 +3264,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ]);
   const operatorEvidenceEntries = useMemo<OperatorEvidenceEntry[]>(() => {
     const entries: OperatorEvidenceEntry[] = [];
-    const workflowWithArtifact = [...workflowRunsWithArtifacts]
-      .filter((workflow) => workflow.artifacts.length > 0)
-      .sort(compareWorkflowRunsNewestFirst)[0] ?? null;
-    if (workflowWithArtifact) {
-      const artifact = [...workflowWithArtifact.artifacts]
-        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
+    const latestArtifactEvidence = workflowRunsWithArtifacts
+      .flatMap((workflow) => workflow.artifacts.map((artifact) => ({ workflow, artifact })))
+      .sort((left, right) => (
+        new Date(right.artifact.createdAt).getTime() - new Date(left.artifact.createdAt).getTime()
+        || compareWorkflowRunsNewestFirst(left.workflow, right.workflow)
+      ))[0] ?? null;
+    if (latestArtifactEvidence) {
+      const { workflow: workflowWithArtifact, artifact } = latestArtifactEvidence;
       const threadLabel = workflowWithArtifact.threadLabel
         ?? (workflowWithArtifact.threadId ? sessionTitleById[workflowWithArtifact.threadId] : null)
         ?? (workflowWithArtifact.threadId ? `thread ${workflowWithArtifact.threadId.slice(0, 6)}` : null);

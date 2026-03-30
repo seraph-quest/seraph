@@ -986,6 +986,169 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Use In Command Bar" })).toBeInTheDocument());
   }, 30000);
 
+  it("prefers the newest artifact across workflow runs for evidence shortcuts", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-older-artifact",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "Saved older notes artifact",
+            created_at: "2026-03-18T12:02:00Z",
+            details: {
+              arguments: { file_path: "notes/older.md" },
+            },
+          },
+          {
+            id: "audit-newer-artifact",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved newer notes artifact",
+            created_at: "2026-03-18T12:05:30Z",
+            details: {
+              arguments: { file_path: "notes/newer.md" },
+            },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-older-artifact",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:10:00Z",
+              summary: "older artifact with newer workflow metadata",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/older.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-older-artifact",
+              root_run_identity: "run-older-artifact",
+            },
+            {
+              id: "run-newer-artifact",
+              tool_name: "workflow_daily_summary",
+              workflow_name: "daily-summary",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-18T12:01:00Z",
+              updated_at: "2026-03-18T12:09:00Z",
+              summary: "newer artifact with older workflow metadata",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/newer.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-newer-artifact",
+              root_run_identity: "run-newer-artifact",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    await waitFor(
+      () => expect(within(evidence).getByText("artifact: notes/newer.md")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(within(evidence).queryByText("artifact: notes/older.md")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "E", shiftKey: true });
+    const useButton = await screen.findByRole("button", { name: "Use In Command Bar" });
+    fireEvent.click(useButton);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/newer.md" as context for the next action.')).toBeInTheDocument(),
+    );
+  }, 30000);
+
   it("supports starter-pack repairs and saved runbook macros", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

@@ -1,12 +1,22 @@
 """Onboarding agent — establishes identity, priorities, and operating context."""
 
-from smolagents import ToolCallingAgent
+import re
+
+from smolagents import ToolCallingAgent, tool
 
 from config.settings import settings
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
+from src.tools.browser_tool import browse_webpage as base_browse_webpage
 from src.tools.soul_tool import view_soul, update_soul
 from src.tools.goal_tools import create_goal, get_goals
 from src.tools.audit import wrap_tools_for_audit
+
+
+_URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+
+
+def _normalize_explicit_url(url: str) -> str:
+    return url.strip().strip("\"'`<>{}[]()").rstrip(".,);!?\"'")
 
 
 ONBOARDING_INSTRUCTIONS = """\
@@ -53,17 +63,80 @@ You are a guardian system building enough context to work well.
 """
 
 
-def create_onboarding_agent() -> ToolCallingAgent:
+def _extract_explicit_web_urls(user_message: str | None) -> list[str]:
+    if not user_message:
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_PATTERN.findall(user_message):
+        normalized = _normalize_explicit_url(match)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    return urls
+
+
+def _build_onboarding_browse_tool(explicit_urls: list[str]):
+    allowed_urls = set(explicit_urls)
+
+    @tool
+    def browse_webpage(url: str, action: str = "extract") -> str:
+        """Inspect one explicitly user-linked onboarding webpage.
+
+        Use this only for the exact URL(s) the user pasted into the current onboarding turn.
+
+        Args:
+            url: The exact onboarding URL to inspect.
+            action: Page inspection mode. Use "extract" unless a different mode is truly needed.
+
+        Returns:
+            Readable page content for the allowed onboarding URL, or an error if the URL is outside scope.
+        """
+        normalized = _normalize_explicit_url(url)
+        if normalized not in allowed_urls:
+            return (
+                "Error: onboarding webpage access is limited to the exact URL(s) "
+                "the user explicitly linked in this turn."
+            )
+        return base_browse_webpage.forward(normalized, action=action)
+
+    return browse_webpage
+
+
+def _build_onboarding_instructions(explicit_urls: list[str]) -> str:
+    if not explicit_urls:
+        return ONBOARDING_INSTRUCTIONS
+
+    allowed_urls = "\n".join(f"- `{url}`" for url in explicit_urls)
+    return (
+        f"{ONBOARDING_INSTRUCTIONS}\n\n"
+        "## Explicit webpage access for this onboarding turn:\n"
+        "- The user explicitly linked a webpage in this message. You may inspect only the exact URL(s) below with `browse_webpage`.\n"
+        "- If the linked page looks relevant to the user's identity, work, priorities, or operating context, inspect it before asking the next onboarding question.\n"
+        "- Do not search the web, do not follow unrelated links, and do not inspect any other URL during onboarding.\n"
+        "- If you need more web context, ask the user to paste the exact page URL.\n"
+        f"{allowed_urls}\n\n"
+        "## Additional onboarding tool for this turn:\n"
+        "- `browse_webpage(url, action)` — Inspect one of the explicitly linked onboarding pages to derive profile or workspace context\n"
+    )
+
+
+def create_onboarding_agent(user_message: str | None = None) -> ToolCallingAgent:
     """Create a specialized agent for the onboarding conversation."""
+    explicit_urls = _extract_explicit_web_urls(user_message)
     model = LiteLLMModel(**build_model_kwargs(
         temperature=0.8,
         max_tokens=settings.model_max_tokens,
         runtime_path="onboarding_agent",
     ))
+    tools = [view_soul, update_soul, create_goal, get_goals]
+    if explicit_urls:
+        tools.append(_build_onboarding_browse_tool(explicit_urls))
 
     return ToolCallingAgent(
-        tools=wrap_tools_for_audit([view_soul, update_soul, create_goal, get_goals]),
+        tools=wrap_tools_for_audit(tools),
         model=model,
         max_steps=settings.agent_max_steps,
-        instructions=ONBOARDING_INSTRUCTIONS,
+        instructions=_build_onboarding_instructions(explicit_urls),
     )

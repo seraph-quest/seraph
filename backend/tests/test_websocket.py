@@ -1,5 +1,6 @@
 import json
 from contextlib import asynccontextmanager, ExitStack
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from starlette.testclient import TestClient
 
 # Ensure models are registered in SQLModel.metadata before create_all
 import src.db.models  # noqa: F401
+from src.api.ws import _build_agent
 
 
 def _make_sync_client_with_db():
@@ -123,3 +125,24 @@ class TestWebSocket:
             stack.close()
             for p in patches:
                 p.stop()
+
+
+@pytest.mark.asyncio
+@patch("src.api.ws.create_onboarding_agent")
+@patch("src.api.ws.get_or_create_profile")
+async def test_build_agent_passes_message_to_onboarding_agent(mock_profile, mock_create_onboarding_agent):
+    mock_profile.return_value = SimpleNamespace(onboarding_completed=False)
+    mock_agent = MagicMock()
+    mock_create_onboarding_agent.return_value = mock_agent
+
+    agent, is_onboarding, specialist_names = await _build_agent(
+        "session-1",
+        "Please review https://example.com/about during onboarding.",
+    )
+
+    assert agent is mock_agent
+    assert is_onboarding is True
+    assert specialist_names == set()
+    mock_create_onboarding_agent.assert_called_once_with(
+        "Please review https://example.com/about during onboarding."
+    )

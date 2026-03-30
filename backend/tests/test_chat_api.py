@@ -20,6 +20,7 @@ class TestChatAPI:
 
         response = await client.post("/api/chat", json={"message": "Hello"})
         assert response.status_code == 200
+        mock_onboarding.assert_called_once_with("Hello")
         data = response.json()
         assert data["response"] == "Hello! I'm Seraph."
         assert "session_id" in data

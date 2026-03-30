@@ -43,7 +43,7 @@ async def chat(request: ChatRequest):
     # Check onboarding status
     profile = await get_or_create_profile()
     if not profile.onboarding_completed:
-        agent = create_onboarding_agent()
+        agent = create_onboarding_agent(request.message)
     else:
         guardian_state = await build_guardian_state(
             session_id=session.id,

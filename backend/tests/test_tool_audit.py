@@ -189,6 +189,43 @@ def test_onboarding_agent_instructions_clarify_tool_scope():
     assert "Tools available in this onboarding mode" in agent.instructions
 
 
+def test_onboarding_agent_enables_browser_for_explicit_user_link():
+    agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
+
+    assert isinstance(agent.tools["browse_webpage"], AuditedTool)
+    assert "You may inspect only the exact URL(s) below" in agent.instructions
+    assert "`https://example.com/about`" in agent.instructions
+    assert "Do not search the web" in agent.instructions
+
+
+def test_onboarding_agent_keeps_browser_disabled_without_explicit_link():
+    agent = create_onboarding_agent("I work in climate software and want better weekly planning.")
+
+    assert "browse_webpage" not in agent.tools
+    assert "Explicit webpage access for this onboarding turn" not in agent.instructions
+
+
+def test_onboarding_agent_browser_scope_is_runtime_enforced():
+    agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
+
+    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse:
+        assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+        assert "limited to the exact URL" in agent.tools["browse_webpage"](
+            url="https://example.com/elsewhere"
+        )
+
+    mock_browse.assert_called_once_with("https://example.com/about", action="extract")
+
+
+def test_onboarding_agent_normalizes_quoted_explicit_urls():
+    agent = create_onboarding_agent('Review "https://example.com/about".')
+
+    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse:
+        assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+
+    mock_browse.assert_called_once_with("https://example.com/about", action="extract")
+
+
 @patch("src.agent.onboarding.LiteLLMModel")
 def test_onboarding_agent_uses_local_profile_runtime_path(mock_model_cls):
     mock_model_cls.return_value = object()

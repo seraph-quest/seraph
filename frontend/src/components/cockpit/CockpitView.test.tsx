@@ -954,9 +954,9 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
-    expect(within(evidence).getByText("artifact: notes/brief.md")).toBeInTheDocument();
-    expect(within(evidence).getByText("trace: write_file")).toBeInTheDocument();
-    expect(within(evidence).getByText("approval context: shell_execute")).toBeInTheDocument();
+    expect(await within(evidence).findByText("artifact: notes/brief.md")).toBeInTheDocument();
+    expect(await within(evidence).findByText("trace: write_file")).toBeInTheDocument();
+    expect(await within(evidence).findByText("approval context: shell_execute")).toBeInTheDocument();
 
     fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/brief.md" }));
     await waitFor(() =>

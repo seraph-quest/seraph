@@ -43,7 +43,7 @@ This file explains:
 ### 1. Guardian state and human model
 
 - [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a structured world-model layer for focus, focus provenance, commitments, active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, continuity threads, recent execution pressure, receptivity, and judgment risks, plus learned communication guidance carried back into guardian state
-- [ ] still missing: stronger human/world modeling quality and richer multi-signal learning beyond the new project/routine/collaborator/obligation-aware world-model, contradiction-aware confidence pass, and first guidance layer
+- [ ] still missing: stronger human/world modeling quality, richer multi-signal learning, and additive memory-provider extensibility beyond the new project/routine/collaborator/obligation-aware world-model, contradiction-aware confidence pass, and first guidance layer
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing
@@ -73,13 +73,13 @@ This file explains:
 ### 6. Workflow leverage
 
 - [x] shipped foundations: specialists, skills, MCP, delegation primitives, first-class reusable workflows, starter packs, a first operator-facing workflow-control layer with draft-to-cockpit steering, a first cockpit workflow-run/operator surface, first workflow-runs history with boundary-aware replay metadata, declared-type artifact-to-workflow handoff from cockpit inspectors, truthful checkpoint branch controls backed by persisted runtime state, branch-family workflow supervision with parent/peer/child inspection, a cockpit-native operator surface for workflow availability plus extension/runtime visibility, and a richer workflow timeline with approval recovery, thread links, replay guardrails, parameterized reruns, capability preflight/autorepair, and starter-pack repair guidance plus runbooks
-- [ ] still missing: richer direct workflow control, deeper step-level workflow history, and easier extension ergonomics beyond the shipped step records, branch-family supervision, checkpoint branch controls, first cockpit timeline, and operator terminal
+- [ ] still missing: richer direct workflow control, deeper step-level workflow history, easier extension ergonomics, and cleaner adapter-first capability contracts for authenticated sources and other provider-backed surfaces beyond the shipped step records, branch-family supervision, checkpoint branch controls, first cockpit timeline, and operator terminal
 - owners: Workstream 07, Workstream 02
 
 ### 7. Execution hardening
 
 - [x] shipped foundations: approvals, policy modes, secret redaction, sandbox path, audit logging, privileged workflow execution-boundary metadata, forced approval wrapping for high-risk/approval-mode workflow paths, explicit secret-ref containment to injection-safe surfaces, rejection of underdeclared workflow runtimes, workflow-run replay metadata that keeps risk/approval/boundary context visible at the operator surface, stricter replay/native-resume guardrails around high-risk or secret-bearing workflow surfaces, approval-context-bound workflow replay/resume plus stale-approval blocking when the privileged surface changes, vault-backed MCP credential storage plus credential-source audit for manual connector auth paths, and a dedicated `vault_keeper` delegation surface so generic memory planning no longer inherits direct secret-management tools
-- [ ] still missing: stronger privileged execution isolation and clearer hardening boundaries beyond that operator-aware replay/native-resume hardening pass
+- [ ] still missing: stronger privileged execution isolation, clearer authenticated-source and connector boundaries, and harder secret-handling posture beyond that operator-aware replay/native-resume hardening pass
 - owners: Workstream 01, Workstream 02
 
 ## Execution Contract

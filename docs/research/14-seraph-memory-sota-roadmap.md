@@ -41,6 +41,7 @@ The winning design is:
 4. add a **MemoryBank-style reinforcement and decay model** so memory quality improves over time instead of only growing
 5. add a **MemGPT-style tiered memory manager** so Seraph explicitly decides what stays in prompt, what stays searchable, and what stays archived
 6. make the core memory unit a **typed, source-backed claim/event/entity record**, not a flat text blob
+7. add a **Hermes-style additive memory-provider adapter layer** so Seraph can keep a guardian-first canonical memory model while still augmenting retrieval, user modeling, or consolidation with pluggable external memory systems
 
 If Seraph does that well, it can surpass both reference systems because it has one advantage they do not use as deeply: observer context, project state, intervention outcomes, and guardian policy can all feed the memory system.
 
@@ -98,6 +99,7 @@ Key strengths:
 - `session_search` is clearly separated from persistent memory
 - the docs are explicit about what should be saved versus skipped
 - the memory layer is security-scanned because it is prompt-injected
+- Hermes now also ships seven additive external memory provider plugins, so the bounded built-in layer is no longer its whole memory story
 
 The important lesson for Seraph is not "copy two markdown files." The lesson is:
 
@@ -105,6 +107,13 @@ The important lesson for Seraph is not "copy two markdown files." The lesson is:
 - always-on memory should be curated, not auto-expanded without limit
 - active-session performance matters
 - memory and session recall should be separate tools with separate cost profiles
+- external memory should be additive and pluggable rather than forcing one monolithic backend to carry every retrieval and user-modeling job
+
+That means the next structural memory follow-through for Seraph is not only “more memory internals.” It is also:
+
+- a provider-neutral memory adapter boundary
+- safe mapping between canonical guardian memory and optional external providers
+- keeping Seraph’s typed guardian memory authoritative even when external providers assist with retrieval, user modeling, or consolidation
 
 ## What OpenClaw Gets Right
 

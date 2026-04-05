@@ -75,7 +75,7 @@ Legend for the checklist column:
 - [x] Capability bootstrap now sequences only low-risk local autorepair actions for workflows and runbooks, while policy lifts, external server enables, installs, and starter-pack activation stay explicit operator repair steps instead of silent bootstrap side effects, and generated multi-step privileged repair bundles now stop at a step-by-step execution boundary instead of chaining mutations from one click.
 - [x] Workflow runs now expose first branch/resume checkpoints, stored-load-error/debug surfaces, and resume drafts tied to existing inputs instead of only replay-from-start guidance.
 - [x] Runtime routing now enforces capability, cost, latency, task-class, and budget safeguards with operator-readable audit details and live timeline summaries instead of only weighted scoring and cooldown rerouting.
-- [ ] Seraph is still behind the strongest reference systems on capability marketplace depth, visual workflow branch debugging, stronger long-horizon intervention learning, broader multi-surface reach beyond the hardened browser/native layer, and deeper execution hardening.
+- [ ] Seraph is still behind the strongest reference systems on capability marketplace depth, cleaner adapter-first external capability surfaces, visual workflow branch debugging, stronger long-horizon intervention learning, broader multi-surface reach beyond the hardened browser/native layer, and deeper execution hardening.
 - [ ] No workstream is complete yet.
 
 ## Completed 10-PR Batches

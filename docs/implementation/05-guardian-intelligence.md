@@ -43,6 +43,8 @@
 - [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, and first live-versus-durable arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
+- [ ] additive memory-provider extensibility so Seraph can preserve a guardian-first canonical memory model while still augmenting retrieval, user modeling, or consolidation with pluggable external memory systems
+- [ ] additive memory-provider extensibility that keeps guardian memory canonical while allowing external memory systems to improve retrieval, user modeling, or consolidation where they materially help
 
 ## Memory Upgrade Program Record
 

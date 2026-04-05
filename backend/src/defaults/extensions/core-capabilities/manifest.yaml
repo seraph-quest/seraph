@@ -10,12 +10,15 @@ trust: bundled
 summary: Bundled default skills, workflows, starter packs, and runbooks.
 permissions:
   tools:
+    - browse_webpage
+    - browser_session
     - create_goal
     - execute_code
     - get_goal_progress
     - get_goals
     - http_request
     - read_file
+    - source_capabilities
     - view_soul
     - web_search
     - write_file
@@ -28,6 +31,7 @@ contributes:
     - skills/goal-reflection.md
     - skills/moltbook.md
     - skills/morning-intention.md
+    - skills/source-evidence-review.md
     - skills/web-briefing.md
     - skills/weekly-planner.md
   workflows:

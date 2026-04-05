@@ -39,6 +39,7 @@
 - [x] Hermes runtime-parity primitives including `execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`, stronger scheduled execution, and tighter runtime security controls
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel routing through the extension platform instead of ad hoc side paths
 - [x] operator-surface imported reach, extension governance, and LLM spend attribution by runtime path and capability family
+- [x] provider-neutral source capability inventory that exposes typed public-web tools, managed authenticated connectors, explicit raw-MCP gaps, and one reusable source-evidence review skill instead of forcing provider-specific workflow glue
 
 ## Working On Now
 
@@ -56,6 +57,7 @@
 - [x] the authoring path now includes one canonical in-repo example package that is validated in tests and pinned to current scaffold output so contributors and docs share the same golden reference
 - [x] the runtime now loads manifest-backed skill contributions through the extension registry while still preserving legacy loose-skill compatibility during the coexistence window
 - [x] the runtime now also loads manifest-backed workflow contributions through the same registry seam, including packaged workflow diagnostics and manifest-preferred duplicate resolution during the coexistence window
+- [x] the runtime now also exposes a first adapter-first source-capability surface, so Seraph can inspect available typed source contracts before composing evidence-collection routines instead of assuming GitHub- or browser-specific paths
 - [x] the runtime now also loads manifest-backed starter packs and explicit runbooks through the same registry seam, and the capabilities surface now publishes packaged starter-pack metadata plus extension-backed runbook entries instead of treating both surfaces as legacy-only inventory
 - [x] startup/runtime loading now serves bundled default skills, workflows, starter packs, and explicit runbooks from a real `seraph.core-capabilities` package under `backend/src/defaults/extensions/`, with workspace extension packs taking precedence over bundled defaults while install/bootstrap/catalog flows and legacy loose-file coexistence are still being migrated
 - [x] the backend now ships one `/api/extensions` lifecycle surface for list, inspect, validate, install, enable, disable, configure, and remove so automation no longer has to talk directly to per-surface skill/workflow/package seams even though the workspace UI still needs to adopt that API and the current `configure` step is metadata-only until typed runtime config contracts land
@@ -64,6 +66,7 @@
 - [x] the trusted-code-plugins RFC is now closed for the current architecture with an explicit negative decision: Seraph continues with typed extension packs, MCP, managed connectors, and bundled native tools, not a general arbitrary-code plugin runtime
 - [x] the five-wave Hermes/OpenClaw capability import program is now complete on `develop`, including packaged reach parity, selective OpenClaw imports, operator-surface governance, benchmark refresh, and deterministic eval proof
 - [x] `workflow-autonomy-supervision-and-artifact-control-v1` now ships reusable checkpoint-backed workflow recovery, truthful unsupported-checkpoint fallback in the runs API, declared-type artifact handoff in the cockpit, and operator-visible branch-family supervision instead of generic retry-only copy
+- [x] `adapter-first-capability-contracts-v1` now ships provider-neutral source contracts, managed-connector inventory, explicit raw-MCP disclosure, and one reusable source-evidence review skill instead of forcing provider-specific reporting glue
 
 ## Review Follow-Up
 
@@ -72,6 +75,12 @@
   - fixed by suppressing implicit resume-plan selection for unsupported checkpoints while keeping explicit `resume-plan` requests fail-closed with `409`
 - review pass:
   - targeted review of checkpoint resume truthfulness, runs-API fallback behavior, cockpit artifact compatibility, and stale test assumptions found no remaining material issues after the list-endpoint fix and regression coverage updates
+- local regression fixed while landing `adapter-first-capability-contracts-v1`:
+  - the first browser-session inventory note described every discovered provider as configured, which could overstate staged or disabled providers
+  - fixed by describing them as known providers instead of configured providers
+- review pass:
+  - direct diff review of source contract truthfulness, managed-connector readiness, raw-MCP disclosure, and skill guidance found no remaining material issues after the provider-note fix
+  - Copernicus review was started for a second pass on bugs, regressions, and hallucinated assumptions, but it did not return findings before validation completed, so the PR validation should claim only the concrete local review result
 
 ## Still To Do On `develop`
 

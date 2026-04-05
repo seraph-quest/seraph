@@ -137,6 +137,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "source_capabilities": {
+        "description": "Inspect the provider-neutral source access surfaces available to the current runtime",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["external_read"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

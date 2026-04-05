@@ -109,11 +109,23 @@ The important lesson for Seraph is not "copy two markdown files." The lesson is:
 - memory and session recall should be separate tools with separate cost profiles
 - external memory should be additive and pluggable rather than forcing one monolithic backend to carry every retrieval and user-modeling job
 
-That means the next structural memory follow-through for Seraph is not only “more memory internals.” It is also:
+That means the structural memory follow-through for Seraph is not only “more memory internals.” It is also:
 
 - a provider-neutral memory adapter boundary
 - safe mapping between canonical guardian memory and optional external providers
 - keeping Seraph’s typed guardian memory authoritative even when external providers assist with retrieval, user modeling, or consolidation
+
+The first implementation step of that follow-through is now live on `develop`:
+
+- extension-defined additive memory providers can be inventoried through the runtime
+- configured providers can augment retrieval without becoming canonical memory owners
+- provider failures degrade cleanly back to guardian-owned memory instead of blocking recall
+
+What is still left after that first step:
+
+- provider-backed user modeling and consolidation paths
+- richer operator diagnostics for provider quality over time
+- stronger evaluation of when external providers materially improve recall versus only add noise
 
 ## What OpenClaw Gets Right
 

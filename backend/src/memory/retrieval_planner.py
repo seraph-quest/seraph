@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from src.db.models import MemoryEntityType, MemoryKind
 from src.memory.hybrid_retrieval import HybridMemoryHit, retrieve_hybrid_memory
+from src.memory.providers import retrieve_additive_memory_provider_context
 from src.memory.repository import memory_repository
 from src.memory.types import bucket_name_for_kind
 
@@ -28,6 +29,7 @@ class MemoryRetrievalPlanResult:
     memory_buckets: dict[str, tuple[str, ...]]
     degraded: bool
     lane: str
+    provider_diagnostics: tuple[dict[str, object], ...] = ()
 
 
 def _append_structured_memory_line(
@@ -209,6 +211,7 @@ async def plan_memory_retrieval(
             memory_buckets=structured_buckets,
             degraded=False,
             lane="structured_only",
+            provider_diagnostics=(),
         )
 
     hybrid = await retrieve_hybrid_memory(
@@ -226,11 +229,20 @@ async def plan_memory_retrieval(
         episodic_hits,
         limit=4 if _prefer_episodic_lane(normalized_query) else 2,
     )
+    provider_retrieval = await retrieve_additive_memory_provider_context(
+        query=normalized_query,
+        active_projects=active_projects,
+        limit=3,
+    )
+    lane = "episodic" if _prefer_episodic_lane(normalized_query) else "hybrid"
+    if provider_retrieval.context:
+        lane = f"{lane}_plus_provider"
 
     return MemoryRetrievalPlanResult(
-        semantic_context=_merge_contexts(structured_context, semantic_context),
+        semantic_context=_merge_contexts(structured_context, semantic_context, provider_retrieval.context),
         episodic_context=episodic_context,
-        memory_buckets=_merge_buckets(structured_buckets, semantic_buckets),
-        degraded=hybrid.degraded,
-        lane="episodic" if _prefer_episodic_lane(normalized_query) else "hybrid",
+        memory_buckets=_merge_buckets(structured_buckets, semantic_buckets, provider_retrieval.buckets),
+        degraded=hybrid.degraded or provider_retrieval.degraded,
+        lane=lane,
+        provider_diagnostics=provider_retrieval.diagnostics,
     )

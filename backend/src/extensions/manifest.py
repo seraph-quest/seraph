@@ -25,6 +25,7 @@ _CONTRIBUTION_FIELDS = (
     "scheduled_routines",
     "mcp_servers",
     "managed_connectors",
+    "memory_providers",
     "automation_triggers",
     "browser_providers",
     "messaging_connectors",
@@ -41,6 +42,7 @@ _CONTRIBUTION_FIELDS = (
 _CONNECTOR_FIELDS = {
     "mcp_servers",
     "managed_connectors",
+    "memory_providers",
     "automation_triggers",
     "browser_providers",
     "messaging_connectors",
@@ -169,6 +171,7 @@ class ExtensionContributionPaths(BaseModel):
     scheduled_routines: list[str] = Field(default_factory=list)
     mcp_servers: list[str] = Field(default_factory=list)
     managed_connectors: list[str] = Field(default_factory=list)
+    memory_providers: list[str] = Field(default_factory=list)
     automation_triggers: list[str] = Field(default_factory=list)
     browser_providers: list[str] = Field(default_factory=list)
     messaging_connectors: list[str] = Field(default_factory=list)

@@ -254,6 +254,32 @@ class MessagingConnectorDefinition:
 
 
 @dataclass(frozen=True)
+class MemoryProviderDefinition:
+    name: str
+    provider_kind: str
+    description: str = ""
+    enabled: bool = False
+    capabilities: tuple[str, ...] = ()
+    config_fields: tuple[ContributionConfigField, ...] = ()
+    canonical_memory_owner: str = "seraph"
+    canonical_write_mode: str = "additive_only"
+    requires_network: bool = True
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "provider_kind": self.provider_kind,
+            "description": self.description,
+            "default_enabled": self.enabled,
+            "capabilities": list(self.capabilities),
+            "config_fields": [field.as_metadata() for field in self.config_fields],
+            "canonical_memory_owner": self.canonical_memory_owner,
+            "canonical_write_mode": self.canonical_write_mode,
+            "requires_network": self.requires_network,
+        }
+
+
+@dataclass(frozen=True)
 class SpeechProfileDefinition:
     name: str
     provider: str
@@ -581,6 +607,57 @@ def parse_messaging_connector_definition(payload: Any, *, source: str) -> Messag
     )
 
 
+def parse_memory_provider_definition(payload: Any, *, source: str) -> MemoryProviderDefinition:
+    name, description = _parse_named_object(payload, source=source, noun="memory provider")
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: memory provider definition must be an object")
+    raw_provider_kind = payload.get("provider_kind")
+    if not isinstance(raw_provider_kind, str) or not raw_provider_kind.strip():
+        raise ConnectorDefinitionError(f"{source}: memory provider must include a non-empty provider_kind")
+    provider_kind = raw_provider_kind.strip()
+    if not re.fullmatch(r"[a-z0-9_\\-]+", provider_kind):
+        raise ConnectorDefinitionError(
+            f"{source}: memory provider_kind '{provider_kind}' must be a lowercase slug"
+        )
+    raw_enabled = payload.get("enabled")
+    if raw_enabled is not None and not isinstance(raw_enabled, bool):
+        raise ConnectorDefinitionError(f"{source}: memory provider enabled must be a boolean")
+    capabilities = _parse_string_list(payload.get("capabilities"), source=source, field_name="capabilities")
+    for capability in capabilities:
+        if capability not in {"retrieval", "user_model", "consolidation"}:
+            raise ConnectorDefinitionError(
+                f"{source}: memory provider capability '{capability}' is not supported"
+            )
+    raw_owner = payload.get("canonical_memory_owner")
+    if raw_owner is not None and (not isinstance(raw_owner, str) or not raw_owner.strip()):
+        raise ConnectorDefinitionError(f"{source}: canonical_memory_owner must be a non-empty string")
+    owner = raw_owner.strip() if isinstance(raw_owner, str) else "seraph"
+    if owner != "seraph":
+        raise ConnectorDefinitionError(
+            f"{source}: canonical_memory_owner must stay 'seraph' for additive providers"
+        )
+    raw_write_mode = payload.get("canonical_write_mode")
+    if raw_write_mode is not None and (not isinstance(raw_write_mode, str) or not raw_write_mode.strip()):
+        raise ConnectorDefinitionError(f"{source}: canonical_write_mode must be a non-empty string")
+    canonical_write_mode = raw_write_mode.strip() if isinstance(raw_write_mode, str) else "additive_only"
+    if canonical_write_mode not in {"additive_only"}:
+        raise ConnectorDefinitionError(
+            f"{source}: canonical_write_mode '{canonical_write_mode}' is not supported"
+        )
+    requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    return MemoryProviderDefinition(
+        name=name,
+        provider_kind=provider_kind,
+        description=description,
+        enabled=False if raw_enabled is None else raw_enabled,
+        capabilities=capabilities,
+        config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
+        canonical_memory_owner=owner,
+        canonical_write_mode=canonical_write_mode,
+        requires_network=True if requires_network is None else requires_network,
+    )
+
+
 def parse_speech_profile_definition(payload: Any, *, source: str) -> SpeechProfileDefinition:
     name, description = _parse_named_object(payload, source=source, noun="speech profile")
     if not isinstance(payload, dict):
@@ -766,6 +843,10 @@ def load_browser_provider_definition(path: Path) -> BrowserProviderDefinition:
 
 def load_messaging_connector_definition(path: Path) -> MessagingConnectorDefinition:
     return parse_messaging_connector_definition(load_connector_payload(path), source=str(path))
+
+
+def load_memory_provider_definition(path: Path) -> MemoryProviderDefinition:
+    return parse_memory_provider_definition(load_connector_payload(path), source=str(path))
 
 
 def load_speech_profile_definition(path: Path) -> SpeechProfileDefinition:

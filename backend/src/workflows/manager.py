@@ -23,6 +23,7 @@ from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.memory.flush import flush_session_memory_sync
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
+from src.tools.policy import get_tool_source_context
 from src.workflows.loader import Workflow, scan_workflow_paths
 from src.workflows.run_identity import parse_workflow_run_identity
 
@@ -239,13 +240,15 @@ def _checkpoint_context_allowed(approval_context: dict[str, Any] | None) -> bool
         return True
     if bool(approval_context.get("accepts_secret_refs", False)):
         return False
+    if bool(approval_context.get("authenticated_source", False)):
+        return False
     boundaries = {
         str(boundary)
         for boundary in approval_context.get("execution_boundaries", [])
         if isinstance(boundary, str)
     }
     return not bool(
-        boundaries & {"secret_management", "secret_read", "secret_injection"}
+        boundaries & {"secret_management", "secret_read", "secret_injection", "authenticated_external_source"}
     )
 
 
@@ -290,16 +293,34 @@ async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any]
     return None
 
 
-def _approval_context_for_workflow(workflow: Workflow) -> dict[str, Any]:
+def _approval_context_for_workflow(workflow: Workflow, tools_by_name: dict[str, Any] | None = None) -> dict[str, Any]:
     canonical_step_tools = _canonicalize_tool_names(workflow.step_tools)
     execution_boundaries: list[str] = []
     accepts_secret_refs = False
+    authenticated_source = False
+    source_systems: list[dict[str, Any]] = []
     for tool_name in workflow.step_tools:
         canonical_name = canonical_tool_name(tool_name)
+        runtime_tool = None
+        if isinstance(tools_by_name, dict):
+            runtime_tool = tools_by_name.get(tool_name) or tools_by_name.get(canonical_name)
+        source_context = get_tool_source_context(runtime_tool)
         if canonical_name.startswith("mcp_"):
             if "external_mcp" not in execution_boundaries:
                 execution_boundaries.append("external_mcp")
             accepts_secret_refs = True
+            if isinstance(source_context, dict) and bool(source_context.get("authenticated_source")):
+                authenticated_source = True
+                if "authenticated_external_source" not in execution_boundaries:
+                    execution_boundaries.append("authenticated_external_source")
+                source_systems.append(
+                    {
+                        "server_name": str(source_context.get("server_name") or ""),
+                        "hostname": str(source_context.get("hostname") or ""),
+                        "source": str(source_context.get("source") or "manual"),
+                        "authenticated_source": True,
+                    }
+                )
             continue
         tool_meta = TOOL_METADATA.get(canonical_name, {})
         for boundary in tool_meta.get("execution_boundaries", []):
@@ -323,6 +344,8 @@ def _approval_context_for_workflow(workflow: Workflow) -> dict[str, Any]:
         "risk_level": risk_level,
         "execution_boundaries": sorted(dict.fromkeys(execution_boundaries or ["unknown"])),
         "accepts_secret_refs": accepts_secret_refs,
+        "authenticated_source": authenticated_source,
+        "source_systems": source_systems,
         "step_tools": sorted(dict.fromkeys(canonical_step_tools)),
     }
 
@@ -570,7 +593,7 @@ class WorkflowTool(Tool):
         )
 
     def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
-        return _approval_context_for_workflow(self.workflow)
+        return _approval_context_for_workflow(self.workflow, self.tools_by_name)
 
     def _control_audit_details(self, control_inputs: dict[str, Any]) -> dict[str, Any]:
         details: dict[str, Any] = {}

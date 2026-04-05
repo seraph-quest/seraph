@@ -26,6 +26,7 @@
 - [x] capability bootstrap and cockpit repair now keep privileged mutation on an explicit operator path by limiting automatic repair to low-risk local workflow or skill toggles while leaving policy lifts, external server enables, installs, and starter-pack activation manual
 - [x] catalog installs and starter-pack activation now preflight lifecycle approvals before bundled MCP-backed capability expansion instead of letting approval-required installs surface only after mutation starts
 - [x] generated doctor-plan and replay repair bundles no longer batch-apply multiple privileged mutations from one click; multi-step privileged fixes now require step-by-step operator execution
+- [x] authenticated MCP-backed tools now preserve source-specific approval and audit context through wrapper layers, and workflow checkpoint/replay paths fail closed when a run crosses into an authenticated external-source boundary instead of treating it like generic MCP read access
 
 ## Working On Now
 
@@ -37,6 +38,7 @@
 - [x] this workstream now also ships `capability-bootstrap-autonomy-boundary-v1`
 - [x] this workstream now also ships `catalog-install-lifecycle-approval-v1`
 - [x] this workstream now also ships `privileged-repair-bundle-gating-v1`
+- [x] this workstream now also ships `authenticated-source-boundary-hardening-v1`
 
 ## Still To Do On `develop`
 
@@ -146,6 +148,24 @@
   - root cause: approval-context fingerprints and mismatch checks were comparing raw list order instead of canonical trust-boundary sets
   - fix: workflow approval-context generation and workflow-run approval-context normalization now canonicalize those lists before hashing or comparison, and a regression test pins that behavior
   - validation also caught stale eval drift from the first Batch E slice: the MCP test API harness still mocked the old unresolved-var path instead of `resolve_headers()`, so the eval contract was updated to match the shipped endpoint behavior before closing the slice
+
+### `authenticated-source-boundary-hardening-v1`
+
+- status: complete on `feat/authenticated-source-boundary-hardening-batch-m-v1`, intended for the aggregate Batch M PR for `#260`
+- root cause addressed:
+  - authenticated external-source context was being attached only to raw MCP tools in `mcp_manager`, but the runtime immediately wrapped those tools for secret-ref handling, audit, and approval, so `/api/tools`, workflow approval context, and checkpoint gating could all regress back to generic `external_mcp`
+  - that meant authenticated connector-backed MCP actions looked narrower in config than they actually were at execution time, and workflow checkpoint reuse could still treat authenticated-source runs as resumable safe branches
+- scope:
+  - tool policy helpers now unwrap wrapper chains when reading MCP source context, so authenticated source metadata survives audit/approval/secret-ref wrappers instead of disappearing after connect time
+  - `/api/tools` now exposes the narrower `authenticated_external_source` execution boundary plus `authenticated_source=true` for MCP rows that actually cross that trust surface, without widening the operator contract for unrelated native or workflow rows
+  - workflow approval context now records authenticated source systems and blocks checkpoint reuse whenever a workflow step depends on an authenticated external source, so replay/resume stays fail-closed for connector-backed runs
+- validation:
+  - `python3 -m py_compile backend/src/api/tools.py backend/src/tools/policy.py backend/src/workflows/manager.py backend/tests/test_mcp_manager.py backend/tests/test_tools_api.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_mcp_manager.py tests/test_tools_api.py tests/test_workflows.py -q`
+  - `cd docs && npm run build`
+- review pass:
+  - `Copernicus` found two real live-path gaps after the first implementation pass: `SecretRefResolvingTool` still dropped `get_approval_context`, so authenticated MCP tools lost the narrower boundary before forced approval wrapped them, and it also dropped `get_audit_failure_payload`, so authenticated-source attribution disappeared on failure even when call/result payloads were source-aware
+  - fixed by forwarding both hooks through the secret-ref wrapper and adding regressions that pin authenticated approval context persistence plus authenticated MCP failure audit payloads through the real wrapped execution path
 
 ### `planner-secret-surface-isolation-v1`
 

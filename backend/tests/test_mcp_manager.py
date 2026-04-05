@@ -19,13 +19,56 @@ class TestMCPManager:
     @patch("src.tools.mcp_manager.MCPClient")
     def test_connect_success(self, MockMCPClient):
         mock_client = MagicMock()
-        mock_client.get_tools.return_value = [MagicMock(name="tool1")]
+        tool = MagicMock()
+        tool.name = "mcp_fetch_repo"
+        mock_client.get_tools.return_value = [tool]
         MockMCPClient.return_value = mock_client
 
         mgr = MCPManager()
         mgr.connect("things", "http://localhost:9000/mcp")
         assert len(mgr.get_tools()) == 1
         assert "things" in mgr._clients
+        connected_tool = mgr.get_tools()[0]
+        assert connected_tool.seraph_source_context["server_name"] == "things"
+        assert connected_tool.seraph_source_context["authenticated_source"] is False
+        approval_context = connected_tool.get_approval_context({})
+        assert approval_context["execution_boundaries"] == ["external_mcp"]
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_authenticated_server_instruments_tool_context(self, MockMCPClient):
+        mock_client = MagicMock()
+        tool = MagicMock()
+        tool.name = "mcp_list_issues"
+        mock_client.get_tools.return_value = [tool]
+        MockMCPClient.return_value = mock_client
+
+        mgr = MCPManager()
+        mgr._config["github"] = {
+            "auth_hint": "OAuth required",
+            "source": "extension",
+            "extension_id": "seraph.github-pack",
+            "extension_reference": "mcp/github.json",
+            "extension_display_name": "GitHub Pack",
+        }
+        mgr.connect(
+            "github",
+            "https://api.github.com/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+
+        connected_tool = mgr.get_tools()[0]
+        assert connected_tool.seraph_source_context["server_name"] == "github"
+        assert connected_tool.seraph_source_context["authenticated_source"] is True
+        assert connected_tool.seraph_source_context["source"] == "extension"
+        approval_context = connected_tool.get_approval_context({})
+        assert approval_context["authenticated_source"] is True
+        assert approval_context["execution_boundaries"] == [
+            "external_mcp",
+            "authenticated_external_source",
+        ]
+        call_summary, call_details = connected_tool.get_audit_call_payload({"query": "issues"})
+        assert "github" in call_summary
+        assert call_details["source_context"]["authenticated_source"] is True
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_connect_failure(self, MockMCPClient):

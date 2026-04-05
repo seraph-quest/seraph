@@ -151,6 +151,26 @@ async def test_tools_api_marks_mcp_tools_as_approval_required_in_approval_mode(c
     assert mcp_entry["risk_level"] == "high"
     assert mcp_entry["execution_boundaries"] == ["external_mcp"]
     assert mcp_entry["accepts_secret_refs"] is True
+    assert mcp_entry["authenticated_source"] is False
+
+
+@pytest.mark.asyncio
+async def test_tools_api_marks_authenticated_mcp_tools_with_narrower_boundary(client):
+    ctx = CurrentContext(tool_policy_mode="full", mcp_policy_mode="approval")
+    mcp_tool = MagicMock()
+    mcp_tool.name = "mcp_tasks"
+    mcp_tool.description = "Task MCP"
+    mcp_tool.seraph_source_context = {
+        "authenticated_source": True,
+        "server_name": "github",
+    }
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx), \
+         patch("src.agent.factory.mcp_manager.get_tools", return_value=[mcp_tool]):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    mcp_entry = next(tool for tool in resp.json() if tool["name"] == "mcp_tasks")
+    assert mcp_entry["execution_boundaries"] == ["external_mcp", "authenticated_external_source"]
+    assert mcp_entry["authenticated_source"] is True
 
 
 @pytest.mark.asyncio

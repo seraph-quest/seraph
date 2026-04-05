@@ -15,9 +15,11 @@ import logging
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from smolagents import MCPClient
 
+from src.audit.formatting import redact_for_audit
 from src.audit.runtime import log_integration_event_sync
 from src.vault.repository import vault_repository
 
@@ -25,6 +27,43 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
 _VAULT_SECRET_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
+
+
+class _InstrumentedMCPTool:
+    """Delegate wrapper for MCP tools that cannot accept dynamic attributes."""
+
+    def __init__(
+        self,
+        wrapped_tool: object,
+        *,
+        source_context: dict[str, object],
+        approval_context_fn,
+        audit_call_payload_fn,
+        audit_result_payload_fn,
+        audit_failure_payload_fn,
+    ) -> None:
+        self.wrapped_tool = wrapped_tool
+        self.name = str(getattr(wrapped_tool, "name", "mcp_tool"))
+        description = getattr(wrapped_tool, "description", "")
+        self.description = description if isinstance(description, str) else ""
+        inputs = getattr(wrapped_tool, "inputs", {})
+        self.inputs = inputs if isinstance(inputs, dict) else {}
+        output_type = getattr(wrapped_tool, "output_type", "string")
+        self.output_type = output_type if isinstance(output_type, str) else "string"
+        output_schema = getattr(wrapped_tool, "output_schema", None)
+        self.output_schema = output_schema if isinstance(output_schema, dict) else None
+        self.is_initialized = True
+        self.seraph_source_context = dict(source_context)
+        self.get_approval_context = approval_context_fn
+        self.get_audit_call_payload = audit_call_payload_fn
+        self.get_audit_result_payload = audit_result_payload_fn
+        self.get_audit_failure_payload = audit_failure_payload_fn
+
+    def forward(self, *args, **kwargs):
+        return self.wrapped_tool(*args, **kwargs)
+
+    def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
 
 class MCPManager:
@@ -68,6 +107,118 @@ class MCPManager:
             f.write("\n")
 
     # --- Connection management ---
+
+    @staticmethod
+    def _build_source_context(
+        *,
+        name: str,
+        url: str,
+        auth_hint: str = "",
+        source: str = "manual",
+        extension_id: str | None = None,
+        extension_reference: str | None = None,
+        extension_display_name: str | None = None,
+        credential_sources: list[str] | None = None,
+        used_headers: bool = False,
+    ) -> dict[str, object]:
+        parsed = urlparse(url)
+        normalized_credential_sources = [
+            item for item in (credential_sources or []) if isinstance(item, str) and item.strip()
+        ]
+        authenticated_source = bool(used_headers or auth_hint.strip() or normalized_credential_sources)
+        return {
+            "server_name": name,
+            "url": url,
+            "hostname": parsed.hostname or "",
+            "authenticated_source": authenticated_source,
+            "auth_hint": auth_hint.strip(),
+            "credential_sources": normalized_credential_sources,
+            "source": source,
+            "extension_id": extension_id,
+            "extension_reference": extension_reference,
+            "extension_display_name": extension_display_name,
+        }
+
+    @staticmethod
+    def _instrument_mcp_tool(tool: object, source_context: dict[str, object]) -> object:
+        def _get_approval_context(_arguments: dict[str, object], *, _context: dict[str, object] = dict(source_context)) -> dict[str, object]:
+            boundaries = ["external_mcp"]
+            if bool(_context.get("authenticated_source")):
+                boundaries.append("authenticated_external_source")
+            return {
+                "server_name": str(_context.get("server_name") or ""),
+                "hostname": str(_context.get("hostname") or ""),
+                "authenticated_source": bool(_context.get("authenticated_source")),
+                "credential_sources": list(_context.get("credential_sources") or []),
+                "source": str(_context.get("source") or "manual"),
+                "extension_id": _context.get("extension_id"),
+                "extension_reference": _context.get("extension_reference"),
+                "extension_display_name": _context.get("extension_display_name"),
+                "execution_boundaries": boundaries,
+            }
+
+        def _get_audit_call_payload(
+            arguments: dict[str, object],
+            *,
+            _context: dict[str, object] = dict(source_context),
+            _tool_name: str = str(getattr(tool, "name", "mcp_tool")),
+        ) -> tuple[str, dict[str, object]]:
+            return (
+                f"{_tool_name} called via {_context.get('server_name')}",
+                {
+                    "arguments": redact_for_audit(arguments),
+                    "source_context": dict(_context),
+                },
+            )
+
+        def _get_audit_result_payload(
+            _arguments: dict[str, object],
+            result: object,
+            *,
+            _context: dict[str, object] = dict(source_context),
+            _tool_name: str = str(getattr(tool, "name", "mcp_tool")),
+        ) -> tuple[str, dict[str, object]]:
+            summary = f"{_tool_name} completed via {_context.get('server_name')}"
+            return (
+                summary,
+                {
+                    "result_preview": redact_for_audit(str(result))[:280],
+                    "source_context": dict(_context),
+                },
+            )
+
+        def _get_audit_failure_payload(
+            arguments: dict[str, object],
+            error: Exception,
+            *,
+            _context: dict[str, object] = dict(source_context),
+            _tool_name: str = str(getattr(tool, "name", "mcp_tool")),
+        ) -> tuple[str, dict[str, object]]:
+            return (
+                f"{_tool_name} failed via {_context.get('server_name')}",
+                {
+                    "arguments": redact_for_audit(arguments),
+                    "error": redact_for_audit(str(error)),
+                    "source_context": dict(_context),
+                },
+            )
+
+        try:
+            setattr(tool, "seraph_source_context", dict(source_context))
+            setattr(tool, "get_approval_context", _get_approval_context)
+            setattr(tool, "get_audit_call_payload", _get_audit_call_payload)
+            setattr(tool, "get_audit_result_payload", _get_audit_result_payload)
+            setattr(tool, "get_audit_failure_payload", _get_audit_failure_payload)
+            return tool
+        except Exception:
+            return _InstrumentedMCPTool(
+                tool,
+                source_context=source_context,
+                approval_context_fn=_get_approval_context,
+                audit_call_payload_fn=_get_audit_call_payload,
+                audit_result_payload_fn=_get_audit_result_payload,
+                audit_failure_payload_fn=_get_audit_failure_payload,
+            )
 
     @staticmethod
     def _resolve_env_vars(value: str) -> str:
@@ -228,7 +379,33 @@ class MCPManager:
             if resolved_headers:
                 params["headers"] = resolved_headers
             client = MCPClient(params, structured_output=False)
-            tools = client.get_tools()
+            source_context = self._build_source_context(
+                name=name,
+                url=url,
+                auth_hint=str(self._config.get(name, {}).get("auth_hint") or ""),
+                source=str(self._config.get(name, {}).get("source") or "manual"),
+                extension_id=(
+                    str(self._config.get(name, {}).get("extension_id"))
+                    if self._config.get(name, {}).get("extension_id") is not None
+                    else None
+                ),
+                extension_reference=(
+                    str(self._config.get(name, {}).get("extension_reference"))
+                    if self._config.get(name, {}).get("extension_reference") is not None
+                    else None
+                ),
+                extension_display_name=(
+                    str(self._config.get(name, {}).get("extension_display_name"))
+                    if self._config.get(name, {}).get("extension_display_name") is not None
+                    else None
+                ),
+                credential_sources=credential_sources,
+                used_headers=bool(resolved_headers),
+            )
+            tools = [
+                self._instrument_mcp_tool(tool, source_context)
+                for tool in client.get_tools()
+            ]
             self._clients[name] = client
             self._tools[name] = tools
             self._status[name] = {"status": "connected", "error": None}

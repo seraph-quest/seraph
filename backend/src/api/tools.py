@@ -8,6 +8,7 @@ from src.tools.policy import (
     get_current_tool_policy_mode,
     get_tool_execution_boundaries,
     get_tool_risk_level,
+    get_tool_source_context,
 )
 from src.workflows.manager import workflow_manager
 
@@ -27,10 +28,11 @@ async def list_tools():
         if meta is None:
             meta = workflow_manager.get_tool_metadata(tool.name)
         is_mcp = tool.name.startswith("mcp_")
+        source_context = get_tool_source_context(tool)
         policy_modes = meta.get("policy_modes") if meta else ([mcp_mode] if is_mcp else [mode])
         execution_boundaries = meta.get("execution_boundaries") if meta else None
         if not execution_boundaries:
-            execution_boundaries = get_tool_execution_boundaries(tool.name, is_mcp=is_mcp)
+            execution_boundaries = get_tool_execution_boundaries(tool.name, is_mcp=is_mcp, tool=tool)
         risk_level = meta.get("risk_level") if meta else None
         if not isinstance(risk_level, str):
             risk_level = get_tool_risk_level(tool.name, is_mcp=is_mcp)
@@ -54,6 +56,12 @@ async def list_tools():
             "risk_level": risk_level,
             "execution_boundaries": execution_boundaries,
             "accepts_secret_refs": bool(meta.get("accepts_secret_refs", is_mcp)) if meta else is_mcp,
+            **({
+                "authenticated_source": bool(
+                    isinstance(source_context, dict)
+                    and source_context.get("authenticated_source")
+                ),
+            } if is_mcp else {}),
         })
 
     # When delegation is active, also include specialist names so the frontend

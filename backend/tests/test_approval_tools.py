@@ -9,6 +9,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
+from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 
 
 class DummyExecuteCodeTool(Tool):
@@ -44,6 +45,30 @@ class DummyPrivilegedWorkflowTool(Tool):
             "execution_boundaries": [self.boundary],
             "accepts_secret_refs": False,
             "step_tools": ["write_file"],
+        }
+
+
+class DummyAuthenticatedMCPTool(Tool):
+    name = "mcp_fetch_repo"
+    description = "Dummy authenticated MCP tool"
+    inputs = {"query": {"type": "string", "description": "Query"}}
+    output_type = "string"
+
+    def __init__(self):
+        super().__init__()
+        self.seraph_source_context = {
+            "server_name": "github",
+            "authenticated_source": True,
+        }
+        self.is_initialized = True
+
+    def forward(self, query: str) -> str:
+        return f"ok:{query}"
+
+    def get_approval_context(self, _arguments):
+        return {
+            "execution_boundaries": ["external_mcp", "authenticated_external_source"],
+            "authenticated_source": True,
         }
 
 
@@ -93,3 +118,24 @@ def test_forced_approval_does_not_consume_approval_after_boundary_context_change
         reset_runtime_context(tokens)
 
     assert tool_impl.calls == []
+
+
+def test_secret_ref_wrapper_preserves_authenticated_mcp_approval_context(async_db):
+    tool = wrap_tools_for_approval(
+        wrap_tools_for_secret_refs([DummyAuthenticatedMCPTool()]),
+        treat_all_as_mcp=True,
+    )[0]
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with pytest.raises(ApprovalRequired) as excinfo:
+            tool(query="repo")
+        pending = asyncio.run(approval_repository.get_pending("s1"))
+    finally:
+        reset_runtime_context(tokens)
+
+    request = next(item for item in pending if item.id == excinfo.value.approval_id)
+    assert request.details["approval_context"]["authenticated_source"] is True
+    assert request.details["approval_context"]["execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+    ]

@@ -61,8 +61,20 @@ class SecretRefResolvingTool(Tool):
             return hook(arguments, result)
         return None
 
+    def get_audit_failure_payload(self, arguments, error):
+        hook = getattr(self.wrapped_tool, "get_audit_failure_payload", None)
+        if callable(hook):
+            return hook(arguments, error)
+        return None
+
     def get_audit_call_payload(self, arguments):
         hook = getattr(self.wrapped_tool, "get_audit_call_payload", None)
+        if callable(hook):
+            return hook(arguments)
+        return None
+
+    def get_approval_context(self, arguments):
+        hook = getattr(self.wrapped_tool, "get_approval_context", None)
         if callable(hook):
             return hook(arguments)
         return None

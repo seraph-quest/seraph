@@ -78,10 +78,14 @@ def get_tool_risk_level(tool_name: str, *, is_mcp: bool = False) -> str:
     return "low"
 
 
-def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False) -> list[str]:
+def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False, tool: object | None = None) -> list[str]:
     """Return the execution-boundary tags for a tool."""
     if is_mcp:
-        return ["external_mcp"]
+        boundaries = ["external_mcp"]
+        source_context = get_tool_source_context(tool)
+        if isinstance(source_context, dict) and bool(source_context.get("authenticated_source")):
+            boundaries.append("authenticated_external_source")
+        return boundaries
 
     metadata = get_tool_metadata(tool_name)
     if metadata is None:
@@ -102,6 +106,22 @@ def tool_accepts_secret_refs(tool_name: str, *, is_mcp: bool = False) -> bool:
     if metadata is None:
         return False
     return bool(metadata.get("accepts_secret_refs", False))
+
+
+def get_tool_source_context(tool: object | None) -> dict[str, object] | None:
+    """Return the first MCP source context visible through wrapper layers."""
+    current = tool
+    visited_ids: set[int] = set()
+    while current is not None:
+        current_id = id(current)
+        if current_id in visited_ids:
+            break
+        visited_ids.add(current_id)
+        source_context = getattr(current, "seraph_source_context", None)
+        if isinstance(source_context, dict):
+            return source_context
+        current = getattr(current, "wrapped_tool", None)
+    return None
 
 
 def get_current_tool_policy_mode() -> str:

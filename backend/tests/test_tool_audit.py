@@ -11,6 +11,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.tools.audit import AuditedTool, wrap_tools_for_audit
+from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 from src.tools.todo_tool import todo
 
 
@@ -55,6 +56,34 @@ class DummyWorkflowLikeTool(Tool):
                 "content_redacted": True,
                 "query": arguments["query"],
                 "result_redacted": True,
+            },
+        )
+
+
+class DummyAuthenticatedMCPFailTool(Tool):
+    name = "mcp_fetch_repo"
+    description = "Dummy authenticated MCP failure"
+    inputs = {"query": {"type": "string", "description": "Query"}}
+    output_type = "string"
+
+    def __init__(self):
+        super().__init__()
+        self.seraph_source_context = {
+            "server_name": "github",
+            "authenticated_source": True,
+        }
+        self.is_initialized = True
+
+    def forward(self, query: str) -> str:
+        raise RuntimeError(f"failed:{query}")
+
+    def get_audit_failure_payload(self, arguments, error):
+        return (
+            "mcp_fetch_repo failed for authenticated source",
+            {
+                "source_context": dict(self.seraph_source_context),
+                "arguments": {"query": arguments["query"]},
+                "error": str(error),
             },
         )
 
@@ -173,6 +202,26 @@ def test_audited_tool_logging_fails_open(async_db):
                 assert tool(code="print('hi')") == "ran:print('hi')"
     finally:
         reset_runtime_context(tokens)
+
+
+def test_secret_ref_wrapper_preserves_authenticated_mcp_failure_audit_payload(async_db):
+    tool = wrap_tools_for_audit(
+        wrap_tools_for_secret_refs([DummyAuthenticatedMCPFailTool()]),
+        treat_all_as_mcp=True,
+    )[0]
+    tokens = set_runtime_context("s1", "high_risk")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            with pytest.raises(RuntimeError, match="failed:repo"):
+                tool(query="repo")
+    finally:
+        reset_runtime_context(tokens)
+
+    events = asyncio.run(audit_repository.list_events(limit=10))
+    failure = next(e for e in events if e["event_type"] == "tool_failed" and e["tool_name"] == "mcp_fetch_repo")
+    assert failure["summary"] == "mcp_fetch_repo failed for authenticated source"
+    assert failure["details"]["source_context"]["authenticated_source"] is True
 
 
 def test_onboarding_agent_uses_audited_tools():

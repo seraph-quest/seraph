@@ -33,6 +33,7 @@
 - [x] built-in delegation now exposes a separate `vault_keeper` specialist for secret-management tools so generic memory delegation stops carrying direct vault read/write capability
 - [x] capability bootstrap now limits automatic repair to low-risk local workflow or skill toggles, leaving policy lifts and capability-surface expansion as explicit operator actions instead of workflow-planning side effects, and generated repair bundles no longer batch-run multiple privileged mutations from one cockpit click
 - [x] provider-neutral source capability discovery now exposes typed public-web tools, managed authenticated connectors, and explicit raw-MCP gaps so execution planning can inspect real external-source seams before composing a routine
+- [x] wrapped MCP tools now preserve authenticated source context through audit, approval, and secret-ref layers, so workflow approval context and operator tool metadata can distinguish generic external MCP from authenticated external-source execution at runtime
 
 ## Working On Now
 
@@ -41,6 +42,7 @@
 - [x] this workstream now also ships `workflow-timeline-and-approval-replay-v3`
 - [x] this workstream now also ships `retire-village-and-editor-v1` and `execution-safety-hardening-v7` alongside richer workflow replay metadata, failed-step visibility, and retry-from-step control surfaces
 - [x] this workstream now also ships `adapter-first-capability-contracts-v1` for source-capability discovery and connector-first external evidence planning
+- [x] this workstream now also ships `authenticated-source-boundary-hardening-v1` for wrapper-stable source context and fail-closed authenticated workflow checkpoints
 
 ## Still To Do On `develop`
 

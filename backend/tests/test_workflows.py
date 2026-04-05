@@ -13,7 +13,13 @@ import pytest
 from src.approval.repository import fingerprint_tool_call
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
-from src.workflows.manager import WorkflowManager, WorkflowTool, workflow_manager
+from src.workflows.manager import (
+    WorkflowManager,
+    WorkflowTool,
+    _approval_context_for_workflow,
+    _checkpoint_context_allowed,
+    workflow_manager,
+)
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.factory import get_tools
@@ -3113,6 +3119,33 @@ class TestWorkflowSurfaces:
                 workflow_tool(file_path="tasks.md")
         finally:
             reset_runtime_context(tokens)
+
+    def test_workflow_approval_context_marks_authenticated_mcp_sources(self):
+        workflow = SimpleNamespace(name="mcp_sync", step_tools=["mcp_fetch_repo"])
+        mcp_tool = MagicMock()
+        mcp_tool.seraph_source_context = {
+            "server_name": "github",
+            "hostname": "api.github.com",
+            "source": "extension",
+            "authenticated_source": True,
+        }
+
+        approval_context = _approval_context_for_workflow(
+            workflow,
+            {"mcp_fetch_repo": mcp_tool},
+        )
+
+        assert approval_context["authenticated_source"] is True
+        assert "authenticated_external_source" in approval_context["execution_boundaries"]
+        assert approval_context["source_systems"] == [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+            }
+        ]
+        assert _checkpoint_context_allowed(approval_context) is False
 
     def test_build_all_specialists_adds_workflow_runner(self):
         native_tool = MagicMock()

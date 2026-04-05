@@ -177,6 +177,23 @@ def _dedupe(items: list[str]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _dedupe_topics(items: list[str]) -> tuple[str, ...]:
+    seen_topics: list[str] = []
+    ordered: list[str] = []
+    for item in items:
+        normalized_item = _normalize_topic(item)
+        if not normalized_item:
+            continue
+        if any(
+            normalized_item in topic or topic in normalized_item
+            for topic in seen_topics
+        ):
+            continue
+        seen_topics.append(normalized_item)
+        ordered.append(item)
+    return tuple(ordered)
+
+
 def _prioritize_topic_context(items: list[str], topic: str | None, *, limit: int | None = None) -> list[str]:
     if not topic:
         prioritized = list(_dedupe(items))
@@ -203,6 +220,107 @@ def _text_matches_topic(candidate: str, topic: str | None) -> bool:
         normalized_topic in normalized_candidate
         or normalized_candidate in normalized_topic
     )
+
+
+def _project_candidate_signals(
+    *,
+    candidate: str,
+    observer_project: str,
+    active_projects: tuple[str, ...],
+    project_memory: list[str],
+    recent_session_lines: list[str],
+    execution_pressure: list[str],
+    supporting_context: list[str],
+    active_goals_summary: str,
+    current_event: str,
+) -> tuple[int, tuple[str, ...]]:
+    score = 0
+    signals: list[str] = []
+
+    if observer_project and _text_matches_topic(observer_project, candidate):
+        score += 4
+        signals.append("observer")
+
+    for index, item in enumerate(active_projects[:3]):
+        if _text_matches_topic(item, candidate):
+            score += max(1, 3 - index)
+            signals.append("projects")
+
+    for index, item in enumerate(project_memory[:3]):
+        if _text_matches_topic(item, candidate):
+            score += max(1, 3 - index)
+            signals.append("memory")
+
+    recent_hits = sum(1 for item in recent_session_lines if _text_matches_topic(item, candidate))
+    if recent_hits:
+        score += recent_hits * 2
+        signals.append("recent_sessions")
+
+    execution_hits = sum(1 for item in execution_pressure if _text_matches_topic(item, candidate))
+    if execution_hits:
+        score += execution_hits * 2
+        signals.append("execution")
+
+    support_hits = sum(1 for item in supporting_context if _text_matches_topic(item, candidate))
+    if support_hits:
+        score += support_hits
+        signals.append("supporting_context")
+
+    if _text_matches_topic(active_goals_summary, candidate):
+        score += 1
+        signals.append("observer_goals")
+
+    if _text_matches_topic(current_event, candidate):
+        score += 2
+        signals.append("current_event")
+
+    return score, _dedupe(signals)
+
+
+def _rank_project_candidates(
+    *,
+    observer_project: str,
+    active_projects: tuple[str, ...],
+    project_memory: list[str],
+    recent_session_lines: list[str],
+    execution_pressure: list[str],
+    supporting_context: list[str],
+    active_goals_summary: str,
+    current_event: str,
+) -> list[tuple[str, int, tuple[str, ...]]]:
+    candidates = [
+        item
+        for item in _dedupe(
+            ([observer_project] if observer_project else [])
+            + list(active_projects[:3])
+            + list(project_memory[:3])
+        )
+        if _normalize_topic(item)
+    ]
+    ranked: list[tuple[str, int, tuple[str, ...]]] = []
+    for candidate in candidates:
+        score, signals = _project_candidate_signals(
+            candidate=candidate,
+            observer_project=observer_project,
+            active_projects=active_projects,
+            project_memory=project_memory,
+            recent_session_lines=recent_session_lines,
+            execution_pressure=execution_pressure,
+            supporting_context=supporting_context,
+            active_goals_summary=active_goals_summary,
+            current_event=current_event,
+        )
+        if score <= 0:
+            continue
+        ranked.append((candidate, score, signals))
+    ranked.sort(
+        key=lambda item: (
+            -item[1],
+            0 if observer_project and _text_matches_topic(item[0], observer_project) else 1,
+            item[0].lower(),
+        )
+    )
+    return ranked
 
 
 def _derive_focus_alignment(observer_context: CurrentContext) -> str:
@@ -289,7 +407,7 @@ def build_guardian_world_model(
 ) -> GuardianWorldModel:
     """Build a first explicit working-state / commitments model from current signals."""
     memory_lines = _extract_lines(memory_context, limit=3)
-    recent_session_lines = _extract_lines(recent_sessions_summary, limit=2)
+    recent_session_lines = _extract_lines(recent_sessions_summary, limit=3)
     feedback_lines = _extract_lines(recent_intervention_feedback, limit=2)
     memory_buckets = memory_buckets or {}
     goal_memory = list(memory_buckets.get("goal", ()))[:2] or _extract_tagged_memory(memory_context, "goal", limit=2)
@@ -332,23 +450,57 @@ def build_guardian_world_model(
         focus_source = "recent_sessions"
 
     observer_project = _clean_line(observer_context.active_project or "")
-    live_topic_anchor = (
-        observer_project
+    execution_pressure = _extract_lines(recent_execution_summary, limit=3)
+    supporting_context = list(collaborators) + list(recurring_obligations) + list(timeline_memory)
+    ranked_projects = _rank_project_candidates(
+        observer_project=observer_project,
+        active_projects=active_projects,
+        project_memory=project_memory,
+        recent_session_lines=recent_session_lines,
+        execution_pressure=execution_pressure,
+        supporting_context=supporting_context,
+        active_goals_summary=_clean_line(observer_context.active_goals_summary or ""),
+        current_event=_clean_line(observer_context.current_event or ""),
+    )
+    distinct_ranked_projects: list[tuple[str, int, tuple[str, ...]]] = []
+    for candidate, score, signals in ranked_projects:
+        if any(_text_matches_topic(candidate, existing[0]) for existing in distinct_ranked_projects):
+            continue
+        distinct_ranked_projects.append((candidate, score, signals))
+    preferred_project_anchor = distinct_ranked_projects[0][0] if distinct_ranked_projects else ""
+    competing_project_anchor = distinct_ranked_projects[1][0] if len(distinct_ranked_projects) > 1 else ""
+    project_anchor = (
+        preferred_project_anchor
+        or observer_project
         or _clean_line(observer_context.current_event or "")
         or _clean_line(observer_context.active_goals_summary or "")
     )
-    recent_session_lines = _prioritize_topic_context(recent_session_lines, live_topic_anchor, limit=2)
-    project_memory = _prioritize_topic_context(project_memory, live_topic_anchor, limit=2)
-    active_routines = _prioritize_topic_context(active_routines, live_topic_anchor, limit=3)
-    collaborators = _prioritize_topic_context(collaborators, live_topic_anchor, limit=3)
-    recurring_obligations = _prioritize_topic_context(recurring_obligations, live_topic_anchor, limit=3)
-    timeline_memory = _prioritize_topic_context(timeline_memory, live_topic_anchor, limit=3)
+    anchor_for_prioritization = project_anchor or observer_project
+    recent_session_lines = _prioritize_topic_context(recent_session_lines, anchor_for_prioritization, limit=3)
+    project_memory = _prioritize_topic_context(project_memory, anchor_for_prioritization, limit=2)
+    active_routines = _prioritize_topic_context(active_routines, anchor_for_prioritization, limit=3)
+    collaborators = _prioritize_topic_context(collaborators, anchor_for_prioritization, limit=3)
+    recurring_obligations = _prioritize_topic_context(recurring_obligations, anchor_for_prioritization, limit=3)
+    timeline_memory = _prioritize_topic_context(timeline_memory, anchor_for_prioritization, limit=3)
+    supporting_context = list(collaborators) + list(recurring_obligations) + list(timeline_memory)
+    matching_anchor_threads = [
+        item for item in recent_session_lines
+        if _text_matches_topic(item, project_anchor)
+    ] if project_anchor else []
+    matching_anchor_execution = [
+        item for item in execution_pressure
+        if _text_matches_topic(item, project_anchor)
+    ] if project_anchor else []
+    matching_anchor_support = [
+        item for item in supporting_context
+        if _text_matches_topic(item, project_anchor)
+    ] if project_anchor else []
     project_timeline = _dedupe(
         timeline_memory
         + project_memory
-        + list(active_projects[:1])
-        + _extract_lines(recent_execution_summary, limit=2)
-        + recent_session_lines[:1]
+        + list(active_projects[:2])
+        + matching_anchor_execution[:2]
+        + matching_anchor_threads[:1]
     )
     memory_signals = _dedupe(
         goal_memory
@@ -359,15 +511,14 @@ def build_guardian_world_model(
         + active_routines[:1]
     )
     continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
-    execution_pressure = _extract_lines(recent_execution_summary, limit=3)
     matching_recent_threads = [
         item for item in recent_session_lines
-        if _text_matches_topic(item, live_topic_anchor)
-    ] if live_topic_anchor else []
+        if _text_matches_topic(item, observer_project)
+    ] if observer_project else []
     stale_recent_threads = [
         item for item in recent_session_lines
-        if not _text_matches_topic(item, live_topic_anchor)
-    ] if live_topic_anchor else []
+        if not _text_matches_topic(item, observer_project)
+    ] if observer_project else []
 
     commitments: list[str] = []
     if observer_context.current_event:
@@ -378,7 +529,7 @@ def build_guardian_world_model(
             commitments.append(summary)
     if observer_context.active_goals_summary:
         commitments.append(observer_context.active_goals_summary)
-    commitments.extend(matching_recent_threads[:1])
+    commitments.extend(matching_anchor_threads[:1])
     commitments.extend(commitment_memory[:2])
     commitments.extend(project_memory[:1])
     commitments.extend(memory_lines[:1])
@@ -406,7 +557,7 @@ def build_guardian_world_model(
         + list(procedural_constraints[:1])
     )
     next_up = _dedupe(
-        matching_recent_threads[:1]
+        matching_anchor_threads[:1]
         + list(commitment_memory[:1])
         + project_memory[:1]
         + list(active_projects[:1])
@@ -414,11 +565,11 @@ def build_guardian_world_model(
         + list(recent_session_lines[:1])
     )
     dominant_thread = (
-        matching_recent_threads[0]
-        if matching_recent_threads
+        matching_anchor_threads[0]
+        if matching_anchor_threads
         else (continuity_threads[0]
         if continuity_threads
-        else (active_projects[0] if active_projects else current_focus)
+        else (project_anchor or (active_projects[0] if active_projects else current_focus))
         )
     )
     active_constraints: list[str] = []
@@ -432,12 +583,19 @@ def build_guardian_world_model(
     active_constraints.extend(procedural_constraints)
     durable_project_signals = _dedupe(project_memory[:2])
     recent_project_signals = _dedupe(list(active_projects[:3]))
-    active_project_signals = _dedupe(
-        ([observer_project] if observer_project else [])
-        + list(durable_project_signals)
+    active_project_signals = _dedupe_topics(
+        list(durable_project_signals)
+        + [item[0] for item in distinct_ranked_projects]
         + list(recent_project_signals)
+        + ([observer_project] if observer_project else [])
     )
-    project_state = _dedupe(list(active_project_signals) + matching_recent_threads[:1] + execution_pressure[:2])
+    project_state = _dedupe(
+        ([project_anchor] if project_anchor else [])
+        + matching_anchor_threads[:1]
+        + matching_anchor_support[:2]
+        + matching_anchor_execution[:2]
+        + list(project_memory[:1])
+    )
     has_observer_focus_signal = any(
         (
             observer_context.current_event,
@@ -474,7 +632,6 @@ def build_guardian_world_model(
         judgment_risks.append(
             f"Live observer project '{observer_project}' does not match recalled project context."
         )
-    supporting_context = list(collaborators) + list(recurring_obligations) + list(timeline_memory)
     matching_support = [
         item for item in supporting_context
         if _text_matches_topic(item, observer_project)
@@ -519,6 +676,40 @@ def build_guardian_world_model(
     elif observer_project and matching_recent_threads and stale_recent_threads:
         judgment_risks.append(
             f"Some recent cross-thread continuity still points away from live project '{observer_project}'."
+        )
+    if (
+        observer_project
+        and preferred_project_anchor
+        and not _text_matches_topic(preferred_project_anchor, observer_project)
+    ):
+        judgment_risks.append(
+            f"Competing project evidence currently favors '{preferred_project_anchor}' over live observer project '{observer_project}'."
+        )
+    if distinct_ranked_projects and len(distinct_ranked_projects) > 1:
+        top_score = distinct_ranked_projects[0][1]
+        next_score = distinct_ranked_projects[1][1]
+        grounded_project_competition = any(
+            signal != "projects"
+            for _, _, signals in distinct_ranked_projects[:2]
+            for signal in signals
+        )
+        if grounded_project_competition and next_score >= max(1, top_score - 2):
+            if observer_project and competing_project_anchor:
+                judgment_risks.append(
+                    f"Project-anchor evidence remains split between live project '{observer_project}' and competing project '{competing_project_anchor}'."
+                )
+            elif competing_project_anchor:
+                judgment_risks.append(
+                    f"Project-anchor evidence remains ambiguous between '{distinct_ranked_projects[0][0]}' and '{competing_project_anchor}'."
+                )
+    if (
+        observer_project
+        and preferred_project_anchor
+        and not _text_matches_topic(preferred_project_anchor, observer_project)
+        and (matching_anchor_threads or matching_anchor_execution)
+    ):
+        judgment_risks.append(
+            f"Recent continuity or execution evidence suggests attention is drifting toward '{preferred_project_anchor}' instead of '{observer_project}'."
         )
     if has_follow_through_pressure:
         judgment_risks.append(

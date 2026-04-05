@@ -1466,6 +1466,17 @@ function workflowResumeDetails(workflow: WorkflowRunRecord): string[] {
   return details;
 }
 
+function workflowStepSummary(step: WorkflowStepRecord): string {
+  const parts = [
+    `${step.id} ${step.status}`,
+    step.durationMs ? `${step.durationMs}ms` : null,
+    step.resultSummary,
+    step.errorSummary,
+    step.recoveryHint,
+  ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+  return parts.join(" · ");
+}
+
 function workflowUpdatedAtMs(workflow: WorkflowRunRecord): number {
   const timestamp = Date.parse(workflow.updatedAt);
   return Number.isNaN(timestamp) ? 0 : timestamp;
@@ -3442,6 +3453,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "e") {
         event.preventDefault();
         inspectOperatorEvidenceEntry(primaryEvidenceEntry);
+      } else if (key === "w") {
+        event.preventDefault();
+        inspectPrimaryWorkflowEntry();
+      } else if (key === "u") {
+        event.preventDefault();
+        queueWorkflowOutputContext(primaryWorkflowShortcutTarget());
       }
     };
     window.addEventListener("keydown", handleOperatorShortcut);
@@ -3457,8 +3474,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     primaryEvidenceEntry,
     primaryTriageEntry,
     primaryWorkflowTriageEntry,
+    inspectPrimaryWorkflowEntry,
+    primaryWorkflowShortcutTarget,
+    queueWorkflowOutputContext,
     redirectOperatorWorkflowEntry,
     studioOpen,
+    workflowRunsWithArtifacts,
     windowsMenuOpen,
   ]);
   const activitySpendByCapabilityFamily = useMemo(
@@ -4948,6 +4969,71 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
 
+  function workflowStepFocusRecords(workflow: WorkflowRunRecord): WorkflowStepRecord[] {
+    const records = workflow.stepRecords ?? [];
+    return [...records]
+      .sort((left, right) => {
+        const leftPriority =
+          left.status !== "succeeded" || workflow.continuedErrorSteps.includes(left.id)
+            ? 0
+            : left.isRecoverable || (left.recoveryActions?.length ?? 0) > 0
+              ? 1
+              : left.artifactPaths.length > 0
+                ? 2
+                : 3;
+        const rightPriority =
+          right.status !== "succeeded" || workflow.continuedErrorSteps.includes(right.id)
+            ? 0
+            : right.isRecoverable || (right.recoveryActions?.length ?? 0) > 0
+              ? 1
+              : right.artifactPaths.length > 0
+                ? 2
+                : 3;
+        if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+        return right.index - left.index;
+      })
+      .slice(0, 3);
+  }
+
+  function queueWorkflowStepContext(workflow: WorkflowRunRecord, step: WorkflowStepRecord) {
+    const outputPath = step.artifactPaths[0];
+    const parts = [
+      `Review workflow "${workflow.workflowName}" step "${step.id}" (${step.tool}).`,
+      outputPath ? `Latest step output: "${outputPath}".` : null,
+      step.errorSummary ? `Current failure: ${step.errorSummary}.` : null,
+      step.resultSummary ? `Latest result: ${step.resultSummary}.` : null,
+      step.recoveryHint ? `Recovery hint: ${step.recoveryHint}.` : null,
+    ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    queueComposerDraft(parts.join(" "));
+  }
+
+  function queueWorkflowOutputContext(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const outputPath = resolved.artifacts[0]?.filePath ?? resolved.artifactPaths[0];
+    if (!outputPath) return;
+    queueComposerDraft(`Use the workspace file "${outputPath}" as context for the next action.`);
+  }
+
+  function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
+    const candidates = [
+      primaryWorkflowTriageEntry?.workflow ?? null,
+      ...workflowRunsWithArtifacts,
+    ]
+      .filter((workflow): workflow is WorkflowRunRecord => workflow != null)
+      .map((workflow) => resolveWorkflowRun(workflow));
+    return (
+      candidates.find((workflow) => workflowStepFocusRecords(workflow).length > 0)
+      ?? candidates.find((workflow) => (workflow.artifacts[0]?.filePath ?? workflow.artifactPaths[0]) != null)
+      ?? candidates[0]
+      ?? null
+    );
+  }
+
+  function inspectPrimaryWorkflowEntry() {
+    inspectWorkflowRun(primaryWorkflowShortcutTarget());
+  }
+
   async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
     setOperatorStatus(`${enabled ? "Enabling" : "Disabling"} ${workflow.name}...`);
     try {
@@ -5757,6 +5843,73 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
               </div>
             )}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && workflowStepFocusRecords(selectedWorkflow).length > 0 && (
+          <div className="cockpit-inspector-stack">
+            {workflowStepFocusRecords(selectedWorkflow).map((step) => {
+              const checkpointDraft = selectedWorkflowCheckpointDraftByStep.get(step.id) ?? null;
+              const outputPath = step.artifactPaths[0] ?? null;
+              const compatible = outputPath
+                ? compatibleArtifactWorkflows(
+                    outputPath,
+                    workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
+                    [selectedWorkflow.workflowName, selectedWorkflow.toolName],
+                  ).slice(0, 1)
+                : [];
+              return (
+                <div key={`${selectedWorkflow.id}:step-focus:${step.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{`step ${step.index + 1}`}</div>
+                  <div className="cockpit-value">
+                    {step.tool} · {workflowStepSummary(step)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use step context ${step.id} for ${selectedWorkflowName}`}
+                    onClick={() => queueWorkflowStepContext(selectedWorkflow, step)}
+                  >
+                    Use Context
+                  </button>
+                  {checkpointDraft && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Draft retry for step ${step.id} in ${selectedWorkflowName}`}
+                      onClick={() => queueComposerDraft(checkpointDraft)}
+                    >
+                      Draft Retry
+                    </button>
+                  )}
+                  {step.recoveryActions?.length ? (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Repair step ${step.id} in ${selectedWorkflowName}`}
+                      onClick={() => void runCapabilityActions(readActionList(step.recoveryActions), `${selectedWorkflow.workflowName} ${step.id}`)}
+                    >
+                      Repair
+                    </button>
+                  ) : null}
+                  {outputPath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use step output ${outputPath}`}
+                      onClick={() => queueComposerDraft(`Use the workspace file "${outputPath}" as context for the next action.`)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {outputPath && compatible.map((workflow) => (
+                    <button
+                      key={`${selectedWorkflow.id}:${step.id}:${workflow.name}`}
+                      className="cockpit-feedback-button"
+                      aria-label={`Run ${workflow.name} from step output ${outputPath}`}
+                      onClick={() => queueArtifactWorkflowDraft(workflow, outputPath)}
+                    >
+                      Run {workflow.name}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
           </div>
         )}
         {selectedInspector.kind === "workflow" && selectedWorkflow && (() => {
@@ -6688,6 +6841,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflowResumeDetails(workflow).join(" · ")}
                           </div>
                         ) : null}
+                        {workflowStepFocusRecords(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowStepFocusRecords(workflow)
+                              .map((step) => `focus ${workflowStepSummary(step)}`)
+                              .join(" · ")}
+                          </div>
+                        ) : null}
                         {workflowSupervisionSummary(workflow).length > 0 ? (
                           <div className="cockpit-row-meta">
                             {workflowSupervisionSummary(workflow).join(" · ")}
@@ -6773,6 +6933,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             )}
                           >
                             Repair step
+                          </button>
+                        ) : null}
+                        {failedStep ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueWorkflowStepContext(workflow, failedStep)}
+                          >
+                            Use failure context
+                          </button>
+                        ) : null}
+                        {(workflow.artifacts[0]?.filePath ?? workflow.artifactPaths[0]) ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueWorkflowOutputContext(workflow)}
+                          >
+                            Use latest output
                           </button>
                         ) : null}
                         {studioEntryForWorkflowRun(workflow) ? (
@@ -7297,7 +7473,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+W inspect top workflow · Shift+U use latest output
                     </div>
                   </div>
 

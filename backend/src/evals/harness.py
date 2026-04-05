@@ -4221,6 +4221,24 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
             summary="Hermes migration",
             importance=0.92,
         )
+        await memory_repository.create_memory(
+            content="Bob owns Hermes migration communications.",
+            kind=MemoryKind.collaborator,
+            summary="Bob owns Hermes migration communications",
+            importance=0.8,
+        )
+        await memory_repository.create_memory(
+            content="Weekly Hermes rollout note goes out on Friday.",
+            kind=MemoryKind.obligation,
+            summary="Weekly Hermes rollout note goes out on Friday",
+            importance=0.78,
+        )
+        await memory_repository.create_memory(
+            content="Hermes migration timeline ends on Friday.",
+            kind=MemoryKind.timeline,
+            summary="Hermes migration timeline ends on Friday",
+            importance=0.77,
+        )
 
         ctx = _make_context(
             active_goals_summary="Support Atlas launch",
@@ -4240,7 +4258,19 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
                 "src.profile.service.sync_soul_file_to_profile",
                 AsyncMock(return_value={"Identity": "Builder"}),
             ),
-            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.audit.repository.audit_repository.list_events",
+                return_value=[
+                    {
+                        "event_type": "tool_result",
+                        "tool_name": "workflow_hermes_migration",
+                        "details": {
+                            "workflow_name": "Hermes migration",
+                            "continued_error_steps": ["notify_release"],
+                        },
+                    }
+                ],
+            ),
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
                 return_value=[],
@@ -4277,6 +4307,16 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "judgment_risk_count": len(state.world_model.judgment_risks),
         "includes_project_mismatch": any(
             "does not match recalled project context" in item
+            for item in state.world_model.judgment_risks
+        ),
+        "includes_supporting_context_mismatch": any(
+            "does not support live project" in item
+            or "still points away from live project" in item
+            for item in state.world_model.judgment_risks
+        ),
+        "includes_execution_context_mismatch": any(
+            "does not line up with live project" in item
+            or "still points away from live project" in item
             for item in state.world_model.judgment_risks
         ),
         "decision_action": decision.action.value,

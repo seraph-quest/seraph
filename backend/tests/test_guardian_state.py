@@ -305,7 +305,7 @@ async def test_build_guardian_state_degrades_world_model_on_project_mismatch(asy
             user_message="What matters for Atlas today?",
         )
 
-    assert "Atlas" in state.world_model.active_projects
+    assert any("Atlas" in item for item in state.world_model.active_projects)
     assert "Hermes migration" in state.world_model.active_projects
     assert (
         "Live observer project 'Atlas' does not match recalled project context."
@@ -395,7 +395,7 @@ async def test_build_guardian_state_degrades_on_stale_supporting_context(async_d
             user_message="What matters for Atlas today?",
         )
 
-    assert "Atlas" in state.world_model.active_projects
+    assert any("Atlas" in item for item in state.world_model.active_projects)
     assert (
         "Recalled collaborator, obligation, or timeline context does not support live project 'Atlas'."
         in state.world_model.judgment_risks
@@ -2153,6 +2153,98 @@ def test_world_model_flags_stale_execution_pressure_against_live_project():
     assert "Workflow Hermes migration degraded at notify_release" in model.active_blockers
     assert (
         "Recent execution pressure does not line up with live project 'Atlas'."
+        in model.judgment_risks
+    )
+
+
+def test_world_model_prefers_project_with_stronger_cross_source_evidence():
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=ctx,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary='- Hermes migration follow-up: assistant said "Finish the Hermes release note."\n- Atlas review: assistant said "Polish the Atlas launch checklist."',
+        recent_intervention_feedback="",
+        active_projects=("Atlas", "Hermes migration"),
+        recent_execution_summary="- Workflow Hermes migration degraded at notify_release",
+        memory_buckets={
+            "project": ("Hermes migration",),
+            "collaborator": (
+                "Bob owns Hermes migration communications",
+            ),
+            "obligation": (
+                "Weekly Hermes rollout note goes out on Friday",
+            ),
+            "timeline": (
+                "Hermes migration timeline ends on Friday",
+            ),
+        },
+    )
+
+    assert model.active_projects[0] == "Hermes migration"
+    assert model.dominant_thread.startswith("Hermes migration follow-up")
+    assert "Bob owns Hermes migration communications" in model.project_state
+    assert "Workflow Hermes migration degraded at notify_release" in model.project_state
+    assert (
+        "Competing project evidence currently favors 'Hermes migration' over live observer project 'Atlas'."
+        in model.judgment_risks
+    )
+    assert (
+        "Recent continuity or execution evidence suggests attention is drifting toward 'Hermes migration' instead of 'Atlas'."
+        in model.judgment_risks
+    )
+
+
+def test_world_model_flags_project_anchor_ambiguity_when_scores_split():
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Keep both launch tracks moving",
+        active_window="VS Code",
+        screen_context="Reviewing release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=ctx,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary='- Atlas follow-up: assistant said "Close the Atlas launch checklist."\n- Hermes migration follow-up: assistant said "Ship the Hermes rollout note."',
+        recent_intervention_feedback="",
+        active_projects=("Atlas", "Hermes migration"),
+        recent_execution_summary="- Workflow Atlas launch degraded at write_file\n- Workflow Hermes migration degraded at notify_release",
+        memory_buckets={
+            "project": ("Atlas launch", "Hermes migration"),
+            "timeline": (
+                "Atlas launch timeline ends on Friday",
+                "Hermes migration timeline ends on Friday",
+            ),
+        },
+    )
+
+    assert "Atlas" in model.active_projects[0]
+    assert "Hermes migration" == model.active_projects[1]
+    assert (
+        "Project-anchor evidence remains ambiguous between 'Atlas' and 'Hermes migration'."
         in model.judgment_risks
     )
 

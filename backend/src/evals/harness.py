@@ -4215,11 +4215,15 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
 
 async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
     async with _patched_async_db(
+        "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
     ):
         await session_manager.get_or_create("current")
         await session_manager.add_message("current", "user", "What matters for Atlas today?")
         await session_manager.add_message("current", "assistant", "Let me reconcile the project signals.")
+        await session_manager.get_or_create("prior")
+        await session_manager.update_title("prior", "Hermes migration follow-up")
+        await session_manager.add_message("prior", "assistant", "Ship the Hermes rollout note.")
 
         await memory_repository.create_memory(
             content="Hermes migration remains the live delivery project.",
@@ -4279,7 +4283,7 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
             ),
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
-                return_value=[],
+                return_value=["Atlas", "Hermes migration"],
             ),
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
@@ -4323,6 +4327,17 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "includes_execution_context_mismatch": any(
             "does not line up with live project" in item
             or "still points away from live project" in item
+            for item in state.world_model.judgment_risks
+        ),
+        "dominant_thread_prefers_hermes": state.world_model.dominant_thread.startswith(
+            "Hermes migration follow-up"
+        ),
+        "project_state_includes_hermes_execution": any(
+            "Hermes migration" in item and "degraded" in item
+            for item in state.world_model.project_state
+        ),
+        "includes_project_anchor_drift": any(
+            "drifting toward 'Hermes migration' instead of 'Atlas'" in item
             for item in state.world_model.judgment_risks
         ),
         "decision_action": decision.action.value,

@@ -31,6 +31,7 @@
 - [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
 - [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, and lowers receptivity further when negative intervention trends line up with that conflicting execution evidence
 - [x] guardian state now also prioritizes live-project cross-thread continuity from recent sessions, carries matching recent-thread commitments into `next_up` and dominant-thread synthesis, and surfaces explicit follow-through risk when open project commitments and recent execution setbacks line up on the same live project
+- [x] guardian world-model synthesis now also ranks competing projects from observer, recent-session, memory, and execution evidence, prefers stronger cross-source project anchors over passive list order, preserves richer canonical project labels, and surfaces explicit ambiguity or drift risks when project evidence stays split
 - [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
 
 ## Working On Now
@@ -43,7 +44,7 @@
 ## Still To Do On `develop`
 
 - [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, stale-support and stale-execution contradiction grounding, and contradiction-aware confidence downgrades
-- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new negative-trend-plus-execution follow-through gating, and the new cross-thread commitment carryover pass
+- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new negative-trend-plus-execution follow-through gating, the new cross-thread commitment carryover pass, and the first multi-project arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval and inventory layer, especially provider-backed user modeling, consolidation support, and stronger quality diagnostics
@@ -988,6 +989,37 @@ This section records the internal Batch C slices on the feature branch before th
     - updated the project-mismatch unit test and runtime eval fixture so the degraded path is now proven by durable project memory alone instead of `get_recent_projects()` noise
   - final recheck:
     - `Singer` reported no remaining material findings after the durable-recall mismatch fix and updated proof path
+
+## Batch R Branch Review Log
+
+### `multi-project-arbitration-and-cross-source-project-carryover-v1`
+
+- status: complete on `feat/multi-project-arbitration-batch-r-v1`, pending inclusion in the aggregate Batch R PR
+- root causes addressed:
+  - project arbitration was still effectively list-ordered, so observer aliases, recent screen-project ordering, or whichever project string appeared first could outweigh broader cross-source evidence
+  - semantically identical labels like `Atlas` and `Atlas launch` were still treated as separate project competitors in ambiguity and active-project output, which made both risk reporting and project-state synthesis noisier than the actual evidence
+- scope:
+  - added scored project-candidate arbitration in `backend/src/guardian/world_model.py` so observer anchors, durable project memory, recent-session continuity, execution pressure, and supporting collaborator or obligation or timeline context all contribute to one ranked project view
+  - switched dominant-thread, project-state, and active-project synthesis to follow the preferred project anchor instead of raw list order, while still preserving explicit mismatch checks against the live observer project when that anchor loses
+  - added explicit project-anchor ambiguity and diverted-attention risks when evidence remains split across projects instead of pretending the top list item is grounded
+  - deduped semantic project aliases in active-project output so richer canonical project labels survive while short observer aliases stop showing up as fake extra projects
+  - extended guardian-state and eval-harness coverage to prove stronger cross-source project preference, ambiguity downgrades, and drift-risk exposure
+- focused review:
+  - first real bug:
+    - the initial ambiguity pass was too eager and downgraded otherwise grounded state from the passive `get_recent_projects()` list alone, without any corroborating recent-session, execution, or memory evidence
+    - fixed by requiring grounded cross-source competition before the ambiguity risk is emitted
+  - second real bug:
+    - the first semantic-dedup pass collapsed richer canonical labels like `Atlas launch` back to the shorter observer alias `Atlas`, which regressed project-linked memory surfaces and caused old tests to pass for the wrong representation
+    - fixed by preferring durable project-memory labels ahead of observer aliases in active-project synthesis while still deduping semantically overlapping variants
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
+    - result: `32 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+    - result: `passed`, with `dominant_thread_prefers_hermes=true`, `project_state_includes_hermes_execution=true`, and `includes_project_anchor_drift=true`
+  - validation intentionally not claimed:
+    - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q -x`
+    - reason: this broad eval-harness assertion path continued to stall in this environment’s long-run path instead of returning a reliable pass/fail signal
 
 ### `intervention-quality-learning-from-longer-horizon-outcomes-v1`
 

@@ -414,6 +414,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_judgment_behavior"]["includes_project_mismatch"] is True
     assert details_by_name["guardian_judgment_behavior"]["includes_supporting_context_mismatch"] is True
     assert details_by_name["guardian_judgment_behavior"]["includes_execution_context_mismatch"] is True
+    assert details_by_name["guardian_judgment_behavior"]["dominant_thread_prefers_hermes"] is True
+    assert details_by_name["guardian_judgment_behavior"]["project_state_includes_hermes_execution"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_project_anchor_drift"] is True
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"

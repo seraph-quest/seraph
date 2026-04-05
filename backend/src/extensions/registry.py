@@ -17,6 +17,7 @@ from src.extensions.capability_contributions import (
     load_browser_provider_definition,
     load_canvas_output_definition,
     load_context_pack_definition,
+    load_memory_provider_definition,
     load_messaging_connector_definition,
     load_node_adapter_definition,
     load_prompt_pack_definition,
@@ -323,6 +324,11 @@ class ExtensionRegistry:
                         metadata.update(load_managed_connector_definition(resolved_path).as_metadata())
                     except Exception:
                         pass
+                if contribution_type == "memory_providers":
+                    try:
+                        metadata.update(load_memory_provider_definition(resolved_path).as_metadata())
+                    except Exception:
+                        pass
                 if contribution_type == "toolset_presets":
                     try:
                         metadata.update(load_toolset_preset_definition(resolved_path).as_metadata())
@@ -511,6 +517,7 @@ class ExtensionRegistry:
         unique_name_types = {
             "automation_triggers": {"label": "automation trigger", "conflict_mode": "all"},
             "browser_providers": {"label": "browser provider", "conflict_mode": "winner"},
+            "memory_providers": {"label": "memory provider", "conflict_mode": "winner"},
             "workflow_runtimes": {"label": "workflow runtime", "conflict_mode": "winner"},
             "canvas_outputs": {"label": "canvas output", "conflict_mode": "winner"},
         }

@@ -47,6 +47,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The workspace now makes imported capability reach, extension governance, and runtime-path/capability-family spend attribution visible inside the operator surface instead of leaving the new breadth opaque.
 - [x] The runtime now exposes provider-neutral source contracts and source inventory for public-web tools, managed authenticated connectors, and raw MCP gaps, so Seraph can compose source-aware routines without hardcoding one provider pipeline per use case.
 - [x] Authenticated MCP-backed sources now keep their source context through runtime wrappers, so operator metadata, approval context, and workflow checkpoint gating can distinguish generic external MCP from authenticated external-source execution.
+- [x] Guardian memory now exposes a first additive memory-provider surface: extension-backed provider inventory, lifecycle-managed provider config/toggle state, additive retrieval integration, and explicit canonical-memory precedence when external providers are configured or unavailable.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
 - [x] The next strategic focus is now post-import hardening: deeper execution isolation, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
@@ -63,6 +64,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] activity-ledger routing summaries, native thread metadata, and LLM spend attribution that make both live continuation state and day-scale budget use easier to inspect
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel-routing surfaces that stay visible and governed through the same extension lifecycle
 - [x] typed longitudinal memory and explicit guardian state
+- [x] additive external memory-provider retrieval and provider inventory that can augment recall without replacing canonical guardian memory
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
 - [x] non-browser presence through a first coherent desktop surface, notifications, native reach, and action-card continuation payloads
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops

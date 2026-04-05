@@ -82,20 +82,22 @@ _STUDIO_TYPE_ORDER = {
     "provider_presets": 9,
     "mcp_servers": 10,
     "managed_connectors": 11,
-    "automation_triggers": 12,
-    "browser_providers": 13,
-    "messaging_connectors": 14,
-    "observer_definitions": 15,
-    "observer_connectors": 16,
-    "channel_adapters": 17,
-    "canvas_outputs": 18,
-    "workflow_runtimes": 19,
-    "node_adapters": 20,
-    "workspace_adapters": 21,
+    "memory_providers": 12,
+    "automation_triggers": 13,
+    "browser_providers": 14,
+    "messaging_connectors": 15,
+    "observer_definitions": 16,
+    "observer_connectors": 17,
+    "channel_adapters": 18,
+    "canvas_outputs": 19,
+    "workflow_runtimes": 20,
+    "node_adapters": 21,
+    "workspace_adapters": 22,
 }
 _CONNECTOR_CONTRIBUTION_TYPES = {
     "mcp_servers",
     "managed_connectors",
+    "memory_providers",
     "automation_triggers",
     "browser_providers",
     "messaging_connectors",
@@ -107,6 +109,7 @@ _CONNECTOR_CONTRIBUTION_TYPES = {
 }
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
 _PLANNED_CONNECTOR_CONTRIBUTION_TYPES = {
+    "memory_providers",
     "automation_triggers",
     "browser_providers",
     "messaging_connectors",
@@ -140,6 +143,7 @@ _PASSIVE_TYPED_CONTRIBUTION_FIELDS = {
 }
 
 _PLANNED_CONNECTOR_REQUIRED_FIELDS = {
+    "memory_providers": ("name", "provider_kind"),
     "automation_triggers": ("name", "trigger_type"),
     "browser_providers": ("name", "provider_kind"),
     "messaging_connectors": ("name", "platform"),
@@ -1681,6 +1685,8 @@ def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
             targets.append({"type": "mcp_server", "name": target_name})
         elif contribution.contribution_type == "managed_connectors":
             targets.append({"type": "managed_connector", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "memory_providers":
+            targets.append({"type": "memory_provider", "name": target_name, "reference": contribution.reference})
         elif contribution.contribution_type == "automation_triggers":
             targets.append({"type": "automation_trigger", "name": target_name, "reference": contribution.reference})
         elif contribution.contribution_type == "browser_providers":
@@ -1702,6 +1708,7 @@ def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
         "workflows",
         "mcp_servers",
         "managed_connectors",
+        "memory_providers",
         "automation_triggers",
         "browser_providers",
         "messaging_connectors",
@@ -1719,6 +1726,7 @@ def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
         "workflows",
         "mcp_servers",
         "managed_connectors",
+        "memory_providers",
         "automation_triggers",
         "browser_providers",
         "messaging_connectors",
@@ -2110,6 +2118,13 @@ def set_extension_connector_enabled(
         raise KeyError(reference)
     if contribution.contribution_type == "managed_connectors":
         return _set_managed_connector_enabled(extension, contribution, enabled=enabled)
+    if contribution.contribution_type == "memory_providers":
+        return _set_planned_connector_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="memory_provider",
+        )
     if contribution.contribution_type == "automation_triggers":
         return _set_planned_connector_enabled(
             extension,
@@ -2465,6 +2480,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         for target in targets:
             if target["type"] not in {
                 "managed_connector",
+                "memory_provider",
                 "automation_trigger",
                 "browser_provider",
                 "messaging_connector",
@@ -2478,6 +2494,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                     if item.reference == target.get("reference")
                     and (
                         (target["type"] == "managed_connector" and item.contribution_type == "managed_connectors")
+                        or (target["type"] == "memory_provider" and item.contribution_type == "memory_providers")
                         or (target["type"] == "automation_trigger" and item.contribution_type == "automation_triggers")
                         or (target["type"] == "browser_provider" and item.contribution_type == "browser_providers")
                         or (target["type"] == "messaging_connector" and item.contribution_type == "messaging_connectors")
@@ -2539,6 +2556,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                     ok = True
         elif target["type"] in {
             "managed_connector",
+            "memory_provider",
             "automation_trigger",
             "browser_provider",
             "messaging_connector",
@@ -2551,6 +2569,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                     if item.reference == target.get("reference")
                     and (
                         (target["type"] == "managed_connector" and item.contribution_type == "managed_connectors")
+                        or (target["type"] == "memory_provider" and item.contribution_type == "memory_providers")
                         or (target["type"] == "automation_trigger" and item.contribution_type == "automation_triggers")
                         or (target["type"] == "browser_provider" and item.contribution_type == "browser_providers")
                         or (target["type"] == "messaging_connector" and item.contribution_type == "messaging_connectors")
@@ -2619,7 +2638,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         changed.append({
             "type": target["type"],
             "name": target_name,
-            "enabled": target_enabled if target["type"] in {"managed_connector", "automation_trigger", "browser_provider", "messaging_connector", "node_adapter"} and ok else enabled,
+            "enabled": target_enabled if target["type"] in {"managed_connector", "memory_provider", "automation_trigger", "browser_provider", "messaging_connector", "node_adapter"} and ok else enabled,
             "ok": ok,
         })
     if state_payload is not None:
@@ -2647,6 +2666,7 @@ def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, 
         raise ValueError("extension config must be an object")
     configurable_types = {
         "managed_connectors",
+        "memory_providers",
         "automation_triggers",
         "browser_providers",
         "messaging_connectors",

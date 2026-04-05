@@ -29,6 +29,7 @@
 - [x] guardian state now also carries learned communication guidance derived from recent intervention outcomes, including timing, suppression, blocked-state, and thread-preference bias, instead of only raw outcome history
 - [x] guardian world-model receptivity and intervention policy can now learn blocked-state async handling instead of only direct/native/timing bias
 - [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
+- [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
 
 ## Working On Now
 
@@ -43,8 +44,7 @@
 - [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, and first live-versus-durable arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
-- [ ] additive memory-provider extensibility so Seraph can preserve a guardian-first canonical memory model while still augmenting retrieval, user modeling, or consolidation with pluggable external memory systems
-- [ ] additive memory-provider extensibility that keeps guardian memory canonical while allowing external memory systems to improve retrieval, user modeling, or consolidation where they materially help
+- [ ] deeper memory-provider use beyond the shipped additive retrieval and inventory layer, especially provider-backed user modeling, consolidation support, and stronger quality diagnostics
 
 ## Memory Upgrade Program Record
 
@@ -962,6 +962,37 @@ This section records the internal Batch C slices on the feature branch before th
   - the same review also caught that `backend/src/guardian/feedback.py` sorted live scope candidates by raw weight before the tie-tolerance branch ran, so `_SCOPE_WEIGHT_TIE_TOLERANCE` only changed the explanation string and never the selected scope
   - fixed by treating `current_event` as a live observer focus anchor in the project-risk gate, and by applying tie selection across all near-tied live scope candidates before choosing the winning scope
   - added regressions in `backend/tests/test_guardian_state.py` and `backend/tests/test_guardian_feedback.py` so current-event anchoring and near-tie scope specificity stay pinned
+
+## Batch N Branch Review Log
+
+### `additive-memory-provider-extensibility-v1`
+
+- status: complete on `feat/memory-provider-extensibility-batch-n-v1`, pending inclusion in the aggregate Batch N PR
+- scope:
+  - added manifest, layout, and registry support for extension-defined `memory_providers`, including canonical-memory ownership rules that keep guardian memory authoritative
+  - added `backend/src/memory/providers.py` so Seraph can inventory configured memory-provider adapters, expose runtime state to operators, and merge additive provider retrieval into memory planning without making providers canonical
+  - added `backend/src/api/memory.py` plus `/api/memory/providers` routing so operator surfaces can inspect configured provider state directly
+  - extended `backend/src/memory/retrieval_planner.py` so additive provider hits join semantic context and memory buckets on a separate `external_memory` lane, while provider failures degrade cleanly back to guardian-owned retrieval
+  - added regression coverage in `backend/tests/test_memory_providers.py` for provider inventory, route registration, additive retrieval merge, and provider-failure fallback
+- validation:
+  - `python3 -m py_compile backend/src/extensions/capability_contributions.py backend/src/extensions/layout.py backend/src/extensions/manifest.py backend/src/extensions/registry.py backend/src/memory/providers.py backend/src/memory/retrieval_planner.py backend/src/api/memory.py backend/src/api/router.py backend/tests/test_memory_providers.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_memory_providers.py -q`
+    - result: `4 passed`
+- local review notes:
+  - the first test helper wrote an extension manifest that required a future Seraph version (`>=2026.4.5`), so the registry correctly skipped the provider and the retrieval-lane assertions failed even though the runtime path itself was sound
+  - fixed by generating the test fixture manifest against the current backend runtime version instead of a future compatibility floor
+  - the first inventory endpoint test depended on the full shared app client fixture, which stalled in this environment before reaching the simple route contract under test
+  - fixed by validating the route contract directly through `src.api.memory.list_memory_providers()` and pinning separate router-registration coverage in `backend/tests/test_memory_providers.py`
+- subagent review:
+  - reviewer: `Parfit` (`019d5e35-6f63-72b0-84a1-9ab090b27da2`)
+  - findings:
+    - `memory_providers` were wired into manifest discovery but not into the normal extension lifecycle control plane, so list/configure/enable flows would have ignored them outside hand-edited state
+    - provider `health()` exceptions could still bubble out of inventory building and break normal memory retrieval instead of degrading cleanly to guardian-owned memory
+    - the parser was advertising `canonical_write_mode=read_through` even though the runtime only implemented additive retrieval
+  - fixed before the slice stayed marked complete:
+    - wired `memory_providers` through `backend/src/extensions/lifecycle.py` so extension connector listing, config writes, enable/disable flows, and package toggle targets now include memory providers
+    - wrapped provider health checks in `backend/src/memory/providers.py` and kept provider availability in diagnostics instead of globally downgrading canonical memory retrieval state
+    - narrowed the supported write mode to `additive_only` until a real read-through path exists
 
 ## Non-Goals
 

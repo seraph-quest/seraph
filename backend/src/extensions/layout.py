@@ -18,6 +18,7 @@ CONTRIBUTION_LAYOUTS: dict[str, tuple[str, ...]] = {
     "scheduled_routines": ("routines/",),
     "mcp_servers": ("mcp/",),
     "managed_connectors": ("connectors/managed/",),
+    "memory_providers": ("connectors/memory/",),
     "automation_triggers": ("automation/",),
     "browser_providers": ("connectors/browser/",),
     "messaging_connectors": ("connectors/messaging/",),

@@ -19,6 +19,7 @@ from src.guardian.state import GuardianState, GuardianStateConfidence, build_gua
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
 from src.memory.procedural import sync_learning_signal_memories
 from src.memory.procedural_guidance import ProceduralMemoryGuidance
+from src.memory.retrieval_planner import MemoryRetrievalPlanResult
 from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
 
@@ -310,6 +311,209 @@ async def test_build_guardian_state_degrades_world_model_on_project_mismatch(asy
         "Live observer project 'Atlas' does not match recalled project context."
         in state.world_model.judgment_risks
     )
+    assert state.confidence.world_model == "degraded"
+    assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_degrades_on_stale_supporting_context(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me reconcile the longer-horizon context.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    retrieval = MemoryRetrievalPlanResult(
+        semantic_context="\n".join(
+            [
+                "- [project] Atlas launch",
+                "- [collaborator] Bob owns Hermes migration communications",
+                "- [obligation] Weekly Hermes rollout note goes out on Friday",
+                "- [timeline] Hermes migration timeline ends on Friday",
+            ]
+        ),
+        episodic_context="",
+        memory_buckets={
+            "project": ("Atlas launch",),
+            "collaborator": ("Bob owns Hermes migration communications",),
+            "obligation": ("Weekly Hermes rollout note goes out on Friday",),
+            "timeline": ("Hermes migration timeline ends on Friday",),
+        },
+        degraded=False,
+        lane="hybrid",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.plan_memory_retrieval",
+            AsyncMock(return_value=retrieval),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(
+                return_value=MagicMock(
+                    effective_signal=GuardianLearningSignal.neutral("advisory"),
+                    dominant_scope="global",
+                )
+            ),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=ProceduralMemoryGuidance(intervention_type="advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What matters for Atlas today?",
+        )
+
+    assert "Atlas" in state.world_model.active_projects
+    assert (
+        "Recalled collaborator, obligation, or timeline context does not support live project 'Atlas'."
+        in state.world_model.judgment_risks
+    )
+    assert state.confidence.world_model == "degraded"
+    assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_degrades_on_stale_execution_pressure(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me reconcile the longer-horizon context.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+        user_state="available",
+    )
+
+    retrieval = MemoryRetrievalPlanResult(
+        semantic_context="- [project] Atlas launch",
+        episodic_context="",
+        memory_buckets={"project": ("Atlas launch",)},
+        degraded=False,
+        lane="hybrid",
+    )
+    negative_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=2,
+        acknowledged_count=0,
+        failed_count=1,
+        bias="reduce_interruptions",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="neutral",
+        blocked_state_bias="neutral",
+        suppression_bias="extend_suppression",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=0,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.plan_memory_retrieval",
+            AsyncMock(return_value=retrieval),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(
+                return_value=MagicMock(
+                    effective_signal=negative_signal,
+                    dominant_scope="project",
+                )
+            ),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch(
+            "src.audit.repository.audit_repository.list_events",
+            return_value=[
+                {
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_hermes_migration",
+                    "details": {
+                        "workflow_name": "Hermes migration",
+                        "continued_error_steps": ["notify_release"],
+                    },
+                }
+            ],
+        ),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=ProceduralMemoryGuidance(intervention_type="advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What matters for Atlas today?",
+        )
+
+    assert (
+        "Recent execution pressure does not line up with live project 'Atlas'."
+        in state.world_model.judgment_risks
+    )
+    assert (
+        "Recent execution setbacks and intervention misses suggest follow-through risk."
+        in state.world_model.judgment_risks
+    )
+    assert "Workflow Hermes migration degraded at notify_release" in state.world_model.active_blockers
+    assert state.world_model.intervention_receptivity == "low"
     assert state.confidence.world_model == "degraded"
     assert state.confidence.overall == "partial"
 
@@ -1738,6 +1942,92 @@ def test_world_model_does_not_count_session_fallback_focus_as_observer_corrobora
     )
     assert "observer" not in model.corroboration_sources
     assert set(model.corroboration_sources) == {"current_session", "recent_sessions"}
+
+
+def test_world_model_prioritizes_live_project_supporting_context():
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=ctx,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="",
+        recent_intervention_feedback="",
+        active_projects=("Atlas",),
+        memory_buckets={
+            "project": ("Atlas launch",),
+            "collaborator": (
+                "Bob owns Hermes migration communications",
+                "Alice owns Atlas launch communications",
+            ),
+            "obligation": (
+                "Weekly Hermes rollout note goes out on Friday",
+                "Weekly Atlas launch note goes out on Friday",
+            ),
+            "timeline": (
+                "Hermes migration timeline ends on Friday",
+                "Atlas launch timeline ends on Friday",
+            ),
+        },
+    )
+
+    assert model.collaborators[0] == "Alice owns Atlas launch communications"
+    assert model.recurring_obligations[0] == "Weekly Atlas launch note goes out on Friday"
+    assert model.project_timeline[0] == "Atlas launch timeline ends on Friday"
+    assert (
+        "Some recalled collaborator, obligation, or timeline context still points away from live project 'Atlas'."
+        in model.judgment_risks
+    )
+
+
+def test_world_model_flags_stale_execution_pressure_against_live_project():
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=ctx,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="",
+        recent_intervention_feedback="",
+        active_projects=("Atlas",),
+        recent_execution_summary="- Workflow Hermes migration degraded at notify_release",
+        memory_buckets={
+            "project": ("Atlas launch",),
+        },
+    )
+
+    assert "Workflow Hermes migration degraded at notify_release" in model.open_loops_or_pressure
+    assert "Workflow Hermes migration degraded at notify_release" in model.active_blockers
+    assert (
+        "Recent execution pressure does not line up with live project 'Atlas'."
+        in model.judgment_risks
+    )
 
 
 @patch("src.agent.factory.ToolCallingAgent")

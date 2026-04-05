@@ -169,6 +169,8 @@ def _overall_confidence(
 def _world_model_status(world_model: GuardianWorldModel) -> str:
     if any(
         "does not match recalled project context" in item
+        or "does not support live project" in item
+        or "does not line up with live project" in item
         for item in world_model.judgment_risks
     ):
         return "degraded"

@@ -29,6 +29,7 @@
 - [x] guardian state now also carries learned communication guidance derived from recent intervention outcomes, including timing, suppression, blocked-state, and thread-preference bias, instead of only raw outcome history
 - [x] guardian world-model receptivity and intervention policy can now learn blocked-state async handling instead of only direct/native/timing bias
 - [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
+- [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, and lowers receptivity further when negative intervention trends line up with that conflicting execution evidence
 - [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
 
 ## Working On Now
@@ -40,8 +41,8 @@
 
 ## Still To Do On `develop`
 
-- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, judgment-risk grounding, and contradiction-aware confidence downgrades
-- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, and first live-versus-durable arbitration pass
+- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, stale-support and stale-execution contradiction grounding, and contradiction-aware confidence downgrades
+- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, and the new negative-trend-plus-execution follow-through gating
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval and inventory layer, especially provider-backed user modeling, consolidation support, and stronger quality diagnostics
@@ -918,6 +919,36 @@ This section records the internal Batch C slices on the feature branch before th
 - scope:
   - extended `backend/src/guardian/world_model.py` so `GuardianWorldModel` now records `focus_source` and `judgment_risks`, making guardian-state synthesis distinguish live observer focus from session or memory fallback and surface when the world model should stay cautious
   - updated `backend/src/guardian/state.py` so world-model confidence no longer stays artificially grounded when focus is only inferred from history, when durable project recall conflicts with the live observer project, or when recent intervention outcomes skew negative enough to keep receptivity selective
+
+## Batch P Branch Review Log
+
+### `long-horizon-guardian-learning-v2`
+
+- status: complete on `feat/long-horizon-guardian-learning-batch-p-v1`, pending inclusion in the aggregate Batch P PR
+- root causes addressed:
+  - guardian-state synthesis was still treating collaborator, obligation, and timeline recall as flat memory buckets, so stale durable support context could stay ahead of live-project-aligned context and weaken judgment only after the operator manually inferred the mismatch
+  - recent execution pressure was visible in the world model, but it was not treated as a contradiction source against the live project anchor and it did not combine with negative intervention trends to make the guardian more selective
+- scope:
+  - updated `backend/src/guardian/world_model.py` so live-project anchors reprioritize collaborators, obligations, routines, and timeline recall before they feed project timelines, memory signals, and continuity threads
+  - taught `GuardianWorldModel` to surface explicit stale-support and stale-execution contradiction risks against the live project anchor instead of only project-label mismatch
+  - promoted recent execution pressure into open-loop and active-blocker synthesis so longer-horizon follow-through pressure stays visible in the world model instead of only the execution sidebar
+  - tightened intervention receptivity so negative outcome trends can drop from `medium` to `low` when the live project anchor is also contradicted by stale support or execution evidence
+  - extended `backend/src/evals/harness.py` and guardian-state tests so the deterministic guardian judgment contract now proves supporting-context mismatch, execution-context mismatch, and low-confidence defer behavior together
+- focused review:
+  - first real bug:
+    - the initial live-topic reprioritization only changed the raw memory lists, but `project_timeline`, `memory_signals`, and `continuity_threads` were still being built earlier from the pre-reordered lists, so the “prioritized live-project context” claim was false for timeline output
+    - fixed by moving those derived structures after the reprioritization step and pinning the regression in `backend/tests/test_guardian_state.py`
+  - second real bug:
+    - the first long-horizon execution-pressure patch pulled `execution_pressure` into `open_loops` and `active_blockers` before that variable was initialized, which broke the guardian-state suite immediately
+    - fixed by moving `execution_pressure = _extract_lines(recent_execution_summary, limit=3)` earlier so blocker/pressure synthesis and contradiction scoring share the same initialized evidence
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/guardian/state.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
+    - result: `28 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_main_lists_available_scenarios -q`
+    - result: `1 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+    - result: `passed`, with `includes_supporting_context_mismatch=true`, `includes_execution_context_mismatch=true`, and `decision_reason=low_guardian_confidence`
   - added `guardian_judgment_behavior` to `backend/src/evals/harness.py` plus targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_strategist_tick.py` proving the new focus provenance, contradiction-aware confidence downgrade, and medium-urgency defer path
 - validation:
   - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/guardian/state.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py backend/tests/test_eval_harness.py`

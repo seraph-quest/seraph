@@ -519,6 +519,133 @@ async def test_build_guardian_state_degrades_on_stale_execution_pressure(async_d
 
 
 @pytest.mark.asyncio
+async def test_build_guardian_state_prioritizes_live_project_cross_thread_continuity(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me reconcile the recent Atlas threads.")
+    await sm.get_or_create("prior-atlas")
+    await sm.update_title("prior-atlas", "Atlas follow-up")
+    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.")
+    await sm.get_or_create("prior-hermes")
+    await sm.update_title("prior-hermes", "Hermes migration")
+    await sm.add_message("prior-hermes", "assistant", "Prepare the Hermes rollout note.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What matters for Atlas today?",
+        )
+
+    assert "Atlas" in state.world_model.continuity_threads[0]
+    assert "Atlas" in state.world_model.dominant_thread
+    assert "Atlas" in state.world_model.next_up[0]
+    assert "Atlas" in state.world_model.project_state[1]
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_surfaces_follow_through_risk_from_cross_thread_and_execution(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me reconcile the recent Atlas threads.")
+    await sm.get_or_create("prior-atlas")
+    await sm.update_title("prior-atlas", "Atlas follow-up")
+    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch(
+            "src.audit.repository.audit_repository.list_events",
+            return_value=[
+                {
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_atlas_launch",
+                    "details": {
+                        "workflow_name": "Atlas launch",
+                        "continued_error_steps": ["send_update"],
+                    },
+                }
+            ],
+        ),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What matters for Atlas today?",
+        )
+
+    assert (
+        "Cross-thread commitments and recent execution setbacks suggest live follow-through risk on project 'Atlas'."
+        in state.world_model.judgment_risks
+    )
+    assert (
+        "Follow-through risk remains open for live project 'Atlas'."
+        in state.world_model.open_loops_or_pressure
+    )
+    assert state.confidence.world_model == "partial"
+    assert state.confidence.overall == "partial"
+
+
+@pytest.mark.asyncio
 async def test_build_guardian_state_treats_current_event_as_live_project_anchor(async_db):
     sm = SessionManager()
     await sm.get_or_create("current")

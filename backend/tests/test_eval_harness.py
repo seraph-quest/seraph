@@ -368,23 +368,26 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
     assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
-    assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "grounded"
+    assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "partial"
     assert details_by_name["guardian_world_model_behavior"]["current_focus"] == "Prepare investor brief while in Arc"
     assert details_by_name["guardian_world_model_behavior"]["focus_source"] == "observer_goal_window"
     assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
     assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
-    assert details_by_name["guardian_world_model_behavior"]["active_blockers"] == [
-        "Recent intervention friction is present",
-    ]
-    assert details_by_name["guardian_world_model_behavior"]["next_up"][0] == "Investor brief"
+    assert "Recent intervention friction is present" in details_by_name["guardian_world_model_behavior"]["active_blockers"]
+    assert "Workflow investor-brief degraded at write_file" in details_by_name["guardian_world_model_behavior"]["active_blockers"]
     assert (
-        details_by_name["guardian_world_model_behavior"]["next_up"][1].startswith(
-            'Investor follow-up: assistant said "Close the investor loop before tomorrow."'
+        "Follow-through risk remains open for live project 'Investor brief'"
+        in details_by_name["guardian_world_model_behavior"]["active_blockers"]
+    )
+    assert (
+        details_by_name["guardian_world_model_behavior"]["next_up"][0].startswith(
+            'Investor brief follow-up: assistant said "Close the investor brief loop before tomorrow."'
         )
     )
+    assert "Investor brief" in details_by_name["guardian_world_model_behavior"]["next_up"]
     assert len(details_by_name["guardian_world_model_behavior"]["next_up"]) == 2
     assert (
-        details_by_name["guardian_world_model_behavior"]["dominant_thread"].startswith("Investor follow-up")
+        details_by_name["guardian_world_model_behavior"]["dominant_thread"].startswith("Investor brief follow-up")
     )
     assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
     assert details_by_name["guardian_world_model_behavior"]["active_projects_count"] >= 1
@@ -394,6 +397,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_execution_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["continuity_thread_matches_live_project"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_follow_through_risk"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True

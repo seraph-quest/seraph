@@ -4109,11 +4109,12 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
         await session_manager.add_message("current", "user", "What needs attention today?")
         await session_manager.add_message("current", "assistant", "Protect meeting prep and ship the brief.")
         await session_manager.get_or_create("prior")
-        await session_manager.update_title("prior", "Investor follow-up")
-        await session_manager.add_message("prior", "assistant", "Close the investor loop before tomorrow.")
+        await session_manager.update_title("prior", "Investor brief follow-up")
+        await session_manager.add_message("prior", "assistant", "Close the investor brief loop before tomorrow.")
 
         ctx = _make_context(
             active_goals_summary="Prepare investor brief",
+            active_project="Investor brief",
             active_window="Arc",
             screen_context="Reviewing investor meeting notes",
             upcoming_events=[{"summary": "Investor sync", "start": "2026-03-18T14:00:00Z"}],
@@ -4193,6 +4194,11 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "includes_execution_pressure": any(
                 "investor-brief degraded" in item
                 for item in state.world_model.execution_pressure
+            ),
+            "continuity_thread_matches_live_project": "Investor" in state.world_model.dominant_thread,
+            "includes_follow_through_risk": any(
+                "follow-through risk" in item
+                for item in state.world_model.judgment_risks
             ),
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,

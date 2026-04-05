@@ -30,6 +30,7 @@
 - [x] guardian world-model receptivity and intervention policy can now learn blocked-state async handling instead of only direct/native/timing bias
 - [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
 - [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, and lowers receptivity further when negative intervention trends line up with that conflicting execution evidence
+- [x] guardian state now also prioritizes live-project cross-thread continuity from recent sessions, carries matching recent-thread commitments into `next_up` and dominant-thread synthesis, and surfaces explicit follow-through risk when open project commitments and recent execution setbacks line up on the same live project
 - [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
 
 ## Working On Now
@@ -42,7 +43,7 @@
 ## Still To Do On `develop`
 
 - [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, stale-support and stale-execution contradiction grounding, and contradiction-aware confidence downgrades
-- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, and the new negative-trend-plus-execution follow-through gating
+- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new negative-trend-plus-execution follow-through gating, and the new cross-thread commitment carryover pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval and inventory layer, especially provider-backed user modeling, consolidation support, and stronger quality diagnostics
@@ -949,6 +950,30 @@ This section records the internal Batch C slices on the feature branch before th
     - result: `1 passed`
   - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
     - result: `passed`, with `includes_supporting_context_mismatch=true`, `includes_execution_context_mismatch=true`, and `decision_reason=low_guardian_confidence`
+
+## Batch Q Branch Review Log
+
+### `cross-thread-project-state-and-follow-through-v1`
+
+- status: complete on `feat/cross-thread-followthrough-batch-q-v1`, pending inclusion in the aggregate Batch Q PR
+- root causes addressed:
+  - the world model already carried recent session summaries, but it was not treating live-project-matching recent threads as stronger continuity evidence than unrelated recent-session carryover
+  - execution setbacks were already visible in `execution_pressure`, but they were still detached from open project commitments, so the guardian could not surface explicit follow-through risk on the same live project
+- scope:
+  - updated `backend/src/guardian/world_model.py` so recent-session continuity is reprioritized by the live project anchor just like collaborator, obligation, and timeline context
+  - carried live-project-matching recent-thread continuity into commitments, `next_up`, dominant-thread selection, and project-state synthesis instead of leaving it buried in the recent-session summary block
+  - surfaced explicit follow-through risk when cross-thread commitments and recent execution setbacks both match the live project, and promoted that pressure into the world-model open-loop surface
+  - extended `backend/src/evals/harness.py` and guardian-state tests so the deterministic guardian world-model contract now proves cross-thread continuity matching and follow-through-risk exposure together
+- focused review:
+  - real bug found:
+    - the first Batch Q pass still treated `Investor brief` and `investor-brief` as different topics, so execution-pressure rows could fail to link back to the live project even when they were clearly about the same workflow
+    - fixed by normalizing non-alphanumeric separators in `backend/src/guardian/world_model.py::_normalize_topic(...)` before topic matching, which made the eval contract truthful instead of depending on punctuation luck
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
+    - result: `30 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_world_model_behavior --indent 0`
+    - result: `passed`, with `continuity_thread_matches_live_project=true` and `includes_follow_through_risk=true`
   - added `guardian_judgment_behavior` to `backend/src/evals/harness.py` plus targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_strategist_tick.py` proving the new focus provenance, contradiction-aware confidence downgrade, and medium-urgency defer path
 - validation:
   - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/guardian/state.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py backend/tests/test_eval_harness.py`

@@ -190,7 +190,8 @@ def _prioritize_topic_context(items: list[str], topic: str | None, *, limit: int
 
 
 def _normalize_topic(value: str | None) -> str:
-    return " ".join(str(value or "").lower().split())
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    return " ".join(normalized.split())
 
 
 def _text_matches_topic(candidate: str, topic: str | None) -> bool:
@@ -336,6 +337,7 @@ def build_guardian_world_model(
         or _clean_line(observer_context.current_event or "")
         or _clean_line(observer_context.active_goals_summary or "")
     )
+    recent_session_lines = _prioritize_topic_context(recent_session_lines, live_topic_anchor, limit=2)
     project_memory = _prioritize_topic_context(project_memory, live_topic_anchor, limit=2)
     active_routines = _prioritize_topic_context(active_routines, live_topic_anchor, limit=3)
     collaborators = _prioritize_topic_context(collaborators, live_topic_anchor, limit=3)
@@ -358,6 +360,14 @@ def build_guardian_world_model(
     )
     continuity_threads = _dedupe(recent_session_lines + feedback_lines[:1])
     execution_pressure = _extract_lines(recent_execution_summary, limit=3)
+    matching_recent_threads = [
+        item for item in recent_session_lines
+        if _text_matches_topic(item, live_topic_anchor)
+    ] if live_topic_anchor else []
+    stale_recent_threads = [
+        item for item in recent_session_lines
+        if not _text_matches_topic(item, live_topic_anchor)
+    ] if live_topic_anchor else []
 
     commitments: list[str] = []
     if observer_context.current_event:
@@ -368,6 +378,7 @@ def build_guardian_world_model(
             commitments.append(summary)
     if observer_context.active_goals_summary:
         commitments.append(observer_context.active_goals_summary)
+    commitments.extend(matching_recent_threads[:1])
     commitments.extend(commitment_memory[:2])
     commitments.extend(project_memory[:1])
     commitments.extend(memory_lines[:1])
@@ -395,16 +406,20 @@ def build_guardian_world_model(
         + list(procedural_constraints[:1])
     )
     next_up = _dedupe(
-        list(commitment_memory[:1])
+        matching_recent_threads[:1]
+        + list(commitment_memory[:1])
         + project_memory[:1]
         + list(active_projects[:1])
         + list(goal_memory[:1])
         + list(recent_session_lines[:1])
     )
     dominant_thread = (
-        continuity_threads[0]
+        matching_recent_threads[0]
+        if matching_recent_threads
+        else (continuity_threads[0]
         if continuity_threads
         else (active_projects[0] if active_projects else current_focus)
+        )
     )
     active_constraints: list[str] = []
     if observer_context.interruption_mode == "focus":
@@ -422,7 +437,7 @@ def build_guardian_world_model(
         + list(durable_project_signals)
         + list(recent_project_signals)
     )
-    project_state = _dedupe(list(active_project_signals) + execution_pressure[:2])
+    project_state = _dedupe(list(active_project_signals) + matching_recent_threads[:1] + execution_pressure[:2])
     has_observer_focus_signal = any(
         (
             observer_context.current_event,
@@ -476,6 +491,9 @@ def build_guardian_world_model(
         item for item in execution_pressure
         if not _text_matches_topic(item, observer_project)
     ] if observer_project else []
+    has_follow_through_pressure = bool(
+        observer_project and matching_recent_threads and matching_execution_pressure
+    )
     has_supporting_context_conflict = bool(observer_project and stale_support)
     has_execution_context_conflict = bool(observer_project and stale_execution_pressure)
     if observer_project and len(stale_support) >= 2 and not matching_support:
@@ -493,6 +511,25 @@ def build_guardian_world_model(
     elif observer_project and matching_execution_pressure and stale_execution_pressure:
         judgment_risks.append(
             f"Some recent execution pressure still points away from live project '{observer_project}'."
+        )
+    if observer_project and stale_recent_threads and not matching_recent_threads:
+        judgment_risks.append(
+            f"Recent cross-thread continuity does not support live project '{observer_project}'."
+        )
+    elif observer_project and matching_recent_threads and stale_recent_threads:
+        judgment_risks.append(
+            f"Some recent cross-thread continuity still points away from live project '{observer_project}'."
+        )
+    if has_follow_through_pressure:
+        judgment_risks.append(
+            f"Cross-thread commitments and recent execution setbacks suggest live follow-through risk on project '{observer_project}'."
+        )
+        open_loops.append(
+            f"Follow-through risk remains open for live project '{observer_project}'."
+        )
+        active_blockers = _dedupe(
+            list(active_blockers)
+            + [f"Follow-through risk remains open for live project '{observer_project}'"]
         )
     has_live_focus_anchor = focus_source == "current_event" or focus_source.startswith("observer_")
     if (

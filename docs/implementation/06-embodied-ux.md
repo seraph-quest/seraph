@@ -30,6 +30,7 @@
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
 - [x] cockpit operator-terminal density now also includes an active triage lane for pending approvals, workflow branch families, queued guardian items, and reach failures with direct continue, open-thread, latest-branch, approve or deny, and desktop-shell actions instead of forcing operators to scan four separate panes for the next action
 - [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
+- [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -47,6 +48,7 @@
 - [x] this workstream now ships `artifact-evidence-roundtrip-v2`
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships the denser operator-terminal layer with live operator feed, saved runbook macros, approval-aware workflow timeline actions, and a separate Activity Ledger window
+- [x] this workstream now ships `workflow-step-focus-and-handoff-v1`
 - [x] this workstream now ships `cockpit-density-and-cross-surface-command-control-v2` with active triage, denser evidence shortcuts, and keyboard-first operator control for approvals, workflow recovery, queued guardian items, degraded reach, artifacts, and trace
 - [x] this workstream now hands the queue forward to a visual workflow debugger, richer cockpit density, and deeper studio ergonomics rather than first-pass branch/resume control
 
@@ -114,6 +116,35 @@
 - review:
   - focused branch review against bugs, regressions, and hallucinated assumptions found the branch-family latest-branch bug plus the stale-evidence `Shift+E` shortcut bug and the inconsistent evidence-shortcut workflow mock above
   - no additional material issues remained after those fixes and the targeted frontend validation
+
+### `workflow-step-focus-and-handoff-v1`
+
+- status: complete on `feat/workflow-operator-density-batch-o-v1` and ready for PR
+- root causes addressed:
+  - the cockpit already showed workflow timelines and artifacts, but failed or recoverable steps were still too easy to miss because the operator had to reconstruct the hottest step from generic timeline rows and inspector stacks
+  - workflow rows still exposed replay and approval controls, but they did not offer a direct handoff path from the current failed step or the latest workflow output back into the command surface
+  - the first shortcut pass for `Shift+W` just inspected the top workflow triage entry, which could point at the newest branch instead of the most operator-useful run with step-focus evidence
+- scope:
+  - workflow timeline rows now surface prioritized step-focus summaries plus direct `Use failure context` and `Use latest output` actions
+  - the workflow inspector now promotes focused step rows with direct context handoff, output reuse, repair, retry, and compatible follow-on workflow actions
+  - keyboard-first control now also includes `Shift+W` for top-workflow inspection and `Shift+U` for the latest workflow output handoff
+- review findings fixed before PR:
+  - `Shift+W` initially chose the newest workflow triage entry instead of the best step-bearing run, so the shortcut could open a branch without the dense step context the shortcut was supposed to surface
+  - the new step-focus layer also exposed stale uniqueness assumptions in older cockpit tests that expected certain workflow summary strings and `Use Output` controls to appear only once
+  - fixed by preferring the best step-bearing workflow candidate for `Shift+W` and by tightening the older tests so they assert presence rather than accidental uniqueness
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces evidence shortcuts and keyboard-first triage control"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow approval, artifact, and trace density inside the inspector"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow runs in the cockpit inspector"`
+    - result: `passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
 
 ## Non-Goals
 

@@ -565,10 +565,10 @@ describe("CockpitView", () => {
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
     expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
-    expect(screen.getByText(/web_search succeeded · 2 web results/)).toBeInTheDocument();
+    expect(screen.getAllByText(/web_search succeeded · 2 web results/)).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Branch web_search" })).toBeInTheDocument();
-    expect(screen.getByText("Use Output")).toBeInTheDocument();
+    expect(screen.getAllByText("Use Output")).not.toHaveLength(0);
     const runButton = screen.getByRole("button", { name: "Run summarize-file" });
     expect(runButton).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run annotate-image" })).not.toBeInTheDocument();
@@ -704,7 +704,20 @@ describe("CockpitView", () => {
               updated_at: "2026-03-18T12:04:00Z",
               summary: "workflow_web_brief_to_file failed at write_file",
               step_tools: ["web_search", "write_file"],
-              step_records: [],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/brief.md"],
+                  error_summary: "write_file blocked by approval",
+                  recovery_hint: "Approve the pending write step and continue the workflow.",
+                  recovery_actions: [{ type: "approval", label: "Approve write_file" }],
+                  is_recoverable: true,
+                },
+              ],
               artifact_paths: ["notes/brief.md"],
               continued_error_steps: ["write_file"],
               risk_level: "medium",
@@ -986,6 +999,16 @@ describe("CockpitView", () => {
 
     fireEvent.keyDown(window, { key: "E", shiftKey: true });
     await waitFor(() => expect(screen.getByRole("button", { name: "Use In Command Bar" })).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "W", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "U", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument(),
+    );
   }, 30000);
 
   it("prefers the newest artifact across workflow runs for evidence shortcuts", async () => {
@@ -3881,6 +3904,20 @@ describe("CockpitView", () => {
             updated_at: "2026-03-26T09:03:00Z",
             summary: "atlas-brief waiting on write_file approval",
             step_tools: ["read_file", "write_file"],
+            step_records: [
+              {
+                id: "write_file",
+                index: 1,
+                tool: "write_file",
+                status: "failed",
+                argument_keys: ["file_path"],
+                artifact_paths: ["notes/brief.md"],
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve write_file and continue the workflow.",
+                recovery_actions: [{ type: "approval", label: "Approve write_file" }],
+                is_recoverable: true,
+              },
+            ],
             artifact_paths: ["notes/brief.md"],
             continued_error_steps: ["write_file"],
             risk_level: "medium",
@@ -3951,6 +3988,17 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(screen.getByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).toBeInTheDocument(),
     );
+
+    const stepRow = within(inspectorWindow as HTMLElement).getByText(/write_file · write_file failed · write_file blocked by approval/i).closest(".cockpit-inspector-stack-row");
+    expect(stepRow).not.toBeNull();
+    expect(within(stepRow as HTMLElement).getByRole("button", { name: "Repair step write_file in atlas-brief" })).toBeInTheDocument();
+
+    fireEvent.click(within(stepRow as HTMLElement).getByRole("button", { name: "Use step context write_file for atlas-brief" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review workflow "atlas-brief" step "write_file" \(write_file\)\./)).toBeInTheDocument(),
+    );
+
+    expect(within(stepRow as HTMLElement).getByRole("button", { name: "Run summarize-file from step output notes/brief.md" })).toBeInTheDocument();
   }, 15000);
 
   it("lets operators edit MCP config from the extension studio", async () => {

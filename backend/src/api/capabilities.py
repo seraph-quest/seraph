@@ -25,6 +25,7 @@ from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
 from src.extensions.lifecycle import get_extension
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
+from src.extensions.source_capabilities import list_source_capability_inventory
 from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
@@ -61,6 +62,11 @@ _BOOTSTRAP_ACTION_PRIORITY = {
     "set_mcp_policy": 5,
     "set_tool_policy": 6,
 }
+
+
+@router.get("/capabilities/source-surfaces")
+async def source_surfaces():
+    return list_source_capability_inventory()
 
 
 def _ensure_workflow_manager_workspace_extensions_loaded() -> None:

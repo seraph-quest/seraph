@@ -45,6 +45,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The extension-platform transition and five-wave capability import program are now represented in the shipped state on `develop`.
 - [x] Seraph now ships Hermes-style runtime primitives (`execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`) plus packaged browser, messaging, automation, node, canvas, and workflow-runtime surfaces through the extension architecture.
 - [x] The workspace now makes imported capability reach, extension governance, and runtime-path/capability-family spend attribution visible inside the operator surface instead of leaving the new breadth opaque.
+- [x] The runtime now exposes provider-neutral source contracts and source inventory for public-web tools, managed authenticated connectors, and raw MCP gaps, so Seraph can compose source-aware routines without hardcoding one provider pipeline per use case.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
 - [x] The next strategic focus is now post-import hardening: deeper execution isolation, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.

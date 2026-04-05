@@ -32,6 +32,7 @@
 - [x] cockpit workflow surfaces now derive branch-family supervision from persisted lineage, including child/peer branch inspection plus latest-branch continue/open-parent controls, instead of treating every workflow run as an isolated replay row
 - [x] built-in delegation now exposes a separate `vault_keeper` specialist for secret-management tools so generic memory delegation stops carrying direct vault read/write capability
 - [x] capability bootstrap now limits automatic repair to low-risk local workflow or skill toggles, leaving policy lifts and capability-surface expansion as explicit operator actions instead of workflow-planning side effects, and generated repair bundles no longer batch-run multiple privileged mutations from one cockpit click
+- [x] provider-neutral source capability discovery now exposes typed public-web tools, managed authenticated connectors, and explicit raw-MCP gaps so execution planning can inspect real external-source seams before composing a routine
 
 ## Working On Now
 
@@ -39,6 +40,7 @@
 - [x] this workstream partnered on `cockpit-workflow-views-v1`
 - [x] this workstream now also ships `workflow-timeline-and-approval-replay-v3`
 - [x] this workstream now also ships `retire-village-and-editor-v1` and `execution-safety-hardening-v7` alongside richer workflow replay metadata, failed-step visibility, and retry-from-step control surfaces
+- [x] this workstream now also ships `adapter-first-capability-contracts-v1` for source-capability discovery and connector-first external evidence planning
 
 ## Still To Do On `develop`
 

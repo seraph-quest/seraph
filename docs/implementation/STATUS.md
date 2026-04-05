@@ -212,7 +212,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
 - [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser step-level workflow/operator debugging beyond the new triage and evidence-control layer, stronger intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, and production-grade hardening for the broadened reach surface.
-- [ ] The next major step is to harden and deepen the imported capability surface without losing the existing guardian trust and memory foundations.
+- [ ] The next major step is to harden and generalize the imported capability surface around atomic capability contracts, adapter-backed authenticated source access, and stronger execution boundaries without losing the existing guardian trust and memory foundations.
 
 ## Workstream View
 

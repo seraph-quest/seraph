@@ -13,6 +13,7 @@ Implementation mirror:
 - `docs/implementation/10-superiority-delivery.md` owns the shipped-on-`develop` translation of this program
 - `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record
 - the GitHub Project, issues, and PRs own active execution state
+- `docs/research/15-reference-systems-refresh-2026-04.md` records the benchmark refresh that sharpened the priorities below
 
 That means winning on:
 
@@ -55,6 +56,10 @@ Seraph has approvals, tool policy modes, secret redaction, and sandboxed shell p
 
 Seraph has a browser surface, WebSocket path, and native daemon foundation, but the reviewed competitors document richer channel and operator reach today.
 
+### 5. Capability contracts and source adapters
+
+Seraph has imported a broad capability surface, but it is still too easy for roadmap thinking to drift into source-specific or provider-specific product pipelines. The stronger reference systems increasingly benefit from reusable plugin, provider, and runtime seams. Seraph should answer that with provider-neutral atomic capability contracts plus thin adapters, not a bespoke feature per source.
+
 ## Program Of Work
 
 ### Interface and control plane
@@ -79,6 +84,13 @@ Seraph has a browser surface, WebSocket path, and native daemon foundation, but 
 
 - extend the first native-notification baseline into broader non-browser reach
 - deepen first-class workflow composition into clearer operator-facing workflow control, artifact round-tripping, and broader leverage on top of tools, skills, MCP, and specialists
+
+### Capability contracts and adapters
+
+- define provider-neutral atomic capabilities for external evidence, authenticated sources, and reusable work surfaces
+- keep authenticated systems connector-first, with browser inspection as fallback rather than primary auth path
+- let Seraph compose routines from those capabilities instead of building one-off product pipelines per provider or source
+- extend this same adapter logic to memory providers so Seraph can preserve a guardian-first canonical memory model while still using external memory systems additively
 
 ## Proof Of Superiority
 

@@ -425,3 +425,92 @@ async def test_operator_timeline_uses_retry_draft_when_no_thread_continue_messag
     payload = resp.json()
     workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
     assert workflow_item["continue_message"] == "Retry workflow \"retryable-save\" from step \"save\"."
+
+
+@pytest.mark.asyncio
+async def test_operator_timeline_hides_stale_resume_surface_when_workflow_boundary_is_blocked(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-3",
+                        "workflow_name": "authenticated-brief",
+                        "summary": "Run is blocked by trust-boundary drift.",
+                        "status": "failed",
+                        "started_at": "2026-03-19T10:00:00Z",
+                        "updated_at": "2026-03-19T10:02:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "thread_continue_message": "Continue from stale approval.",
+                        "approval_recovery_message": (
+                            "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+                            "Start a fresh run instead of replaying or resuming."
+                        ),
+                        "retry_from_step_draft": "Retry workflow \"authenticated-brief\" from step \"save\".",
+                        "replay_draft": "Replay authenticated workflow",
+                        "replay_allowed": True,
+                        "replay_block_reason": "approval_context_changed",
+                        "replay_recommended_actions": [
+                            {"type": "set_tool_policy", "label": "Allow write_file", "mode": "full"}
+                        ],
+                        "risk_level": "medium",
+                        "execution_boundaries": ["authenticated_external_source", "workspace_write"],
+                        "pending_approval_count": 0,
+                        "resume_from_step": "save",
+                        "resume_checkpoint_label": "Save step",
+                        "run_identity": "session-1:workflow_authenticated_brief:auth-brief",
+                        "run_fingerprint": "auth-brief",
+                        "continued_error_steps": ["save"],
+                        "failed_step_tool": "write_file",
+                        "checkpoint_step_ids": ["search", "save"],
+                        "last_completed_step_id": "search",
+                        "checkpoint_candidates": [
+                            {
+                                "step_id": "save",
+                                "label": "save (write_file)",
+                                "kind": "retry_failed_step",
+                                "status": "continued_error",
+                            },
+                        ],
+                        "branch_kind": "retry_failed_step",
+                        "branch_depth": 0,
+                        "parent_run_identity": None,
+                        "root_run_identity": "session-1:workflow_authenticated_brief:auth-brief",
+                        "resume_plan": {
+                            "resume_from_step": "save",
+                            "draft": "Retry workflow \"authenticated-brief\" from step \"save\".",
+                        },
+                        "availability": "ready",
+                        "step_records": [
+                            {"id": "search", "tool": "web_search", "status": "succeeded"},
+                            {"id": "save", "tool": "write_file", "status": "continued_error"},
+                        ],
+                    }
+                ]
+            ),
+        ),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.operator.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.operator.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.operator.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Session 1"}]),
+        ),
+    ):
+        resp = await client.get("/api/operator/timeline", params={"session_id": "session-1", "limit": 8})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
+    assert workflow_item["continue_message"].startswith("Workflow 'authenticated-brief' changed its trust boundary")
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["recommended_actions"] == []
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["resume_checkpoint_label"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None

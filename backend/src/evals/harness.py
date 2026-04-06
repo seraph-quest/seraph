@@ -5534,6 +5534,113 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
+    from src.api.activity import get_activity_ledger
+    from src.api.operator import get_operator_timeline
+
+    started_at = datetime.now(timezone.utc) - timedelta(minutes=6)
+    updated_at = started_at + timedelta(minutes=3)
+    blocked_run = {
+        "id": "run-1",
+        "workflow_name": "authenticated-brief",
+        "summary": "Authenticated workflow boundary drifted.",
+        "status": "failed",
+        "started_at": started_at.isoformat().replace("+00:00", "Z"),
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+        "thread_id": "thread-1",
+        "thread_label": "Research thread",
+        "thread_continue_message": "Continue from stale approval.",
+        "approval_recovery_message": (
+            "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+            "Start a fresh run instead of replaying or resuming."
+        ),
+        "retry_from_step_draft": 'Run workflow "authenticated-brief" with query="seraph". Resume from step "save".',
+        "replay_draft": 'Run workflow "authenticated-brief" with query="seraph".',
+        "replay_allowed": True,
+        "replay_block_reason": "approval_context_changed",
+        "replay_recommended_actions": [{"type": "open_settings", "label": "Open settings"}],
+        "risk_level": "medium",
+        "execution_boundaries": ["authenticated_external_source", "workspace_write"],
+        "pending_approval_count": 0,
+        "resume_from_step": "save",
+        "resume_checkpoint_label": "save (write_file)",
+        "run_identity": "thread-1:workflow_authenticated_brief:auth-brief",
+        "run_fingerprint": "auth-brief",
+        "continued_error_steps": ["save"],
+        "failed_step_tool": "write_file",
+        "checkpoint_step_ids": ["search", "save"],
+        "last_completed_step_id": "search",
+        "checkpoint_candidates": [
+            {
+                "step_id": "save",
+                "label": "save (write_file)",
+                "kind": "retry_failed_step",
+                "status": "continued_error",
+            }
+        ],
+        "branch_kind": "retry_failed_step",
+        "branch_depth": 0,
+        "parent_run_identity": None,
+        "root_run_identity": "thread-1:workflow_authenticated_brief:auth-brief",
+        "resume_plan": {
+            "source_run_identity": "thread-1:workflow_authenticated_brief:auth-brief",
+            "parent_run_identity": "thread-1:workflow_authenticated_brief:auth-brief",
+            "root_run_identity": "thread-1:workflow_authenticated_brief:auth-brief",
+            "branch_kind": "retry_failed_step",
+            "resume_from_step": "save",
+            "resume_checkpoint_label": "save (write_file)",
+            "requires_manual_execution": True,
+        },
+        "availability": "ready",
+        "step_records": [
+            {"id": "search", "tool": "web_search", "status": "succeeded"},
+            {"id": "save", "tool": "write_file", "status": "continued_error"},
+        ],
+    }
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+        patch("src.api.operator._list_workflow_runs", return_value=[blocked_run]),
+        patch("src.api.operator.approval_repository.list_pending", return_value=[]),
+        patch("src.api.operator.native_notification_queue.list", return_value=[]),
+        patch("src.api.operator.insight_queue.peek_all", return_value=[]),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
+        patch("src.api.operator.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+        patch("src.api.activity._list_workflow_runs", return_value=[blocked_run]),
+        patch("src.api.activity.approval_repository.list_pending", return_value=[]),
+        patch("src.api.activity.native_notification_queue.list", return_value=[]),
+        patch("src.api.activity.insight_queue.peek_all", return_value=[]),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
+        patch("src.api.activity.audit_repository.list_events", return_value=[]),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+    ):
+        operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
+        activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
+
+    operator_item = next(item for item in operator_payload["items"] if item["kind"] == "workflow_run")
+    activity_item = next(item for item in activity_payload["items"] if item["kind"] == "workflow_run")
+
+    return {
+        "operator_continue_message_mentions_boundary": "trust boundary" in operator_item["continue_message"].lower(),
+        "operator_replay_draft_is_none": operator_item["replay_draft"] is None,
+        "operator_recommended_actions_empty": operator_item["recommended_actions"] == [],
+        "operator_resume_plan_is_none": operator_item["metadata"]["resume_plan"] is None,
+        "operator_checkpoint_candidates_empty": operator_item["metadata"]["checkpoint_candidates"] == [],
+        "activity_continue_message_mentions_boundary": "trust boundary" in activity_item["continue_message"].lower(),
+        "activity_replay_draft_is_none": activity_item["replay_draft"] is None,
+        "activity_recommended_actions_empty": activity_item["recommended_actions"] == [],
+        "activity_resume_plan_is_none": activity_item["metadata"]["resume_plan"] is None,
+        "activity_checkpoint_candidates_empty": activity_item["metadata"]["checkpoint_candidates"] == [],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -6717,6 +6824,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="The operator timeline keeps workflows, approvals, notifications, queued bundles, interventions, and failures bound to one thread with the right continue and replay metadata.",
         runner=_eval_threaded_operator_timeline_behavior,
+    ),
+    EvalScenario(
+        name="workflow_boundary_blocked_surface_behavior",
+        category="behavior",
+        description="Operator and activity workflow surfaces fail closed when trust-boundary drift blocks replay or resume, instead of advertising stale continuation controls.",
+        runner=_eval_workflow_boundary_blocked_surface_behavior,
     ),
     EvalScenario(
         name="capability_repair_behavior",

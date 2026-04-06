@@ -340,9 +340,13 @@
   - the workflows runs API already marked trust-boundary drift correctly with `approval_context_changed` and `approval_context_missing`, but it still serialized checkpoint candidates and a concrete `resume_plan` for those same blocked runs
   - that left operator surfaces with stale branch/retry metadata even though `/api/workflows/runs/{run_identity}/resume-plan` would fail closed, which made the API contract less truthful than the runtime boundary
 - scope:
-  - workflow run projection now clears `resume_from_step`, `resume_checkpoint_label`, `checkpoint_candidates`, and `resume_plan` whenever replay is blocked because the trust boundary changed or because the run predates tracked lineage for the current privileged surface
+- workflow run projection now clears `resume_from_step`, `resume_checkpoint_label`, `checkpoint_candidates`, and `resume_plan` whenever replay is blocked because the trust boundary changed or because the run predates tracked lineage for the current privileged surface
+- operator timeline and activity ledger now re-sanitize blocked workflow runs too, so stale replay drafts, checkpoint metadata, and retry actions do not leak back in through downstream surfaces if upstream run payloads ever regress
   - the same fail-closed rule now applies to both completed workflow runs reconstructed from audit events and still-pending runs reconstructed from call state, so the operator surface does not advertise stale continuation paths on either side
   - blocked trust-boundary runs also stop surfacing approval-style thread continuation prompts, so activity and cockpit layers fall back to the recovery message instead of implying that approval alone can unblock the run
+  - blocked trust-boundary runs now also drop stale replay repair and step-recovery actions, so policy-lift or repair suggestions only appear when the run is actually blocked by availability or repair state rather than by privilege drift
+  - delegated and direct authenticated-source workflow approval context now carries credential-source provenance too, so replay and resume checks can detect credential-route drift rather than only server-name drift
+  - delegated workflow approval context now also records delegated tool inventory, so replay and resume checks can detect a widened specialist tool surface even when the specialist name stayed the same
   - pending approvals, repair guidance, and other non-boundary replay blocks still keep their existing branch metadata where that metadata is part of the intended operator contract
 - validation:
   - `python3 -m py_compile backend/src/api/workflows.py backend/tests/test_workflows.py`

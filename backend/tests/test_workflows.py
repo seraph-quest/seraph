@@ -2620,6 +2620,109 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
 
 
 @pytest.mark.asyncio
+async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_blocks_replay(client):
+    recorded_context = {
+        "workflow_name": "web-brief-to-file",
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "accepts_secret_refs": False,
+        "step_tools": ["web_search", "write_file"],
+    }
+    current_context = {
+        "workflow_name": "web-brief-to-file",
+        "risk_level": "high",
+        "execution_boundaries": ["secret_injection", "workspace_write"],
+        "accepts_secret_refs": True,
+        "step_tools": ["get_secret_ref", "write_file"],
+    }
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-failed",
+                    "session_id": "session-1",
+                    "event_type": "tool_failed",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file failed on save",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-repair-blocked",
+                        "approval_context": recorded_context,
+                        "step_tools": ["web_search", "write_file"],
+                        "step_records": [
+                            {"id": "search", "tool": "web_search", "status": "succeeded"},
+                            {
+                                "id": "save",
+                                "tool": "write_file",
+                                "status": "failed",
+                                "error_summary": "write_file blocked by policy",
+                            },
+                        ],
+                        "continued_error_steps": ["save"],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "web-brief-repair-blocked",
+                        "approval_context": recorded_context,
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "high",
+                "execution_boundaries": ["secret_injection", "workspace_write"],
+                "accepts_secret_refs": True,
+                "approval_context": current_context,
+            },
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": False,
+                    "missing_tools": ["write_file"],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["replay_block_reason"] == "approval_context_changed"
+    assert run["replay_recommended_actions"] == []
+    assert run["step_records"][1]["recovery_actions"] == []
+    assert run["step_records"][1]["recovery_hint"] is None
+    assert run["step_records"][1]["is_recoverable"] is False
+
+
+@pytest.mark.asyncio
 async def test_workflow_runs_endpoint_ignores_approval_context_list_reordering(client):
     recorded_context = {
         "workflow_name": "web-brief-to-file",
@@ -3097,6 +3200,249 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
     assert run["checkpoint_candidates"] == []
     assert run["resume_plan"] is None
     assert run["current_approval_context"]["delegated_specialists"] == ["mcp_github"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_detects_delegated_authenticated_credential_source_drift(client):
+    recorded_context = {
+        "workflow_name": "delegated-brief",
+        "risk_level": "high",
+        "execution_boundaries": ["delegation", "external_mcp", "authenticated_external_source"],
+        "accepts_secret_refs": True,
+        "step_tools": ["delegate_task", "write_file"],
+        "delegated_specialists": ["mcp_github"],
+        "authenticated_source": True,
+        "source_systems": [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+                "credential_sources": ["vault:github_token"],
+            }
+        ],
+    }
+    current_context = {
+        "workflow_name": "delegated-brief",
+        "risk_level": "high",
+        "execution_boundaries": ["authenticated_external_source", "external_mcp", "delegation"],
+        "accepts_secret_refs": True,
+        "step_tools": ["write_file", "delegate_task"],
+        "delegated_specialists": ["mcp_github"],
+        "authenticated_source": True,
+        "source_systems": [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+                "credential_sources": ["env:GITHUB_TOKEN"],
+            }
+        ],
+    }
+    runtime_workflow_tool = SimpleNamespace(
+        name="workflow_delegated_brief",
+        get_approval_context=lambda _arguments: current_context,
+    )
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_delegated_brief",
+                    "summary": "workflow_delegated_brief succeeded (2 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "delegated-brief",
+                        "run_fingerprint": "delegated-brief-auth-cred",
+                        "approval_context": recorded_context,
+                        "step_tools": ["delegate_task", "write_file"],
+                        "step_records": [],
+                        "artifact_paths": ["notes/brief.md"],
+                        "continued_error_steps": [],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_delegated_brief",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "delegated-brief-auth-cred",
+                        "approval_context": recorded_context,
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "high",
+                "execution_boundaries": ["delegation", "external_mcp", "authenticated_external_source"],
+                "accepts_secret_refs": True,
+                "approval_context": recorded_context,
+            },
+        ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[runtime_workflow_tool]),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "delegated-brief",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["approval_context_mismatch"] is True
+    assert run["replay_allowed"] is False
+    assert run["replay_block_reason"] == "approval_context_changed"
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
+    assert run["current_approval_context"]["source_systems"] == [
+        {
+            "server_name": "github",
+            "hostname": "api.github.com",
+            "source": "extension",
+            "authenticated_source": True,
+            "credential_sources": ["env:GITHUB_TOKEN"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_detects_delegated_tool_inventory_drift(client):
+    recorded_context = {
+        "workflow_name": "delegated-brief",
+        "risk_level": "high",
+        "execution_boundaries": ["delegation", "external_mcp"],
+        "accepts_secret_refs": True,
+        "step_tools": ["delegate_task", "write_file"],
+        "delegated_specialists": ["mcp_github"],
+        "delegated_tool_names": ["mcp_github_issues"],
+    }
+    current_context = {
+        "workflow_name": "delegated-brief",
+        "risk_level": "high",
+        "execution_boundaries": ["external_mcp", "delegation"],
+        "accepts_secret_refs": True,
+        "step_tools": ["write_file", "delegate_task"],
+        "delegated_specialists": ["mcp_github"],
+        "delegated_tool_names": ["mcp_github_issues", "mcp_github_repo"],
+    }
+    runtime_workflow_tool = SimpleNamespace(
+        name="workflow_delegated_brief",
+        get_approval_context=lambda _arguments: current_context,
+    )
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_delegated_brief",
+                    "summary": "workflow_delegated_brief succeeded (2 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "delegated-brief",
+                        "run_fingerprint": "delegated-brief-tool-inventory",
+                        "approval_context": recorded_context,
+                        "step_tools": ["delegate_task", "write_file"],
+                        "step_records": [],
+                        "artifact_paths": ["notes/brief.md"],
+                        "continued_error_steps": [],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_delegated_brief",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "delegated-brief-tool-inventory",
+                        "approval_context": recorded_context,
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "high",
+                "execution_boundaries": ["delegation", "external_mcp"],
+                "accepts_secret_refs": True,
+                "approval_context": recorded_context,
+            },
+        ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[runtime_workflow_tool]),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "delegated-brief",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["approval_context_mismatch"] is True
+    assert run["replay_allowed"] is False
+    assert run["replay_block_reason"] == "approval_context_changed"
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
+    assert run["current_approval_context"]["delegated_tool_names"] == [
+        "mcp_github_issues",
+        "mcp_github_repo",
+    ]
 
 
 @pytest.mark.asyncio
@@ -4062,6 +4408,7 @@ class TestWorkflowSurfaces:
             "hostname": "api.github.com",
             "source": "extension",
             "authenticated_source": True,
+            "credential_sources": ["vault:github_token"],
         }
 
         approval_context = _approval_context_for_workflow(
@@ -4077,6 +4424,7 @@ class TestWorkflowSurfaces:
                 "hostname": "api.github.com",
                 "source": "extension",
                 "authenticated_source": True,
+                "credential_sources": ["vault:github_token"],
             }
         ]
         assert _checkpoint_context_allowed(approval_context) is False
@@ -4139,6 +4487,7 @@ class TestWorkflowSurfaces:
             "hostname": "api.github.com",
             "source": "extension",
             "authenticated_source": True,
+            "credential_sources": ["env:GITHUB_TOKEN", "vault:github_token"],
         }
         github_specialist = SimpleNamespace(name="mcp_github", tools=[mcp_tool])
 
@@ -4153,6 +4502,7 @@ class TestWorkflowSurfaces:
         assert approval_context["risk_level"] == "high"
         assert approval_context["authenticated_source"] is True
         assert approval_context["delegated_specialists"] == ["mcp_github"]
+        assert approval_context["delegated_tool_names"] == ["mcp_github_issues"]
         assert "external_mcp" in approval_context["execution_boundaries"]
         assert "authenticated_external_source" in approval_context["execution_boundaries"]
         assert approval_context["source_systems"] == [
@@ -4161,9 +4511,51 @@ class TestWorkflowSurfaces:
                 "hostname": "api.github.com",
                 "source": "extension",
                 "authenticated_source": True,
+                "credential_sources": ["env:GITHUB_TOKEN", "vault:github_token"],
             }
         ]
         assert _checkpoint_context_allowed(approval_context) is False
+
+    def test_workflow_tool_approval_context_records_delegated_tool_inventory(self):
+        workflow = Workflow(
+            name="delegated-mcp-sync",
+            description="Delegate authenticated source work",
+            inputs={
+                "task": {"type": "string", "required": True},
+                "specialist": {"type": "string", "required": True},
+            },
+            steps=[
+                WorkflowStep(
+                    id="delegate",
+                    tool="delegate_task",
+                    arguments={
+                        "task": "{{ task }}",
+                        "specialist": "{{ specialist }}",
+                    },
+                )
+            ],
+            requires_tools=["delegate_task"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {"delegate_task": DummyTool("delegate_task", lambda **_kwargs: "delegated")},
+        )
+        issues_tool = MagicMock()
+        issues_tool.name = "mcp_github_issues"
+        repo_tool = MagicMock()
+        repo_tool.name = "mcp_github_repo"
+        github_specialist = SimpleNamespace(name="mcp_github", tools=[issues_tool, repo_tool])
+
+        with patch("src.agent.specialists.build_all_specialists", return_value=[github_specialist]):
+            approval_context = workflow_tool.get_approval_context(
+                {
+                    "task": "Review the assigned issues.",
+                    "specialist": "mcp_github",
+                }
+            )
+
+        assert approval_context["delegated_specialists"] == ["mcp_github"]
+        assert approval_context["delegated_tool_names"] == ["mcp_github_issues", "mcp_github_repo"]
 
     def test_workflow_metadata_fails_closed_when_delegate_target_is_dynamic(self):
         workflow = Workflow(

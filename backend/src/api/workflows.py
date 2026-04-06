@@ -299,6 +299,7 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
     execution_boundaries = _normalize_string_list(value.get("execution_boundaries"))
     step_tools = _normalize_string_list(value.get("step_tools"))
     delegated_specialists = _normalize_string_list(value.get("delegated_specialists"))
+    delegated_tool_names = _normalize_string_list(value.get("delegated_tool_names"))
     authenticated_source = bool(value.get("authenticated_source", False))
     delegation_target_unresolved = bool(value.get("delegation_target_unresolved", False))
     source_systems = _normalize_source_systems(value.get("source_systems"))
@@ -308,6 +309,7 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
             execution_boundaries,
             step_tools,
             delegated_specialists,
+            delegated_tool_names,
             "accepts_secret_refs" in value,
             authenticated_source,
             delegation_target_unresolved,
@@ -324,6 +326,8 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
     }
     if delegated_specialists:
         normalized["delegated_specialists"] = delegated_specialists
+    if delegated_tool_names:
+        normalized["delegated_tool_names"] = delegated_tool_names
     if authenticated_source:
         normalized["authenticated_source"] = True
     if delegation_target_unresolved:
@@ -810,14 +814,14 @@ def _workflow_replay_policy(
     approval_context_mismatch: bool,
     approval_context_missing_for_protected_surface: bool,
 ) -> tuple[bool, str | None]:
-    if availability == "disabled":
-        return False, "workflow_disabled"
-    if availability != "ready":
-        return False, "workflow_unavailable"
     if approval_context_mismatch:
         return False, "approval_context_changed"
     if approval_context_missing_for_protected_surface:
         return False, "approval_context_missing"
+    if availability == "disabled":
+        return False, "workflow_disabled"
+    if availability != "ready":
+        return False, "workflow_unavailable"
     if pending_approval_count > 0:
         return False, "pending_approval"
     if accepts_secret_refs:
@@ -834,6 +838,63 @@ def _workflow_replay_policy(
 
 def _workflow_resume_surface_allowed(*, replay_block_reason: str | None) -> bool:
     return replay_block_reason not in {"approval_context_changed", "approval_context_missing"}
+
+
+def _workflow_repair_surface_allowed(*, replay_block_reason: str | None) -> bool:
+    return replay_block_reason not in {"approval_context_changed", "approval_context_missing"}
+
+
+def _workflow_boundary_blocked(*, replay_block_reason: str | None) -> bool:
+    return replay_block_reason in {"approval_context_changed", "approval_context_missing"}
+
+
+def workflow_surface_continue_message(run: dict[str, Any]) -> str | None:
+    replay_block_reason = str(run.get("replay_block_reason") or "") or None
+    if _workflow_boundary_blocked(replay_block_reason=replay_block_reason):
+        message = run.get("approval_recovery_message")
+        return str(message) if isinstance(message, str) and message.strip() else None
+    for value in (
+        run.get("thread_continue_message"),
+        run.get("approval_recovery_message"),
+        run.get("retry_from_step_draft"),
+        run.get("replay_draft"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def workflow_surface_replay_draft(run: dict[str, Any]) -> str | None:
+    replay_block_reason = str(run.get("replay_block_reason") or "") or None
+    if _workflow_boundary_blocked(replay_block_reason=replay_block_reason):
+        return None
+    value = run.get("replay_draft")
+    return str(value) if isinstance(value, str) and value.strip() else None
+
+
+def workflow_surface_recommended_actions(run: dict[str, Any]) -> list[dict[str, Any]]:
+    replay_block_reason = str(run.get("replay_block_reason") or "") or None
+    if _workflow_boundary_blocked(replay_block_reason=replay_block_reason):
+        return []
+    value = run.get("replay_recommended_actions")
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def workflow_surface_resume_metadata(run: dict[str, Any]) -> dict[str, Any]:
+    replay_block_reason = str(run.get("replay_block_reason") or "") or None
+    blocked = _workflow_boundary_blocked(replay_block_reason=replay_block_reason)
+    checkpoint_candidates = run.get("checkpoint_candidates")
+    if not isinstance(checkpoint_candidates, list):
+        checkpoint_candidates = []
+    return {
+        "replay_allowed": False if blocked else bool(run.get("replay_allowed")),
+        "resume_from_step": None if blocked else run.get("resume_from_step"),
+        "resume_checkpoint_label": None if blocked else run.get("resume_checkpoint_label"),
+        "checkpoint_candidates": [] if blocked else checkpoint_candidates,
+        "resume_plan": None if blocked else run.get("resume_plan"),
+    }
 
 
 def _workflow_runtime_statuses() -> dict[str, dict[str, Any]]:
@@ -1291,6 +1352,18 @@ async def _list_workflow_runs(
             approval_context_mismatch=bool(run.get("approval_context_mismatch")),
             approval_context_missing_for_protected_surface=approval_context_missing_for_protected_surface,
         )
+        repair_surface_allowed = _workflow_repair_surface_allowed(
+            replay_block_reason=replay_block_reason,
+        )
+        if not repair_surface_allowed:
+            run["replay_recommended_actions"] = []
+            if isinstance(step_records, list):
+                for step in step_records:
+                    if not isinstance(step, dict):
+                        continue
+                    step["recovery_actions"] = []
+                    step["recovery_hint"] = None
+                    step["is_recoverable"] = False
         run_identity = build_workflow_run_identity(
             run.get("session_id") if isinstance(run.get("session_id"), str) else None,
             tool_name,
@@ -1494,6 +1567,18 @@ async def _list_workflow_runs(
                 approval_context_mismatch=bool(run.get("approval_context_mismatch")),
                 approval_context_missing_for_protected_surface=approval_context_missing_for_protected_surface,
             )
+            repair_surface_allowed = _workflow_repair_surface_allowed(
+                replay_block_reason=replay_block_reason,
+            )
+            if not repair_surface_allowed:
+                run["replay_recommended_actions"] = []
+                if isinstance(step_records, list):
+                    for step in step_records:
+                        if not isinstance(step, dict):
+                            continue
+                        step["recovery_actions"] = []
+                        step["recovery_hint"] = None
+                        step["is_recoverable"] = False
             run_identity = build_workflow_run_identity(
                 run.get("session_id") if isinstance(run.get("session_id"), str) else None,
                 str(run["tool_name"]),

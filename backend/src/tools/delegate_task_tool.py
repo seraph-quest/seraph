@@ -97,6 +97,17 @@ def _max_risk_level(current: str, candidate: str) -> str:
     return current if current_rank >= candidate_rank else candidate
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: dict[str, None] = {}
+    for item in value:
+        text = str(item).strip()
+        if text:
+            normalized[text] = None
+    return sorted(normalized)
+
+
 def _build_specialists_by_name(specialists: Iterable[object]) -> dict[str, object]:
     specialists_by_name: dict[str, object] = {}
     for specialist in specialists:
@@ -153,6 +164,7 @@ def infer_delegation_approval_context(
     accepts_secret_refs = False
     authenticated_source = False
     source_systems: list[dict[str, Any]] = []
+    delegated_tool_names: list[str] = []
     risk_level = "low"
 
     raw_specialist_tools = getattr(selected_runtime, "tools", []) or []
@@ -163,6 +175,7 @@ def infer_delegation_approval_context(
     if not specialist_tools and isinstance(selected_name, str):
         for tool_name in _SPECIALIST_DEFAULT_TOOL_NAMES.get(selected_name, ()):
             canonical_name = canonical_tool_name(tool_name)
+            delegated_tool_names.append(canonical_name)
             for boundary in get_tool_execution_boundaries(canonical_name):
                 if boundary not in execution_boundaries:
                     execution_boundaries.append(boundary)
@@ -181,6 +194,7 @@ def infer_delegation_approval_context(
         if not isinstance(tool_name, str) or not tool_name:
             continue
         canonical_name = canonical_tool_name(tool_name)
+        delegated_tool_names.append(canonical_name)
         is_mcp = canonical_name.startswith("mcp_")
         for boundary in get_tool_execution_boundaries(canonical_name, is_mcp=is_mcp, tool=tool):
             if boundary not in execution_boundaries:
@@ -195,6 +209,7 @@ def infer_delegation_approval_context(
                 "hostname": str(source_context.get("hostname") or ""),
                 "source": str(source_context.get("source") or "manual"),
                 "authenticated_source": True,
+                "credential_sources": _normalize_string_list(source_context.get("credential_sources")),
             }
             if source_system not in source_systems:
                 source_systems.append(source_system)
@@ -206,6 +221,7 @@ def infer_delegation_approval_context(
 
     return {
         "delegated_specialist": selected_name,
+        "delegated_tool_names": sorted(dict.fromkeys(delegated_tool_names)),
         "delegation_target_unresolved": unresolved,
         "risk_level": risk_level,
         "execution_boundaries": execution_boundaries,

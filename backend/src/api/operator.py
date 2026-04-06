@@ -9,7 +9,13 @@ from fastapi import APIRouter, Query
 
 from src.agent.session import session_manager
 from src.api.observer import _continuity_surface
-from src.api.workflows import _list_workflow_runs
+from src.api.workflows import (
+    _list_workflow_runs,
+    workflow_surface_continue_message,
+    workflow_surface_recommended_actions,
+    workflow_surface_replay_draft,
+    workflow_surface_resume_metadata,
+)
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
@@ -56,6 +62,7 @@ async def get_operator_timeline(
     items: list[dict[str, Any]] = []
 
     for run in workflow_runs:
+        workflow_surface = workflow_surface_resume_metadata(run)
         items.append({
             "id": f"workflow:{run['id']}",
             "kind": "workflow_run",
@@ -66,16 +73,11 @@ async def get_operator_timeline(
             "updated_at": str(run["updated_at"]),
             "thread_id": run.get("thread_id"),
             "thread_label": run.get("thread_label"),
-            "continue_message": (
-                run.get("thread_continue_message")
-                or run.get("approval_recovery_message")
-                or run.get("retry_from_step_draft")
-                or run.get("replay_draft")
-            ),
-            "replay_draft": run.get("replay_draft"),
-            "replay_allowed": run.get("replay_allowed"),
+            "continue_message": workflow_surface_continue_message(run),
+            "replay_draft": workflow_surface_replay_draft(run),
+            "replay_allowed": workflow_surface["replay_allowed"],
             "replay_block_reason": run.get("replay_block_reason"),
-            "recommended_actions": run.get("replay_recommended_actions", []),
+            "recommended_actions": workflow_surface_recommended_actions(run),
             "source": "workflow",
             "metadata": {
                 "run_identity": run.get("run_identity"),
@@ -86,16 +88,16 @@ async def get_operator_timeline(
                 "failed_step_ids": list(run.get("continued_error_steps", []) or []),
                 "failed_step_tool": run.get("failed_step_tool"),
                 "pending_approval_count": run.get("pending_approval_count", 0),
-                "resume_from_step": run.get("resume_from_step"),
-                "resume_checkpoint_label": run.get("resume_checkpoint_label"),
+                "resume_from_step": workflow_surface["resume_from_step"],
+                "resume_checkpoint_label": workflow_surface["resume_checkpoint_label"],
                 "last_completed_step_id": run.get("last_completed_step_id"),
                 "checkpoint_step_ids": list(run.get("checkpoint_step_ids", []) or []),
-                "checkpoint_candidates": run.get("checkpoint_candidates", []),
+                "checkpoint_candidates": workflow_surface["checkpoint_candidates"],
                 "branch_kind": run.get("branch_kind"),
                 "branch_depth": run.get("branch_depth"),
                 "parent_run_identity": run.get("parent_run_identity"),
                 "root_run_identity": run.get("root_run_identity"),
-                "resume_plan": run.get("resume_plan"),
+                "resume_plan": workflow_surface["resume_plan"],
                 "availability": run.get("availability"),
             },
         })

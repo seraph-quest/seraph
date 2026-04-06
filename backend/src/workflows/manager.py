@@ -235,12 +235,94 @@ def _json_safe_value(value: Any) -> Any:
         return str(value)
 
 
+def _max_risk_level(current: str, candidate: str) -> str:
+    ranks = {"low": 0, "medium": 1, "high": 2}
+    current_rank = ranks.get(current, ranks["high"])
+    candidate_rank = ranks.get(candidate, ranks["high"])
+    return current if current_rank >= candidate_rank else candidate
+
+
+def _append_unique_source_systems(
+    target: list[dict[str, Any]],
+    additions: list[dict[str, Any]],
+) -> None:
+    for source_system in additions:
+        if isinstance(source_system, dict) and source_system not in target:
+            target.append(source_system)
+
+
+def _delegate_step_approval_context(
+    workflow: Workflow,
+    step: Any,
+    workflow_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    from src.tools.delegate_task_tool import infer_delegation_approval_context
+
+    if canonical_tool_name(getattr(step, "tool", "")) != "delegate_task":
+        return None
+    raw_arguments = getattr(step, "arguments", None)
+    if not isinstance(raw_arguments, dict):
+        return infer_delegation_approval_context(None, None)
+    render_context = {"inputs": dict(workflow_inputs or {})}
+    render_context.update(workflow_inputs or {})
+    try:
+        rendered_arguments = _render_value(raw_arguments, render_context)
+    except KeyError:
+        rendered_arguments = raw_arguments
+    if not isinstance(rendered_arguments, dict):
+        return infer_delegation_approval_context(None, None)
+
+    def _resolved_string(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        if "{{" in value and "}}" in value:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    return infer_delegation_approval_context(
+        _resolved_string(rendered_arguments.get("task")),
+        _resolved_string(rendered_arguments.get("specialist")),
+    )
+
+
+def _policy_modes_for_approval_context(approval_context: dict[str, Any]) -> list[str]:
+    if bool(approval_context.get("delegation_target_unresolved", False)):
+        return ["full"]
+    if bool(approval_context.get("authenticated_source", False)):
+        return ["full"]
+    if bool(approval_context.get("accepts_secret_refs", False)):
+        return ["full"]
+    boundaries = {
+        str(boundary)
+        for boundary in approval_context.get("execution_boundaries", [])
+        if isinstance(boundary, str)
+    }
+    if boundaries & {
+        "authenticated_external_source",
+        "container_process_execution",
+        "container_process_management",
+        "external_mcp",
+        "sandbox_execution",
+        "secret_injection",
+        "secret_read",
+    }:
+        return ["full"]
+    if approval_context.get("risk_level") == "high":
+        return ["full"]
+    if approval_context.get("risk_level") == "medium":
+        return ["balanced", "full"]
+    return ["safe", "balanced", "full"]
+
+
 def _checkpoint_context_allowed(approval_context: dict[str, Any] | None) -> bool:
     if approval_context is None:
         return True
     if bool(approval_context.get("accepts_secret_refs", False)):
         return False
     if bool(approval_context.get("authenticated_source", False)):
+        return False
+    if bool(approval_context.get("delegation_target_unresolved", False)):
         return False
     boundaries = {
         str(boundary)
@@ -293,12 +375,19 @@ async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any]
     return None
 
 
-def _approval_context_for_workflow(workflow: Workflow, tools_by_name: dict[str, Any] | None = None) -> dict[str, Any]:
+def _approval_context_for_workflow(
+    workflow: Workflow,
+    tools_by_name: dict[str, Any] | None = None,
+    workflow_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     canonical_step_tools = _canonicalize_tool_names(workflow.step_tools)
     execution_boundaries: list[str] = []
     accepts_secret_refs = False
     authenticated_source = False
     source_systems: list[dict[str, Any]] = []
+    delegated_specialists: list[str] = []
+    delegation_target_unresolved = False
+    risk_level = "low"
     for tool_name in workflow.step_tools:
         canonical_name = canonical_tool_name(tool_name)
         runtime_tool = None
@@ -337,8 +426,27 @@ def _approval_context_for_workflow(workflow: Workflow, tools_by_name: dict[str, 
         risk_level = "medium"
     elif any(tool_name in {"execute_code", "get_secret"} for tool_name in canonical_step_tools):
         risk_level = "high"
-    else:
-        risk_level = "low"
+    steps = getattr(workflow, "steps", None)
+    if isinstance(steps, list):
+        for step in steps:
+            delegate_context = _delegate_step_approval_context(workflow, step, workflow_inputs)
+            if not isinstance(delegate_context, dict):
+                continue
+            delegated_specialist = delegate_context.get("delegated_specialist")
+            if isinstance(delegated_specialist, str) and delegated_specialist:
+                delegated_specialists.append(delegated_specialist)
+            if bool(delegate_context.get("delegation_target_unresolved", False)):
+                delegation_target_unresolved = True
+            risk_level = _max_risk_level(risk_level, str(delegate_context.get("risk_level") or "high"))
+            accepts_secret_refs = accepts_secret_refs or bool(delegate_context.get("accepts_secret_refs", False))
+            authenticated_source = authenticated_source or bool(delegate_context.get("authenticated_source", False))
+            for boundary in delegate_context.get("execution_boundaries", []):
+                if isinstance(boundary, str) and boundary not in execution_boundaries:
+                    execution_boundaries.append(boundary)
+            _append_unique_source_systems(
+                source_systems,
+                list(delegate_context.get("source_systems", [])),
+            )
     return {
         "workflow_name": workflow.name,
         "risk_level": risk_level,
@@ -346,6 +454,8 @@ def _approval_context_for_workflow(workflow: Workflow, tools_by_name: dict[str, 
         "accepts_secret_refs": accepts_secret_refs,
         "authenticated_source": authenticated_source,
         "source_systems": source_systems,
+        "delegated_specialists": sorted(dict.fromkeys(delegated_specialists)),
+        "delegation_target_unresolved": delegation_target_unresolved,
         "step_tools": sorted(dict.fromkeys(canonical_step_tools)),
     }
 
@@ -592,8 +702,8 @@ class WorkflowTool(Tool):
             },
         )
 
-    def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
-        return _approval_context_for_workflow(self.workflow, self.tools_by_name)
+    def get_approval_context(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return _approval_context_for_workflow(self.workflow, self.tools_by_name, arguments)
 
     def _control_audit_details(self, control_inputs: dict[str, Any]) -> dict[str, Any]:
         details: dict[str, Any] = {}
@@ -1231,7 +1341,8 @@ class WorkflowManager:
         workflow = self.get_workflow_by_tool_name(tool_name)
         if workflow is None:
             return None
-        policy_modes = self._infer_policy_modes(workflow)
+        approval_context = _approval_context_for_workflow(workflow)
+        policy_modes = self._infer_policy_modes(workflow, approval_context)
         return {
             "description": workflow.description,
             "inputs": workflow.inputs,
@@ -1244,10 +1355,10 @@ class WorkflowManager:
             "requires_tools": _canonicalize_tool_names(workflow.requires_tools),
             "requires_skills": workflow.requires_skills,
             "step_count": len(workflow.steps),
-            "execution_boundaries": self._infer_execution_boundaries(workflow),
-            "risk_level": self._infer_risk_level(workflow),
-            "accepts_secret_refs": self._accepts_secret_refs(workflow),
-            "approval_context": _approval_context_for_workflow(workflow),
+            "execution_boundaries": self._infer_execution_boundaries(workflow, approval_context),
+            "risk_level": self._infer_risk_level(workflow, approval_context),
+            "accepts_secret_refs": self._accepts_secret_refs(workflow, approval_context),
+            "approval_context": approval_context,
         }
 
     def _get_runtime_availability(
@@ -1309,50 +1420,33 @@ class WorkflowManager:
             "missing_manifest_network": missing_manifest_network,
         }
 
-    def _infer_policy_modes(self, workflow: Workflow) -> list[str]:
-        step_tools = workflow.step_tools
-        canonical_step_tools = [canonical_tool_name(tool_name) for tool_name in step_tools]
-        if any(tool_name.startswith("mcp_") for tool_name in canonical_step_tools):
-            return ["full"]
-        if any(
-            tool_name in {"write_file", "update_goal", "update_soul", "store_secret", "delete_secret"}
-            for tool_name in canonical_step_tools
-        ):
-            return ["balanced", "full"]
-        if any(tool_name in {"execute_code", "get_secret"} for tool_name in canonical_step_tools):
-            return ["full"]
-        return ["safe", "balanced", "full"]
+    def _infer_policy_modes(self, workflow: Workflow, approval_context: dict[str, Any] | None = None) -> list[str]:
+        context = approval_context or _approval_context_for_workflow(workflow)
+        return _policy_modes_for_approval_context(context)
 
-    def _infer_execution_boundaries(self, workflow: Workflow) -> list[str]:
-        boundaries: list[str] = []
-        for tool_name in workflow.step_tools:
-            canonical_name = canonical_tool_name(tool_name)
-            if canonical_name.startswith("mcp_"):
-                boundaries.append("external_mcp")
-                continue
-            tool_meta = TOOL_METADATA.get(canonical_name, {})
-            for boundary in tool_meta.get("execution_boundaries", []):
-                if boundary not in boundaries:
-                    boundaries.append(boundary)
-        return boundaries or ["unknown"]
+    def _infer_execution_boundaries(
+        self,
+        workflow: Workflow,
+        approval_context: dict[str, Any] | None = None,
+    ) -> list[str]:
+        context = approval_context or _approval_context_for_workflow(workflow)
+        boundaries = context.get("execution_boundaries", [])
+        return list(boundaries) if isinstance(boundaries, list) and boundaries else ["unknown"]
 
-    def _infer_risk_level(self, workflow: Workflow) -> str:
-        policy_modes = self._infer_policy_modes(workflow)
+    def _infer_risk_level(self, workflow: Workflow, approval_context: dict[str, Any] | None = None) -> str:
+        context = approval_context or _approval_context_for_workflow(workflow)
+        if isinstance(context.get("risk_level"), str):
+            return str(context["risk_level"])
+        policy_modes = self._infer_policy_modes(workflow, context)
         if policy_modes == ["full"]:
             return "high"
         if policy_modes == ["balanced", "full"]:
             return "medium"
         return "low"
 
-    def _accepts_secret_refs(self, workflow: Workflow) -> bool:
-        for tool_name in workflow.step_tools:
-            canonical_name = canonical_tool_name(tool_name)
-            if canonical_name.startswith("mcp_"):
-                return True
-            tool_meta = TOOL_METADATA.get(canonical_name, {})
-            if bool(tool_meta.get("accepts_secret_refs", False)):
-                return True
-        return False
+    def _accepts_secret_refs(self, workflow: Workflow, approval_context: dict[str, Any] | None = None) -> bool:
+        context = approval_context or _approval_context_for_workflow(workflow)
+        return bool(context.get("accepts_secret_refs", False))
 
 
 workflow_manager = WorkflowManager()

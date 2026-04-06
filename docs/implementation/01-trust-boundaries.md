@@ -185,6 +185,23 @@
   - direct review against bugs and regressions exposed one real backward-compatibility problem in the first pass: adding default `authenticated_source=false` and empty `source_systems=[]` into normalized approval context changed legacy workflow fingerprints for runs that never carried source metadata
   - fixed by only persisting authenticated-source fields in normalized approval context when they are materially present, which keeps older approval fingerprints stable while still surfacing real authenticated-source drift
 
+### `workflow-delegation-boundary-enforcement-v1`
+
+- status: complete on `feat/delegated-workflow-boundary-hardening-batch-ad-v2`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - reusable workflows that used `delegate_task` only advertised the generic `delegation` surface in workflow metadata and runtime approval context, even when the delegated specialist actually crossed vault or authenticated external-source boundaries
+  - that made delegated workflows look safer than the real execution path, which weakened safe/balanced exposure decisions and let checkpoint/replay policy reason about an underspecified trust surface
+- scope:
+  - delegated workflow approval context now resolves the selected specialist when the route is explicit or renderable from runtime inputs, and merges the delegated specialist's real risk, boundary, and authenticated-source signals into the workflow approval snapshot
+  - workflow metadata now derives policy modes, risk, execution boundaries, and secret-ref handling from that richer approval context instead of trusting only the direct step tool list
+  - workflows with unresolved dynamic delegation targets now fail closed as `full` / `high` and block checkpoint reuse instead of staying exposed as generic low-risk delegation
+- validation:
+  - `python3 -m py_compile backend/src/tools/delegate_task_tool.py backend/src/workflows/manager.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -q -k "delegated_vault_routes or authenticated_delegated_source or delegate_target_is_dynamic or authenticated_source_context_drift or authenticated_source_system_reordering or approval_context_marks_authenticated_mcp_sources"`
+- review pass:
+  - direct review against bugs and regressions found two real implementation problems in the first pass: static vault delegation was still reading a low-risk surface because the specialist graph exposed tools as a dict and the new boundary walk treated it like a list, and the first vault regression overclaimed `accepts_secret_refs` even though the real fail-closed signal is the delegated secret-injection boundary
+  - fixed by normalizing specialist tool collections before walking delegated boundaries and by pinning the actual checkpoint-blocking contract instead of inventing a broader secret-ref claim
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

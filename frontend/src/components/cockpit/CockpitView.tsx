@@ -3663,6 +3663,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "p") {
         event.preventDefault();
         queueWorkflowFamilyPlan(primaryWorkflowShortcutTarget());
+      } else if (key === "t") {
+        event.preventDefault();
+        queueWorkflowRecoveryDraft(primaryWorkflowShortcutTarget());
       }
     };
     window.addEventListener("keydown", handleOperatorShortcut);
@@ -3682,6 +3685,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     inspectPrimaryWorkflowEntry,
     queueWorkflowFamilyPlan,
     queueWorkflowLatestFailureContext,
+    queueWorkflowRecoveryDraft,
     primaryWorkflowShortcutTarget,
     queueWorkflowOutputContext,
     redirectOperatorWorkflowEntry,
@@ -5272,6 +5276,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const latestFailure = workflowLatestFailureContext(workflow);
     if (!latestFailure) return;
     queueWorkflowStepContext(latestFailure.workflow, latestFailure.step);
+  }
+  function queueWorkflowRecoveryDraft(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    if (resolved.retryFromStepDraft) {
+      queueComposerDraft(resolved.retryFromStepDraft);
+      return;
+    }
+    if (resolved.replayAllowed === false) return;
+    queueComposerDraft(resolved.replayDraft ?? buildWorkflowReplayDraft(resolved));
   }
 
   function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
@@ -7949,7 +7963,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+U use latest output · Shift+P draft next step
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+U use latest output · Shift+P draft next step
                     </div>
                   </div>
 
@@ -7959,13 +7973,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">{operatorTriageEntries.length} requiring action</span>
                     </div>
                     {operatorTriageEntries.map((entry) => {
-                      const latestBranch = entry.workflow ? workflowLatestBranchRun(entry.workflow) : null;
-                      const bestContinuation = entry.workflow ? workflowBestContinuationRun(entry.workflow) : null;
-                      const latestFailureContext = entry.workflow ? workflowLatestFailureContext(entry.workflow) : null;
-                      const hasCurrentOutput = entry.workflow ? workflowPrimaryOutputPath(entry.workflow) : null;
+                      const triageWorkflow = entry.workflow ?? null;
+                      const latestBranch = triageWorkflow ? workflowLatestBranchRun(triageWorkflow) : null;
+                      const bestContinuation = triageWorkflow ? workflowBestContinuationRun(triageWorkflow) : null;
+                      const latestFailureContext = triageWorkflow ? workflowLatestFailureContext(triageWorkflow) : null;
+                      const failedStep = triageWorkflow ? failedWorkflowStep(triageWorkflow) : null;
+                      const hasCurrentOutput = triageWorkflow ? workflowPrimaryOutputPath(triageWorkflow) : null;
                       const bestContinuationOutput = bestContinuation ? workflowPrimaryOutputPath(bestContinuation) : null;
-                      const hasDistinctBestContinuation = entry.workflow && bestContinuation
-                        ? (bestContinuation.runIdentity ?? bestContinuation.id) !== (entry.workflow.runIdentity ?? entry.workflow.id)
+                      const hasDistinctBestContinuation = triageWorkflow && bestContinuation
+                        ? (bestContinuation.runIdentity ?? bestContinuation.id) !== (triageWorkflow.runIdentity ?? triageWorkflow.id)
                         : false;
                       return (
                       <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
@@ -7990,62 +8006,95 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               continue
                             </button>
                           )}
-                          {entry.workflow && hasCurrentOutput && (
+                          {triageWorkflow && hasCurrentOutput && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Use latest output for ${entry.label}`}
-                              onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                              onClick={() => queueWorkflowOutputContext(triageWorkflow)}
                             >
                               use output
                             </button>
                           )}
-                          {entry.workflow && latestFailureContext && (
+                          {triageWorkflow && latestFailureContext && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Use failure context for ${entry.label}`}
-                              onClick={() => queueWorkflowLatestFailureContext(entry.workflow)}
+                              onClick={() => queueWorkflowLatestFailureContext(triageWorkflow)}
                             >
                               use failure
                             </button>
                           )}
-                          {entry.workflow && hasDistinctBestContinuation && (
+                          {triageWorkflow?.retryFromStepDraft && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Retry step for ${entry.label}`}
+                              onClick={() => queueComposerDraft(triageWorkflow.retryFromStepDraft ?? "")}
+                            >
+                              retry step
+                            </button>
+                          )}
+                          {triageWorkflow && triageWorkflow.replayAllowed === false && triageWorkflow.replayRecommendedActions?.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Repair replay for ${entry.label}`}
+                              onClick={() => void repairWorkflowReplay(triageWorkflow)}
+                            >
+                              repair replay
+                            </button>
+                          ) : null}
+                          {triageWorkflow && failedStep?.recoveryActions?.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Repair step for ${entry.label}`}
+                              onClick={() => void runCapabilityActions(
+                                readActionList(failedStep.recoveryActions),
+                                `${triageWorkflow.workflowName} ${failedStep.id}`,
+                              )}
+                            >
+                              repair step
+                            </button>
+                          ) : null}
+                          {triageWorkflow && hasDistinctBestContinuation && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Open best continuation for ${entry.label}`}
-                              onClick={() => inspectWorkflowBestContinuation(entry.workflow)}
+                              onClick={() => inspectWorkflowBestContinuation(triageWorkflow)}
                             >
                               open best
                             </button>
                           )}
-                          {entry.workflow && hasDistinctBestContinuation && bestContinuation && workflowCanContinue(bestContinuation) && (
+                          {triageWorkflow && hasDistinctBestContinuation && bestContinuation && workflowCanContinue(bestContinuation) && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Continue best continuation for ${entry.label}`}
-                              onClick={() => continueWorkflowBestContinuation(entry.workflow)}
+                              onClick={() => continueWorkflowBestContinuation(triageWorkflow)}
                             >
                               continue best
                             </button>
                           )}
-                          {entry.workflow && (
+                          {triageWorkflow && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Draft next step for ${entry.label}`}
-                              onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                              onClick={() => queueWorkflowFamilyPlan(triageWorkflow)}
                             >
                               draft next step
                             </button>
                           )}
-                          {entry.workflow && hasCurrentOutput && hasDistinctBestContinuation && bestContinuationOutput && bestContinuationOutput !== hasCurrentOutput && (
+                          {triageWorkflow && hasCurrentOutput && hasDistinctBestContinuation && bestContinuationOutput && bestContinuationOutput !== hasCurrentOutput && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Compare best continuation for ${entry.label}`}
-                              onClick={() => queueWorkflowBestContinuationComparison(entry.workflow)}
+                              onClick={() => queueWorkflowBestContinuationComparison(triageWorkflow)}
                             >
                               compare best
                             </button>
@@ -8070,12 +8119,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               </button>
                             </>
                           )}
-                          {entry.workflow && latestBranch && (
+                          {triageWorkflow && latestBranch && (
                             <button
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Inspect latest branch for ${entry.label}`}
-                              onClick={() => inspectLatestWorkflowBranch(entry.workflow)}
+                              onClick={() => inspectLatestWorkflowBranch(triageWorkflow)}
                             >
                               latest branch
                             </button>

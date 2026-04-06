@@ -202,6 +202,22 @@
   - direct review against bugs and regressions found two real implementation problems in the first pass: static vault delegation was still reading a low-risk surface because the specialist graph exposed tools as a dict and the new boundary walk treated it like a list, and the first vault regression overclaimed `accepts_secret_refs` even though the real fail-closed signal is the delegated secret-injection boundary
   - fixed by normalizing specialist tool collections before walking delegated boundaries and by pinning the actual checkpoint-blocking contract instead of inventing a broader secret-ref claim
 
+### `extension-removal-boundary-enforcement-v1`
+
+- status: complete on `feat/extension-removal-boundary-hardening-batch-ad-v3`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - install, update, enable, and secret-bearing configure already route through extension lifecycle approval, but direct removal still mutated the workspace package and runtime state immediately
+  - that meant a high-risk extension could be torn down without the same package-digest-bound approval envelope that already protects the rest of the lifecycle mutation surface
+- scope:
+  - extension removal now reuses the existing lifecycle approval seam before destructive workspace-package teardown
+  - removal approvals bind to the current installed package digest, so a changed package must be re-approved before the delete path can consume the destructive mutation
+  - low-risk workspace removals remain direct because the lifecycle approval profile is still driven by the extension's real declared boundaries instead of turning every uninstall into ceremony
+- validation:
+  - `python3 -m py_compile backend/src/api/extensions.py backend/tests/test_extensions_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_extensions_api.py -q -k "remove_high_risk_extension_requires_approval or remove_high_risk_extension_requires_new_approval_if_package_changes or install_high_risk_extension_requires_new_approval_if_package_changes or install_and_enable_high_risk_extension_require_approval"`
+- review pass:
+  - direct review against regressions found the real risk was not broad uninstall approval in general, but the missing destructive boundary specifically for already-approved high-risk extensions; the fix keeps low-risk removals direct and only tightens the high-risk mutation seam
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

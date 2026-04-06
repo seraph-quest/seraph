@@ -793,11 +793,21 @@ describe("CockpitView", () => {
     const workflowRow = within(triage).getByText("workflow degraded: web-brief-to-file").closest(".cockpit-operator-row--entry");
     expect(workflowRow).not.toBeNull();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Open best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Continue best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Compare best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
 
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow degraded: web-brief-to-file" }));
     await waitFor(() => expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument());
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
 
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Compare best continuation for workflow degraded: web-brief-to-file" }));
     await waitFor(() =>
@@ -814,6 +824,27 @@ describe("CockpitView", () => {
         screen.getByDisplayValue(
           'Review workflow family state for "web-brief-to-file". Current output: "notes/brief.md". Best continuation: "workflow_web_brief_to_file branch running" with latest output "notes/branch-brief.md" Latest family failure: "workflow_web_brief_to_file failed at write_file". Related reusable outputs: "notes/branch-brief.md". Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.',
         ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Continue best continuation for workflow degraded: web-brief-to-file" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas branch")).toBeInTheDocument());
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Open best continuation for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
+    );
+    expect(screen.getByText("parent run")).toBeInTheDocument();
+
+    const runningWorkflowRow = within(triage).getByText("workflow running: web-brief-to-file").closest(".cockpit-operator-row--entry");
+    expect(runningWorkflowRow).not.toBeNull();
+    expect(within(runningWorkflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow running: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Open best continuation for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "F", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Current failure: write_file blocked by approval\./),
       ).toBeInTheDocument(),
     );
 

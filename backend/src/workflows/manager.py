@@ -317,6 +317,7 @@ def normalize_workflow_approval_context(
     execution_boundaries = _normalize_string_list(value.get("execution_boundaries"))
     step_tools = _normalize_string_list(value.get("step_tools"))
     delegated_specialists = _normalize_string_list(value.get("delegated_specialists"))
+    delegated_tool_names = _normalize_string_list(value.get("delegated_tool_names"))
     authenticated_source = bool(value.get("authenticated_source", False))
     delegation_target_unresolved = bool(value.get("delegation_target_unresolved", False))
     source_systems = _normalize_source_systems(value.get("source_systems"))
@@ -326,6 +327,7 @@ def normalize_workflow_approval_context(
             execution_boundaries,
             step_tools,
             delegated_specialists,
+            delegated_tool_names,
             "accepts_secret_refs" in value,
             authenticated_source,
             delegation_target_unresolved,
@@ -342,6 +344,8 @@ def normalize_workflow_approval_context(
     }
     if delegated_specialists:
         normalized["delegated_specialists"] = delegated_specialists
+    if delegated_tool_names:
+        normalized["delegated_tool_names"] = delegated_tool_names
     if authenticated_source:
         normalized["authenticated_source"] = True
     if delegation_target_unresolved:
@@ -514,6 +518,7 @@ def _approval_context_for_workflow(
     authenticated_source = False
     source_systems: list[dict[str, Any]] = []
     delegated_specialists: list[str] = []
+    delegated_tool_names: list[str] = []
     delegation_target_unresolved = False
     risk_level = "low"
     for tool_name in workflow.step_tools:
@@ -536,6 +541,7 @@ def _approval_context_for_workflow(
                         "hostname": str(source_context.get("hostname") or ""),
                         "source": str(source_context.get("source") or "manual"),
                         "authenticated_source": True,
+                        "credential_sources": _normalize_string_list(source_context.get("credential_sources")),
                     }
                 )
             continue
@@ -563,6 +569,9 @@ def _approval_context_for_workflow(
             delegated_specialist = delegate_context.get("delegated_specialist")
             if isinstance(delegated_specialist, str) and delegated_specialist:
                 delegated_specialists.append(delegated_specialist)
+            for delegated_tool_name in delegate_context.get("delegated_tool_names", []):
+                if isinstance(delegated_tool_name, str) and delegated_tool_name:
+                    delegated_tool_names.append(delegated_tool_name)
             if bool(delegate_context.get("delegation_target_unresolved", False)):
                 delegation_target_unresolved = True
             risk_level = _max_risk_level(risk_level, str(delegate_context.get("risk_level") or "high"))
@@ -583,6 +592,7 @@ def _approval_context_for_workflow(
         "authenticated_source": authenticated_source,
         "source_systems": source_systems,
         "delegated_specialists": sorted(dict.fromkeys(delegated_specialists)),
+        "delegated_tool_names": sorted(dict.fromkeys(delegated_tool_names)),
         "delegation_target_unresolved": delegation_target_unresolved,
         "step_tools": sorted(dict.fromkeys(canonical_step_tools)),
     }

@@ -78,6 +78,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_composition_behavior" in captured.out
     assert "workflow_approval_threading_behavior" in captured.out
     assert "threaded_operator_timeline_behavior" in captured.out
+    assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -190,6 +191,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "workflow_composition_behavior",
                 "workflow_approval_threading_behavior",
                 "threaded_operator_timeline_behavior",
+                "workflow_boundary_blocked_surface_behavior",
                 "capability_repair_behavior",
                 "capability_preflight_behavior",
                 "activity_ledger_attribution_behavior",
@@ -724,6 +726,16 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert details_by_name["threaded_operator_timeline_behavior"]["intervention_source"] == "native_notification"
     assert details_by_name["threaded_operator_timeline_behavior"]["audit_thread_label"] == "Research thread"
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_continue_message_mentions_boundary"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_replay_draft_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_recommended_actions_empty"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_resume_plan_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_checkpoint_candidates_empty"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_continue_message_mentions_boundary"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_replay_draft_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_recommended_actions_empty"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_resume_plan_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_checkpoint_candidates_empty"] is True
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]

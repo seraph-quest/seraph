@@ -10,7 +10,13 @@ from fastapi import APIRouter, Query
 
 from src.agent.session import session_manager
 from src.api.observer import _continuity_surface
-from src.api.workflows import _list_workflow_runs
+from src.api.workflows import (
+    _list_workflow_runs,
+    workflow_surface_continue_message,
+    workflow_surface_recommended_actions,
+    workflow_surface_replay_draft,
+    workflow_surface_resume_metadata,
+)
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
@@ -416,6 +422,7 @@ async def get_activity_ledger(
         updated_at = str(run.get("updated_at") or run.get("started_at") or "")
         if _parse_iso(updated_at) < cutoff:
             continue
+        workflow_surface = workflow_surface_resume_metadata(run)
         items.append({
             "id": f"workflow:{run['id']}",
             "kind": "workflow_run",
@@ -427,16 +434,11 @@ async def get_activity_ledger(
             "updated_at": updated_at,
             "thread_id": run.get("thread_id"),
             "thread_label": run.get("thread_label"),
-            "continue_message": (
-                run.get("thread_continue_message")
-                or run.get("approval_recovery_message")
-                or run.get("retry_from_step_draft")
-                or run.get("replay_draft")
-            ),
-            "replay_draft": run.get("replay_draft"),
-            "replay_allowed": run.get("replay_allowed"),
+            "continue_message": workflow_surface_continue_message(run),
+            "replay_draft": workflow_surface_replay_draft(run),
+            "replay_allowed": workflow_surface["replay_allowed"],
             "replay_block_reason": run.get("replay_block_reason"),
-            "recommended_actions": run.get("replay_recommended_actions", []),
+            "recommended_actions": workflow_surface_recommended_actions(run),
             "source": "workflow",
             "model": None,
             "provider": None,
@@ -456,10 +458,10 @@ async def get_activity_ledger(
                 "branch_kind": run.get("branch_kind"),
                 "run_identity": run.get("run_identity"),
                 "run_fingerprint": run.get("run_fingerprint"),
-                "resume_from_step": run.get("resume_from_step"),
-                "resume_checkpoint_label": run.get("resume_checkpoint_label"),
-                "checkpoint_candidates": run.get("checkpoint_candidates", []),
-                "resume_plan": run.get("resume_plan"),
+                "resume_from_step": workflow_surface["resume_from_step"],
+                "resume_checkpoint_label": workflow_surface["resume_checkpoint_label"],
+                "checkpoint_candidates": workflow_surface["checkpoint_candidates"],
+                "resume_plan": workflow_surface["resume_plan"],
             },
         })
 

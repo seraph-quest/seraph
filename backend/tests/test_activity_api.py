@@ -168,6 +168,88 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
 
 
 @pytest.mark.asyncio
+async def test_activity_ledger_hides_stale_resume_surface_when_workflow_boundary_is_blocked(client):
+    with (
+        patch(
+            "src.api.activity._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-2",
+                        "workflow_name": "authenticated-brief",
+                        "summary": "Authenticated workflow boundary drifted.",
+                        "status": "failed",
+                        "started_at": _iso_offset(minutes=-8),
+                        "updated_at": _iso_offset(minutes=-6),
+                        "thread_id": "session-1",
+                        "thread_label": "Research thread",
+                        "thread_continue_message": "Continue from stale approval.",
+                        "approval_recovery_message": (
+                            "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+                            "Start a fresh run instead of replaying or resuming."
+                        ),
+                        "retry_from_step_draft": "Retry workflow \"authenticated-brief\" from step \"save\".",
+                        "replay_draft": "Replay authenticated workflow",
+                        "replay_allowed": True,
+                        "replay_block_reason": "approval_context_changed",
+                        "replay_recommended_actions": [
+                            {"type": "set_tool_policy", "label": "Allow write_file", "mode": "full"}
+                        ],
+                        "risk_level": "medium",
+                        "execution_boundaries": ["authenticated_external_source", "workspace_write"],
+                        "pending_approval_count": 0,
+                        "resume_from_step": "save",
+                        "resume_checkpoint_label": "Save step",
+                        "run_identity": "session-1:workflow_authenticated_brief:run-2",
+                        "run_fingerprint": "authenticated-brief",
+                        "continued_error_steps": ["save"],
+                        "failed_step_tool": "write_file",
+                        "checkpoint_candidates": [
+                            {
+                                "step_id": "save",
+                                "label": "save (write_file)",
+                                "kind": "retry_failed_step",
+                                "status": "continued_error",
+                            },
+                        ],
+                        "branch_kind": "retry_failed_step",
+                        "resume_plan": {
+                            "resume_from_step": "save",
+                            "draft": "Retry workflow \"authenticated-brief\" from step \"save\".",
+                        },
+                        "availability": "ready",
+                        "step_records": [{"id": "save", "tool": "write_file", "status": "continued_error"}],
+                    }
+                ]
+            ),
+        ),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
+    assert workflow_item["continue_message"].startswith("Workflow 'authenticated-brief' changed its trust boundary")
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["recommended_actions"] == []
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["resume_checkpoint_label"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None
+
+
+@pytest.mark.asyncio
 async def test_activity_ledger_respects_window_and_classifies_background_llm_calls(client):
     with (
         patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),

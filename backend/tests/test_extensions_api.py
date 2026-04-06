@@ -183,6 +183,52 @@ def _write_mcp_connector_extension(
     return package_dir
 
 
+def _write_multi_mcp_connector_extension(root: Path) -> Path:
+    package_dir = root / "multi-connector-pack"
+    (package_dir / "mcp").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.multi-connector-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Multi Connector Pack\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  mcp_servers:\n"
+        "    - mcp/github-primary.json\n"
+        "    - mcp/github-secondary.json\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "mcp" / "github-primary.json").write_text(
+        "{\n"
+        '  "name": "github-primary",\n'
+        '  "url": "https://example.test/mcp-primary",\n'
+        '  "description": "Primary packaged GitHub MCP",\n'
+        '  "headers": {"Authorization": "Bearer ${GITHUB_PRIMARY_TOKEN}"},\n'
+        '  "auth_hint": "Set GITHUB_PRIMARY_TOKEN before enabling the connector",\n'
+        '  "transport": "streamable-http"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (package_dir / "mcp" / "github-secondary.json").write_text(
+        "{\n"
+        '  "name": "github-secondary",\n'
+        '  "url": "https://example.test/mcp-secondary",\n'
+        '  "description": "Secondary packaged GitHub MCP",\n'
+        '  "headers": {"Authorization": "Bearer ${GITHUB_SECONDARY_TOKEN}"},\n'
+        '  "auth_hint": "Set GITHUB_SECONDARY_TOKEN before enabling the connector",\n'
+        '  "transport": "streamable-http"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_managed_connector_extension(root: Path) -> Path:
     package_dir = root / "managed-connector-pack"
     (package_dir / "connectors" / "managed").mkdir(parents=True)
@@ -862,6 +908,14 @@ async def test_install_and_enable_high_risk_extension_require_approval(client, e
         assert "workspace_write" in installed["approval_profile"]["lifecycle_boundaries"]
 
         disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        disable_detail = disable_response.json()["detail"]
+        assert disable_detail["type"] == "approval_required"
+
+        approve_disable = await client.post(f"/api/approvals/{disable_detail['approval_id']}/approve")
+        assert approve_disable.status_code == 200
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
         assert disable_response.status_code == 200
 
         enable_response = await client.post("/api/extensions/seraph.high-risk-pack/enable")
@@ -1002,6 +1056,58 @@ async def test_remove_high_risk_extension_requires_new_approval_if_package_chang
         assert remove_response.status_code == 409
         second_remove_approval_id = remove_response.json()["detail"]["approval_id"]
         assert second_remove_approval_id != first_remove_approval_id
+
+
+@pytest.mark.asyncio
+async def test_disable_high_risk_extension_requires_new_approval_if_package_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        first_disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{first_disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        installed_root = extension_runtime / "extensions" / "seraph-high-risk-pack"
+        (installed_root / "workflows" / "write-note.md").write_text(
+            "---\n"
+            "name: write-note\n"
+            "description: Write a changed note into the workspace\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/high-risk.md\n"
+            "      content: changed-after-disable-approval\n"
+            "---\n\n"
+            "Write a changed note.\n",
+            encoding="utf-8",
+        )
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        second_disable_approval_id = disable_response.json()["detail"]["approval_id"]
+        assert second_disable_approval_id != first_disable_approval_id
 
 
 @pytest.mark.asyncio
@@ -1266,6 +1372,13 @@ async def test_enable_rejects_degraded_extension_with_invalid_workflow_before_ap
         )
 
         disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
         assert disable_response.status_code == 200
 
         enable_response = await client.post("/api/extensions/seraph.high-risk-pack/enable")
@@ -1326,10 +1439,24 @@ async def test_install_toggle_and_remove_workspace_connector_extension(client, e
         connect_mock.assert_called_once()
 
         disable_response = await client.post("/api/extensions/seraph.test-connector/disable")
+        assert disable_response.status_code == 409
+        disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        disable_response = await client.post("/api/extensions/seraph.test-connector/disable")
         assert disable_response.status_code == 200
         assert disable_response.json()["extension"]["enabled"] is False
         assert mcp_manager._config["github-packaged"]["enabled"] is False
         disconnect_mock.assert_called_once()
+
+        remove_response = await client.delete("/api/extensions/seraph.test-connector")
+        assert remove_response.status_code == 409
+        remove_approval_id = remove_response.json()["detail"]["approval_id"]
+
+        approve_remove = await client.post(f"/api/approvals/{remove_approval_id}/approve")
+        assert approve_remove.status_code == 200
 
         remove_response = await client.delete("/api/extensions/seraph.test-connector")
         assert remove_response.status_code == 200
@@ -1903,10 +2030,110 @@ async def test_extension_connector_enable_endpoint_controls_packaged_mcp_runtime
             "/api/extensions/seraph.test-connector/connectors/enabled",
             json={"reference": "mcp/github.json", "enabled": False},
         )
+        assert disable_response.status_code == 409
+        disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        disable_response = await client.post(
+            "/api/extensions/seraph.test-connector/connectors/enabled",
+            json={"reference": "mcp/github.json", "enabled": False},
+        )
         assert disable_response.status_code == 200
         assert disable_response.json()["status"] == "disabled"
         assert mcp_manager._config["github-packaged"]["enabled"] is False
         assert disconnect_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_connector_lifecycle_approval_is_scoped_to_each_packaged_connector_target(client, extension_runtime, tmp_path):
+    package_dir = _write_multi_mcp_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ), patch.object(
+        mcp_manager,
+        "connect",
+    ) as connect_mock, patch.object(
+        mcp_manager,
+        "disconnect",
+    ) as disconnect_mock:
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        enable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": True},
+        )
+        assert enable_primary.status_code == 409
+        primary_approval_id = enable_primary.json()["detail"]["approval_id"]
+
+        approve_primary = await client.post(f"/api/approvals/{primary_approval_id}/approve")
+        assert approve_primary.status_code == 200
+
+        enable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": True},
+        )
+        assert enable_primary.status_code == 200
+        assert enable_primary.json()["connector"]["name"] == "github-primary"
+        assert connect_mock.call_count == 1
+
+        enable_secondary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-secondary.json", "enabled": True},
+        )
+        assert enable_secondary.status_code == 409
+        secondary_approval_id = enable_secondary.json()["detail"]["approval_id"]
+        assert secondary_approval_id != primary_approval_id
+
+        approve_secondary = await client.post(f"/api/approvals/{secondary_approval_id}/approve")
+        assert approve_secondary.status_code == 200
+
+        enable_secondary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-secondary.json", "enabled": True},
+        )
+        assert enable_secondary.status_code == 200
+        assert enable_secondary.json()["connector"]["name"] == "github-secondary"
+        assert connect_mock.call_count == 2
+
+        disable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": False},
+        )
+        assert disable_primary.status_code == 409
+        disable_primary_approval_id = disable_primary.json()["detail"]["approval_id"]
+
+        approve_disable_primary = await client.post(f"/api/approvals/{disable_primary_approval_id}/approve")
+        assert approve_disable_primary.status_code == 200
+
+        disable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": False},
+        )
+        assert disable_primary.status_code == 200
+        assert disable_primary.json()["connector"]["name"] == "github-primary"
+        assert disconnect_mock.call_count == 1
+
+        disable_secondary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-secondary.json", "enabled": False},
+        )
+        assert disable_secondary.status_code == 409
+        assert disable_secondary.json()["detail"]["approval_id"] != disable_primary_approval_id
 
 
 @pytest.mark.asyncio

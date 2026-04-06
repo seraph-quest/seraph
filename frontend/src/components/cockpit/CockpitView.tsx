@@ -6314,6 +6314,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Open
                   </button>
+                  {workflowCanContinue(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue failure lineage branch ${entry.workflowName}`}
+                      onClick={() => continueWorkflowRun(entry)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  {workflowLatestFailureContext(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use failure context from ${entry.workflowName} failure lineage`}
+                      onClick={() => queueWorkflowLatestFailureContext(entry)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
                 </div>
               ))}
               {familyOutputs.map((output) => (
@@ -6371,6 +6389,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Open
                   </button>
+                  {workflowCanContinue(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue ancestor run ${entry.workflowName}`}
+                      onClick={() => continueWorkflowRun(entry)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  {workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use ancestor output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputContext(entry)}
+                    >
+                      Use Output
+                    </button>
+                  )}
                   {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
                     <button
                       className="cockpit-feedback-button"
@@ -6446,6 +6482,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Open
                   </button>
+                  {workflowCanContinue(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue peer branch ${entry.workflowName}`}
+                      onClick={() => continueWorkflowRun(entry)}
+                    >
+                      Continue
+                    </button>
+                  )}
                   {(entry.artifacts[0]?.filePath ?? entry.artifactPaths[0]) && (
                     <button
                       className="cockpit-feedback-button"

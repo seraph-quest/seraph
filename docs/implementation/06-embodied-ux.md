@@ -55,7 +55,7 @@
 - [x] this workstream now also ships `workflow-branch-debugging-and-long-running-control-v1`
 - [x] this workstream now also ships `workflow-history-comparison-and-family-output-control-v1`
 - [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
-- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, and the first best-continuation keyboard layer
+- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
 
 ## Still To Do On `develop`
 
@@ -331,6 +331,31 @@
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures"`
     - result: `passed`
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
+
+### `workflow-family-row-control-parity-and-failure-follow-through-v1`
+
+- status: in progress on `feat/workflow-checkpoint-control-batch-aa-v1`
+- root causes addressed:
+  - child-branch rows already exposed denser long-running actions, but ancestor, peer, and failure-lineage rows still dropped back to thinner one-off affordances even when they had reusable outputs or continuable context
+  - the inspector therefore showed the family history truthfully, but did not let operators act on that truth with consistent density across the whole family surface
+- scope:
+  - ancestor rows now also expose direct output reuse whenever the ancestor carries a reusable output
+  - peer rows now also expose direct continuation when the peer branch is genuinely continuable
+  - failure-lineage rows now also expose direct continue and failure-context reuse when the failed branch actually supports those actions
+- review findings fixed during implementation:
+  - the first pass of the new failure-lineage control would have relied on a branch-family fixture that did not actually carry failed step-record context, which would have produced a false-positive test instead of proving the real inspector contract
+  - fixed by upgrading the branch-family test fixture so the degraded child branch carries a real failed checkpoint step and by pinning the new ancestor/peer/failure-lineage actions directly in the existing family-history spec
+- validation:
+  - `cd frontend && timeout 60 env NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
+    - result: `passed`
+  - `cd frontend && timeout 120 env NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
     - result: `passed`
   - `cd frontend && npm run build`
     - result: `passed`

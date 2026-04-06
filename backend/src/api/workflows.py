@@ -1378,7 +1378,7 @@ async def _list_workflow_runs(
             ),
             "thread_continue_message": (
                 approvals[0].get("resume_message")
-                if approvals and isinstance(approvals[0], dict)
+                if resume_surface_allowed and approvals and isinstance(approvals[0], dict)
                 else None
             ),
             "run_identity": run_identity,
@@ -1584,7 +1584,7 @@ async def _list_workflow_runs(
                 ),
                 "thread_continue_message": (
                     approvals[0].get("resume_message")
-                    if approvals and isinstance(approvals[0], dict)
+                    if resume_surface_allowed and approvals and isinstance(approvals[0], dict)
                     else None
                 ),
                 "run_identity": run_identity,

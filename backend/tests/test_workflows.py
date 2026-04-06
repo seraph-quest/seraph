@@ -1718,7 +1718,7 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
     assert run["resume_checkpoint_label"] is None
     assert run["checkpoint_candidates"] == []
     assert run["resume_plan"] is None
-    assert run["thread_continue_message"] == "Continue the authenticated brief once approved"
+    assert run["thread_continue_message"] is None
     assert "predates trust-boundary tracking" in run["approval_recovery_message"]
 
 

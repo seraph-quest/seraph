@@ -342,6 +342,7 @@
 - scope:
   - workflow run projection now clears `resume_from_step`, `resume_checkpoint_label`, `checkpoint_candidates`, and `resume_plan` whenever replay is blocked because the trust boundary changed or because the run predates tracked lineage for the current privileged surface
   - the same fail-closed rule now applies to both completed workflow runs reconstructed from audit events and still-pending runs reconstructed from call state, so the operator surface does not advertise stale continuation paths on either side
+  - blocked trust-boundary runs also stop surfacing approval-style thread continuation prompts, so activity and cockpit layers fall back to the recovery message instead of implying that approval alone can unblock the run
   - pending approvals, repair guidance, and other non-boundary replay blocks still keep their existing branch metadata where that metadata is part of the intended operator contract
 - validation:
   - `python3 -m py_compile backend/src/api/workflows.py backend/tests/test_workflows.py`

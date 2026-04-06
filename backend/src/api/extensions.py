@@ -66,6 +66,7 @@ _BUILTIN_CHANNEL_ADAPTERS = (
     },
 )
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
+_NEW_SECRET_CONFIG_SENTINEL = "__SERAPH_NEW_SECRET_VALUE__"
 
 
 def _lifecycle_fallback_preview(preview: dict[str, Any]) -> dict[str, Any]:
@@ -313,13 +314,66 @@ def _scaffold_package_slug(value: str) -> str:
     return normalized
 
 
-def _configure_request_uses_new_secret_values(
+def _normalize_config_value_for_approval(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_config_value_for_approval(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list):
+        return [_normalize_config_value_for_approval(item) for item in value]
+    return value
+
+
+def _normalize_secret_value_for_approval(value: Any, *, incoming: bool) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value == _REDACTED_CONFIG_SENTINEL:
+            return _REDACTED_CONFIG_SENTINEL
+        if not value.strip():
+            return value
+        return _NEW_SECRET_CONFIG_SENTINEL if incoming else _REDACTED_CONFIG_SENTINEL
+    return _NEW_SECRET_CONFIG_SENTINEL if incoming else _REDACTED_CONFIG_SENTINEL
+
+
+def _normalize_config_entry_for_approval(
+    config_entry: dict[str, Any],
+    *,
+    allowed_keys: set[str],
+    secret_keys: set[str],
+    incoming: bool,
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in sorted(allowed_keys):
+        if key not in config_entry:
+            continue
+        value = config_entry.get(key)
+        if key in secret_keys:
+            normalized[key] = _normalize_secret_value_for_approval(value, incoming=incoming)
+        else:
+            normalized[key] = _normalize_config_value_for_approval(value)
+    return normalized
+
+
+def _configure_request_approval_context(
     preview: dict[str, Any],
     config: dict[str, Any],
-) -> bool:
+) -> dict[str, Any] | None:
+    approval_profile = preview.get("approval_profile")
+    if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
+        return None
+
     contributions = preview.get("contributions")
     if not isinstance(contributions, list) or not isinstance(config, dict):
-        return False
+        return None
+
+    existing_config = preview.get("config")
+    if not isinstance(existing_config, dict):
+        existing_config = {}
+
+    requested_snapshot: dict[str, Any] = {}
+    current_snapshot: dict[str, Any] = {}
 
     for contribution in contributions:
         if not isinstance(contribution, dict):
@@ -337,23 +391,56 @@ def _configure_request_uses_new_secret_values(
         incoming_config = contribution_configs.get(contribution_name)
         if not isinstance(incoming_config, dict):
             continue
-        for field in config_fields:
-            if not isinstance(field, dict):
-                continue
-            if str(field.get("input") or "") != "password":
-                continue
-            key = field.get("key")
-            if not isinstance(key, str) or not key:
-                continue
-            if key not in incoming_config:
-                continue
-            value = incoming_config.get(key)
-            if isinstance(value, str):
-                if not value.strip() or value == _REDACTED_CONFIG_SENTINEL:
-                    continue
-                return True
-            return True
-    return False
+        allowed_keys = {
+            key
+            for field in config_fields
+            if isinstance(field, dict)
+            for key in [field.get("key")]
+            if isinstance(key, str) and key
+        }
+        if not allowed_keys:
+            continue
+        secret_keys = {
+            key
+            for field in config_fields
+            if isinstance(field, dict) and str(field.get("input") or "") == "password"
+            for key in [field.get("key")]
+            if isinstance(key, str) and key
+        }
+        requested_keys = {key for key in incoming_config.keys() if key in allowed_keys}
+        if not requested_keys:
+            continue
+        normalized_requested = _normalize_config_entry_for_approval(
+            incoming_config,
+            allowed_keys=requested_keys,
+            secret_keys=secret_keys,
+            incoming=True,
+        )
+        if not normalized_requested:
+            continue
+        existing_type_config = existing_config.get(contribution_type)
+        existing_entry = (
+            existing_type_config.get(contribution_name)
+            if isinstance(existing_type_config, dict)
+            else None
+        )
+        normalized_current = _normalize_config_entry_for_approval(
+            existing_entry if isinstance(existing_entry, dict) else {},
+            allowed_keys=set(normalized_requested.keys()),
+            secret_keys=secret_keys,
+            incoming=False,
+        )
+        requested_snapshot.setdefault(contribution_type, {})[contribution_name] = normalized_requested
+        if normalized_current:
+            current_snapshot.setdefault(contribution_type, {})[contribution_name] = normalized_current
+
+    if not requested_snapshot or requested_snapshot == current_snapshot:
+        return None
+
+    return {
+        "requested_config": requested_snapshot,
+        "current_config": current_snapshot,
+    }
 
 
 async def _require_extension_lifecycle_approval(
@@ -361,6 +448,8 @@ async def _require_extension_lifecycle_approval(
     preview: dict[str, Any],
     *,
     consume: bool = True,
+    fingerprint_context: dict[str, Any] | None = None,
+    summary_suffix: str | None = None,
 ) -> None:
     preview = _lifecycle_fallback_preview(preview)
     approval_profile = preview.get("approval_profile")
@@ -396,6 +485,8 @@ async def _require_extension_lifecycle_approval(
         "boundaries": lifecycle_boundaries,
         "permissions": preview.get("permissions"),
     }
+    if isinstance(fingerprint_context, dict):
+        arguments.update(fingerprint_context)
     if target_reference:
         arguments["target_reference"] = target_reference
     if target_name:
@@ -434,28 +525,33 @@ async def _require_extension_lifecycle_approval(
             if part
         )
         summary = f"{summary} target '{target_label}'"
+    if summary_suffix:
+        summary = f"{summary} {summary_suffix.strip()}"
     summary = (
         f"{summary} with access to "
         f"{', '.join(lifecycle_boundaries) or 'high-risk capabilities'}"
     )
+    details = {
+        "extension_id": extension_id,
+        "extension_display_name": display_name,
+        "action": action,
+        "target_reference": target_reference or None,
+        "target_name": target_name or None,
+        "target_type": target_type or None,
+        "package_path": preview.get("root_path") or preview.get("path"),
+        "package_digest": preview.get("package_digest"),
+        "permissions": preview.get("permissions"),
+        "approval_profile": approval_profile,
+    }
+    if isinstance(fingerprint_context, dict):
+        details.update(fingerprint_context)
     request = await approval_repository.get_or_create_pending(
         session_id=None,
         tool_name=tool_name,
         risk_level=str(approval_profile.get("risk_level") or "high"),
         summary=summary,
         fingerprint=fingerprint,
-        details={
-            "extension_id": extension_id,
-            "extension_display_name": display_name,
-            "action": action,
-            "target_reference": target_reference or None,
-            "target_name": target_name or None,
-            "target_type": target_type or None,
-            "package_path": preview.get("root_path") or preview.get("path"),
-            "package_digest": preview.get("package_digest"),
-            "permissions": preview.get("permissions"),
-            "approval_profile": approval_profile,
-        },
+        details=details,
     )
     raise HTTPException(
         status_code=409,
@@ -1054,8 +1150,14 @@ async def configure_extension_package(extension_id: str, req: ExtensionConfigReq
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
-        if _configure_request_uses_new_secret_values(preview, req.config):
-            await _require_extension_lifecycle_approval("configure", preview)
+        approval_context = _configure_request_approval_context(preview, req.config)
+        if approval_context is not None:
+            await _require_extension_lifecycle_approval(
+                "configure",
+                preview,
+                fingerprint_context=approval_context,
+                summary_suffix="for requested config changes",
+            )
         extension = configure_extension(extension_id, req.config)
     except KeyError as exc:
         await _log_extension_lifecycle_event(

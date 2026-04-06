@@ -1840,6 +1840,41 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         )
         assert redacted_reconfigure.status_code == 200
 
+        changed_node_url = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    **configured["config"],
+                    "node_adapters": {
+                        "companion": {"node_url": "https://nodes-2.example.test"},
+                    },
+                }
+            },
+        )
+        assert changed_node_url.status_code == 409
+        changed_node_url_detail = changed_node_url.json()["detail"]
+        assert changed_node_url_detail["type"] == "approval_required"
+
+        approve_changed_node_url = await client.post(
+            f"/api/approvals/{changed_node_url_detail['approval_id']}/approve"
+        )
+        assert approve_changed_node_url.status_code == 200
+
+        changed_node_url = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    **configured["config"],
+                    "node_adapters": {
+                        "companion": {"node_url": "https://nodes-2.example.test"},
+                    },
+                }
+            },
+        )
+        assert changed_node_url.status_code == 200
+        reconfigured = changed_node_url.json()["extension"]
+        assert reconfigured["config"]["node_adapters"]["companion"]["node_url"] == "https://nodes-2.example.test"
+
         enable_browser = await client.post(
             "/api/extensions/seraph.wave2-pack/connectors/enabled",
             json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},

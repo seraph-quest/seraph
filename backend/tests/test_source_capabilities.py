@@ -1,12 +1,14 @@
 from unittest.mock import patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from src.app import create_app
 from src.tools.source_capabilities_tool import source_capabilities
 
 
 @pytest.mark.asyncio
-async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(client, tmp_path):
+async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(tmp_path):
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
     mcp_entries = [
@@ -27,15 +29,19 @@ async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(clien
         patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
         patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
     ):
-        response = await client.get("/api/capabilities/source-surfaces")
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as local_client:
+            response = await local_client.get("/api/capabilities/source-surfaces")
 
     assert response.status_code == 200
     payload = response.json()
     typed_by_name = {item["name"]: item for item in payload["typed_sources"]}
+    adapters_by_name = {item["name"]: item for item in payload["adapters"]}
 
     assert typed_by_name["web_search"]["contracts"] == ["source_discovery.read"]
     assert "browser_session.manage" in typed_by_name["browser_session"]["contracts"]
     assert "local-browser" in typed_by_name["browser_session"]["notes"][1]
+    assert adapters_by_name["web_search"]["adapter_state"] == "ready"
+    assert adapters_by_name["browse_webpage"]["operations"][0]["contract"] == "webpage.read"
 
     managed = typed_by_name["github-managed"]
     assert managed["source_kind"] == "managed_connector"
@@ -47,9 +53,11 @@ async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(clien
     assert "work_items.write" in managed["contracts"]
 
     assert payload["summary"]["authenticated_typed_source_count"] >= 1
+    assert payload["adapter_summary"]["ready_adapter_count"] >= 2
     assert payload["untyped_sources"][0]["name"] == "raw-github-mcp"
     assert payload["untyped_sources"][0]["source_kind"] == "mcp_server"
     assert payload["composition_rules"][0].startswith("Prefer typed authenticated connectors")
+    assert payload["selection_rules"][0].startswith("Prefer connector-backed typed adapters")
 
 
 def test_source_capabilities_tool_reports_connector_first_guidance():
@@ -87,10 +95,33 @@ def test_source_capabilities_tool_reports_connector_first_guidance():
             "Prefer typed authenticated connectors over browser login for authenticated systems.",
         ],
     }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "github-managed",
+                "adapter_state": "degraded",
+                "provider": "github",
+                "contracts": ["repository.read", "work_items.read"],
+                "degraded_reason": "no_runtime_adapter",
+                "operations": [
+                    {
+                        "contract": "work_items.read",
+                        "input_mode": "adapter_defined",
+                        "executable": False,
+                        "reason": "no_runtime_adapter",
+                    }
+                ],
+            }
+        ]
+    }
 
-    with patch("src.tools.source_capabilities_tool.list_source_capability_inventory", return_value=inventory):
+    with (
+        patch("src.tools.source_capabilities_tool.list_source_capability_inventory", return_value=inventory),
+        patch("src.tools.source_capabilities_tool.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
         result = source_capabilities.forward()
 
     assert "github-managed" in result
     assert "raw-github-mcp" in result
     assert "Prefer typed authenticated connectors over browser login" in result
+    assert "no_runtime_adapter" in result

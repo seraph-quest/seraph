@@ -5641,6 +5641,115 @@ async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
+    import tempfile
+
+    from src.api.capabilities import _build_capability_overview
+    from src.browser.sessions import browser_session_runtime
+    from src.extensions.source_operations import collect_source_evidence_bundle, list_source_adapter_inventory
+
+    workspace_dir = tempfile.mkdtemp(prefix="seraph-source-adapters-")
+    mcp_entries = [
+        {
+            "name": "raw-github-mcp",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 6,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "manual",
+        }
+    ]
+    browser_session_runtime.reset_for_tests()
+    session_payload = browser_session_runtime.open_session(
+        owner_session_id="session-1",
+        url="https://example.com/context",
+        provider_name="local-browser",
+        provider_kind="local",
+        execution_mode="local_runtime",
+        capture="extract",
+        content="Snapshot content from a structured browser session.",
+    )
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", workspace_dir),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch(
+            "src.extensions.source_operations.search_web_records",
+            return_value=(
+                [
+                    {
+                        "title": "Seraph roadmap",
+                        "href": "https://example.com/roadmap",
+                        "body": "Roadmap summary for the product.",
+                    }
+                ],
+                [],
+            ),
+        ),
+        patch(
+            "src.extensions.source_operations.browse_webpage",
+            return_value="Seraph can inspect public webpages and summarize them.",
+        ),
+        patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
+        patch("src.api.capabilities.get_current_tool_policy_mode", return_value="safe"),
+        patch("src.api.capabilities._tool_status_list", return_value=[]),
+        patch("src.api.capabilities._skill_status_map", return_value=([], {})),
+        patch("src.api.capabilities._workflow_status_map", return_value=([], {})),
+        patch("src.api.capabilities._mcp_status_list", return_value=[]),
+        patch("src.api.capabilities._starter_pack_statuses", return_value=[]),
+        patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
+        patch("src.api.capabilities._recommended_actions", return_value=([], [], [])),
+        patch(
+            "src.api.capabilities.context_manager.get_context",
+            return_value=_make_context(tool_policy_mode="safe", mcp_policy_mode="disabled", approval_mode="safe"),
+        ),
+    ):
+        adapter_inventory = list_source_adapter_inventory()
+        search_bundle = collect_source_evidence_bundle(
+            contract="source_discovery.read",
+            query="seraph roadmap",
+            max_results=1,
+        )
+        page_bundle = collect_source_evidence_bundle(
+            contract="webpage.read",
+            url="https://example.com/about",
+        )
+        session_bundle = collect_source_evidence_bundle(
+            contract="webpage.read",
+            source="browser_session",
+            owner_session_id="session-1",
+            ref=str(session_payload["latest_ref"]),
+        )
+        github_bundle = collect_source_evidence_bundle(
+            contract="work_items.read",
+            source="github-managed",
+        )
+        overview = _build_capability_overview()
+
+    browser_session_runtime.reset_for_tests()
+    github_adapter = next(item for item in adapter_inventory["adapters"] if item["name"] == "github-managed")
+    return {
+        "adapter_count": adapter_inventory["summary"]["adapter_count"],
+        "ready_adapter_count": adapter_inventory["summary"]["ready_adapter_count"],
+        "github_adapter_state": github_adapter["adapter_state"],
+        "github_degraded_reason": github_adapter["degraded_reason"],
+        "github_next_best_name": github_adapter["next_best_sources"][0]["name"],
+        "search_status": search_bundle["status"],
+        "search_item_kind": search_bundle["items"][0]["kind"],
+        "page_status": page_bundle["status"],
+        "page_item_kind": page_bundle["items"][0]["kind"],
+        "session_status": session_bundle["status"],
+        "session_item_kind": session_bundle["items"][0]["kind"],
+        "github_bundle_status": github_bundle["status"],
+        "github_bundle_next_best_name": github_bundle["next_best_sources"][0]["name"],
+        "overview_source_adapters_total": overview["summary"]["source_adapters_total"],
+        "overview_source_adapters_ready": overview["summary"]["source_adapters_ready"],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -6830,6 +6939,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Operator and activity workflow surfaces fail closed when trust-boundary drift blocks replay or resume, instead of advertising stale continuation controls.",
         runner=_eval_workflow_boundary_blocked_surface_behavior,
+    ),
+    EvalScenario(
+        name="source_adapter_evidence_behavior",
+        category="behavior",
+        description="Source adapters expose executable public-web contracts, degrade unavailable authenticated connectors truthfully, and normalize evidence into one reusable shape.",
+        runner=_eval_source_adapter_evidence_behavior,
     ),
     EvalScenario(
         name="capability_repair_behavior",

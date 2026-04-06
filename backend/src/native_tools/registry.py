@@ -142,6 +142,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "collect_source_evidence": {
+        "description": "Collect normalized evidence through provider-neutral source contracts",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["external_read"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

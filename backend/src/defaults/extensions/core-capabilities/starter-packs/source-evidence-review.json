@@ -1,0 +1,9 @@
+{
+  "name": "source-evidence-review",
+  "label": "Source Evidence Review",
+  "description": "Enable the bounded evidence-review skill and adapter-backed source evidence collection for public discovery and explicit webpages.",
+  "install_items": [],
+  "skills": ["source-evidence-review"],
+  "workflows": [],
+  "sample_prompt": "Inspect the available source adapters, then gather bounded evidence from the explicit URL I pasted."
+}

@@ -12,6 +12,7 @@ permissions:
   tools:
     - browse_webpage
     - browser_session
+    - collect_source_evidence
     - create_goal
     - execute_code
     - get_goal_progress
@@ -40,8 +41,10 @@ contributes:
   runbooks:
     - runbooks/daily-operator-rhythm.yaml
     - runbooks/research-briefing.yaml
+    - runbooks/source-evidence-review.yaml
     - runbooks/weekly-alignment.yaml
   starter_packs:
     - starter-packs/daily-operator-rhythm.json
     - starter-packs/research-briefing.json
+    - starter-packs/source-evidence-review.json
     - starter-packs/weekly-alignment.json

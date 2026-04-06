@@ -1,0 +1,4 @@
+id: runbook:source-evidence-review
+title: Source Evidence Review
+summary: Turn on the adapter-backed evidence helpers for bounded public-source discovery and explicit page inspection.
+starter_pack: source-evidence-review

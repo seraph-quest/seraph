@@ -1,0 +1,237 @@
+from unittest.mock import patch
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from src.app import create_app
+from src.observer.context import CurrentContext
+from src.browser.sessions import browser_session_runtime
+from src.api.capabilities import _build_capability_overview
+from src.tools.source_evidence_tool import collect_source_evidence
+
+
+@pytest.fixture(autouse=True)
+def reset_browser_sessions():
+    browser_session_runtime.reset_for_tests()
+    yield
+    browser_session_runtime.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_source_adapters_endpoint_exposes_ready_public_adapters_and_degraded_managed_connector(
+    tmp_path,
+):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "raw-github-mcp",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": False,
+            "tool_count": 3,
+            "status": "auth_required",
+            "auth_hint": "Set a bearer token.",
+            "has_headers": True,
+            "source": "manual",
+        }
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.get("/api/capabilities/source-adapters")
+
+    assert response.status_code == 200
+    payload = response.json()
+    adapters_by_name = {item["name"]: item for item in payload["adapters"]}
+
+    assert adapters_by_name["web_search"]["adapter_state"] == "ready"
+    assert adapters_by_name["browse_webpage"]["operations"][0]["input_mode"] == "url"
+    assert adapters_by_name["browser_session"]["operations"][0]["contract"] == "webpage.read"
+
+    managed = adapters_by_name["github-managed"]
+    assert managed["adapter_state"] == "degraded"
+    assert managed["degraded_reason"] == "requires_config"
+    assert managed["operations"][0]["executable"] is False
+    assert payload["selection_rules"][0].startswith("Prefer connector-backed typed adapters")
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_endpoint_collects_search_results_in_normalized_shape():
+    records = [
+        {
+            "title": "Seraph roadmap",
+            "href": "https://example.com/roadmap",
+            "body": "Roadmap summary for the product.",
+        },
+        {
+            "title": "Seraph status",
+            "href": "https://example.com/status",
+            "body": "Current shipped truth.",
+        },
+    ]
+
+    with patch("src.extensions.source_operations.search_web_records", return_value=(records, [])):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-evidence",
+                json={"contract": "source_discovery.read", "query": "seraph roadmap", "max_results": 2},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["adapter"]["name"] == "web_search"
+    assert payload["summary"]["item_count"] == 2
+    assert payload["items"][0]["kind"] == "search_result"
+    assert payload["items"][0]["location"] == "https://example.com/roadmap"
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_endpoint_collects_public_page_content():
+    with patch(
+        "src.extensions.source_operations.browse_webpage",
+        return_value="Seraph can inspect public webpages and summarize them.",
+    ):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-evidence",
+                json={"contract": "webpage.read", "url": "https://example.com/about"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["adapter"]["name"] == "browse_webpage"
+    assert payload["items"][0]["kind"] == "webpage"
+    assert payload["items"][0]["location"] == "https://example.com/about"
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_endpoint_reads_existing_browser_snapshot():
+    payload = browser_session_runtime.open_session(
+        owner_session_id="session-1",
+        url="https://example.com/context",
+        provider_name="local-browser",
+        provider_kind="local",
+        execution_mode="local_runtime",
+        capture="extract",
+        content="Snapshot content from an existing browser session.",
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+        response = await client.post(
+            "/api/capabilities/source-evidence",
+            json={
+                "contract": "webpage.read",
+                "source": "browser_session",
+                "owner_session_id": "session-1",
+                "ref": payload["latest_ref"],
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ok"
+    assert result["adapter"]["name"] == "browser_session"
+    assert result["items"][0]["kind"] == "browser_snapshot"
+    assert result["items"][0]["metadata"]["ref"] == payload["latest_ref"]
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_endpoint_reports_degraded_managed_connector_with_fallback(
+    tmp_path,
+):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "raw-github-mcp",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 6,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "manual",
+        }
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-evidence",
+                json={"contract": "work_items.read", "source": "github-managed"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "unavailable"
+    assert payload["adapter"]["name"] == "github-managed"
+    assert payload["adapter"]["adapter_state"] == "degraded"
+    assert payload["next_best_sources"][0]["name"] == "raw-github-mcp"
+
+
+def test_collect_source_evidence_tool_renders_structured_summary():
+    bundle = {
+        "status": "ok",
+        "adapter": {
+            "name": "browse_webpage",
+            "adapter_state": "ready",
+        },
+        "items": [
+            {
+                "title": "https://example.com/about",
+                "location": "https://example.com/about",
+                "summary": "Public product page.",
+            }
+        ],
+        "warnings": [],
+        "next_best_sources": [{"name": "browser_session", "description": "Reuse an existing snapshot."}],
+    }
+
+    with patch("src.tools.source_evidence_tool.collect_source_evidence_bundle", return_value=bundle):
+        result = collect_source_evidence.forward(contract="webpage.read", url="https://example.com/about")
+
+    assert "status: ok" in result
+    assert "source: browse_webpage" in result
+    assert "Public product page." in result
+    assert "browser_session" in result
+
+
+def test_capability_overview_includes_source_adapter_inventory():
+    source_adapter_inventory = {
+        "summary": {"adapter_count": 4, "ready_adapter_count": 3},
+        "adapters": [{"name": "web_search", "adapter_state": "ready"}],
+        "selection_rules": ["Prefer connector-backed typed adapters when ready."],
+    }
+
+    with (
+        patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
+        patch("src.api.capabilities.get_current_tool_policy_mode", return_value="safe"),
+        patch("src.api.capabilities._tool_status_list", return_value=[]),
+        patch("src.api.capabilities._skill_status_map", return_value=([], {})),
+        patch("src.api.capabilities._workflow_status_map", return_value=([], {})),
+        patch("src.api.capabilities._mcp_status_list", return_value=[]),
+        patch("src.api.capabilities._starter_pack_statuses", return_value=[]),
+        patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
+        patch("src.api.capabilities._recommended_actions", return_value=([], [], [])),
+        patch("src.api.capabilities.list_source_adapter_inventory", return_value=source_adapter_inventory),
+        patch(
+            "src.api.capabilities.context_manager.get_context",
+            return_value=CurrentContext(tool_policy_mode="safe", mcp_policy_mode="disabled", approval_mode="safe"),
+        ),
+    ):
+        overview = _build_capability_overview()
+
+    assert overview["summary"]["source_adapters_ready"] == 3
+    assert overview["summary"]["source_adapters_total"] == 4
+    assert overview["source_adapters"][0]["name"] == "web_search"
+    assert overview["source_adapter_rules"][0].startswith("Prefer connector-backed typed adapters")

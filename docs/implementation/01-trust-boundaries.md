@@ -294,6 +294,26 @@
   - the real risk here was not missing audit entirely, but silent loss of authenticated-source provenance whenever a wrapper chain fell back to the generic audit path
   - fixed by enriching audit details centrally in the audit wrapper instead of requiring every privileged tool surface to remember its own source-context plumbing
 
+### `workflow-replay-delegation-boundary-enforcement-v1`
+
+- status: complete on `feat/workflow-replay-delegation-boundary-hardening-batch-ad-v10`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - workflow replay and resume projection normalized risk, secret, and authenticated-source fields, but it still ignored delegated-specialist routing fields when comparing the recorded trust boundary to the current one
+  - the underlying workflow runtime also restored checkpoint state without re-checking the parent run's approval context, so direct resume could bypass the API-side `approval_context_changed` guard and reuse state across delegated-boundary drift
+- scope:
+  - approval-context normalization for workflow replay now includes `delegated_specialists` and `delegation_target_unresolved`, so delegated routing drift is treated as a real trust-boundary change instead of noise
+  - checkpoint restore now compares the parent run's normalized approval context to the current workflow approval context before reusing any saved step state, and it fails closed when the boundary changed
+  - reordering of delegated specialists or authenticated source-system metadata remains non-material and does not trigger false drift
+- validation:
+  - `python3 -m py_compile backend/src/workflows/manager.py backend/src/api/workflows.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -q -k "resume_rejects_when_delegation_boundary_changes or detects_delegated_specialist_context_drift or ignores_delegated_specialist_reordering or approval_context_list_reordering or approval_context_changes or authenticated_source_context_drift or authenticated_source_system_reordering or failure_payload_keeps_checkpoint"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first proof pass only blocked the direct resume seam, which would still have left replay projection blind to delegated-specialist drift
+  - while pinning the fix, I also caught two real test regressions of my own: one existing workflow failure-payload method was accidentally dedented during the edit, and one older approval-context reordering assertion was overwritten with the wrong replay expectation
+  - both were corrected before publish, and the expanded targeted suite now covers the old stable cases alongside the new delegated-boundary drift cases
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

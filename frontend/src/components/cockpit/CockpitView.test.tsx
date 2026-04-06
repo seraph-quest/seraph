@@ -3582,7 +3582,7 @@ describe("CockpitView", () => {
     const workflowLabel = await screen.findByText("resume-review");
     const workflowRow = workflowLabel.closest(".cockpit-row");
     expect(workflowRow).not.toBeNull();
-    expect(within(workflowRow as HTMLElement).getByText(/checkpoint review_checkpoint/i)).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getAllByText(/checkpoint review_checkpoint/i).length).toBeGreaterThan(0);
     expect(within(workflowRow as HTMLElement).getByText(/run resume-r/i)).toBeInTheDocument();
 
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Studio" }));
@@ -3721,6 +3721,34 @@ describe("CockpitView", () => {
                 { kind: "workflow_degraded", at: "2026-03-20T09:08:00Z", summary: "branch review needs continuation" },
               ],
             },
+            {
+              id: "run-peer",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:07:00Z",
+              updated_at: "2026-03-20T09:07:30Z",
+              summary: "peer review branch completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/peer-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-peer-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "peer_checkpoint",
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:07:00Z", summary: "Peer branch started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:07:30Z", summary: "peer review branch completed" },
+              ],
+            },
           ],
         }));
       }
@@ -3736,7 +3764,7 @@ describe("CockpitView", () => {
     const rootRow = rootSummary.closest(".cockpit-row");
     expect(rootRow).not.toBeNull();
     expect(within(rootRow as HTMLElement).getByText(/supervision branched/i)).toBeInTheDocument();
-    expect(within(rootRow as HTMLElement).getByText(/1 child branch/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/2 child branches/i)).toBeInTheDocument();
     expect(within(rootRow as HTMLElement).getByText(/root branch/i)).toBeInTheDocument();
     expect(within(rootRow as HTMLElement).getByText(/continue resume-review/i)).toBeInTheDocument();
     expect(within(rootRow as HTMLElement).getByText(/latest failure branch review needs continuation/i)).toBeInTheDocument();
@@ -3746,14 +3774,14 @@ describe("CockpitView", () => {
     const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
     expect(within(inspector).getByRole("button", { name: "Open Latest Branch" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue Latest Branch" })).toBeInTheDocument();
-    expect(within(inspector).getByText("child branch")).toBeInTheDocument();
+    expect(within(inspector).getAllByText("child branch")).toHaveLength(2);
     expect(within(inspector).getByText("branch origin")).toBeInTheDocument();
     expect(within(inspector).getByText("best continuation")).toBeInTheDocument();
     expect(within(inspector).getByText("failure lineage")).toBeInTheDocument();
     expect(within(inspector).getAllByText("family output").length).toBeGreaterThan(0);
     expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
-    expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
@@ -3767,10 +3795,15 @@ describe("CockpitView", () => {
     );
     expect(within(inspector).getAllByRole("button", { name: "Open Parent" }).length).toBeGreaterThan(0);
     expect(within(inspector).getByText("parent run")).toBeInTheDocument();
-    expect(within(inspector).getByText(/older than current/i)).toBeInTheDocument();
-    fireEvent.click(within(inspector).getByRole("button", { name: "Use family output notes/root-review.md" }));
+    expect(within(inspector).getByText("peer branch")).toBeInTheDocument();
+    expect(within(inspector).getAllByText(/older than current/i)).toHaveLength(2);
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use family output notes/root-review.md from resume-r" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use peer branch output notes/peer-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/peer-review.md" as context for the next action.')).toBeInTheDocument(),
     );
   });
 

@@ -2976,6 +2976,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const seen = new Set<string>();
     const outputs: WorkflowFamilyArtifactOutput[] = [];
     workflowFamilyRuns(workflow).forEach((entry) => {
+      if (entry.runIdentity === workflow.runIdentity || entry.id === workflow.id) {
+        return;
+      }
       entry.artifacts.forEach((artifact) => {
         const key = `${artifact.filePath}:${entry.runIdentity ?? entry.id}`;
         if (seen.has(key)) return;
@@ -6160,14 +6163,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   </div>
                   <button
                     className="cockpit-feedback-button"
-                    aria-label={`Open workflow for family output ${output.filePath}`}
+                    aria-label={`Open workflow for family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
                     onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
                   >
                     Open Run
                   </button>
                   <button
                     className="cockpit-feedback-button"
-                    aria-label={`Use family output ${output.filePath}`}
+                    aria-label={`Use family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
                     onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
                   >
                     Use Output

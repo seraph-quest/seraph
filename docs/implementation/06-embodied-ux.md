@@ -184,11 +184,19 @@
   - the workflow inspector now surfaces family-output rows across the workflow family, each with direct open-run and use-output actions
   - child and peer branch rows now also expose direct output reuse when that branch carries a reusable artifact
 - review findings fixed during implementation:
-  - the first pass reintroduced stale uniqueness assumptions in the existing branch-family test by adding multiple valid `family output` rows for the same inspected family
-  - fixed by tightening the test to assert presence of the family-history surface rather than accidental uniqueness
+  - the first pass treated current-run outputs as family outputs, which let the new family-output surface duplicate the existing current-run `Use Output` path instead of highlighting sibling and ancestor artifacts
+  - the first pass also used non-unique family-output action labels and left the peer-branch output path unpinned in the cockpit test
+  - fixed by excluding the inspected run from family-output inventory, qualifying family-output actions by source run, and expanding the branch-family test to cover peer-output reuse while tightening older assertions that relied on accidental uniqueness
 - validation:
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
     - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `53 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
     - result: `passed`
 
 ## Non-Goals

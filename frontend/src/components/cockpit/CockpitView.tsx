@@ -2905,6 +2905,80 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     return summary;
   }
+  function workflowCanContinue(workflow: WorkflowRunRecord): boolean {
+    const approval = approvalForWorkflow(workflow);
+    const continueTarget = approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId;
+    if ((approval?.resume_message ?? workflow.threadContinueMessage) && continueTarget) {
+      return true;
+    }
+    return workflowCheckpointActions(workflow).length > 0 || !!workflow.retryFromStepDraft;
+  }
+  function workflowBestContinuationRun(workflow: WorkflowRunRecord): WorkflowRunRecord | null {
+    const resolved = resolveWorkflowRun(workflow);
+    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(resolved)) ?? [resolved];
+    const ancestorIds = new Set(
+      workflowAncestorRuns(resolved)
+        .map((entry) => entry.runIdentity)
+        .filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+    );
+    const candidates = [
+      resolved,
+      ...familyRuns.filter((entry) => (
+        entry.runIdentity !== resolved.runIdentity
+        && (!entry.runIdentity || !ancestorIds.has(entry.runIdentity))
+      )),
+    ];
+    return candidates.find((entry) => (
+      workflowCanContinue(entry)
+      || entry.pendingApprovalCount
+    )) ?? null;
+  }
+  function workflowFailureLineage(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+    return familyRuns.filter((entry) => (
+      entry.status === "failed"
+      || entry.status === "degraded"
+      || entry.continuedErrorSteps.length > 0
+    ));
+  }
+  function workflowBranchOriginSummary(workflow: WorkflowRunRecord): string[] {
+    const summary: string[] = [];
+    const parent = workflow.parentRunIdentity
+      ? workflowRunByIdentity.get(workflow.parentRunIdentity)
+      : null;
+    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+    if (parent) {
+      summary.push(`from ${parent.workflowName}`);
+    } else if (familyRuns.length > 1) {
+      summary.push("root branch");
+    }
+    if (workflow.resumeCheckpointLabel) {
+      summary.push(`checkpoint ${workflow.resumeCheckpointLabel}`);
+    } else if (workflow.branchKind) {
+      summary.push(workflow.branchKind.replace(/_/g, " "));
+    }
+    if (typeof workflow.branchDepth === "number") {
+      summary.push(`depth ${workflow.branchDepth}`);
+    }
+    return summary;
+  }
+  function workflowBranchDebugSummary(workflow: WorkflowRunRecord): string[] {
+    const summary = workflowBranchOriginSummary(workflow);
+    const bestContinuation = workflowBestContinuationRun(workflow);
+    if (bestContinuation) {
+      summary.push(
+        bestContinuation.runIdentity === workflow.runIdentity
+          ? "continue here"
+          : `continue ${bestContinuation.workflowName}`,
+      );
+      summary.push(workflowSupervisionLabel(bestContinuation));
+    }
+    const latestFailure = workflowFailureLineage(workflow)[0];
+    if (latestFailure) {
+      summary.push(`latest failure ${latestFailure.summary}`);
+    }
+    return summary;
+  }
   function inspectWorkflowRun(workflow: WorkflowRunRecord | null | undefined) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
@@ -5427,6 +5501,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       : null;
     const selectedWorkflowApproval = selectedWorkflow ? approvalForWorkflow(selectedWorkflow) : null;
     const selectedWorkflowLatestBranch = selectedWorkflow ? workflowLatestBranchRun(selectedWorkflow) : null;
+    const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
     const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
     const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
     const selectedWorkflowCheckpointDraftByStep = new Map(
@@ -5733,6 +5808,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             ))}
           </div>
         )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && workflowBranchDebugSummary(selectedWorkflow).length > 0 && (
+          <div className="cockpit-chip-row">
+            {workflowBranchDebugSummary(selectedWorkflow).map((detail) => (
+              <span key={`${selectedWorkflow.id}:branch-debug:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
+            ))}
+          </div>
+        )}
         {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflowApproval && (
           <div className="cockpit-inspector-stack">
             <div className="cockpit-inspector-stack-row">
@@ -5916,11 +6000,86 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const ancestors = workflowAncestorRuns(selectedWorkflow);
           const childRuns = workflowChildRuns(selectedWorkflow);
           const peerRuns = workflowPeerRuns(selectedWorkflow);
-          if (ancestors.length === 0 && childRuns.length === 0 && peerRuns.length === 0) {
+          const branchOriginSummary = workflowBranchOriginSummary(selectedWorkflow);
+          const failureLineage = workflowFailureLineage(selectedWorkflow).slice(0, 3);
+          if (
+            ancestors.length === 0
+            && childRuns.length === 0
+            && peerRuns.length === 0
+            && branchOriginSummary.length === 0
+            && !selectedWorkflowBestContinuation
+            && failureLineage.length === 0
+          ) {
             return null;
           }
           return (
             <div className="cockpit-inspector-stack">
+              {branchOriginSummary.length > 0 && (
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">branch origin</div>
+                  <div className="cockpit-value">{branchOriginSummary.join(" · ")}</div>
+                  {selectedWorkflow.parentRunIdentity && (
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => inspectWorkflowRun(workflowRunByIdentity.get(selectedWorkflow.parentRunIdentity ?? ""))}
+                    >
+                      Open Parent
+                    </button>
+                  )}
+                </div>
+              )}
+              {selectedWorkflowBestContinuation && (
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">best continuation</div>
+                  <div className="cockpit-value">
+                    {selectedWorkflowBestContinuation.workflowName}
+                    {" · "}
+                    {selectedWorkflowBestContinuation.summary}
+                    {" · "}
+                    {workflowSupervisionLabel(selectedWorkflowBestContinuation)}
+                    {" · "}
+                    {formatAge(selectedWorkflowBestContinuation.updatedAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open best continuation for ${selectedWorkflowName}`}
+                    onClick={() => inspectWorkflowRun(selectedWorkflowBestContinuation)}
+                  >
+                    Open
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Continue best continuation for ${selectedWorkflowName}`}
+                    onClick={() => continueWorkflowRun(selectedWorkflowBestContinuation)}
+                  >
+                    Continue
+                  </button>
+                  {(selectedWorkflowBestContinuation.artifacts[0]?.filePath ?? selectedWorkflowBestContinuation.artifactPaths[0]) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use latest output from best continuation for ${selectedWorkflowName}`}
+                      onClick={() => queueWorkflowOutputContext(selectedWorkflowBestContinuation)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                </div>
+              )}
+              {failureLineage.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:failure-lineage:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "failure lineage" : "failure branch"}</div>
+                  <div className="cockpit-value">
+                    {entry.workflowName} · {entry.summary} · {workflowSupervisionLabel(entry)} · {formatAge(entry.updatedAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open failure lineage branch ${entry.workflowName}`}
+                    onClick={() => inspectWorkflowRun(entry)}
+                  >
+                    Open
+                  </button>
+                </div>
+              ))}
               {ancestors.map((entry, index) => (
                 <div key={`${selectedWorkflow.id}:ancestor:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
                   <div className="cockpit-key">{index === 0 ? "parent run" : "ancestor run"}</div>
@@ -6851,6 +7010,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {workflowSupervisionSummary(workflow).length > 0 ? (
                           <div className="cockpit-row-meta">
                             {workflowSupervisionSummary(workflow).join(" · ")}
+                          </div>
+                        ) : null}
+                        {workflowBranchDebugSummary(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowBranchDebugSummary(workflow).join(" · ")}
                           </div>
                         ) : null}
                       </button>

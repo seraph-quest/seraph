@@ -39,6 +39,7 @@
 - [x] this workstream now also ships `catalog-install-lifecycle-approval-v1`
 - [x] this workstream now also ships `privileged-repair-bundle-gating-v1`
 - [x] this workstream now also ships `authenticated-source-boundary-hardening-v1`
+- [x] this workstream now also ships `workflow-authenticated-source-drift-enforcement-v1`
 
 ## Still To Do On `develop`
 
@@ -166,6 +167,23 @@
 - review pass:
   - `Copernicus` found two real live-path gaps after the first implementation pass: `SecretRefResolvingTool` still dropped `get_approval_context`, so authenticated MCP tools lost the narrower boundary before forced approval wrapped them, and it also dropped `get_audit_failure_payload`, so authenticated-source attribution disappeared on failure even when call/result payloads were source-aware
   - fixed by forwarding both hooks through the secret-ref wrapper and adding regressions that pin authenticated approval context persistence plus authenticated MCP failure audit payloads through the real wrapped execution path
+
+### `workflow-authenticated-source-drift-enforcement-v1`
+
+- status: complete on `feat/execution-isolation-batch-ad-v1`, intended for the first Batch AD PR for `#299`
+- root cause addressed:
+  - workflow run projection was normalizing approval context down to risk, boundaries, secret-ref acceptance, and step tools, which silently dropped authenticated-source flags and source-system provenance from recorded runs
+  - the current workflow surface was also derived from static workflow metadata, which cannot see the live wrapped MCP tool surface, so replay and resume drift checks could miss a change from generic external access to authenticated external-source execution
+- scope:
+  - workflow approval-context normalization now preserves authenticated-source truth and normalized source-system provenance when those fields are actually present, while staying backward-compatible for older runs that never recorded them
+  - workflow run projection now derives current workflow approval context from runtime-built workflow tools before falling back to static metadata, so authenticated MCP/source wrappers participate in replay and resume blocking
+  - replay and resume blocking now catches authenticated-source drift deterministically instead of collapsing both sides back to the same generic boundary summary
+- validation:
+  - `python3 -m py_compile backend/src/api/workflows.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -q -k "approval_context or authenticated_source_system"`
+- review pass:
+  - direct review against bugs and regressions exposed one real backward-compatibility problem in the first pass: adding default `authenticated_source=false` and empty `source_systems=[]` into normalized approval context changed legacy workflow fingerprints for runs that never carried source metadata
+  - fixed by only persisting authenticated-source fields in normalized approval context when they are materially present, which keeps older approval fingerprints stable while still surfacing real authenticated-source drift
 
 ### `planner-secret-surface-isolation-v1`
 

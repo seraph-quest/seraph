@@ -248,21 +248,81 @@ def _normalize_string_list(value: Any) -> list[str]:
     return sorted(normalized)
 
 
+def _normalize_source_systems(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, bool, tuple[str, ...]]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        server_name = str(item.get("server_name") or "").strip()
+        hostname = str(item.get("hostname") or "").strip()
+        source = str(item.get("source") or "").strip()
+        authenticated_source = bool(item.get("authenticated_source", False))
+        credential_sources = tuple(_normalize_string_list(item.get("credential_sources")))
+        key = (
+            server_name,
+            hostname,
+            source,
+            authenticated_source,
+            credential_sources,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "server_name": server_name,
+                "hostname": hostname,
+                "source": source,
+                "authenticated_source": authenticated_source,
+                "credential_sources": list(credential_sources),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            str(item.get("server_name") or ""),
+            str(item.get("hostname") or ""),
+            str(item.get("source") or ""),
+            bool(item.get("authenticated_source", False)),
+            tuple(item.get("credential_sources") or []),
+        )
+    )
+    return normalized
+
+
 def _normalize_approval_context(value: Any, *, workflow_name: str | None = None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     risk_level = str(value.get("risk_level") or "").strip()
     execution_boundaries = _normalize_string_list(value.get("execution_boundaries"))
     step_tools = _normalize_string_list(value.get("step_tools"))
-    if not any([risk_level, execution_boundaries, step_tools, "accepts_secret_refs" in value]):
+    authenticated_source = bool(value.get("authenticated_source", False))
+    source_systems = _normalize_source_systems(value.get("source_systems"))
+    if not any(
+        [
+            risk_level,
+            execution_boundaries,
+            step_tools,
+            "accepts_secret_refs" in value,
+            authenticated_source,
+            source_systems,
+        ]
+    ):
         return None
-    return {
+    normalized = {
         "workflow_name": str(value.get("workflow_name") or workflow_name or "").strip() or None,
         "risk_level": risk_level or "unknown",
         "execution_boundaries": execution_boundaries,
         "accepts_secret_refs": bool(value.get("accepts_secret_refs", False)),
         "step_tools": step_tools,
     }
+    if authenticated_source:
+        normalized["authenticated_source"] = True
+    if source_systems:
+        normalized["source_systems"] = source_systems
+    return normalized
 
 
 def _workflow_current_approval_context(
@@ -276,7 +336,7 @@ def _workflow_current_approval_context(
     )
     if normalized is not None:
         return normalized
-    return {
+    normalized = {
         "workflow_name": workflow_name,
         "risk_level": str(workflow_meta.get("risk_level") or "high"),
         "execution_boundaries": _normalize_string_list(
@@ -285,6 +345,31 @@ def _workflow_current_approval_context(
         "accepts_secret_refs": bool(workflow_meta.get("accepts_secret_refs", False)),
         "step_tools": _normalize_string_list(workflow_meta.get("step_tools")),
     }
+    if bool(workflow_meta.get("authenticated_source", False)):
+        normalized["authenticated_source"] = True
+    source_systems = _normalize_source_systems(workflow_meta.get("source_systems"))
+    if source_systems:
+        normalized["source_systems"] = source_systems
+    return normalized
+
+
+def _workflow_runtime_approval_contexts() -> dict[str, dict[str, Any]]:
+    base_tools, active_skill_names, _mcp_mode = get_base_tools_and_active_skills()
+    runtime_contexts: dict[str, dict[str, Any]] = {}
+    for tool in workflow_manager.build_workflow_tools(base_tools, active_skill_names):
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name.startswith("workflow_"):
+            continue
+        hook = getattr(tool, "get_approval_context", None)
+        if not callable(hook):
+            continue
+        normalized = _normalize_approval_context(
+            hook({}),
+            workflow_name=_workflow_name_from_tool(tool_name),
+        )
+        if normalized is not None:
+            runtime_contexts[tool_name] = normalized
+    return runtime_contexts
 
 
 def _workflow_name_from_tool(tool_name: str) -> str:
@@ -931,6 +1016,7 @@ async def _list_workflow_runs(
     completed: list[dict[str, Any]] = []
     pending_approvals = await approval_repository.list_pending(session_id=session_id, limit=100)
     workflow_statuses = _workflow_runtime_statuses()
+    workflow_runtime_contexts = _workflow_runtime_approval_contexts()
     pending_by_tool: dict[tuple[str | None, str], list[dict[str, Any]]] = defaultdict(list)
     pending_by_signature: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for approval in pending_approvals:
@@ -1074,7 +1160,11 @@ async def _list_workflow_runs(
         )
         current_approval_context = _workflow_current_approval_context(
             workflow_name=str(run["workflow_name"]),
-            workflow_meta=workflow_meta,
+            workflow_meta={
+                **workflow_meta,
+                "approval_context": workflow_runtime_contexts.get(tool_name)
+                or workflow_meta.get("approval_context"),
+            },
         )
         effective_approval_context = recorded_approval_context or current_approval_context
         approval_context_mismatch = bool(
@@ -1293,7 +1383,11 @@ async def _list_workflow_runs(
             )
             current_approval_context = _workflow_current_approval_context(
                 workflow_name=str(run["workflow_name"]),
-                workflow_meta=workflow_meta,
+                workflow_meta={
+                    **workflow_meta,
+                    "approval_context": workflow_runtime_contexts.get(str(run["tool_name"]))
+                    or workflow_meta.get("approval_context"),
+                },
             )
             effective_approval_context = recorded_approval_context or current_approval_context
             approval_context_mismatch = bool(

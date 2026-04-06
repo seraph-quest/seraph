@@ -32,7 +32,7 @@
 - [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
 - [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
 - [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
-- [x] cockpit workflow density now also exposes family-history comparison summaries plus family-output reuse across workflow branches, so operators can compare sibling or ancestor runs and reuse the freshest useful family output without reconstructing lineage manually
+- [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, and direct compare-output drafts across workflow branches, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, and draft output diffs without reconstructing lineage manually
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -54,12 +54,13 @@
 - [x] this workstream now ships `cockpit-density-and-cross-surface-command-control-v2` with active triage, denser evidence shortcuts, and keyboard-first operator control for approvals, workflow recovery, queued guardian items, degraded reach, artifacts, and trace
 - [x] this workstream now also ships `workflow-branch-debugging-and-long-running-control-v1`
 - [x] this workstream now also ships `workflow-history-comparison-and-family-output-control-v1`
-- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history/comparison
+- [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
+- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, and comparison drafts
 
 ## Still To Do On `develop`
 
 - [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight, repair, bounded bootstrap, and first studio save flows
-- [ ] broader long-running workflow control, richer keyboard/operator density, and more flexible workspace ergonomics inside the cockpit beyond the current workflow-run layer, branch debugger, family-history comparison, Activity Ledger, pane model, extension studio, and saved-layout composition model
+- [ ] broader long-running workflow control, richer keyboard/operator density, and more flexible workspace ergonomics inside the cockpit beyond the current workflow-run layer, branch debugger, family-history comparison/output-diff layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 
@@ -197,6 +198,23 @@
   - `cd docs && npm run build`
     - result: `passed`
   - `git diff --check`
+    - result: `passed`
+
+### `workflow-output-comparison-drafts-and-family-diff-control-v1`
+
+- status: in progress on `feat/workflow-output-comparison-batch-u-v1`
+- root causes addressed:
+  - Batch T made workflow family history and family-output reuse visible, but operators still had to manually reconstruct a comparison prompt when they wanted to inspect how the current run differed from a child, peer, ancestor, or family-output run
+  - the cockpit already knew the relevant family relationships and output paths, but it did not turn that lineage into a direct comparison action
+- scope:
+  - branch-family rows now expose direct compare-output drafts when both the inspected workflow and the related run have reusable outputs
+  - family-output inventory rows now also expose compare actions when the inspected workflow has its own reusable output
+  - comparison actions stay fail closed when either side lacks a reusable artifact instead of advertising a fake diff path
+- review findings fixed during implementation:
+  - this surface reuses the same dense inspector rows that already produced stale uniqueness assumptions in earlier cockpit tests, so the first review focus was making the new compare actions source-aware and testable instead of adding another ambiguous generic `Compare` control
+  - fixed by adding source-qualified compare action labels, deriving comparison drafts only from truthful output pairs, and expanding the branch-family cockpit test to pin current-vs-child and current-vs-peer comparison drafts directly
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
     - result: `passed`
 
 ## Non-Goals

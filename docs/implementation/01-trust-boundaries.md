@@ -314,6 +314,25 @@
   - while pinning the fix, I also caught two real test regressions of my own: one existing workflow failure-payload method was accidentally dedented during the edit, and one older approval-context reordering assertion was overwritten with the wrong replay expectation
   - both were corrected before publish, and the expanded targeted suite now covers the old stable cases alongside the new delegated-boundary drift cases
 
+### `workflow-legacy-replay-boundary-enforcement-v1`
+
+- status: complete on `feat/workflow-legacy-replay-boundary-hardening-batch-ad-v11`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - legacy workflow runs can still carry reusable checkpoint context without any recorded approval context at all, and direct resume trusted those payloads as long as the workflow name matched
+  - the API replay projection had the same blind spot for protected medium-risk surfaces like authenticated external sources, where replay could still look valid even though the run predates trust-boundary tracking
+- scope:
+  - privileged workflow surfaces now require tracked approval lineage before replay or resume is considered safe, including authenticated sources, delegated specialist routes, unresolved delegation, secret-bearing boundaries, external MCP, and other high-risk surfaces
+  - direct checkpoint restore now fails closed when a parent run predates trust-boundary tracking for the current protected workflow surface
+  - workflow run projection now reports `approval_context_missing` for those legacy protected runs so replay/resume UI and API paths surface the same fresh-run requirement
+- validation:
+  - `python3 -m py_compile backend/src/workflows/manager.py backend/src/api/workflows.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -q -k "approval_context_is_missing_for_authenticated_surface or resume_rejects_legacy_checkpoint_for_authenticated_surface or approval_context_changes or authenticated_source_context_drift or authenticated_source_system_reordering or delegated_specialist_context_drift or delegated_specialist_reordering or approval_context_list_reordering"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first implementation pass had a real syntax regression in the replay recovery-message branch because I duplicated the nested conditional while adding the new `approval_context_missing` case
+  - after fixing that, I reran the targeted seam set to make sure the older authenticated-source and delegated-stability cases still behaved the same while only the legacy protected runs started failing closed
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

@@ -791,6 +791,61 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
             _seraph_root_run_identity=parent_run_identity,
         )
 
+
+def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface():
+    workflow = Workflow(
+        name="authenticated-replay",
+        description="Resume authenticated source work",
+        inputs={"query": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+            WorkflowStep(id="save", tool="write_file", arguments={"file_path": "notes/out.md", "content": "{{ steps.search.result }}"}),
+        ],
+        requires_tools=["web_search", "write_file"],
+    )
+    workflow_tool = WorkflowTool(
+        workflow,
+        {
+            "web_search": DummyTool("web_search", lambda query: f"fresh result for {query}"),
+            "write_file": DummyTool("write_file", lambda file_path, content: f"saved {file_path}: {content}"),
+        },
+    )
+    workflow_tool.get_approval_context = lambda _arguments: {
+        "workflow_name": "authenticated-replay",
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "accepts_secret_refs": False,
+        "step_tools": ["web_search", "write_file"],
+        "authenticated_source": True,
+        "source_systems": [{"server_name": "github", "hostname": "api.github.com", "source": "extension", "authenticated_source": True}],
+    }
+    parent_run_identity = "session-1:workflow_authenticated_replay:parent"
+    checkpoint_payload = {
+        "workflow_name": "authenticated-replay",
+        "checkpoint_context": {
+            "search": {
+                "tool": "web_search",
+                "arguments": {"query": "seraph"},
+                "result": "cached search result",
+            }
+        },
+        "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+    }
+
+    with (
+        patch(
+            "src.workflows.manager._load_workflow_checkpoint_payload",
+            AsyncMock(return_value=checkpoint_payload),
+        ),
+        pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
+    ):
+        workflow_tool(
+            query="seraph",
+            _seraph_resume_from_step="save",
+            _seraph_parent_run_identity=parent_run_identity,
+            _seraph_root_run_identity=parent_run_identity,
+        )
+
     def test_workflow_tool_audit_call_payload_uses_normalized_control_inputs_for_fingerprint(self):
         workflow = Workflow(
             name="web-brief",
@@ -3126,6 +3181,211 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
 
     assert response.status_code == 409
     assert "trust boundary" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_missing_for_authenticated_surface(client):
+    current_context = {
+        "workflow_name": "web-brief-to-file",
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "accepts_secret_refs": False,
+        "step_tools": ["web_search", "write_file"],
+        "authenticated_source": True,
+        "source_systems": [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+                "credential_sources": ["vault:github_token"],
+            }
+        ],
+    }
+    runtime_workflow_tool = SimpleNamespace(
+        name="workflow_web_brief_to_file",
+        get_approval_context=lambda _arguments: current_context,
+    )
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded (2 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-legacy-auth",
+                        "step_tools": ["web_search", "write_file"],
+                        "step_records": [],
+                        "artifact_paths": ["notes/brief.md"],
+                        "continued_error_steps": [],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "web-brief-legacy-auth",
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+                "approval_context": {
+                    "workflow_name": "web-brief-to-file",
+                    "risk_level": "medium",
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "accepts_secret_refs": False,
+                    "step_tools": ["web_search", "write_file"],
+                },
+            },
+        ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[runtime_workflow_tool]),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["approval_context_mismatch"] is False
+    assert run["replay_allowed"] is False
+    assert run["replay_block_reason"] == "approval_context_missing"
+    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_resume_plan_rejects_when_approval_context_is_missing_for_authenticated_surface(client):
+    current_context = {
+        "workflow_name": "web-brief-to-file",
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "accepts_secret_refs": False,
+        "step_tools": ["web_search", "write_file"],
+        "authenticated_source": True,
+        "source_systems": [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+            }
+        ],
+    }
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-result",
+                    "session_id": "session-1",
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "workflow_web_brief_to_file succeeded (2 steps)",
+                    "created_at": "2026-03-18T12:01:45Z",
+                    "details": {
+                        "workflow_name": "web-brief-to-file",
+                        "run_fingerprint": "web-brief-legacy-auth",
+                        "step_tools": ["web_search", "write_file"],
+                        "step_records": [
+                            {"id": "search", "tool": "web_search", "status": "succeeded"},
+                            {"id": "save", "tool": "write_file", "status": "succeeded"},
+                        ],
+                        "checkpoint_step_ids": ["search", "save"],
+                        "last_completed_step_id": "save",
+                        "continued_error_steps": [],
+                    },
+                },
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "web-brief-legacy-auth",
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+                "approval_context": current_context,
+            },
+        ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[SimpleNamespace(name="workflow_web_brief_to_file", get_approval_context=lambda _arguments: current_context)]),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {},
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.post(
+            "/api/workflows/runs/session-1:workflow_web_brief_to_file:web-brief-legacy-auth/resume-plan",
+            json={"step_id": "save"},
+        )
+
+    assert response.status_code == 409
+    assert "predates trust-boundary tracking" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

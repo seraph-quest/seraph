@@ -351,6 +351,34 @@ def normalize_workflow_approval_context(
     return normalized
 
 
+def approval_context_requires_tracked_lineage(value: dict[str, Any] | None) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if bool(value.get("accepts_secret_refs", False)):
+        return True
+    if bool(value.get("authenticated_source", False)):
+        return True
+    if bool(value.get("delegation_target_unresolved", False)):
+        return True
+    if _normalize_string_list(value.get("delegated_specialists")):
+        return True
+    boundaries = {
+        str(boundary)
+        for boundary in value.get("execution_boundaries", [])
+        if isinstance(boundary, str)
+    }
+    if boundaries & {
+        "authenticated_external_source",
+        "delegation",
+        "external_mcp",
+        "secret_injection",
+        "secret_management",
+        "secret_read",
+    }:
+        return True
+    return str(value.get("risk_level") or "") == "high"
+
+
 def _delegate_step_approval_context(
     workflow: Workflow,
     step: Any,
@@ -923,6 +951,14 @@ class WorkflowTool(Tool):
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' cannot resume from step '{requested_step_id}' "
                 "because the parent run changed its trust boundary"
+            )
+        if (
+            recorded_approval_context is None
+            and approval_context_requires_tracked_lineage(current_approval_context)
+        ):
+            raise RuntimeError(
+                f"Workflow '{self.workflow.name}' cannot resume from step '{requested_step_id}' "
+                "because the parent run predates trust-boundary tracking for the current workflow surface"
             )
         raw_checkpoint_context = details.get("checkpoint_context")
         if not isinstance(raw_checkpoint_context, dict):

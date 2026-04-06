@@ -1614,6 +1614,115 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
 
 
 @pytest.mark.asyncio
+async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lacks_tracked_authenticated_context(client):
+    current_context = {
+        "workflow_name": "web-brief-to-file",
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "accepts_secret_refs": False,
+        "step_tools": ["web_search", "write_file"],
+        "authenticated_source": True,
+        "source_systems": [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+            }
+        ],
+    }
+    runtime_workflow_tool = SimpleNamespace(
+        name="workflow_web_brief_to_file",
+        get_approval_context=lambda _arguments: current_context,
+    )
+
+    with (
+        patch(
+            "src.api.workflows.audit_repository.list_events",
+            return_value=[
+                {
+                    "id": "evt-call",
+                    "session_id": "session-1",
+                    "event_type": "tool_call",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "summary": "Calling workflow",
+                    "created_at": "2026-03-18T12:01:00Z",
+                    "details": {
+                        "run_fingerprint": "web-brief-auth-pending",
+                        "arguments": {"query": "seraph", "file_path": "notes/brief.md"},
+                    },
+                },
+            ],
+        ),
+        patch(
+            "src.api.workflows.approval_repository.list_pending",
+            return_value=[
+                {
+                    "id": "approval-1",
+                    "tool_name": "workflow_web_brief_to_file",
+                    "session_id": "session-1",
+                    "fingerprint": "web-brief-auth-pending",
+                    "summary": "Approval pending for workflow_web_brief_to_file",
+                    "risk_level": "medium",
+                    "created_at": "2026-03-18T12:01:10Z",
+                    "resume_message": "Continue the authenticated brief once approved",
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["external_read", "workspace_write"],
+                "accepts_secret_refs": False,
+                "approval_context": {
+                    "workflow_name": "web-brief-to-file",
+                    "risk_level": "medium",
+                    "execution_boundaries": ["external_read", "workspace_write"],
+                    "accepts_secret_refs": False,
+                    "step_tools": ["web_search", "write_file"],
+                },
+            },
+        ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[runtime_workflow_tool]),
+        patch(
+            "src.api.workflows.workflow_manager.list_workflows",
+            return_value=[
+                {
+                    "name": "web-brief-to-file",
+                    "inputs": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "file_path": {"type": "string", "description": "Output path"},
+                    },
+                    "enabled": True,
+                    "is_available": True,
+                    "missing_tools": [],
+                    "missing_skills": [],
+                }
+            ],
+        ),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["replay_allowed"] is False
+    assert run["replay_block_reason"] == "approval_context_missing"
+    assert run["resume_from_step"] is None
+    assert run["resume_checkpoint_label"] is None
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
+    assert run["thread_continue_message"] == "Continue the authenticated brief once approved"
+    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+
+
+@pytest.mark.asyncio
 async def test_workflow_runs_endpoint_marks_waiting_runs_as_awaiting_approval(client):
     with (
         patch(
@@ -2503,6 +2612,10 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
     assert run["replay_block_reason"] == "approval_context_changed"
     assert run["risk_level"] == "medium"
     assert run["execution_boundaries"] == ["external_read", "workspace_write"]
+    assert run["resume_from_step"] is None
+    assert run["resume_checkpoint_label"] is None
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
     assert "trust boundary" in run["approval_recovery_message"]
 
 
@@ -2717,6 +2830,8 @@ async def test_workflow_runs_endpoint_detects_authenticated_source_context_drift
     assert run["approval_context_mismatch"] is True
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
     assert run["current_approval_context"]["authenticated_source"] is True
     assert run["current_approval_context"]["source_systems"] == [
         {
@@ -2979,6 +3094,8 @@ async def test_workflow_runs_endpoint_detects_delegated_specialist_context_drift
     assert run["approval_context_mismatch"] is True
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_changed"
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
     assert run["current_approval_context"]["delegated_specialists"] == ["mcp_github"]
 
 
@@ -3288,6 +3405,10 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_is_mis
     assert run["approval_context_mismatch"] is False
     assert run["replay_allowed"] is False
     assert run["replay_block_reason"] == "approval_context_missing"
+    assert run["resume_from_step"] is None
+    assert run["resume_checkpoint_label"] is None
+    assert run["checkpoint_candidates"] == []
+    assert run["resume_plan"] is None
     assert "predates trust-boundary tracking" in run["approval_recovery_message"]
 
 

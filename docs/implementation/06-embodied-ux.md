@@ -289,6 +289,31 @@
   - `git diff --check`
     - result: `passed`
 
+### `workflow-triage-recovery-controls-v1`
+
+- status: complete on `feat/workflow-triage-recovery-controls-batch-y-v1`, intended for the aggregate Batch Y PR for `#285`
+- root causes addressed:
+  - Batch X made workflow triage strong for follow-through, but the hottest failed or blocked workflows still hid retry-step, repair-step, and replay-repair controls behind the workflow timeline or inspector
+  - keyboard-first workflow control still had no direct recovery draft path for the primary workflow target
+- scope:
+  - workflow triage rows now expose direct `retry step`, `repair step`, and `repair replay` actions when the underlying workflow state truthfully supports them
+  - keyboard-first workflow control now also includes `Shift+T` for drafting the top workflow recovery path, preferring retry-step over generic rerun when available
+  - triage recovery controls stay fail closed when replay is blocked without repair actions or when the failed step has no repair path
+- review findings fixed during implementation:
+  - the first triage recovery test still used an approval-style failed-step action, which did not exercise the same repair path as the operator surface and produced a false red assertion
+  - fixed by aligning the test fixture with a real repair action and by proving replay-repair separately with a blocked workflow that exposes replay repair actions without a retry-step path
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
+
 ## Non-Goals
 
 - cosmetic polish detached from guardian value

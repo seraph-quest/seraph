@@ -714,7 +714,7 @@ describe("CockpitView", () => {
                   artifact_paths: ["notes/brief.md"],
                   error_summary: "write_file blocked by approval",
                   recovery_hint: "Approve the pending write step and continue the workflow.",
-                  recovery_actions: [{ type: "approval", label: "Approve write_file" }],
+                  recovery_actions: [{ type: "set_tool_policy", label: "Allow write_file", name: "write_file", mode: "full" }],
                   is_recoverable: true,
                 },
               ],
@@ -726,6 +726,7 @@ describe("CockpitView", () => {
               thread_id: "session-2",
               thread_label: "Atlas thread",
               replay_allowed: true,
+              retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
               thread_continue_message: "Continue Atlas workflow",
               run_identity: "root-1",
               root_run_identity: "root-1",
@@ -755,6 +756,30 @@ describe("CockpitView", () => {
               parent_run_identity: "root-1",
               root_run_identity: "root-1",
             },
+            {
+              id: "run-repair",
+              tool_name: "workflow_atlas_repair",
+              workflow_name: "atlas-repair",
+              session_id: "session-2",
+              status: "failed",
+              started_at: "2026-03-18T11:55:00Z",
+              updated_at: "2026-03-18T12:01:00Z",
+              summary: "workflow_atlas_repair blocked before replay",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: [],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: false,
+              replay_block_reason: "policy_boundary",
+              replay_recommended_actions: [{ type: "set_tool_policy", label: "Allow write_file", name: "write_file", mode: "full" }],
+              run_identity: "repair-1",
+              root_run_identity: "repair-1",
+            },
           ],
         }));
       }
@@ -772,6 +797,7 @@ describe("CockpitView", () => {
       expect(within(triage).getByText("awaiting approval · Approve Atlas shell command")).toBeInTheDocument();
       expect(within(triage).getByText("workflow degraded: web-brief-to-file")).toBeInTheDocument();
       expect(within(triage).getByText("workflow running: web-brief-to-file")).toBeInTheDocument();
+      expect(within(triage).getByText("workflow failed: atlas-repair")).toBeInTheDocument();
       expect(within(triage).getByText("degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
       expect(within(triage).getByText("queued: advisory")).toBeInTheDocument();
       expect(within(triage).getByText("queued follow-up · Draft Atlas follow-up")).toBeInTheDocument();
@@ -794,6 +820,8 @@ describe("CockpitView", () => {
     expect(workflowRow).not.toBeNull();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Retry step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Repair step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Open best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Continue best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
     expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
@@ -807,6 +835,19 @@ describe("CockpitView", () => {
       expect(
         screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
       ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Retry step for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Repair step for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
     );
 
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Compare best continuation for workflow degraded: web-brief-to-file" }));
@@ -840,6 +881,7 @@ describe("CockpitView", () => {
     expect(runningWorkflowRow).not.toBeNull();
     expect(within(runningWorkflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow running: web-brief-to-file" })).toBeInTheDocument();
     expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Open best continuation for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
+    expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Retry step for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "F", shiftKey: true });
     await waitFor(() =>
@@ -848,11 +890,28 @@ describe("CockpitView", () => {
       ).toBeInTheDocument(),
     );
 
+    fireEvent.keyDown(window, { key: "T", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).toBeInTheDocument(),
+    );
+
     fireEvent.keyDown(window, { key: "L", shiftKey: true });
     await waitFor(() =>
       expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
     );
     expect(screen.getByText("parent run")).toBeInTheDocument();
+
+    const blockedWorkflowRow = within(triage).getByText("workflow failed: atlas-repair").closest(".cockpit-operator-row--entry");
+    expect(blockedWorkflowRow).not.toBeNull();
+    expect(within(blockedWorkflowRow as HTMLElement).getByRole("button", { name: "Repair replay for workflow failed: atlas-repair" })).toBeInTheDocument();
+    expect(within(blockedWorkflowRow as HTMLElement).queryByRole("button", { name: "Retry step for workflow failed: atlas-repair" })).not.toBeInTheDocument();
+    fireEvent.click(within(blockedWorkflowRow as HTMLElement).getByRole("button", { name: "Repair replay for workflow failed: atlas-repair" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
 
     const queuedRow = within(triage).getByText("queued: advisory").closest(".cockpit-operator-row--entry");
     expect(queuedRow).not.toBeNull();

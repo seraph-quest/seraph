@@ -3600,6 +3600,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "u") {
         event.preventDefault();
         queueWorkflowOutputContext(primaryWorkflowShortcutTarget());
+      } else if (key === "p") {
+        event.preventDefault();
+        queueWorkflowFamilyPlan(primaryWorkflowShortcutTarget());
       }
     };
     window.addEventListener("keydown", handleOperatorShortcut);
@@ -3616,6 +3619,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     primaryTriageEntry,
     primaryWorkflowTriageEntry,
     inspectPrimaryWorkflowEntry,
+    queueWorkflowFamilyPlan,
     primaryWorkflowShortcutTarget,
     queueWorkflowOutputContext,
     redirectOperatorWorkflowEntry,
@@ -5175,6 +5179,34 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
 
+  function queueWorkflowFamilyPlan(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const currentOutputPath = workflowPrimaryOutputPath(resolved);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    const latestFailure = workflowFailureLineage(resolved)[0] ?? null;
+    const familyOutputs = workflowFamilyArtifactOutputs(resolved).slice(0, 3);
+    if (!currentOutputPath && !bestContinuation && !latestFailure && familyOutputs.length === 0) return;
+    const parts = [
+      `Review workflow family state for "${resolved.workflowName}".`,
+      currentOutputPath ? `Current output: "${currentOutputPath}".` : null,
+      bestContinuation
+        ? [
+            `Best continuation: "${bestContinuation.summary}"`,
+            workflowPrimaryOutputPath(bestContinuation)
+              ? `latest output "${workflowPrimaryOutputPath(bestContinuation)}"`
+              : null,
+          ].filter((part): part is string => typeof part === "string" && part.length > 0).join(" with ")
+        : null,
+      latestFailure ? `Latest family failure: "${latestFailure.summary}".` : null,
+      familyOutputs.length > 0
+        ? `Related reusable outputs: ${familyOutputs.map((output) => `"${output.filePath}"`).join(", ")}.`
+        : null,
+      "Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.",
+    ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    queueComposerDraft(parts.join(" "));
+  }
+
   function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
     const candidates = [
       primaryWorkflowTriageEntry?.workflow ?? null,
@@ -6161,6 +6193,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Compare
                     </button>
                   )}
+                </div>
+              )}
+              {(selectedWorkflowOutputPath || selectedWorkflowBestContinuation || failureLineage.length > 0 || familyOutputs.length > 0) && (
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">next step</div>
+                  <div className="cockpit-value">Bundle current workflow-family state into one continuation-planning draft.</div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Draft next step from workflow family for ${selectedWorkflowName}`}
+                    onClick={() => queueWorkflowFamilyPlan(selectedWorkflow)}
+                  >
+                    Draft Next Step
+                  </button>
                 </div>
               )}
               {failureLineage.map((entry, index) => (
@@ -7837,7 +7882,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+W inspect top workflow · Shift+U use latest output
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+W inspect top workflow · Shift+U use latest output · Shift+P draft next step
                     </div>
                   </div>
 

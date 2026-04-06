@@ -42,6 +42,7 @@
 - [x] operator-surface imported reach, extension governance, and LLM spend attribution by runtime path and capability family
 - [x] provider-neutral source capability inventory that exposes typed public-web tools, managed authenticated connectors, explicit raw-MCP gaps, and one reusable source-evidence review skill instead of forcing provider-specific workflow glue
 - [x] first adapter-backed source-evidence runtime that turns typed public-web contracts into normalized evidence bundles, exposes degraded managed-connector truth instead of implied access, and gives Seraph one reusable `collect_source_evidence` path for public discovery, explicit pages, and existing browser-session snapshots
+- [x] first connector-backed authenticated source-read bridge that binds a managed connector to a live MCP runtime when the connector is enabled and configured, so typed source contracts can execute normalized `repository.read`, `work_items.read`, and `code_activity.read` evidence reads instead of staying permanently degraded
 
 ## Working On Now
 
@@ -87,6 +88,9 @@
 - local review finding fixed while landing `adapter-backed-authenticated-source-operations-v1`:
   - typed managed connectors could advertise work-item or repository contracts without any executable runtime path, which risked implying authenticated access that did not exist yet
   - fixed by adding explicit adapter-state and degraded-reason surfaces plus next-best fallback guidance instead of treating inventory metadata as execution truth
+- local review finding fixed while landing `adapter-backed-authenticated-source-operations-v2`:
+  - the first authenticated adapter grading treated an unimplemented write route as if it invalidated the whole authenticated read adapter, which would have kept GitHub degraded even when every read contract was executable
+  - fixed by grading managed-connector readiness against executable read coverage while still exposing unbound write routes as non-executable operations
 
 ## Still To Do On `develop`
 

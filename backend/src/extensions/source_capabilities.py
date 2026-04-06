@@ -37,6 +37,7 @@ class TypedSourceSurface:
     contracts: tuple[str, ...]
     config_keys: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
+    runtime_adapter: dict[str, Any] | None = None
     extension_id: str | None = None
     reference: str | None = None
     notes: tuple[str, ...] = ()
@@ -56,6 +57,7 @@ class TypedSourceSurface:
             "contracts": list(self.contracts),
             "config_keys": list(self.config_keys),
             "capabilities": list(self.capabilities),
+            "runtime_adapter": self.runtime_adapter,
             "extension_id": self.extension_id,
             "reference": self.reference,
             "notes": list(self.notes),
@@ -277,6 +279,11 @@ def _managed_source_surfaces(
                 contracts=contracts,
                 config_keys=tuple(sorted(config_entry.keys())),
                 capabilities=tuple(capabilities),
+                runtime_adapter=(
+                    dict(runtime_adapter)
+                    if isinstance((runtime_adapter := contribution.metadata.get("runtime_adapter")), dict)
+                    else None
+                ),
                 extension_id=contribution.extension_id,
                 reference=contribution.reference,
                 notes=tuple(notes),

@@ -738,17 +738,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_checkpoint_candidates_empty"] is True
     assert details_by_name["source_adapter_evidence_behavior"]["adapter_count"] >= 4
     assert details_by_name["source_adapter_evidence_behavior"]["ready_adapter_count"] >= 3
-    assert details_by_name["source_adapter_evidence_behavior"]["github_adapter_state"] == "degraded"
-    assert details_by_name["source_adapter_evidence_behavior"]["github_degraded_reason"] == "requires_config"
-    assert details_by_name["source_adapter_evidence_behavior"]["github_next_best_name"] == "raw-github-mcp"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_adapter_state"] == "ready"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_work_item_tool"] == "search_issues"
     assert details_by_name["source_adapter_evidence_behavior"]["search_status"] == "ok"
     assert details_by_name["source_adapter_evidence_behavior"]["search_item_kind"] == "search_result"
     assert details_by_name["source_adapter_evidence_behavior"]["page_status"] == "ok"
     assert details_by_name["source_adapter_evidence_behavior"]["page_item_kind"] == "webpage"
     assert details_by_name["source_adapter_evidence_behavior"]["session_status"] == "ok"
     assert details_by_name["source_adapter_evidence_behavior"]["session_item_kind"] == "browser_snapshot"
-    assert details_by_name["source_adapter_evidence_behavior"]["github_bundle_status"] == "unavailable"
-    assert details_by_name["source_adapter_evidence_behavior"]["github_bundle_next_best_name"] == "raw-github-mcp"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_bundle_status"] == "ok"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_item_kind"] == "work_item"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_runtime_server"] == "github"
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_total"] >= 4
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_ready"] >= 3
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"

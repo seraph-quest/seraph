@@ -5648,10 +5648,18 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
     from src.browser.sessions import browser_session_runtime
     from src.extensions.source_operations import collect_source_evidence_bundle, list_source_adapter_inventory
 
+    class _FakeTool:
+        def __init__(self, name: str, payload: list[dict[str, Any]]) -> None:
+            self.name = name
+            self._payload = payload
+
+        def __call__(self, **kwargs):
+            return self._payload
+
     workspace_dir = tempfile.mkdtemp(prefix="seraph-source-adapters-")
     mcp_entries = [
         {
-            "name": "raw-github-mcp",
+            "name": "github",
             "url": "https://example.com/mcp",
             "enabled": True,
             "connected": True,
@@ -5661,6 +5669,63 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
             "has_headers": True,
             "source": "manual",
         }
+    ]
+    state_payload = {
+        "extensions": {
+            "seraph.core-managed-connectors": {
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "inst_123",
+                        }
+                    }
+                },
+                "connector_state": {
+                    "connectors/managed/github.yaml": {
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+    }
+    github_tools = [
+        _FakeTool(
+            "search_repositories",
+            [
+                {
+                    "id": 1,
+                    "full_name": "seraph-quest/seraph",
+                    "html_url": "https://github.com/seraph-quest/seraph",
+                    "description": "Adapter-backed source evidence runtime.",
+                }
+            ],
+        ),
+        _FakeTool(
+            "search_issues",
+            [
+                {
+                    "id": 41,
+                    "title": "Adapter-backed GitHub evidence",
+                    "html_url": "https://github.com/seraph-quest/seraph/issues/41",
+                    "body": "Expose provider-neutral evidence reads.",
+                    "state": "open",
+                    "number": 41,
+                }
+            ],
+        ),
+        _FakeTool(
+            "search_pull_requests",
+            [
+                {
+                    "id": 42,
+                    "title": "Improve adapters",
+                    "html_url": "https://github.com/seraph-quest/seraph/pull/42",
+                    "body": "Promote GitHub into a real adapter.",
+                    "state": "open",
+                    "number": 42,
+                }
+            ],
+        ),
     ]
     browser_session_runtime.reset_for_tests()
     session_payload = browser_session_runtime.open_session(
@@ -5675,7 +5740,10 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
 
     with (
         patch("src.extensions.source_capabilities.settings.workspace_dir", workspace_dir),
+        patch("src.extensions.source_capabilities.load_extension_state_payload", return_value=state_payload),
         patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=github_tools),
         patch(
             "src.extensions.source_operations.search_web_records",
             return_value=(
@@ -5726,6 +5794,7 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         github_bundle = collect_source_evidence_bundle(
             contract="work_items.read",
             source="github-managed",
+            query="is:issue source adapter",
         )
         overview = _build_capability_overview()
 
@@ -5735,8 +5804,11 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         "adapter_count": adapter_inventory["summary"]["adapter_count"],
         "ready_adapter_count": adapter_inventory["summary"]["ready_adapter_count"],
         "github_adapter_state": github_adapter["adapter_state"],
-        "github_degraded_reason": github_adapter["degraded_reason"],
-        "github_next_best_name": github_adapter["next_best_sources"][0]["name"],
+        "github_work_item_tool": next(
+            item["tool_name"]
+            for item in github_adapter["operations"]
+            if item["contract"] == "work_items.read"
+        ),
         "search_status": search_bundle["status"],
         "search_item_kind": search_bundle["items"][0]["kind"],
         "page_status": page_bundle["status"],
@@ -5744,7 +5816,8 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
         "session_status": session_bundle["status"],
         "session_item_kind": session_bundle["items"][0]["kind"],
         "github_bundle_status": github_bundle["status"],
-        "github_bundle_next_best_name": github_bundle["next_best_sources"][0]["name"],
+        "github_item_kind": github_bundle["items"][0]["kind"],
+        "github_runtime_server": github_bundle["items"][0]["metadata"]["runtime_server"],
         "overview_source_adapters_total": overview["summary"]["source_adapters_total"],
         "overview_source_adapters_ready": overview["summary"]["source_adapters_ready"],
     }

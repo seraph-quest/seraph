@@ -19,3 +19,21 @@ config_fields:
     label: API Base URL
     required: false
     input: url
+runtime_adapter:
+  kind: mcp_server
+  server_names:
+    - github
+    - raw-github-mcp
+  routes:
+    repository.read:
+      tool_names:
+        - search_repositories
+      result_kind: repository
+    work_items.read:
+      tool_names:
+        - search_issues
+      result_kind: work_item
+    code_activity.read:
+      tool_names:
+        - search_pull_requests
+      result_kind: code_activity

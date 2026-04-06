@@ -983,6 +983,7 @@ async def remove_extension_package(extension_id: str):
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("remove", preview)
         remove_extension(extension_id)
     except KeyError as exc:
         await _log_extension_lifecycle_event(

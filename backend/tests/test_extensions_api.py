@@ -919,6 +919,92 @@ async def test_install_high_risk_extension_requires_new_approval_if_package_chan
 
 
 @pytest.mark.asyncio
+async def test_remove_high_risk_extension_requires_approval(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 409
+        remove_detail = remove_response.json()["detail"]
+        assert remove_detail["type"] == "approval_required"
+
+        approve_remove = await client.post(f"/api/approvals/{remove_detail['approval_id']}/approve")
+        assert approve_remove.status_code == 200
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 200
+        assert not (extension_runtime / "extensions" / "seraph-high-risk-pack").exists()
+
+
+@pytest.mark.asyncio
+async def test_remove_high_risk_extension_requires_new_approval_if_package_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 409
+        first_remove_approval_id = remove_response.json()["detail"]["approval_id"]
+
+        approve_remove = await client.post(f"/api/approvals/{first_remove_approval_id}/approve")
+        assert approve_remove.status_code == 200
+
+        installed_workflow = extension_runtime / "extensions" / "seraph-high-risk-pack" / "workflows" / "write-note.md"
+        installed_workflow.write_text(
+            "---\n"
+            "name: write-note\n"
+            "description: Write a changed note into the workspace\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/high-risk.md\n"
+            "      content: changed-before-remove\n"
+            "---\n\n"
+            "Write a changed note.\n",
+            encoding="utf-8",
+        )
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 409
+        second_remove_approval_id = remove_response.json()["detail"]["approval_id"]
+        assert second_remove_approval_id != first_remove_approval_id
+
+
+@pytest.mark.asyncio
 async def test_install_configure_toggle_and_remove_workspace_extension(client, extension_runtime, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
 

@@ -218,6 +218,26 @@
 - review pass:
   - direct review against regressions found the real risk was not broad uninstall approval in general, but the missing destructive boundary specifically for already-approved high-risk extensions; the fix keeps low-risk removals direct and only tightens the high-risk mutation seam
 
+### `extension-disable-and-connector-target-boundary-enforcement-v1`
+
+- status: complete on `feat/extension-config-boundary-hardening-batch-ad-v4`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - high-risk extension disable still bypassed lifecycle approval even after install, update, enable, and remove were hardened, which let privileged or safety-relevant packages be silently deactivated
+  - packaged connector approval was also extension-scoped rather than target-scoped, so approval for one high-risk connector could be reused for a sibling connector inside the same pack when their boundary profile matched
+  - degraded packages could lose derived contribution permission profiles entirely, which made the disable path fail open because the preview no longer advertised the lifecycle approval boundary that the manifest still declared
+- scope:
+  - high-risk extension disable now routes through the same lifecycle approval seam as the rest of the mutation surface instead of remaining an ungated teardown path
+  - packaged connector enable and disable approvals now fingerprint the specific connector target reference, name, and type, so sibling connectors cannot reuse each other's lifecycle approvals
+  - lifecycle approval now falls back to declared manifest permissions when a degraded package loses its derived approval profile, keeping disable fail-closed under workflow or contribution validation drift
+- validation:
+  - `python3 -m py_compile backend/src/api/extensions.py backend/tests/test_extensions_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_extensions_api.py -x -vv -k "install_and_enable_high_risk_extension_require_approval or disable_high_risk_extension_requires_new_approval_if_package_changes or extension_connector_enable_endpoint_controls_packaged_mcp_runtime or connector_lifecycle_approval_is_scoped_to_each_packaged_connector_target or install_toggle_and_remove_workspace_connector_extension or enable_rejects_degraded_extension_with_invalid_workflow_before_approval"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first implementation pass exposed a real fail-open regression: once a high-risk package became degraded, its projected `approval_profile` dropped out and disable reverted to `200` without approval
+  - fixed by deriving a fallback lifecycle approval profile from declared manifest permissions when the live preview no longer carries one, which keeps the disable seam hard without widening low-risk packages that still declare no lifecycle boundaries
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

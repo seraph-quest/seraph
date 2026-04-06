@@ -37,6 +37,7 @@ from src.extensions.lifecycle import (
     update_extension_path,
     validate_extension_path,
 )
+from src.extensions.permissions import LIFECYCLE_APPROVAL_BOUNDARIES
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.scaffold import scaffold_extension_package
 from src.extensions.state import (
@@ -44,6 +45,8 @@ from src.extensions.state import (
     load_extension_state_payload,
     save_extension_state_payload,
 )
+from src.native_tools.registry import canonical_tool_name
+from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
 from src.tools.mcp_manager import mcp_manager
 
 router = APIRouter()
@@ -63,6 +66,59 @@ _BUILTIN_CHANNEL_ADAPTERS = (
     },
 )
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
+
+
+def _lifecycle_fallback_preview(preview: dict[str, Any]) -> dict[str, Any]:
+    approval_profile = preview.get("approval_profile")
+    if isinstance(approval_profile, dict) and approval_profile.get("requires_lifecycle_approval"):
+        return preview
+
+    permissions = preview.get("permissions")
+    if not isinstance(permissions, dict):
+        return preview
+
+    boundaries: list[str] = []
+    for boundary in permissions.get("execution_boundaries", []) or []:
+        if isinstance(boundary, str) and boundary.strip() and boundary not in boundaries:
+            boundaries.append(boundary.strip())
+
+    risk_level = "low"
+    for raw_tool_name in permissions.get("tools", []) or []:
+        if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+            continue
+        tool_name = canonical_tool_name(raw_tool_name)
+        if not tool_name:
+            continue
+        is_mcp = tool_name.startswith("mcp_")
+        for boundary in get_tool_execution_boundaries(tool_name, is_mcp=is_mcp):
+            if boundary not in boundaries:
+                boundaries.append(boundary)
+        tool_risk = get_tool_risk_level(tool_name, is_mcp=is_mcp)
+        if tool_risk == "high" or (tool_risk == "medium" and risk_level == "low"):
+            risk_level = tool_risk
+
+    lifecycle_boundaries = [
+        boundary
+        for boundary in boundaries
+        if boundary in LIFECYCLE_APPROVAL_BOUNDARIES
+    ]
+    if not lifecycle_boundaries:
+        return preview
+
+    if risk_level != "high":
+        risk_level = "high"
+    runtime_behavior = "mcp_policy" if "external_mcp" in boundaries else "high_risk"
+    requires_runtime_approval = runtime_behavior in {"mcp_policy", "high_risk"}
+    return {
+        **preview,
+        "approval_profile": {
+            "requires_runtime_approval": requires_runtime_approval,
+            "runtime_behavior": runtime_behavior,
+            "requires_lifecycle_approval": True,
+            "lifecycle_boundaries": lifecycle_boundaries,
+            "risk_level": risk_level,
+        },
+    }
 
 
 class ExtensionPathRequest(BaseModel):
@@ -306,6 +362,7 @@ async def _require_extension_lifecycle_approval(
     *,
     consume: bool = True,
 ) -> None:
+    preview = _lifecycle_fallback_preview(preview)
     approval_profile = preview.get("approval_profile")
     if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
         return
@@ -327,6 +384,9 @@ async def _require_extension_lifecycle_approval(
 
     extension_id = str(preview.get("id") or preview.get("extension_id") or "")
     display_name = str(preview.get("display_name") or extension_id or "extension")
+    target_reference = str(preview.get("target_reference") or preview.get("reference") or "")
+    target_name = str(preview.get("target_name") or preview.get("name") or "")
+    target_type = str(preview.get("target_type") or preview.get("type") or "")
     tool_name = f"extension_{action}"
     arguments = {
         "extension_id": extension_id,
@@ -336,6 +396,12 @@ async def _require_extension_lifecycle_approval(
         "boundaries": lifecycle_boundaries,
         "permissions": preview.get("permissions"),
     }
+    if target_reference:
+        arguments["target_reference"] = target_reference
+    if target_name:
+        arguments["target_name"] = target_name
+    if target_type:
+        arguments["target_type"] = target_type
     fingerprint = fingerprint_tool_call(tool_name, arguments)
     approval_satisfied = (
         await approval_repository.consume_approved(
@@ -354,8 +420,23 @@ async def _require_extension_lifecycle_approval(
         return
 
     summary = (
-        f"{action.replace('_', ' ').title()} extension '{display_name}' "
-        f"with access to {', '.join(lifecycle_boundaries) or 'high-risk capabilities'}"
+        f"{action.replace('_', ' ').title()} extension "
+        f"'{display_name}'"
+    )
+    if target_reference or target_name:
+        target_label = " / ".join(
+            part
+            for part in (
+                target_type.replace("_", " ").strip(),
+                target_name,
+                target_reference,
+            )
+            if part
+        )
+        summary = f"{summary} target '{target_label}'"
+    summary = (
+        f"{summary} with access to "
+        f"{', '.join(lifecycle_boundaries) or 'high-risk capabilities'}"
     )
     request = await approval_repository.get_or_create_pending(
         session_id=None,
@@ -367,6 +448,9 @@ async def _require_extension_lifecycle_approval(
             "extension_id": extension_id,
             "extension_display_name": display_name,
             "action": action,
+            "target_reference": target_reference or None,
+            "target_name": target_name or None,
+            "target_type": target_type or None,
             "package_path": preview.get("root_path") or preview.get("path"),
             "package_digest": preview.get("package_digest"),
             "permissions": preview.get("permissions"),
@@ -635,50 +719,55 @@ async def set_extension_package_connector_enabled(extension_id: str, req: Extens
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
+        target_connector = next(
+            (
+                contribution
+                for contribution in preview.get("contributions", [])
+                if isinstance(contribution, dict) and contribution.get("reference") == req.reference
+            ),
+            None,
+        )
+        if target_connector is None:
+            raise KeyError(req.reference)
+        permission_profile = target_connector.get("permission_profile")
+        connector_preview = {
+            **preview,
+            "target_reference": req.reference,
+            "target_name": target_connector.get("name"),
+            "target_type": target_connector.get("type"),
+            "approval_profile": {
+                "requires_runtime_approval": bool(
+                    isinstance(permission_profile, dict) and permission_profile.get("requires_approval")
+                ),
+                "runtime_behavior": (
+                    str(permission_profile.get("approval_behavior") or "never")
+                    if isinstance(permission_profile, dict)
+                    else "never"
+                ),
+                "requires_lifecycle_approval": bool(
+                    isinstance(permission_profile, dict)
+                    and permission_profile.get("lifecycle_approval_boundaries")
+                ),
+                "lifecycle_boundaries": (
+                    list(permission_profile.get("lifecycle_approval_boundaries", []))
+                    if isinstance(permission_profile, dict)
+                    else []
+                ),
+                "risk_level": (
+                    str(permission_profile.get("risk_level") or "low")
+                    if isinstance(permission_profile, dict)
+                    else "low"
+                ),
+            },
+        }
         if req.enabled:
             if preview.get("status") != "ready":
                 raise ValueError(
                     f"extension '{extension_id}' is degraded and cannot enable packaged connectors until validation issues are fixed"
                 )
-            target_connector = next(
-                (
-                    contribution
-                    for contribution in preview.get("contributions", [])
-                    if isinstance(contribution, dict) and contribution.get("reference") == req.reference
-                ),
-                None,
-            )
-            if target_connector is None:
-                raise KeyError(req.reference)
-            permission_profile = target_connector.get("permission_profile")
-            connector_preview = {
-                **preview,
-                "approval_profile": {
-                    "requires_runtime_approval": bool(
-                        isinstance(permission_profile, dict) and permission_profile.get("requires_approval")
-                    ),
-                    "runtime_behavior": (
-                        str(permission_profile.get("approval_behavior") or "never")
-                        if isinstance(permission_profile, dict)
-                        else "never"
-                    ),
-                    "requires_lifecycle_approval": bool(
-                        isinstance(permission_profile, dict)
-                        and permission_profile.get("lifecycle_approval_boundaries")
-                    ),
-                    "lifecycle_boundaries": (
-                        list(permission_profile.get("lifecycle_approval_boundaries", []))
-                        if isinstance(permission_profile, dict)
-                        else []
-                    ),
-                    "risk_level": (
-                        str(permission_profile.get("risk_level") or "low")
-                        if isinstance(permission_profile, dict)
-                        else "low"
-                    ),
-                },
-            }
             await _require_extension_lifecycle_approval("enable", connector_preview)
+        else:
+            await _require_extension_lifecycle_approval("disable", connector_preview)
         result = set_extension_connector_enabled(extension_id, req.reference, enabled=req.enabled)
     except KeyError as exc:
         detail = (
@@ -919,7 +1008,10 @@ async def enable_extension_package(extension_id: str):
 
 @router.post("/extensions/{extension_id}/disable")
 async def disable_extension_package(extension_id: str):
+    preview: dict[str, Any] | None = None
     try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("disable", preview)
         result = disable_extension(extension_id)
     except KeyError as exc:
         await _log_extension_lifecycle_event(

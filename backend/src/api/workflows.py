@@ -298,15 +298,19 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
     risk_level = str(value.get("risk_level") or "").strip()
     execution_boundaries = _normalize_string_list(value.get("execution_boundaries"))
     step_tools = _normalize_string_list(value.get("step_tools"))
+    delegated_specialists = _normalize_string_list(value.get("delegated_specialists"))
     authenticated_source = bool(value.get("authenticated_source", False))
+    delegation_target_unresolved = bool(value.get("delegation_target_unresolved", False))
     source_systems = _normalize_source_systems(value.get("source_systems"))
     if not any(
         [
             risk_level,
             execution_boundaries,
             step_tools,
+            delegated_specialists,
             "accepts_secret_refs" in value,
             authenticated_source,
+            delegation_target_unresolved,
             source_systems,
         ]
     ):
@@ -318,8 +322,12 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
         "accepts_secret_refs": bool(value.get("accepts_secret_refs", False)),
         "step_tools": step_tools,
     }
+    if delegated_specialists:
+        normalized["delegated_specialists"] = delegated_specialists
     if authenticated_source:
         normalized["authenticated_source"] = True
+    if delegation_target_unresolved:
+        normalized["delegation_target_unresolved"] = True
     if source_systems:
         normalized["source_systems"] = source_systems
     return normalized

@@ -251,6 +251,106 @@ def _append_unique_source_systems(
             target.append(source_system)
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: dict[str, None] = {}
+    for item in value:
+        text = str(item).strip()
+        if text:
+            normalized[text] = None
+    return sorted(normalized)
+
+
+def _normalize_source_systems(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, bool, tuple[str, ...]]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        server_name = str(item.get("server_name") or "").strip()
+        hostname = str(item.get("hostname") or "").strip()
+        source = str(item.get("source") or "").strip()
+        authenticated_source = bool(item.get("authenticated_source", False))
+        credential_sources = tuple(_normalize_string_list(item.get("credential_sources")))
+        key = (
+            server_name,
+            hostname,
+            source,
+            authenticated_source,
+            credential_sources,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "server_name": server_name,
+                "hostname": hostname,
+                "source": source,
+                "authenticated_source": authenticated_source,
+                "credential_sources": list(credential_sources),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            str(item.get("server_name") or ""),
+            str(item.get("hostname") or ""),
+            str(item.get("source") or ""),
+            bool(item.get("authenticated_source", False)),
+            tuple(item.get("credential_sources") or []),
+        )
+    )
+    return normalized
+
+
+def normalize_workflow_approval_context(
+    value: Any,
+    *,
+    workflow_name: str | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    risk_level = str(value.get("risk_level") or "").strip()
+    execution_boundaries = _normalize_string_list(value.get("execution_boundaries"))
+    step_tools = _normalize_string_list(value.get("step_tools"))
+    delegated_specialists = _normalize_string_list(value.get("delegated_specialists"))
+    authenticated_source = bool(value.get("authenticated_source", False))
+    delegation_target_unresolved = bool(value.get("delegation_target_unresolved", False))
+    source_systems = _normalize_source_systems(value.get("source_systems"))
+    if not any(
+        [
+            risk_level,
+            execution_boundaries,
+            step_tools,
+            delegated_specialists,
+            "accepts_secret_refs" in value,
+            authenticated_source,
+            delegation_target_unresolved,
+            source_systems,
+        ]
+    ):
+        return None
+    normalized = {
+        "workflow_name": str(value.get("workflow_name") or workflow_name or "").strip() or None,
+        "risk_level": risk_level or "unknown",
+        "execution_boundaries": execution_boundaries,
+        "accepts_secret_refs": bool(value.get("accepts_secret_refs", False)),
+        "step_tools": step_tools,
+    }
+    if delegated_specialists:
+        normalized["delegated_specialists"] = delegated_specialists
+    if authenticated_source:
+        normalized["authenticated_source"] = True
+    if delegation_target_unresolved:
+        normalized["delegation_target_unresolved"] = True
+    if source_systems:
+        normalized["source_systems"] = source_systems
+    return normalized
+
+
 def _delegate_step_approval_context(
     workflow: Workflow,
     step: Any,
@@ -517,6 +617,7 @@ class WorkflowTool(Tool):
             start_index, restored_step_records, restored_artifact_paths, restored_context = self._restore_checkpoint_context(
                 control_inputs=control_inputs,
                 canonical_step_tools=canonical_step_tools,
+                approval_context=approval_context,
             )
             for step_id, state in restored_context.items():
                 context["steps"][step_id] = state
@@ -780,6 +881,7 @@ class WorkflowTool(Tool):
         *,
         control_inputs: dict[str, Any],
         canonical_step_tools: list[str],
+        approval_context: dict[str, Any],
     ) -> tuple[int, list[dict[str, Any]], list[str], dict[str, dict[str, Any]]]:
         requested_step_id = str(control_inputs.get("_seraph_resume_from_step") or "").strip()
         if not requested_step_id:
@@ -805,6 +907,22 @@ class WorkflowTool(Tool):
         if str(details.get("workflow_name") or self.workflow.name) != self.workflow.name:
             raise RuntimeError(
                 f"Workflow '{self.workflow.name}' cannot reuse checkpoint state from a different workflow"
+            )
+        recorded_approval_context = normalize_workflow_approval_context(
+            details.get("approval_context"),
+            workflow_name=self.workflow.name,
+        )
+        current_approval_context = normalize_workflow_approval_context(
+            approval_context,
+            workflow_name=self.workflow.name,
+        )
+        if (
+            recorded_approval_context is not None
+            and recorded_approval_context != current_approval_context
+        ):
+            raise RuntimeError(
+                f"Workflow '{self.workflow.name}' cannot resume from step '{requested_step_id}' "
+                "because the parent run changed its trust boundary"
             )
         raw_checkpoint_context = details.get("checkpoint_context")
         if not isinstance(raw_checkpoint_context, dict):

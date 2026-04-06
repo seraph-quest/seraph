@@ -823,12 +823,26 @@ async def get_extension_package_source(extension_id: str, reference: str):
 
 @router.post("/extensions/{extension_id}/source")
 async def save_extension_package_source(extension_id: str, req: ExtensionSourceSaveRequest):
+    preview: dict[str, Any] | None = None
     try:
+        source_preview = get_extension_source(extension_id, req.reference)
+        preview = source_preview.get("extension") if isinstance(source_preview, dict) else None
+        if isinstance(preview, dict):
+            await _require_extension_lifecycle_approval(
+                "save_source",
+                {
+                    **preview,
+                    "target_reference": req.reference,
+                    "target_name": req.reference,
+                    "target_type": "source_file",
+                },
+            )
         payload = save_extension_source(extension_id, req.reference, req.content)
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="save_source",
             outcome="failed",
+            preview=preview,
             path=extension_id,
             error=f"Extension '{extension_id}' not found",
             extra_details={"reference": req.reference},
@@ -838,6 +852,7 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
         await _log_extension_lifecycle_event(
             action="save_source",
             outcome="failed",
+            preview=preview,
             path=extension_id,
             error=str(exc),
             extra_details={"reference": req.reference},

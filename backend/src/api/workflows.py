@@ -27,7 +27,7 @@ from src.extensions.workflow_runtimes import list_workflow_runtime_inventory
 from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
-from src.workflows.manager import workflow_manager
+from src.workflows.manager import approval_context_requires_tracked_lineage, workflow_manager
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 router = APIRouter()
@@ -808,6 +808,7 @@ def _workflow_replay_policy(
     accepts_secret_refs: bool,
     pending_approval_count: int,
     approval_context_mismatch: bool,
+    approval_context_missing_for_protected_surface: bool,
 ) -> tuple[bool, str | None]:
     if availability == "disabled":
         return False, "workflow_disabled"
@@ -815,6 +816,8 @@ def _workflow_replay_policy(
         return False, "workflow_unavailable"
     if approval_context_mismatch:
         return False, "approval_context_changed"
+    if approval_context_missing_for_protected_surface:
+        return False, "approval_context_missing"
     if pending_approval_count > 0:
         return False, "pending_approval"
     if accepts_secret_refs:
@@ -1179,6 +1182,10 @@ async def _list_workflow_runs(
             recorded_approval_context is not None
             and recorded_approval_context != current_approval_context
         )
+        approval_context_missing_for_protected_surface = bool(
+            recorded_approval_context is None
+            and approval_context_requires_tracked_lineage(current_approval_context)
+        )
 
         run.update({
             "status": "failed" if event.get("event_type") == "tool_failed" else "succeeded",
@@ -1278,6 +1285,7 @@ async def _list_workflow_runs(
             accepts_secret_refs=bool(run["accepts_secret_refs"]),
             pending_approval_count=len(approvals),
             approval_context_mismatch=bool(run.get("approval_context_mismatch")),
+            approval_context_missing_for_protected_surface=approval_context_missing_for_protected_surface,
         )
         run_identity = build_workflow_run_identity(
             run.get("session_id") if isinstance(run.get("session_id"), str) else None,
@@ -1343,12 +1351,16 @@ async def _list_workflow_runs(
                 f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
                 if bool(run.get("approval_context_mismatch"))
                 else (
-                    f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
-                    if len(approvals) > 0
+                    f"Workflow '{run['workflow_name']}' predates trust-boundary tracking for its current privileged surface. Start a fresh run instead of replaying or resuming."
+                    if approval_context_missing_for_protected_surface
                     else (
-                        f"Repair workflow '{run['workflow_name']}' before replaying."
-                        if str(run["availability"]) != "ready"
-                        else None
+                        f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
+                        if len(approvals) > 0
+                        else (
+                            f"Repair workflow '{run['workflow_name']}' before replaying."
+                            if str(run["availability"]) != "ready"
+                            else None
+                        )
                     )
                 )
             ),
@@ -1401,6 +1413,10 @@ async def _list_workflow_runs(
             approval_context_mismatch = bool(
                 recorded_approval_context is not None
                 and recorded_approval_context != current_approval_context
+            )
+            approval_context_missing_for_protected_surface = bool(
+                recorded_approval_context is None
+                and approval_context_requires_tracked_lineage(current_approval_context)
             )
             run.update({
                 "approval_context": effective_approval_context,
@@ -1460,6 +1476,7 @@ async def _list_workflow_runs(
                 accepts_secret_refs=bool(run["accepts_secret_refs"]),
                 pending_approval_count=len(approvals),
                 approval_context_mismatch=bool(run.get("approval_context_mismatch")),
+                approval_context_missing_for_protected_surface=approval_context_missing_for_protected_surface,
             )
             run_identity = build_workflow_run_identity(
                 run.get("session_id") if isinstance(run.get("session_id"), str) else None,
@@ -1528,12 +1545,16 @@ async def _list_workflow_runs(
                     f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
                     if bool(run.get("approval_context_mismatch"))
                     else (
-                        f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
-                        if len(approvals) > 0
+                        f"Workflow '{run['workflow_name']}' predates trust-boundary tracking for its current privileged surface. Start a fresh run instead of replaying or resuming."
+                        if approval_context_missing_for_protected_surface
                         else (
-                            f"Repair workflow '{run['workflow_name']}' before replaying."
-                            if str(run["availability"]) != "ready"
-                            else None
+                            f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
+                            if len(approvals) > 0
+                            else (
+                                f"Repair workflow '{run['workflow_name']}' before replaying."
+                                if str(run["availability"]) != "ready"
+                                else None
+                            )
                         )
                     )
                 ),
@@ -1738,12 +1759,17 @@ async def build_workflow_resume_plan(
             run = next((item for item in runs if item.get("run_identity") == run_identity), None)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Workflow run '{run_identity}' not found")
-    if str(run.get("replay_block_reason") or "") == "approval_context_changed":
+    if str(run.get("replay_block_reason") or "") in {"approval_context_changed", "approval_context_missing"}:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"Workflow run '{run_identity}' cannot resume because its trust boundary "
                 "changed after the original run. Start a fresh run instead."
+                if str(run.get("replay_block_reason") or "") == "approval_context_changed"
+                else (
+                    f"Workflow run '{run_identity}' cannot resume because it predates trust-boundary "
+                    "tracking for the current privileged workflow surface. Start a fresh run instead."
+                )
             ),
         )
     resume_plan = _workflow_resume_plan(

@@ -257,6 +257,25 @@
   - the first target-scoping regression used packaged MCP source files and ran into unrelated packaged-MCP draft validation noise, which obscured the approval contract the slice was supposed to prove
   - fixed by pinning target-scoped source-save approval on a multi-workflow high-risk package instead, so the regression exercises the same save path without coupling to MCP-specific source semantics
 
+### `extension-config-mutation-boundary-enforcement-v1`
+
+- status: complete on `feat/extension-config-approval-hardening-batch-ad-v6`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - high-risk extension configure only re-entered lifecycle approval when a request carried a brand-new secret value, so materially different non-secret config changes on already-approved high-risk packages could still change runtime behavior without fresh approval
+  - configure approvals were also package-scoped only, which meant the approval identity did not bind to either the requested config mutation or the current stored config subset that the mutation was changing
+- scope:
+  - high-risk configure now derives a normalized config-mutation approval context from recognized configurable targets and binds approval to both the requested config fragment and the current stored config fragment for those keys
+  - redacted no-op reconfigures remain direct because replaying the stored config placeholder shape does not produce a new mutation context
+  - unknown targets and purely invalid unmapped config entries still fall through to normal validation instead of consuming lifecycle approval for config paths the package does not actually declare
+- validation:
+  - `python3 -m py_compile backend/src/api/extensions.py backend/tests/test_extensions_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_extensions_api.py -x -vv -k "install_configure_and_toggle_wave2_contribution_surfaces"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first proof shape targeted a low-risk managed-connector package and therefore would not have exercised the hardened lifecycle path at all
+  - fixed by pinning the regression on the already high-risk `wave2` pack, where changing only the non-secret `node_url` now requires fresh approval while a redacted no-op reconfigure stays direct
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

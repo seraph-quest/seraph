@@ -3823,6 +3823,14 @@ describe("CockpitView", () => {
               branch_kind: "replay_from_start",
               branch_depth: 0,
               checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
               replay_allowed: true,
               replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
               timeline: [
@@ -3864,6 +3872,14 @@ describe("CockpitView", () => {
               branch_depth: 1,
               resume_checkpoint_label: "review_checkpoint",
               checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "retry_failed_step",
+                },
+              ],
               replay_allowed: true,
               thread_continue_message: "Continue child branch from the review checkpoint.",
               retry_from_step_draft:
@@ -3895,6 +3911,14 @@ describe("CockpitView", () => {
               branch_depth: 1,
               resume_checkpoint_label: "peer_checkpoint",
               checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "peer_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="peer_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
               replay_allowed: true,
               thread_continue_message: "Continue peer branch from the peer checkpoint.",
               timeline: [
@@ -3934,11 +3958,21 @@ describe("CockpitView", () => {
     expect(within(inspector).getAllByText("family output").length).toBeGreaterThan(0);
     expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from best continuation resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry review_checkpoint from best continuation resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" }));
     await waitFor(() =>
@@ -3978,17 +4012,44 @@ describe("CockpitView", () => {
     expect(within(inspector).getByRole("button", { name: "Continue peer branch resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue failure lineage branch resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use failure context from resume-review failure lineage" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Branch review_checkpoint from parent run resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Branch peer_checkpoint from peer branch resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from failure lineage branch resume-review" })).toBeInTheDocument();
     fireEvent.click(within(inspector).getByRole("button", { name: "Use ancestor output notes/root-review.md" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Branch review_checkpoint from parent run resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue peer branch resume-review" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue("Continue peer branch from the peer checkpoint.")).toBeInTheDocument(),
     );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Branch peer_checkpoint from peer branch resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="peer_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
     fireEvent.click(within(inspector).getByRole("button", { name: "Use failure context from resume-review failure lineage" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue(/Review workflow "resume-review" step "review_checkpoint" \(read_file\)\./)).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry review_checkpoint from failure lineage branch resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue failure lineage branch resume-review" }));
     await waitFor(() =>

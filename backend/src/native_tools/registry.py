@@ -147,6 +147,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "plan_source_review": {
+        "description": "Plan a provider-neutral source review routine from the currently available adapters",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["external_read"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

@@ -112,6 +112,88 @@ _PREFERRED_SOURCE_ORDER: dict[str, tuple[str, ...]] = {
     "browser_session.manage": ("browser_session",),
 }
 
+_SOURCE_REVIEW_TEMPLATES: dict[str, dict[str, Any]] = {
+    "daily_review": {
+        "title": "Daily Source Review",
+        "description": "Review what moved during the day across external work items, code activity, and public context.",
+        "recommended_runbooks": ["runbook:source-daily-review"],
+        "recommended_starter_packs": ["source-daily-review"],
+        "steps": (
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "purpose": "Capture tickets, pull requests, or tasks that moved during the review window.",
+                "query_label": "recent work items",
+            },
+            {
+                "id": "code_activity",
+                "contract": "code_activity.read",
+                "purpose": "Capture commits, branches, or code changes tied to the same focus area.",
+                "query_label": "recent code activity",
+            },
+            {
+                "id": "context",
+                "contract": "source_discovery.read",
+                "purpose": "Fill obvious evidence gaps from public status pages or supporting references when typed coverage is partial.",
+                "query_label": "supporting public context",
+            },
+        ),
+    },
+    "progress_review": {
+        "title": "Progress Review",
+        "description": "Collect current external work evidence for one project, repo, or focus area.",
+        "recommended_runbooks": ["runbook:source-progress-review"],
+        "recommended_starter_packs": ["source-progress-review"],
+        "steps": (
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "purpose": "Gather the work items that best represent the current state of execution.",
+                "query_label": "current work items",
+            },
+            {
+                "id": "code_activity",
+                "contract": "code_activity.read",
+                "purpose": "Gather recent code activity for the same focus area.",
+                "query_label": "recent code activity",
+            },
+            {
+                "id": "repositories",
+                "contract": "repository.read",
+                "purpose": "Add repository or project records when the review needs repo-level context.",
+                "query_label": "repositories or projects",
+            },
+        ),
+    },
+    "goal_alignment": {
+        "title": "Goal Alignment Review",
+        "description": "Compare active external work evidence to the user's stated goals without hardcoding one provider pipeline.",
+        "recommended_runbooks": ["runbook:source-goal-alignment"],
+        "recommended_starter_packs": ["source-goal-alignment"],
+        "steps": (
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "purpose": "Gather the work items most likely to represent movement against the goal.",
+                "query_label": "goal-linked work items",
+            },
+            {
+                "id": "code_activity",
+                "contract": "code_activity.read",
+                "purpose": "Gather code activity that advanced or distracted from the goal.",
+                "query_label": "goal-linked code activity",
+            },
+            {
+                "id": "context",
+                "contract": "source_discovery.read",
+                "purpose": "Use public context only when typed goal evidence is missing or ambiguous.",
+                "query_label": "goal context or roadmap evidence",
+            },
+        ),
+    },
+}
+_VALID_SOURCE_REVIEW_INTENTS = tuple(sorted(_SOURCE_REVIEW_TEMPLATES))
+
 
 def _matching_untyped_sources(
     inventory: dict[str, Any],
@@ -430,6 +512,120 @@ def _candidate_adapters_for_contract(adapters: list[dict[str, Any]], contract: s
     return [item[1] for item in ranked]
 
 
+def _normalize_review_template(template: dict[str, Any], intent: str) -> dict[str, Any] | None:
+    title = str(template.get("title") or "").strip()
+    description = str(template.get("description") or "").strip()
+    steps = template.get("steps")
+    if not title or not description or not isinstance(steps, tuple):
+        return None
+    normalized_steps: list[dict[str, str]] = []
+    for raw_step in steps:
+        if not isinstance(raw_step, dict):
+            continue
+        step_id = str(raw_step.get("id") or "").strip()
+        contract = str(raw_step.get("contract") or "").strip()
+        purpose = str(raw_step.get("purpose") or "").strip()
+        query_label = str(raw_step.get("query_label") or "").strip()
+        if not step_id or not contract or not purpose or not query_label:
+            continue
+        normalized_steps.append(
+            {
+                "id": step_id,
+                "contract": contract,
+                "purpose": purpose,
+                "query_label": query_label,
+            }
+        )
+    if not normalized_steps:
+        return None
+    return {
+        "intent": intent,
+        "title": title,
+        "description": description,
+        "recommended_runbooks": [
+            str(item).strip()
+            for item in template.get("recommended_runbooks", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        "recommended_starter_packs": [
+            str(item).strip()
+            for item in template.get("recommended_starter_packs", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        "steps": normalized_steps,
+    }
+
+
+def list_source_review_templates() -> list[dict[str, Any]]:
+    templates: list[dict[str, Any]] = []
+    for intent in _VALID_SOURCE_REVIEW_INTENTS:
+        template = _normalize_review_template(_SOURCE_REVIEW_TEMPLATES[intent], intent)
+        if template is not None:
+            templates.append(template)
+    return templates
+
+
+def _review_window_phrase(time_window: str) -> str:
+    cleaned = " ".join(time_window.split()).strip()
+    return cleaned or "the review window"
+
+
+def _review_focus_phrase(focus: str, goal_context: str) -> str:
+    cleaned_focus = " ".join(focus.split()).strip()
+    if cleaned_focus:
+        return cleaned_focus
+    cleaned_goal = " ".join(goal_context.split()).strip()
+    if cleaned_goal:
+        return cleaned_goal
+    return "the current focus"
+
+
+def _suggested_query(*, query_label: str, focus: str, goal_context: str, time_window: str) -> str:
+    focus_phrase = _review_focus_phrase(focus, goal_context)
+    window_phrase = _review_window_phrase(time_window)
+    return f"{query_label} for {focus_phrase} during {window_phrase}"
+
+
+def _query_guidance(contract: str) -> str:
+    if contract == "source_discovery.read":
+        return "Use a plain-language search that names the focus area, project, or goal. Typed search syntax is optional."
+    if contract == "repository.read":
+        return "Name the repo, project, or owner whose repository context matters to the review."
+    return "Name the project, goal, or repo plus the review window. Provider-specific syntax is optional unless you need tighter filtering."
+
+
+def _select_review_adapter(
+    *,
+    adapters: list[dict[str, Any]],
+    contract: str,
+    preferred_source: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]], list[str]]:
+    warnings: list[str] = []
+    next_best: list[dict[str, str]] = []
+    if preferred_source:
+        preferred_adapter = _find_adapter(adapters, preferred_source)
+        if preferred_adapter is None:
+            warnings.append(f"Requested source '{preferred_source}' is not a known typed adapter.")
+        elif contract in (preferred_adapter.get("contracts") or []):
+            next_best = list(preferred_adapter.get("next_best_sources") or [])
+            return preferred_adapter, next_best, warnings
+    candidates = _candidate_adapters_for_contract(adapters, contract)
+    if not candidates:
+        return None, [], warnings
+    selected = candidates[0]
+    next_best = list(selected.get("next_best_sources") or [])
+    if not next_best:
+        next_best = [
+            {
+                "name": str(candidate.get("name") or ""),
+                "reason": "typed_fallback",
+                "description": "Another typed adapter can satisfy the same contract.",
+            }
+            for candidate in candidates[1:4]
+        ]
+    return selected, next_best, warnings
+
+
 def _build_search_item(record: dict[str, Any], source_name: str) -> dict[str, Any]:
     url = str(record.get("href") or "")
     body = str(record.get("body") or "")
@@ -518,6 +714,192 @@ def _operation_for_contract(adapter: dict[str, Any], contract: str) -> dict[str,
         if isinstance(operation, dict) and str(operation.get("contract") or "") == contract:
             return operation
     return None
+
+
+def build_source_review_plan(
+    *,
+    intent: str,
+    focus: str = "",
+    goal_context: str = "",
+    time_window: str = "",
+    source: str = "",
+    url: str = "",
+) -> dict[str, Any]:
+    normalized_intent = intent.strip().lower()
+    if normalized_intent not in _SOURCE_REVIEW_TEMPLATES:
+        return {
+            "status": "failed",
+            "warnings": [
+                f"intent must be one of {', '.join(_VALID_SOURCE_REVIEW_INTENTS)}",
+            ],
+            "steps": [],
+        }
+
+    template = _normalize_review_template(_SOURCE_REVIEW_TEMPLATES[normalized_intent], normalized_intent)
+    if template is None:
+        return {
+            "status": "failed",
+            "warnings": [f"intent '{normalized_intent}' is misconfigured."],
+            "steps": [],
+        }
+
+    inventory = list_source_capability_inventory()
+    adapter_inventory = list_source_adapter_inventory(inventory)
+    adapters = adapter_inventory["adapters"]
+
+    steps: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    ready_step_count = 0
+    degraded_step_count = 0
+    unavailable_step_count = 0
+    for spec in template["steps"]:
+        contract = spec["contract"]
+        selected_adapter, next_best, step_warnings = _select_review_adapter(
+            adapters=adapters,
+            contract=contract,
+            preferred_source=source.strip(),
+        )
+        warnings.extend(step_warnings)
+        if selected_adapter is None:
+            unavailable_step_count += 1
+            steps.append(
+                {
+                    "id": spec["id"],
+                    "contract": contract,
+                    "purpose": spec["purpose"],
+                    "status": "unavailable",
+                    "source": "",
+                    "provider": "",
+                    "authenticated": False,
+                    "input_mode": "query",
+                    "query_guidance": _query_guidance(contract),
+                    "suggested_input": _suggested_query(
+                        query_label=spec["query_label"],
+                        focus=focus,
+                        goal_context=goal_context,
+                        time_window=time_window,
+                    ),
+                    "collection_arguments": {
+                        "contract": contract,
+                        "query": _suggested_query(
+                            query_label=spec["query_label"],
+                            focus=focus,
+                            goal_context=goal_context,
+                            time_window=time_window,
+                        ),
+                    },
+                    "next_best_sources": [],
+                    "warnings": [f"No typed adapter currently advertises '{contract}'."],
+                }
+            )
+            continue
+
+        operation = _operation_for_contract(selected_adapter, contract) or {}
+        executable = bool(operation.get("executable"))
+        adapter_state = str(selected_adapter.get("adapter_state") or "unavailable")
+        if executable and adapter_state == "ready":
+            status = "ready"
+            ready_step_count += 1
+        elif adapter_state == "degraded":
+            status = "degraded"
+            degraded_step_count += 1
+        else:
+            status = "unavailable"
+            unavailable_step_count += 1
+
+        suggested_input = _suggested_query(
+            query_label=spec["query_label"],
+            focus=focus,
+            goal_context=goal_context,
+            time_window=time_window,
+        )
+        step_payload = {
+            "id": spec["id"],
+            "contract": contract,
+            "purpose": spec["purpose"],
+            "status": status,
+            "source": str(selected_adapter.get("name") or ""),
+            "provider": str(selected_adapter.get("provider") or ""),
+            "authenticated": bool(selected_adapter.get("authenticated")),
+            "input_mode": str(operation.get("input_mode") or "query"),
+            "query_guidance": _query_guidance(contract),
+            "suggested_input": suggested_input,
+            "collection_arguments": {
+                "contract": contract,
+                "source": str(selected_adapter.get("name") or ""),
+                "query": suggested_input,
+            },
+            "next_best_sources": next_best,
+            "warnings": [],
+        }
+        degraded_reason = str(operation.get("reason") or selected_adapter.get("degraded_reason") or "").strip()
+        if degraded_reason:
+            step_payload["degraded_reason"] = degraded_reason
+            step_payload["warnings"].append(
+                f"Adapter '{selected_adapter.get('name')}' cannot fully execute '{contract}' right now ({degraded_reason})."
+            )
+        steps.append(step_payload)
+
+    if url.strip():
+        steps.append(
+            {
+                "id": "explicit_page",
+                "contract": "webpage.read",
+                "purpose": "Inspect the explicit public URL before generalizing beyond it.",
+                "status": "ready",
+                "source": "browse_webpage",
+                "provider": "seraph",
+                "authenticated": False,
+                "input_mode": "url",
+                "query_guidance": "Use the explicit URL directly instead of search when the user already supplied one.",
+                "suggested_input": url.strip(),
+                "collection_arguments": {
+                    "contract": "webpage.read",
+                    "source": "browse_webpage",
+                    "url": url.strip(),
+                },
+                "next_best_sources": [
+                    {
+                        "name": "browser_session",
+                        "reason": "structured_fallback",
+                        "description": "Reuse an existing structured browser snapshot if the page needs multi-step inspection.",
+                    }
+                ],
+                "warnings": [],
+            }
+        )
+        ready_step_count += 1
+
+    if ready_step_count == len(steps):
+        status = "ready"
+    elif ready_step_count > 0:
+        status = "partial"
+    elif degraded_step_count > 0:
+        status = "degraded"
+    else:
+        status = "unavailable"
+
+    return {
+        "status": status,
+        "intent": normalized_intent,
+        "title": template["title"],
+        "description": template["description"],
+        "focus": focus.strip(),
+        "goal_context": goal_context.strip(),
+        "time_window": time_window.strip(),
+        "recommended_runbooks": template["recommended_runbooks"],
+        "recommended_starter_packs": template["recommended_starter_packs"],
+        "summary": {
+            "step_count": len(steps),
+            "ready_step_count": ready_step_count,
+            "degraded_step_count": degraded_step_count,
+            "unavailable_step_count": unavailable_step_count,
+            "ready_adapter_count": int(adapter_inventory["summary"]["ready_adapter_count"]),
+            "adapter_count": int(adapter_inventory["summary"]["adapter_count"]),
+        },
+        "steps": steps,
+        "warnings": warnings,
+    }
 
 
 def _extract_records(raw_result: object) -> list[dict[str, Any]]:

@@ -5823,6 +5823,91 @@ async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_source_review_routine_behavior() -> dict[str, Any]:
+    import tempfile
+
+    from src.extensions.source_operations import build_source_review_plan
+
+    class _EvalTool:
+        def __init__(self, name: str, payload: list[dict[str, Any]]) -> None:
+            self.name = name
+            self._payload = payload
+
+        def __call__(self, **kwargs):
+            return self._payload
+
+    workspace_dir = tempfile.mkdtemp(prefix="seraph-source-review-")
+    mcp_entries = [
+        {
+            "name": "github",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 6,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "manual",
+        }
+    ]
+    state_payload = {
+        "extensions": {
+            "seraph.core-managed-connectors": {
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "inst_123",
+                        }
+                    }
+                },
+                "connector_state": {
+                    "connectors/managed/github.yaml": {
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+    }
+    github_tools = [
+        _EvalTool("search_repositories", [{"id": 1, "full_name": "seraph-quest/seraph"}]),
+        _EvalTool("search_issues", [{"id": 41, "title": "Adapter-backed GitHub evidence"}]),
+        _EvalTool("search_pull_requests", [{"id": 42, "title": "Improve adapters"}]),
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", workspace_dir),
+        patch("src.extensions.source_capabilities.load_extension_state_payload", return_value=state_payload),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=github_tools),
+    ):
+        daily_plan = build_source_review_plan(
+            intent="daily_review",
+            focus="adapter-backed source operations",
+            time_window="today",
+            url="https://example.com/status",
+        )
+        goal_plan = build_source_review_plan(
+            intent="goal_alignment",
+            focus="adapter-backed source operations",
+            goal_context="Move authenticated source routines forward",
+            time_window="this week",
+        )
+
+    daily_steps = {step["id"]: step for step in daily_plan["steps"]}
+    return {
+        "daily_plan_status": daily_plan["status"],
+        "daily_ready_step_count": daily_plan["summary"]["ready_step_count"],
+        "daily_work_items_source": daily_steps["work_items"]["source"],
+        "daily_code_activity_source": daily_steps["code_activity"]["source"],
+        "daily_context_source": daily_steps["context"]["source"],
+        "daily_explicit_page_source": daily_steps["explicit_page"]["source"],
+        "goal_plan_status": goal_plan["status"],
+        "goal_runbook": goal_plan["recommended_runbooks"][0],
+        "goal_starter_pack": goal_plan["recommended_starter_packs"][0],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -7018,6 +7103,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Source adapters expose executable public-web contracts, degrade unavailable authenticated connectors truthfully, and normalize evidence into one reusable shape.",
         runner=_eval_source_adapter_evidence_behavior,
+    ),
+    EvalScenario(
+        name="source_review_routine_behavior",
+        category="behavior",
+        description="Source review routines stay connector-first, expose reusable provider-neutral review steps, and surface ready fallback paths without hardcoded provider pipelines.",
+        runner=_eval_source_review_routine_behavior,
     ),
     EvalScenario(
         name="capability_repair_behavior",

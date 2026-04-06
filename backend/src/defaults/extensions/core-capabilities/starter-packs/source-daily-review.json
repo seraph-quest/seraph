@@ -1,0 +1,7 @@
+{
+  "name": "source-daily-review",
+  "label": "Source Daily Review",
+  "description": "Turn on a connector-first daily review grounded in active goals and provider-neutral source evidence.",
+  "skills": ["source-daily-review"],
+  "sample_prompt": "Review today’s work against my active goals using the available source adapters."
+}

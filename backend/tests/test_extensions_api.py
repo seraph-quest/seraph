@@ -140,6 +140,63 @@ def _write_high_risk_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_multi_high_risk_extension(root: Path) -> Path:
+    package_dir = root / "multi-high-risk-pack"
+    (package_dir / "workflows").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.multi-high-risk-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Multi High Risk Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.3.19\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  workflows:\n"
+        "    - workflows/write-note-a.md\n"
+        "    - workflows/write-note-b.md\n"
+        "permissions:\n"
+        "  tools: [write_file]\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (package_dir / "workflows" / "write-note-a.md").write_text(
+        "---\n"
+        "name: write-note-a\n"
+        "description: Write note A into the workspace\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/high-risk-a.md\n"
+        "      content: approved-a\n"
+        "---\n\n"
+        "Write note A.\n",
+        encoding="utf-8",
+    )
+    (package_dir / "workflows" / "write-note-b.md").write_text(
+        "---\n"
+        "name: write-note-b\n"
+        "description: Write note B into the workspace\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/high-risk-b.md\n"
+        "      content: approved-b\n"
+        "---\n\n"
+        "Write note B.\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_mcp_connector_extension(
     root: Path,
     *,
@@ -2929,6 +2986,172 @@ async def test_workspace_extension_source_save_updates_package_members(client, e
 
 
 @pytest.mark.asyncio
+async def test_high_risk_extension_source_save_requires_lifecycle_approval(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        save_response = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert save_response.status_code == 409
+        approval_detail = save_response.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve_save = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve_save.status_code == 200
+
+        save_response = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert save_response.status_code == 200
+        assert save_response.json()["validation"]["workflow"]["name"] == "write-note"
+
+
+@pytest.mark.asyncio
+async def test_high_risk_extension_source_save_requires_new_approval_if_package_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        first_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert first_save.status_code == 409
+        first_approval_id = first_save.json()["detail"]["approval_id"]
+
+        approve_save = await client.post(f"/api/approvals/{first_approval_id}/approve")
+        assert approve_save.status_code == 200
+
+        installed_root = extension_runtime / "extensions" / "seraph-high-risk-pack"
+        (installed_root / "workflows" / "write-note.md").write_text(
+            "---\n"
+            "name: write-note\n"
+            "description: Drifted high-risk workflow\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/high-risk-drifted.md\n"
+            "      content: drifted\n"
+            "---\n\n"
+            "Write a drifted note.\n",
+            encoding="utf-8",
+        )
+
+        second_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow again\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated-again.md\n"
+                    "      content: updated-again\n"
+                    "---\n\n"
+                    "Write another updated note.\n"
+                ),
+            },
+        )
+        assert second_save.status_code == 409
+        second_approval_id = second_save.json()["detail"]["approval_id"]
+        assert second_approval_id != first_approval_id
+
+
+@pytest.mark.asyncio
 async def test_manifest_source_save_rejects_unloadable_package_updates(client, extension_runtime, tmp_path):
     package_dir = _write_installable_extension(tmp_path)
 
@@ -3348,6 +3571,103 @@ async def test_workflow_source_save_allows_cross_package_references(client, exte
 
         assert response.status_code == 200
         assert response.json()["validation"]["workflow"]["name"] == "local-workflow"
+
+
+@pytest.mark.asyncio
+async def test_high_risk_source_save_approval_is_scoped_to_each_target(client, extension_runtime, tmp_path):
+    package_dir = _write_multi_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        primary_save = await client.post(
+            "/api/extensions/seraph.multi-high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note-a.md",
+                "content": (
+                    "---\n"
+                    "name: write-note-a\n"
+                    "description: Updated high-risk workflow A\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-a-updated.md\n"
+                    "      content: updated-a\n"
+                    "---\n\n"
+                    "Write updated note A.\n"
+                ),
+            },
+        )
+        assert primary_save.status_code == 409
+        primary_approval_id = primary_save.json()["detail"]["approval_id"]
+
+        approve_primary = await client.post(f"/api/approvals/{primary_approval_id}/approve")
+        assert approve_primary.status_code == 200
+
+        primary_save = await client.post(
+            "/api/extensions/seraph.multi-high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note-a.md",
+                "content": (
+                    "---\n"
+                    "name: write-note-a\n"
+                    "description: Updated high-risk workflow A\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-a-updated.md\n"
+                    "      content: updated-a\n"
+                    "---\n\n"
+                    "Write updated note A.\n"
+                ),
+            },
+        )
+        assert primary_save.status_code == 200
+
+        secondary_save = await client.post(
+            "/api/extensions/seraph.multi-high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note-b.md",
+                "content": (
+                    "---\n"
+                    "name: write-note-b\n"
+                    "description: Updated high-risk workflow B\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-b-updated.md\n"
+                    "      content: updated-b\n"
+                    "---\n\n"
+                    "Write updated note B.\n"
+                ),
+            },
+        )
+        assert secondary_save.status_code == 409
+        secondary_approval_id = secondary_save.json()["detail"]["approval_id"]
+        assert secondary_approval_id != primary_approval_id
 
 
 @pytest.mark.asyncio

@@ -238,6 +238,25 @@
   - the first implementation pass exposed a real fail-open regression: once a high-risk package became degraded, its projected `approval_profile` dropped out and disable reverted to `200` without approval
   - fixed by deriving a fallback lifecycle approval profile from declared manifest permissions when the live preview no longer carries one, which keeps the disable seam hard without widening low-risk packages that still declare no lifecycle boundaries
 
+### `extension-source-mutation-boundary-enforcement-v1`
+
+- status: complete on `feat/extension-source-boundary-hardening-batch-ad-v5`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - workspace extension source edits were writing directly into installed package files after validation, but they never re-entered the lifecycle approval seam
+  - that meant a high-risk installed package could be materially rewritten after installation approval without any new destructive or privileged mutation approval, and the edited reference itself was not part of the approval identity
+- scope:
+  - source-save mutations now route through lifecycle approval before writing into installed workspace extension files
+  - source-save approvals are target-scoped by edited reference, so approval for one high-risk file does not unlock a sibling workflow or other editable file in the same package
+  - low-risk package editing remains direct, and broken-manifest repair still works because source-save approval falls back to the current extension payload rather than assuming the package is already fully healthy
+- validation:
+  - `python3 -m py_compile backend/src/api/extensions.py backend/tests/test_extensions_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_extensions_api.py -x -vv -k "high_risk_extension_source_save_requires_lifecycle_approval or high_risk_extension_source_save_requires_new_approval_if_package_changes or workspace_extension_source_save_updates_package_members or broken_workspace_manifest_can_be_loaded_and_repaired_via_source_api or high_risk_source_save_approval_is_scoped_to_each_target"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first target-scoping regression used packaged MCP source files and ran into unrelated packaged-MCP draft validation noise, which obscured the approval contract the slice was supposed to prove
+  - fixed by pinning target-scoped source-save approval on a multi-workflow high-risk package instead, so the regression exercises the same save path without coupling to MCP-specific source semantics
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

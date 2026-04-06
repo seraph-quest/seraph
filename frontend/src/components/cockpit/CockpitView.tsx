@@ -3657,6 +3657,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "l") {
         event.preventDefault();
         inspectLatestWorkflowBranch(primaryWorkflowShortcutTarget());
+      } else if (key === "b") {
+        event.preventDefault();
+        inspectWorkflowBestContinuation(primaryWorkflowShortcutTarget());
+      } else if (key === "n") {
+        event.preventDefault();
+        continueWorkflowBestContinuation(primaryWorkflowShortcutTarget());
+      } else if (key === "g") {
+        event.preventDefault();
+        queueWorkflowBestContinuationComparison(primaryWorkflowShortcutTarget());
       } else if (key === "u") {
         event.preventDefault();
         queueWorkflowOutputContext(primaryWorkflowShortcutTarget());
@@ -3682,7 +3691,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     primaryTriageEntry,
     primaryWorkflowTriageEntry,
     inspectLatestWorkflowBranch,
+    inspectWorkflowBestContinuation,
     inspectPrimaryWorkflowEntry,
+    continueWorkflowBestContinuation,
+    queueWorkflowBestContinuationComparison,
     queueWorkflowFamilyPlan,
     queueWorkflowLatestFailureContext,
     queueWorkflowRecoveryDraft,
@@ -7963,7 +7975,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+U use latest output · Shift+P draft next step
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step
                     </div>
                   </div>
 

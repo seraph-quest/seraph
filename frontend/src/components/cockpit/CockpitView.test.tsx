@@ -901,6 +901,23 @@ describe("CockpitView", () => {
     );
     expect(screen.getByText("parent run")).toBeInTheDocument();
 
+    fireEvent.keyDown(window, { key: "B", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
+    );
+
+    fireEvent.keyDown(window, { key: "N", shiftKey: true });
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas branch")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "G", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/brief.md" and "notes/branch-brief.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
     const blockedWorkflowRow = within(triage).getByText("workflow failed: atlas-repair").closest(".cockpit-operator-row--entry");
     expect(blockedWorkflowRow).not.toBeNull();
     expect(within(blockedWorkflowRow as HTMLElement).getByRole("button", { name: "Repair replay for workflow failed: atlas-repair" })).toBeInTheDocument();

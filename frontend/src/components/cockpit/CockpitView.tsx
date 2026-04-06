@@ -3127,6 +3127,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       queueComposerDraft(resolved.replayDraft ?? buildWorkflowReplayDraft(resolved));
     }
   }
+  function renderWorkflowCheckpointControls(
+    workflow: WorkflowRunRecord,
+    scopeLabel: string,
+    keyPrefix: string,
+  ) {
+    return workflowCheckpointActions(workflow).map((action) => (
+      <button
+        key={`${keyPrefix}:${action.stepId}:${action.label}`}
+        className="cockpit-feedback-button"
+        aria-label={`${action.label} from ${scopeLabel} ${workflow.workflowName}`}
+        onClick={() => queueComposerDraft(action.draft)}
+      >
+        {action.label}
+      </button>
+    ));
+  }
   function buildWorkflowRedirectDraft(workflow: WorkflowRunRecord): string {
     const resolved = resolveWorkflowRun(workflow);
     const parts = [
@@ -6286,6 +6302,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Compare
                     </button>
                   )}
+                  {renderWorkflowCheckpointControls(
+                    selectedWorkflowBestContinuation,
+                    "best continuation",
+                    `${selectedWorkflow.id}:best-continuation`,
+                  )}
                 </div>
               )}
               {(selectedWorkflowOutputPath || selectedWorkflowBestContinuation || failureLineage.length > 0 || familyOutputs.length > 0) && (
@@ -6331,6 +6352,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     >
                       Use Failure
                     </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    index === 0 ? "failure lineage branch" : "failure branch",
+                    `${selectedWorkflow.id}:failure-lineage-controls:${entry.runIdentity ?? entry.id}`,
                   )}
                 </div>
               ))}
@@ -6416,6 +6442,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Compare
                     </button>
                   )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    index === 0 ? "parent run" : "ancestor run",
+                    `${selectedWorkflow.id}:ancestor-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
                 </div>
               ))}
               {childRuns.map((entry) => (
@@ -6460,6 +6491,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     >
                       Compare
                     </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    "child branch",
+                    `${selectedWorkflow.id}:child-controls:${entry.runIdentity ?? entry.id}`,
                   )}
                 </div>
               ))}
@@ -6508,6 +6544,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     >
                       Compare
                     </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    "peer branch",
+                    `${selectedWorkflow.id}:peer-controls:${entry.runIdentity ?? entry.id}`,
                   )}
                 </div>
               ))}

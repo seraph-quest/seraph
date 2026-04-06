@@ -3673,7 +3673,7 @@ describe("CockpitView", () => {
               updated_at: "2026-03-20T09:05:00Z",
               summary: "root review workflow completed",
               step_tools: ["read_file"],
-              artifact_paths: [],
+              artifact_paths: ["notes/root-review.md"],
               continued_error_steps: [],
               risk_level: "low",
               thread_id: "session-1",
@@ -3700,7 +3700,7 @@ describe("CockpitView", () => {
               updated_at: "2026-03-20T09:08:00Z",
               summary: "branch review needs continuation",
               step_tools: ["read_file"],
-              artifact_paths: [],
+              artifact_paths: ["notes/branch-review.md"],
               continued_error_steps: ["review_checkpoint"],
               risk_level: "low",
               thread_id: "session-1",
@@ -3750,8 +3750,10 @@ describe("CockpitView", () => {
     expect(within(inspector).getByText("branch origin")).toBeInTheDocument();
     expect(within(inspector).getByText("best continuation")).toBeInTheDocument();
     expect(within(inspector).getByText("failure lineage")).toBeInTheDocument();
+    expect(within(inspector).getAllByText("family output").length).toBeGreaterThan(0);
     expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md" })).toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
@@ -3765,6 +3767,11 @@ describe("CockpitView", () => {
     );
     expect(within(inspector).getAllByRole("button", { name: "Open Parent" }).length).toBeGreaterThan(0);
     expect(within(inspector).getByText("parent run")).toBeInTheDocument();
+    expect(within(inspector).getByText(/older than current/i)).toBeInTheDocument();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use family output notes/root-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
   });
 
   it("surfaces workflow approval, artifact, and trace density inside the inspector", async () => {

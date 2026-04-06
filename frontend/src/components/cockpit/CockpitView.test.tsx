@@ -3782,7 +3782,18 @@ describe("CockpitView", () => {
     expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/root-review.md" and "notes/branch-review.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
     await waitFor(() =>
@@ -3797,9 +3808,20 @@ describe("CockpitView", () => {
     expect(within(inspector).getByText("parent run")).toBeInTheDocument();
     expect(within(inspector).getByText("peer branch")).toBeInTheDocument();
     expect(within(inspector).getAllByText(/older than current/i)).toHaveLength(2);
+    expect(within(inspector).getByRole("button", { name: "Compare ancestor output notes/root-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare peer branch output notes/peer-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare family output notes/root-review.md from resume-r" })).toBeInTheDocument();
     fireEvent.click(within(inspector).getByRole("button", { name: "Use family output notes/root-review.md from resume-r" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare peer branch output notes/peer-review.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/branch-review.md" and "notes/peer-review.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
     );
     fireEvent.click(within(inspector).getByRole("button", { name: "Use peer branch output notes/peer-review.md" }));
     await waitFor(() =>

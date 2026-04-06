@@ -5156,6 +5156,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     queueComposerDraft(`Use the workspace file "${outputPath}" as context for the next action.`);
   }
 
+  function workflowPrimaryOutputPath(workflow: WorkflowRunRecord | null | undefined): string | null {
+    if (!workflow) return null;
+    const resolved = resolveWorkflowRun(workflow);
+    return resolved.artifacts[0]?.filePath ?? resolved.artifactPaths[0] ?? null;
+  }
+
+  function queueWorkflowOutputComparison(
+    currentWorkflow: WorkflowRunRecord | null | undefined,
+    relatedWorkflow: WorkflowRunRecord | null | undefined,
+  ) {
+    const currentOutputPath = workflowPrimaryOutputPath(currentWorkflow);
+    const relatedOutputPath = workflowPrimaryOutputPath(relatedWorkflow);
+    if (!currentOutputPath || !relatedOutputPath) return;
+    queueComposerDraft(
+      `Compare the workspace files "${currentOutputPath}" and "${relatedOutputPath}". `
+      + "Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.",
+    );
+  }
+
   function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
     const candidates = [
       primaryWorkflowTriageEntry?.workflow ?? null,
@@ -6070,6 +6089,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const branchOriginSummary = workflowBranchOriginSummary(selectedWorkflow);
           const failureLineage = workflowFailureLineage(selectedWorkflow).slice(0, 3);
           const familyOutputs = workflowFamilyArtifactOutputs(selectedWorkflow);
+          const selectedWorkflowOutputPath = workflowPrimaryOutputPath(selectedWorkflow);
           if (
             ancestors.length === 0
             && childRuns.length === 0
@@ -6132,6 +6152,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Use Output
                     </button>
                   )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(selectedWorkflowBestContinuation) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare best continuation output for ${selectedWorkflowName}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, selectedWorkflowBestContinuation)}
+                    >
+                      Compare
+                    </button>
+                  )}
                 </div>
               )}
               {failureLineage.map((entry, index) => (
@@ -6175,6 +6204,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Use Output
                   </button>
+                  {selectedWorkflowOutputPath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, output.sourceWorkflow)}
+                    >
+                      Compare
+                    </button>
+                  )}
                 </div>
               ))}
               {ancestors.map((entry, index) => (
@@ -6195,6 +6233,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Open
                   </button>
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare ancestor output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, entry)}
+                    >
+                      Compare
+                    </button>
+                  )}
                 </div>
               ))}
               {childRuns.map((entry) => (
@@ -6231,6 +6278,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Use Output
                     </button>
                   )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare child branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, entry)}
+                    >
+                      Compare
+                    </button>
+                  )}
                 </div>
               ))}
               {peerRuns.map((entry) => (
@@ -6259,6 +6315,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       onClick={() => queueWorkflowOutputContext(entry)}
                     >
                       Use Output
+                    </button>
+                  )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare peer branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, entry)}
+                    >
+                      Compare
                     </button>
                   )}
                 </div>

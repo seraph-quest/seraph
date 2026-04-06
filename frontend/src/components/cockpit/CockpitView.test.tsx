@@ -3781,10 +3781,20 @@ describe("CockpitView", () => {
     expect(within(inspector).getAllByText("family output").length).toBeGreaterThan(0);
     expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Review workflow family state for "resume-review". Current output: "notes/root-review.md". Best continuation: "branch review needs continuation" with latest output "notes/branch-review.md" Latest family failure: "branch review needs continuation". Related reusable outputs: "notes/branch-review.md", "notes/peer-review.md". Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.',
+        ),
+      ).toBeInTheDocument(),
+    );
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" }));
     await waitFor(() =>
@@ -3826,6 +3836,160 @@ describe("CockpitView", () => {
     fireEvent.click(within(inspector).getByRole("button", { name: "Use peer branch output notes/peer-review.md" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue('Use the workspace file "notes/peer-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+  });
+
+  it("keeps family next-step planning available without a best continuation", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [{
+            name: "resume-review",
+            tool_name: "workflow_resume_review",
+            description: "Resume a review workflow",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "defaults/workflows/resume-review.md",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "never",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/root-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "replay_from_start",
+              branch_depth: 0,
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:00:00Z", summary: "Workflow started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:05:00Z", summary: "root review workflow completed" },
+              ],
+            },
+            {
+              id: "run-peer",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:07:00Z",
+              updated_at: "2026-03-20T09:07:30Z",
+              summary: "peer review branch completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/peer-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-peer-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "peer_checkpoint",
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:07:00Z", summary: "Peer branch started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:07:30Z", summary: "peer review branch completed" },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const rootSummary = await screen.findByText("root review workflow completed");
+    fireEvent.click(rootSummary);
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).queryByText("best continuation")).not.toBeInTheDocument();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Review workflow family state for "resume-review". Current output: "notes/root-review.md". Related reusable outputs: "notes/peer-review.md". Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.',
+        ),
+      ).toBeInTheDocument(),
     );
   });
 

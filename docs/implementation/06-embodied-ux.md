@@ -32,7 +32,7 @@
 - [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
 - [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
 - [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
-- [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, and direct compare-output drafts across workflow branches, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, and draft output diffs without reconstructing lineage manually
+- [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, and draft continuation plans without reconstructing lineage manually
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -55,7 +55,7 @@
 - [x] this workstream now also ships `workflow-branch-debugging-and-long-running-control-v1`
 - [x] this workstream now also ships `workflow-history-comparison-and-family-output-control-v1`
 - [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
-- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, and comparison drafts
+- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, and family-plan bundling
 
 ## Still To Do On `develop`
 
@@ -215,6 +215,32 @@
   - fixed by adding source-qualified compare action labels, deriving comparison drafts only from truthful output pairs, and expanding the branch-family cockpit test to pin current-vs-child and current-vs-peer comparison drafts directly
 - validation:
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
+    - result: `passed`
+
+### `workflow-family-action-bundles-and-continuation-planning-v1`
+
+- status: in progress on `feat/workflow-family-action-bundles-batch-v1`
+- root causes addressed:
+  - Batch U made workflow family comparison and output reuse actionable, but operators still had to manually reconstruct one coherent next-step prompt from best continuation, latest family failure, and reusable family outputs
+  - the cockpit already had the truthful family state needed for that synthesis, but it still exposed those signals as separate actions instead of one bundled planning handoff
+- scope:
+  - the workflow inspector now exposes a direct `Draft Next Step` family action that bundles the current output, best continuation, latest family failure, and reusable family outputs when those signals actually exist
+  - keyboard-first control now also includes `Shift+P` for drafting that family next-step bundle from the primary workflow target
+  - the bundled family-plan draft stays fail closed when the inspected workflow has no truthful family continuation or output context to hand off
+- review findings fixed during implementation:
+  - this surface depends on the same dense lineage fixture used by the branch-family cockpit test, so the first review focus was making the new family-plan draft deterministic instead of adding another unpinned action row
+  - the first pass also rendered the visible `Draft Next Step` action only when a best continuation row existed, even though the bundled planner can also operate from current output plus family-output or failure context alone
+  - fixed by moving the action onto its own workflow-family row and expanding the cockpit test coverage to pin both the full bundled draft and the no-best-continuation fallback
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `54 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
     - result: `passed`
 
 ## Non-Goals

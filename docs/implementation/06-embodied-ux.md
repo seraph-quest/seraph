@@ -55,7 +55,7 @@
 - [x] this workstream now also ships `workflow-branch-debugging-and-long-running-control-v1`
 - [x] this workstream now also ships `workflow-history-comparison-and-family-output-control-v1`
 - [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
-- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, and triage quick actions
+- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, and the first best-continuation keyboard layer
 
 ## Still To Do On `develop`
 
@@ -302,6 +302,31 @@
 - review findings fixed during implementation:
   - the first triage recovery test still used an approval-style failed-step action, which did not exercise the same repair path as the operator surface and produced a false red assertion
   - fixed by aligning the test fixture with a real repair action and by proving replay-repair separately with a blocked workflow that exposes replay repair actions without a retry-step path
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
+
+### `workflow-keyboard-continuation-and-comparison-control-v1`
+
+- status: in progress on `feat/workflow-keyboard-continuation-batch-z-v1`
+- root causes addressed:
+  - Batch Y made the triage lane dense and truthful, but the highest-value best-continuation actions were still partly mouse-only even though the same triage state was already available to the keyboard layer
+  - the keyboard surface could inspect the latest branch or draft the next step, but it still could not directly open the best continuation, continue that branch, or compare against it
+- scope:
+  - keyboard-first workflow control now also includes `Shift+B` for opening the best continuation on the primary workflow target
+  - keyboard-first workflow control now also includes `Shift+N` for continuing the best continuation on the primary workflow target when that continuation is distinct and resumable
+  - keyboard-first workflow control now also includes `Shift+G` for comparing the current workflow output against the best continuation when both sides have distinct reusable outputs
+- review findings fixed during implementation:
+  - the shortcut layer is intentionally reusing the same `inspectWorkflowBestContinuation`, `continueWorkflowBestContinuation`, and `queueWorkflowBestContinuationComparison` helpers as the triage buttons so the keyboard path cannot drift into a second continuation model
+  - compare-best remains fail closed for self-referential continuations or identical output paths, and continue-best remains fail closed when the resolved best continuation is not actually continuable
 - validation:
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures"`
     - result: `passed`

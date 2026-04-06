@@ -1490,6 +1490,14 @@ function compareWorkflowRunsNewestFirst(a: WorkflowRunRecord, b: WorkflowRunReco
   return workflowUpdatedAtMs(b) - workflowUpdatedAtMs(a);
 }
 
+interface WorkflowFamilyArtifactOutput {
+  key: string;
+  filePath: string;
+  createdAt: string;
+  sourceWorkflow: WorkflowRunRecord;
+  sourceLabel: string;
+}
+
 function workflowCheckpointActions(
   workflow: WorkflowRunRecord,
 ): Array<{ stepId: string; draft: string; label: string }> {
@@ -2844,6 +2852,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow.runIdentity) return [];
     return workflowChildrenByParentIdentity.get(workflow.runIdentity) ?? [];
   }
+  function workflowFamilyRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    return workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+  }
   function workflowPeerRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
     if (!workflow.parentRunIdentity) return [];
     return (workflowChildrenByParentIdentity.get(workflow.parentRunIdentity) ?? [])
@@ -2867,7 +2878,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (childRuns.length > 0) return childRuns[0] ?? null;
     if (!workflow.runIdentity) return null;
     const ancestorIds = new Set(workflowAncestorRuns(workflow).map((entry) => entry.runIdentity).filter(Boolean));
-    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [];
+    const familyRuns = workflowFamilyRuns(workflow);
     return familyRuns.find((entry) => (
       entry.runIdentity !== workflow.runIdentity
       && !!entry.parentRunIdentity
@@ -2893,7 +2904,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const summary = [workflowSupervisionLabel(workflow)];
     const childRuns = workflowChildRuns(workflow);
     const peerRuns = workflowPeerRuns(workflow);
-    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+    const familyRuns = workflowFamilyRuns(workflow);
     if (childRuns.length > 0) {
       summary.push(`${childRuns.length} child ${childRuns.length === 1 ? "branch" : "branches"}`);
     }
@@ -2915,7 +2926,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
   function workflowBestContinuationRun(workflow: WorkflowRunRecord): WorkflowRunRecord | null {
     const resolved = resolveWorkflowRun(workflow);
-    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(resolved)) ?? [resolved];
+    const familyRuns = workflowFamilyRuns(resolved);
     const ancestorIds = new Set(
       workflowAncestorRuns(resolved)
         .map((entry) => entry.runIdentity)
@@ -2934,19 +2945,75 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     )) ?? null;
   }
   function workflowFailureLineage(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
-    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+    const familyRuns = workflowFamilyRuns(workflow);
     return familyRuns.filter((entry) => (
       entry.status === "failed"
       || entry.status === "degraded"
       || entry.continuedErrorSteps.length > 0
     ));
   }
+  function workflowComparisonSummary(base: WorkflowRunRecord, target: WorkflowRunRecord): string[] {
+    const summary: string[] = [];
+    const baseUpdated = workflowUpdatedAtMs(base);
+    const targetUpdated = workflowUpdatedAtMs(target);
+    if (targetUpdated > baseUpdated) {
+      summary.push("newer than current");
+    } else if (targetUpdated < baseUpdated) {
+      summary.push("older than current");
+    }
+    if (target.status !== base.status) {
+      summary.push(`${target.status} vs ${base.status}`);
+    }
+    if ((target.artifactPaths.length || target.artifacts.length) > 0) {
+      summary.push(`${Math.max(target.artifactPaths.length, target.artifacts.length)} outputs`);
+    }
+    if (target.resumeCheckpointLabel && target.resumeCheckpointLabel !== base.resumeCheckpointLabel) {
+      summary.push(`checkpoint ${target.resumeCheckpointLabel}`);
+    }
+    return summary;
+  }
+  function workflowFamilyArtifactOutputs(workflow: WorkflowRunRecord): WorkflowFamilyArtifactOutput[] {
+    const seen = new Set<string>();
+    const outputs: WorkflowFamilyArtifactOutput[] = [];
+    workflowFamilyRuns(workflow).forEach((entry) => {
+      if (entry.runIdentity === workflow.runIdentity || entry.id === workflow.id) {
+        return;
+      }
+      entry.artifacts.forEach((artifact) => {
+        const key = `${artifact.filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath: artifact.filePath,
+          createdAt: artifact.createdAt,
+          sourceWorkflow: entry,
+          sourceLabel: entry.summary,
+        });
+      });
+      entry.artifactPaths.forEach((filePath, index) => {
+        const key = `${filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath,
+          createdAt: entry.updatedAt,
+          sourceWorkflow: entry,
+          sourceLabel: index === 0 ? entry.summary : `${entry.summary} output ${index + 1}`,
+        });
+      });
+    });
+    return outputs
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 4);
+  }
   function workflowBranchOriginSummary(workflow: WorkflowRunRecord): string[] {
     const summary: string[] = [];
     const parent = workflow.parentRunIdentity
       ? workflowRunByIdentity.get(workflow.parentRunIdentity)
       : null;
-    const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+    const familyRuns = workflowFamilyRuns(workflow);
     if (parent) {
       summary.push(`from ${parent.workflowName}`);
     } else if (familyRuns.length > 1) {
@@ -5532,7 +5599,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       const linkedInterventions = interventionsForWorkflow(workflow);
       const childRuns = workflowChildRuns(workflow);
       const peerRuns = workflowPeerRuns(workflow);
-      const familyRuns = workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+      const familyRuns = workflowFamilyRuns(workflow);
       title = workflow.workflowName;
       meta = `${workflow.status} · ${workflow.artifacts.length} artifacts`;
       body = workflow.summary;
@@ -6002,6 +6069,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const peerRuns = workflowPeerRuns(selectedWorkflow);
           const branchOriginSummary = workflowBranchOriginSummary(selectedWorkflow);
           const failureLineage = workflowFailureLineage(selectedWorkflow).slice(0, 3);
+          const familyOutputs = workflowFamilyArtifactOutputs(selectedWorkflow);
           if (
             ancestors.length === 0
             && childRuns.length === 0
@@ -6009,6 +6077,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             && branchOriginSummary.length === 0
             && !selectedWorkflowBestContinuation
             && failureLineage.length === 0
+            && familyOutputs.length === 0
           ) {
             return null;
           }
@@ -6080,11 +6149,45 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   </button>
                 </div>
               ))}
+              {familyOutputs.map((output) => (
+                <div key={`${selectedWorkflow.id}:family-output:${output.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">family output</div>
+                  <div className="cockpit-value">
+                    {output.filePath}
+                    {" · "}
+                    {output.sourceWorkflow.workflowName}
+                    {" · "}
+                    {output.sourceLabel}
+                    {" · "}
+                    {formatAge(output.createdAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open workflow for family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                    onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
+                  >
+                    Open Run
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                    onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
+                  >
+                    Use Output
+                  </button>
+                </div>
+              ))}
               {ancestors.map((entry, index) => (
                 <div key={`${selectedWorkflow.id}:ancestor:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
                   <div className="cockpit-key">{index === 0 ? "parent run" : "ancestor run"}</div>
                   <div className="cockpit-value">
-                    {entry.workflowName} · {entry.status} · {workflowSupervisionLabel(entry)} · {formatAge(entry.updatedAt)}
+                    {[
+                      entry.workflowName,
+                      entry.status,
+                      workflowSupervisionLabel(entry),
+                      ...workflowComparisonSummary(selectedWorkflow, entry),
+                      formatAge(entry.updatedAt),
+                    ].join(" · ")}
                   </div>
                   <button
                     className="cockpit-feedback-button"
@@ -6098,7 +6201,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 <div key={`${selectedWorkflow.id}:child:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
                   <div className="cockpit-key">child branch</div>
                   <div className="cockpit-value">
-                    {entry.workflowName} · {entry.status} · {workflowSupervisionLabel(entry)} · {entry.resumeCheckpointLabel ?? entry.branchKind ?? "branch"} · {formatAge(entry.updatedAt)}
+                    {[
+                      entry.workflowName,
+                      entry.status,
+                      workflowSupervisionLabel(entry),
+                      entry.resumeCheckpointLabel ?? entry.branchKind ?? "branch",
+                      ...workflowComparisonSummary(selectedWorkflow, entry),
+                      formatAge(entry.updatedAt),
+                    ].join(" · ")}
                   </div>
                   <button
                     className="cockpit-feedback-button"
@@ -6112,13 +6222,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Continue
                   </button>
+                  {(entry.artifacts[0]?.filePath ?? entry.artifactPaths[0]) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use child branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputContext(entry)}
+                    >
+                      Use Output
+                    </button>
+                  )}
                 </div>
               ))}
               {peerRuns.map((entry) => (
                 <div key={`${selectedWorkflow.id}:peer:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
                   <div className="cockpit-key">peer branch</div>
                   <div className="cockpit-value">
-                    {entry.workflowName} · {entry.status} · {workflowSupervisionLabel(entry)} · {entry.resumeCheckpointLabel ?? entry.branchKind ?? "branch"} · {formatAge(entry.updatedAt)}
+                    {[
+                      entry.workflowName,
+                      entry.status,
+                      workflowSupervisionLabel(entry),
+                      entry.resumeCheckpointLabel ?? entry.branchKind ?? "branch",
+                      ...workflowComparisonSummary(selectedWorkflow, entry),
+                      formatAge(entry.updatedAt),
+                    ].join(" · ")}
                   </div>
                   <button
                     className="cockpit-feedback-button"
@@ -6126,6 +6252,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Open
                   </button>
+                  {(entry.artifacts[0]?.filePath ?? entry.artifactPaths[0]) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use peer branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputContext(entry)}
+                    >
+                      Use Output
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

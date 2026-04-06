@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from src.browser.sessions import browser_session_runtime
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.tools.browser_tool import browse_webpage
+from src.tools.mcp_manager import mcp_manager
 from src.tools.web_search_tool import search_web_records
 
 
@@ -47,6 +48,10 @@ class SourceOperation:
     input_mode: str
     executable: bool
     reason: str = ""
+    runtime_server: str = ""
+    tool_name: str = ""
+    result_kind: str = ""
+    per_page_param: str = ""
 
     def as_payload(self) -> dict[str, Any]:
         payload = {
@@ -57,6 +62,14 @@ class SourceOperation:
         }
         if self.reason:
             payload["reason"] = self.reason
+        if self.runtime_server:
+            payload["runtime_server"] = self.runtime_server
+        if self.tool_name:
+            payload["tool_name"] = self.tool_name
+        if self.result_kind:
+            payload["result_kind"] = self.result_kind
+        if self.per_page_param:
+            payload["per_page_param"] = self.per_page_param
         return payload
 
 
@@ -127,10 +140,204 @@ def _matching_untyped_sources(
     return matches
 
 
+def _normalize_string_tuple(values: Any) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return ()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        item = value.strip()
+        if not item or item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+    return tuple(normalized)
+
+
+def _runtime_adapter_payload(source: dict[str, Any]) -> dict[str, Any]:
+    runtime_adapter = source.get("runtime_adapter")
+    return dict(runtime_adapter) if isinstance(runtime_adapter, dict) else {}
+
+
+def _runtime_route_map(runtime_adapter: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_routes = runtime_adapter.get("routes")
+    if not isinstance(raw_routes, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for contract, payload in raw_routes.items():
+        if not isinstance(contract, str) or not contract.strip() or not isinstance(payload, dict):
+            continue
+        result[contract.strip()] = payload
+    return result
+
+
+def _mcp_config_by_name() -> dict[str, dict[str, Any]]:
+    config_by_name: dict[str, dict[str, Any]] = {}
+    for item in mcp_manager.get_config():
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        config_by_name[name] = item
+    return config_by_name
+
+
+def _server_tools_by_name(server_name: str) -> dict[str, object]:
+    tools_by_name: dict[str, object] = {}
+    for tool in mcp_manager.get_server_tools(server_name):
+        tool_name = str(getattr(tool, "name", "") or "").strip()
+        if not tool_name:
+            continue
+        tools_by_name[tool_name] = tool
+    return tools_by_name
+
+
+def _resolve_mcp_runtime_operations(
+    *,
+    source: dict[str, Any],
+    inventory: dict[str, Any],
+    contracts: tuple[str, ...],
+) -> tuple[str, str, list[dict[str, str]], tuple[SourceOperation, ...]]:
+    runtime_state = str(source.get("runtime_state") or "unknown")
+    if runtime_state != "ready":
+        reason = runtime_state if runtime_state in {"requires_config", "disabled"} else "connector_not_ready"
+        operations = tuple(
+            SourceOperation(
+                contract=contract,
+                description=f"Typed {contract} contract advertised by {source.get('name')}.",
+                input_mode="query",
+                executable=False,
+                reason=reason,
+            )
+            for contract in contracts
+        )
+        return ("degraded" if contracts else "unavailable"), reason, _matching_untyped_sources(inventory, provider=str(source.get("provider") or "")), operations
+
+    runtime_adapter = _runtime_adapter_payload(source)
+    if str(runtime_adapter.get("kind") or "") != "mcp_server":
+        reason = "no_runtime_adapter"
+        operations = tuple(
+            SourceOperation(
+                contract=contract,
+                description=f"Typed {contract} contract advertised by {source.get('name')}.",
+                input_mode="query",
+                executable=False,
+                reason=reason,
+            )
+            for contract in contracts
+        )
+        return "degraded", reason, _matching_untyped_sources(inventory, provider=str(source.get("provider") or "")), operations
+
+    routes = _runtime_route_map(runtime_adapter)
+    server_names = _normalize_string_tuple(runtime_adapter.get("server_names"))
+    config_by_name = _mcp_config_by_name()
+    bound_server = next(
+        (
+            server_name
+            for server_name in server_names
+            if config_by_name.get(server_name, {}).get("connected")
+        ),
+        "",
+    )
+    next_best = _matching_untyped_sources(inventory, provider=str(source.get("provider") or ""))
+    operations: list[SourceOperation] = []
+    executable_count = 0
+    default_reason = "no_connected_runtime"
+    for contract in contracts:
+        route = routes.get(contract)
+        tool_names = _normalize_string_tuple(route.get("tool_names")) if route else ()
+        result_kind = (
+            str(route.get("result_kind") or "").strip()
+            if route
+            else ""
+        )
+        query_param = (
+            str(route.get("query_param") or "").strip()
+            if route
+            else ""
+        )
+        per_page_param = (
+            str(route.get("per_page_param") or "").strip()
+            if route
+            else ""
+        )
+        description = f"Typed {contract} contract advertised by {source.get('name')}."
+        if route is None or not tool_names:
+            operations.append(
+                SourceOperation(
+                    contract=contract,
+                    description=description,
+                    input_mode="query",
+                    executable=False,
+                    reason="route_not_defined",
+                    result_kind=result_kind,
+                    per_page_param=per_page_param,
+                )
+            )
+            default_reason = "route_not_defined"
+            continue
+        if not bound_server:
+            operations.append(
+                SourceOperation(
+                    contract=contract,
+                    description=description,
+                    input_mode=query_param or "query",
+                    executable=False,
+                    reason="no_connected_runtime",
+                    result_kind=result_kind,
+                    per_page_param=per_page_param,
+                )
+            )
+            continue
+        tools_by_name = _server_tools_by_name(bound_server)
+        matched_tool_name = next((tool_name for tool_name in tool_names if tool_name in tools_by_name), "")
+        if not matched_tool_name:
+            operations.append(
+                SourceOperation(
+                    contract=contract,
+                    description=description,
+                    input_mode=query_param or "query",
+                    executable=False,
+                    reason="missing_runtime_tool",
+                    runtime_server=bound_server,
+                    result_kind=result_kind,
+                    per_page_param=per_page_param,
+                )
+            )
+            default_reason = "missing_runtime_tool"
+            continue
+        executable_count += 1
+        operations.append(
+            SourceOperation(
+                contract=contract,
+                description=description,
+                input_mode=query_param or "query",
+                executable=True,
+                runtime_server=bound_server,
+                tool_name=matched_tool_name,
+                result_kind=result_kind,
+                per_page_param=per_page_param,
+            )
+        )
+
+    if not operations:
+        return "unavailable", "no_contracts", next_best, ()
+    required_operations = [operation for operation in operations if not operation.contract.endswith(".write")]
+    relevant_operations = required_operations or operations
+    relevant_executable_count = sum(1 for operation in relevant_operations if operation.executable)
+    if relevant_executable_count == len(relevant_operations):
+        return "ready", "", [], tuple(operations)
+    if relevant_executable_count > 0:
+        return "degraded", "partial_runtime_support", next_best, tuple(operations)
+    return "degraded", default_reason, next_best, tuple(operations)
+
+
 def _adapter_state_for_source(source: dict[str, Any], inventory: dict[str, Any]) -> tuple[str, str, list[dict[str, str]], tuple[SourceOperation, ...]]:
     name = str(source.get("name") or "")
     source_kind = str(source.get("source_kind") or "")
-    runtime_state = str(source.get("runtime_state") or "unknown")
     contracts = tuple(
         str(item) for item in source.get("contracts", [])
         if isinstance(item, str) and item.strip()
@@ -140,25 +347,7 @@ def _adapter_state_for_source(source: dict[str, Any], inventory: dict[str, Any])
         return "ready", "", [], _NATIVE_OPERATION_DEFINITIONS[name]
 
     if source_kind == "managed_connector":
-        if runtime_state == "requires_config":
-            reason = "requires_config"
-        elif runtime_state == "disabled":
-            reason = "disabled"
-        else:
-            reason = "no_runtime_adapter"
-        operations = tuple(
-            SourceOperation(
-                contract=contract,
-                description=f"Typed {contract} contract advertised by {name}.",
-                input_mode="adapter_defined",
-                executable=False,
-                reason=reason,
-            )
-            for contract in contracts
-        )
-        next_best = _matching_untyped_sources(inventory, provider=str(source.get("provider") or ""))
-        state = "degraded" if contracts else "unavailable"
-        return state, reason, next_best, operations
+        return _resolve_mcp_runtime_operations(source=source, inventory=inventory, contracts=contracts)
 
     return "unavailable", "unsupported_source_kind", [], ()
 
@@ -324,6 +513,104 @@ def _browser_session_payload(*, owner_session_id: str, ref: str, session_id: str
     return None
 
 
+def _operation_for_contract(adapter: dict[str, Any], contract: str) -> dict[str, Any] | None:
+    for operation in adapter.get("operations") or []:
+        if isinstance(operation, dict) and str(operation.get("contract") or "") == contract:
+            return operation
+    return None
+
+
+def _extract_records(raw_result: object) -> list[dict[str, Any]]:
+    if isinstance(raw_result, list):
+        return [item for item in raw_result if isinstance(item, dict)]
+    if not isinstance(raw_result, dict):
+        return []
+    for key in ("items", "results", "nodes", "data"):
+        value = raw_result.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return [raw_result]
+
+
+def _record_title(record: dict[str, Any]) -> str:
+    for key in ("full_name", "title", "name", "path", "url"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    number = record.get("number")
+    if isinstance(number, int):
+        return f"#{number}"
+    return "external record"
+
+
+def _record_location(record: dict[str, Any]) -> str:
+    for key in ("html_url", "url", "web_url"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _record_summary(record: dict[str, Any]) -> str:
+    for key in ("body", "description", "summary", "excerpt"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    state = str(record.get("state") or "").strip()
+    if state:
+        return f"state={state}"
+    return ""
+
+
+def _build_connector_item(
+    record: dict[str, Any],
+    *,
+    contract: str,
+    source_name: str,
+    provider: str,
+    result_kind: str,
+    runtime_server: str,
+) -> dict[str, Any]:
+    location = _record_location(record)
+    summary = _record_summary(record)
+    title = _record_title(record)
+    record_id = str(record.get("id") or location or title).strip()
+    return {
+        "id": record_id,
+        "kind": result_kind or "external_record",
+        "contract": contract,
+        "source_name": source_name,
+        "provider": provider,
+        "source_kind": "managed_connector",
+        "title": title,
+        "location": location,
+        "hostname": _parse_hostname(location),
+        "summary": summary or title,
+        "excerpt": _excerpt(summary or title),
+        "content": summary or title,
+        "observed_at": _utc_now(),
+        "metadata": {
+            "state": str(record.get("state") or ""),
+            "number": record.get("number"),
+            "runtime_server": runtime_server,
+            "repository": record.get("repository"),
+        },
+    }
+
+
+def _invoke_mcp_query(tool: object, *, query_param: str, per_page_param: str, query: str, max_results: int) -> object:
+    arguments: dict[str, object] = {query_param: query}
+    if per_page_param:
+        arguments[per_page_param] = max_results
+    try:
+        return tool(**arguments)
+    except TypeError as exc:
+        if per_page_param and "unexpected keyword" in str(exc).lower():
+            fallback_arguments = {query_param: query}
+            return tool(**fallback_arguments)
+        raise
+
+
 def collect_source_evidence_bundle(
     *,
     contract: str,
@@ -381,8 +668,16 @@ def collect_source_evidence_bundle(
         "degraded_reason": selected_adapter.get("degraded_reason"),
     }
 
-    if selected_adapter["adapter_state"] != "ready":
-        reason = str(selected_adapter.get("degraded_reason") or "unavailable")
+    selected_operation = _operation_for_contract(selected_adapter, contract)
+    if selected_operation is None:
+        response["warnings"].append(
+            f"Source '{selected_adapter['name']}' does not currently define an executable route for '{contract}'."
+        )
+        response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+        return response
+
+    if not bool(selected_operation.get("executable")):
+        reason = str(selected_operation.get("reason") or selected_adapter.get("degraded_reason") or "unavailable")
         response["warnings"].append(
             f"Source '{selected_adapter['name']}' cannot execute '{contract}' right now ({reason})."
         )
@@ -430,6 +725,48 @@ def collect_source_evidence_bundle(
             return response
         response["items"] = [_build_browser_item(payload, source_name)]
         response["status"] = "ok"
+    elif selected_adapter["source_kind"] == "managed_connector":
+        if not query.strip():
+            response["status"] = "failed"
+            response["warnings"].append(
+                f"{source_name} evidence collection requires a non-empty query for '{contract}'."
+            )
+            return response
+        runtime_server = str(selected_operation.get("runtime_server") or "")
+        tool_name = str(selected_operation.get("tool_name") or "")
+        tools_by_name = _server_tools_by_name(runtime_server)
+        tool = tools_by_name.get(tool_name)
+        if tool is None:
+            response["warnings"].append(
+                f"Source '{source_name}' is missing runtime tool '{tool_name}' on '{runtime_server}'."
+            )
+            response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+            return response
+        try:
+            raw_result = _invoke_mcp_query(
+                tool,
+                query_param=str(selected_operation.get("input_mode") or "query"),
+                per_page_param=str(selected_operation.get("per_page_param") or "perPage"),
+                query=query.strip(),
+                max_results=max_results,
+            )
+        except Exception as exc:
+            response["status"] = "failed"
+            response["warnings"].append(str(exc))
+            return response
+        records = _extract_records(raw_result)
+        response["items"] = [
+            _build_connector_item(
+                record,
+                contract=contract,
+                source_name=source_name,
+                provider=str(selected_adapter.get("provider") or ""),
+                result_kind=str(selected_operation.get("result_kind") or "external_record"),
+                runtime_server=runtime_server,
+            )
+            for record in records
+        ]
+        response["status"] = "ok" if response["items"] else "empty"
     else:
         response["warnings"].append(
             f"Source '{source_name}' advertises '{contract}', but no executable runtime adapter is implemented yet."

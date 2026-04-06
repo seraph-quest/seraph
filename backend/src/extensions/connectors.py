@@ -54,6 +54,46 @@ class ManagedConnectorField:
 
 
 @dataclass(frozen=True)
+class ManagedConnectorRuntimeRoute:
+    contract: str
+    tool_names: tuple[str, ...]
+    result_kind: str = "external_record"
+    query_param: str = "query"
+    per_page_param: str = "perPage"
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "contract": self.contract,
+            "tool_names": list(self.tool_names),
+            "result_kind": self.result_kind,
+            "query_param": self.query_param,
+            "per_page_param": self.per_page_param,
+        }
+
+
+@dataclass(frozen=True)
+class ManagedConnectorRuntimeAdapter:
+    kind: str
+    server_names: tuple[str, ...]
+    routes: tuple[ManagedConnectorRuntimeRoute, ...]
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "server_names": list(self.server_names),
+            "routes": {
+                route.contract: {
+                    "tool_names": list(route.tool_names),
+                    "result_kind": route.result_kind,
+                    "query_param": route.query_param,
+                    "per_page_param": route.per_page_param,
+                }
+                for route in self.routes
+            },
+        }
+
+
+@dataclass(frozen=True)
 class ManagedConnectorDefinition:
     name: str
     provider: str
@@ -63,9 +103,10 @@ class ManagedConnectorDefinition:
     capabilities: tuple[str, ...] = ()
     setup_steps: tuple[str, ...] = ()
     config_fields: tuple[ManagedConnectorField, ...] = ()
+    runtime_adapter: ManagedConnectorRuntimeAdapter | None = None
 
     def as_metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "name": self.name,
             "provider": self.provider,
             "description": self.description,
@@ -75,6 +116,9 @@ class ManagedConnectorDefinition:
             "setup_steps": list(self.setup_steps),
             "config_fields": [field.as_metadata() for field in self.config_fields],
         }
+        if self.runtime_adapter is not None:
+            metadata["runtime_adapter"] = self.runtime_adapter.as_metadata()
+        return metadata
 
 
 def load_connector_payload(path: Path) -> Any:
@@ -264,6 +308,100 @@ def parse_managed_connector_definition(payload: Any, *, source: str) -> ManagedC
             )
         )
 
+    runtime_adapter: ManagedConnectorRuntimeAdapter | None = None
+    raw_runtime_adapter = payload.get("runtime_adapter")
+    if raw_runtime_adapter is not None:
+        if not isinstance(raw_runtime_adapter, dict):
+            raise ConnectorDefinitionError(f"{source}: managed connector runtime_adapter must be an object")
+        raw_kind = raw_runtime_adapter.get("kind")
+        if not isinstance(raw_kind, str) or not raw_kind.strip():
+            raise ConnectorDefinitionError(f"{source}: managed connector runtime_adapter kind must be a non-empty string")
+        kind = raw_kind.strip()
+        if kind != "mcp_server":
+            raise ConnectorDefinitionError(
+                f"{source}: managed connector runtime_adapter kind '{kind}' is not supported"
+            )
+        server_names = _parse_string_list(
+            raw_runtime_adapter.get("server_names"),
+            source=source,
+            field_name="runtime_adapter.server_names",
+        )
+        if not server_names:
+            raise ConnectorDefinitionError(
+                f"{source}: managed connector runtime_adapter server_names must include at least one name"
+            )
+        raw_routes = raw_runtime_adapter.get("routes")
+        if not isinstance(raw_routes, dict) or not raw_routes:
+            raise ConnectorDefinitionError(
+                f"{source}: managed connector runtime_adapter routes must be a non-empty object"
+            )
+        routes: list[ManagedConnectorRuntimeRoute] = []
+        for raw_contract, raw_route in raw_routes.items():
+            if not isinstance(raw_contract, str) or not raw_contract.strip():
+                raise ConnectorDefinitionError(
+                    f"{source}: managed connector runtime_adapter route keys must be non-empty strings"
+                )
+            if not isinstance(raw_route, dict):
+                raise ConnectorDefinitionError(
+                    f"{source}: managed connector runtime_adapter route '{raw_contract}' must be an object"
+                )
+            tool_names = _parse_string_list(
+                raw_route.get("tool_names"),
+                source=source,
+                field_name=f"runtime_adapter.routes.{raw_contract}.tool_names",
+            )
+            if not tool_names:
+                raise ConnectorDefinitionError(
+                    f"{source}: managed connector runtime_adapter route '{raw_contract}' must include tool_names"
+                )
+            raw_result_kind = raw_route.get("result_kind")
+            if raw_result_kind is not None and (
+                not isinstance(raw_result_kind, str) or not raw_result_kind.strip()
+            ):
+                raise ConnectorDefinitionError(
+                    f"{source}: managed connector runtime_adapter route '{raw_contract}' result_kind must be a non-empty string"
+                )
+            raw_query_param = raw_route.get("query_param")
+            if raw_query_param is not None and (
+                not isinstance(raw_query_param, str) or not raw_query_param.strip()
+            ):
+                raise ConnectorDefinitionError(
+                    f"{source}: managed connector runtime_adapter route '{raw_contract}' query_param must be a non-empty string"
+                )
+            raw_per_page_param = raw_route.get("per_page_param")
+            if raw_per_page_param is not None and (
+                not isinstance(raw_per_page_param, str) or not raw_per_page_param.strip()
+            ):
+                raise ConnectorDefinitionError(
+                    f"{source}: managed connector runtime_adapter route '{raw_contract}' per_page_param must be a non-empty string"
+                )
+            routes.append(
+                ManagedConnectorRuntimeRoute(
+                    contract=raw_contract.strip(),
+                    tool_names=tool_names,
+                    result_kind=(
+                        raw_result_kind.strip()
+                        if isinstance(raw_result_kind, str) and raw_result_kind.strip()
+                        else "external_record"
+                    ),
+                    query_param=(
+                        raw_query_param.strip()
+                        if isinstance(raw_query_param, str) and raw_query_param.strip()
+                        else "query"
+                    ),
+                    per_page_param=(
+                        raw_per_page_param.strip()
+                        if isinstance(raw_per_page_param, str) and raw_per_page_param.strip()
+                        else "perPage"
+                    ),
+                )
+            )
+        runtime_adapter = ManagedConnectorRuntimeAdapter(
+            kind=kind,
+            server_names=server_names,
+            routes=tuple(routes),
+        )
+
     return ManagedConnectorDefinition(
         name=name,
         provider=provider,
@@ -273,6 +411,7 @@ def parse_managed_connector_definition(payload: Any, *, source: str) -> ManagedC
         capabilities=capabilities,
         setup_steps=setup_steps,
         config_fields=tuple(config_fields),
+        runtime_adapter=runtime_adapter,
     )
 
 

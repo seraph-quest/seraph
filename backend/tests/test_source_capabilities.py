@@ -28,6 +28,8 @@ async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(tmp_p
     with (
         patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
         patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[]),
     ):
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as local_client:
             response = await local_client.get("/api/capabilities/source-surfaces")
@@ -125,3 +127,40 @@ def test_source_capabilities_tool_reports_connector_first_guidance():
     assert "raw-github-mcp" in result
     assert "Prefer typed authenticated connectors over browser login" in result
     assert "no_runtime_adapter" in result
+
+
+def test_source_capabilities_tool_reports_bound_runtime_routes():
+    inventory = {
+        "contracts": [],
+        "typed_sources": [],
+        "untyped_sources": [],
+        "composition_rules": [],
+    }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "github-managed",
+                "adapter_state": "ready",
+                "provider": "github",
+                "contracts": ["work_items.read"],
+                "degraded_reason": None,
+                "operations": [
+                    {
+                        "contract": "work_items.read",
+                        "input_mode": "query",
+                        "executable": True,
+                        "runtime_server": "github",
+                        "tool_name": "search_issues",
+                    }
+                ],
+            }
+        ]
+    }
+
+    with (
+        patch("src.tools.source_capabilities_tool.list_source_capability_inventory", return_value=inventory),
+        patch("src.tools.source_capabilities_tool.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        result = source_capabilities.forward(focus="adapters")
+
+    assert "github/search_issues" in result

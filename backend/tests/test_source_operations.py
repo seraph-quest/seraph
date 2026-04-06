@@ -10,6 +10,15 @@ from src.api.capabilities import _build_capability_overview
 from src.tools.source_evidence_tool import collect_source_evidence
 
 
+class FakeMCPTool:
+    def __init__(self, name: str, payload):
+        self.name = name
+        self._payload = payload
+
+    def __call__(self, **kwargs):
+        return self._payload
+
+
 @pytest.fixture(autouse=True)
 def reset_browser_sessions():
     browser_session_runtime.reset_for_tests()
@@ -40,6 +49,8 @@ async def test_source_adapters_endpoint_exposes_ready_public_adapters_and_degrad
     with (
         patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
         patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[]),
     ):
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.get("/api/capabilities/source-adapters")
@@ -164,6 +175,8 @@ async def test_source_evidence_endpoint_reports_degraded_managed_connector_with_
     with (
         patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
         patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[]),
     ):
         async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
             response = await client.post(
@@ -177,6 +190,150 @@ async def test_source_evidence_endpoint_reports_degraded_managed_connector_with_
     assert payload["adapter"]["name"] == "github-managed"
     assert payload["adapter"]["adapter_state"] == "degraded"
     assert payload["next_best_sources"][0]["name"] == "raw-github-mcp"
+
+
+@pytest.mark.asyncio
+async def test_source_adapters_endpoint_promotes_managed_connector_when_runtime_is_bound(
+    tmp_path,
+):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "github",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 3,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "extension",
+        }
+    ]
+    state_payload = {
+        "extensions": {
+            "seraph.core-managed-connectors": {
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "inst_123",
+                        }
+                    }
+                },
+                "connector_state": {
+                    "connectors/managed/github.yaml": {
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+    }
+    server_tools = [
+        FakeMCPTool("search_repositories", [{"id": 1, "full_name": "seraph-quest/seraph"}]),
+        FakeMCPTool("search_issues", [{"id": 2, "title": "Fix source adapter", "html_url": "https://example.com/issues/2"}]),
+        FakeMCPTool("search_pull_requests", [{"id": 3, "title": "Improve adapters", "html_url": "https://example.com/pulls/3"}]),
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.load_extension_state_payload", return_value=state_payload),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=server_tools),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.get("/api/capabilities/source-adapters")
+
+    assert response.status_code == 200
+    payload = response.json()
+    managed = next(item for item in payload["adapters"] if item["name"] == "github-managed")
+    assert managed["adapter_state"] == "ready"
+    assert managed["degraded_reason"] is None
+    work_items_route = next(item for item in managed["operations"] if item["contract"] == "work_items.read")
+    assert work_items_route["executable"] is True
+    assert work_items_route["runtime_server"] == "github"
+    assert work_items_route["tool_name"] == "search_issues"
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_endpoint_collects_github_work_items_via_bound_runtime(
+    tmp_path,
+):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "github",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 3,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "extension",
+        }
+    ]
+    state_payload = {
+        "extensions": {
+            "seraph.core-managed-connectors": {
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "inst_123",
+                        }
+                    }
+                },
+                "connector_state": {
+                    "connectors/managed/github.yaml": {
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+    }
+    server_tools = [
+        FakeMCPTool(
+            "search_issues",
+            [
+                {
+                    "id": 41,
+                    "title": "Adapter-backed GitHub evidence",
+                    "html_url": "https://github.com/seraph-quest/seraph/issues/41",
+                    "body": "Expose provider-neutral evidence reads.",
+                    "state": "open",
+                    "number": 41,
+                }
+            ],
+        )
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.load_extension_state_payload", return_value=state_payload),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=server_tools),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-evidence",
+                json={
+                    "contract": "work_items.read",
+                    "source": "github-managed",
+                    "query": "is:issue source adapter",
+                    "max_results": 5,
+                },
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["adapter"]["name"] == "github-managed"
+    assert payload["items"][0]["kind"] == "work_item"
+    assert payload["items"][0]["location"] == "https://github.com/seraph-quest/seraph/issues/41"
+    assert payload["items"][0]["metadata"]["runtime_server"] == "github"
 
 
 def test_collect_source_evidence_tool_renders_structured_summary():

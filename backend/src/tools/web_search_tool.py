@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from ddgs import DDGS
 from smolagents import tool
@@ -37,6 +38,13 @@ def _filter_search_results(results: list[dict[str, object]]) -> tuple[list[dict[
     return allowed, blocked
 
 
+def search_web_records(query: str, max_results: int = 5) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Return structured allowed search results plus blocked-result metadata."""
+    with DDGS(timeout=settings.web_search_timeout) as ddgs:
+        results = list(ddgs.text(query, max_results=max_results))
+    return _filter_search_results(results)
+
+
 @tool
 def web_search(query: str, max_results: int = 5) -> str:
     """Search the web using DuckDuckGo and return results.
@@ -49,10 +57,9 @@ def web_search(query: str, max_results: int = 5) -> str:
         Formatted search results with titles, URLs, and snippets.
     """
     try:
-        with DDGS(timeout=settings.web_search_timeout) as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+        filtered_results, blocked_results = search_web_records(query, max_results=max_results)
 
-        if not results:
+        if not filtered_results and not blocked_results:
             log_integration_event_sync(
                 integration_type="web_search",
                 name="duckduckgo",
@@ -65,7 +72,6 @@ def web_search(query: str, max_results: int = 5) -> str:
             )
             return f"No results found for: {query}"
 
-        filtered_results, blocked_results = _filter_search_results(results)
         filtered_count = len(blocked_results)
         blocked_hostnames = sorted({item["hostname"] for item in blocked_results if item["hostname"]})
         block_reasons = sorted({item["reason"] for item in blocked_results if item["reason"]})
@@ -78,7 +84,7 @@ def web_search(query: str, max_results: int = 5) -> str:
                 details=_search_details(
                     query,
                     max_results,
-                    result_count=len(results),
+                    result_count=filtered_count,
                     filtered_result_count=filtered_count,
                     blocked_hostnames=blocked_hostnames[:5],
                     blocked_reasons=block_reasons,

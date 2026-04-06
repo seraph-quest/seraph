@@ -26,6 +26,7 @@ from src.db.models import UserProfile
 from src.extensions.lifecycle import get_extension
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
 from src.extensions.source_capabilities import list_source_capability_inventory
+from src.extensions.source_operations import collect_source_evidence_bundle, list_source_adapter_inventory
 from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
@@ -66,7 +67,20 @@ _BOOTSTRAP_ACTION_PRIORITY = {
 
 @router.get("/capabilities/source-surfaces")
 async def source_surfaces():
-    return list_source_capability_inventory()
+    inventory = list_source_capability_inventory()
+    adapter_inventory = list_source_adapter_inventory(inventory)
+    return {
+        **inventory,
+        "adapter_summary": adapter_inventory["summary"],
+        "adapters": adapter_inventory["adapters"],
+        "selection_rules": adapter_inventory["selection_rules"],
+    }
+
+
+@router.get("/capabilities/source-adapters")
+async def source_adapters():
+    inventory = list_source_capability_inventory()
+    return list_source_adapter_inventory(inventory)
 
 
 def _ensure_workflow_manager_workspace_extensions_loaded() -> None:
@@ -86,8 +100,33 @@ class CapabilityBootstrapRequest(BaseModel):
     name: str
 
 
+class SourceEvidenceRequest(BaseModel):
+    contract: str
+    source: str = ""
+    query: str = ""
+    url: str = ""
+    ref: str = ""
+    session_id: str = ""
+    owner_session_id: str = ""
+    max_results: int = 5
+
+
 class WorkflowDraftRequest(BaseModel):
     content: str
+
+
+@router.post("/capabilities/source-evidence")
+async def source_evidence(req: SourceEvidenceRequest):
+    return collect_source_evidence_bundle(
+        contract=req.contract,
+        source=req.source,
+        query=req.query,
+        url=req.url,
+        ref=req.ref,
+        session_id=req.session_id,
+        owner_session_id=req.owner_session_id,
+        max_results=req.max_results,
+    )
 
 
 def _load_starter_packs() -> list[dict[str, Any]]:
@@ -1455,6 +1494,7 @@ def _build_capability_overview() -> dict[str, Any]:
     base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
     tool_mode = get_current_tool_policy_mode()
     available_tool_names = [tool.name for tool in base_tools]
+    source_adapter_inventory = list_source_adapter_inventory()
     native_tools = _tool_status_list(tool_mode)
     skills, skills_by_name = _skill_status_map(available_tool_names)
     workflows, workflows_by_name = _workflow_status_map(available_tool_names, active_skill_names)
@@ -1503,11 +1543,15 @@ def _build_capability_overview() -> dict[str, Any]:
             "starter_packs_total": len(starter_packs),
             "mcp_servers_ready": sum(1 for server in mcp_servers if server["availability"] == "ready"),
             "mcp_servers_total": len(mcp_servers),
+            "source_adapters_ready": int(source_adapter_inventory["summary"]["ready_adapter_count"]),
+            "source_adapters_total": int(source_adapter_inventory["summary"]["adapter_count"]),
         },
         "native_tools": native_tools,
         "skills": skills,
         "workflows": workflows,
         "mcp_servers": mcp_servers,
+        "source_adapters": source_adapter_inventory["adapters"],
+        "source_adapter_rules": source_adapter_inventory["selection_rules"],
         "starter_packs": starter_packs,
         "catalog_items": catalog_items,
         "recommendations": recommendations,

@@ -56,7 +56,13 @@ _SPECIALIST_DEFAULT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "memory_keeper": ("view_soul", "update_soul"),
     "vault_keeper": ("store_secret", "get_secret", "get_secret_ref", "list_secrets", "delete_secret"),
     "goal_planner": ("create_goal", "update_goal", "get_goals", "get_goal_progress"),
-    "web_researcher": ("web_search", "browse_webpage", "browser_session", "source_capabilities"),
+    "web_researcher": (
+        "web_search",
+        "browse_webpage",
+        "browser_session",
+        "source_capabilities",
+        "collect_source_evidence",
+    ),
     "file_worker": ("read_file", "write_file", "fill_template", "execute_code"),
 }
 

@@ -41,6 +41,7 @@
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel routing through the extension platform instead of ad hoc side paths
 - [x] operator-surface imported reach, extension governance, and LLM spend attribution by runtime path and capability family
 - [x] provider-neutral source capability inventory that exposes typed public-web tools, managed authenticated connectors, explicit raw-MCP gaps, and one reusable source-evidence review skill instead of forcing provider-specific workflow glue
+- [x] first adapter-backed source-evidence runtime that turns typed public-web contracts into normalized evidence bundles, exposes degraded managed-connector truth instead of implied access, and gives Seraph one reusable `collect_source_evidence` path for public discovery, explicit pages, and existing browser-session snapshots
 
 ## Working On Now
 
@@ -68,6 +69,7 @@
 - [x] the five-wave Hermes/OpenClaw capability import program is now complete on `develop`, including packaged reach parity, selective OpenClaw imports, operator-surface governance, benchmark refresh, and deterministic eval proof
 - [x] `workflow-autonomy-supervision-and-artifact-control-v1` now ships reusable checkpoint-backed workflow recovery, truthful unsupported-checkpoint fallback in the runs API, declared-type artifact handoff in the cockpit, and operator-visible branch-family supervision instead of generic retry-only copy
 - [x] `adapter-first-capability-contracts-v1` now ships provider-neutral source contracts, managed-connector inventory, explicit raw-MCP disclosure, and one reusable source-evidence review skill instead of forcing provider-specific reporting glue
+- [x] `adapter-backed-authenticated-source-operations-v1` now ships source-adapter inventory, normalized evidence bundles, executable public-web read contracts, explicit degraded managed-connector semantics, and one reusable `collect_source_evidence` tool/API path instead of leaving source routines to stitch raw surface metadata together
 
 ## Review Follow-Up
 
@@ -82,6 +84,9 @@
 - review pass:
   - direct diff review of source contract truthfulness, managed-connector readiness, raw-MCP disclosure, and skill guidance found no remaining material issues after the provider-note fix
   - Copernicus review was started for a second pass on bugs, regressions, and hallucinated assumptions, but it did not return findings before validation completed, so the PR validation should claim only the concrete local review result
+- local review finding fixed while landing `adapter-backed-authenticated-source-operations-v1`:
+  - typed managed connectors could advertise work-item or repository contracts without any executable runtime path, which risked implying authenticated access that did not exist yet
+  - fixed by adding explicit adapter-state and degraded-reason surfaces plus next-best fallback guidance instead of treating inventory metadata as execution truth
 
 ## Still To Do On `develop`
 

@@ -32,7 +32,7 @@
 - [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, latest-branch, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
 - [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
 - [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
-- [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, family-row checkpoint drill-in, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, branch or retry from family checkpoints, and draft continuation plans without reconstructing lineage manually
+- [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, family-row checkpoint drill-in, direct family-row retry/repair controls, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, branch or retry from family checkpoints, repair failed family steps, and draft continuation plans without reconstructing lineage manually
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -56,6 +56,7 @@
 - [x] this workstream now also ships `workflow-history-comparison-and-family-output-control-v1`
 - [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
 - [x] this workstream now also ships `workflow-family-checkpoint-drilldown-and-step-control-v1`
+- [x] this workstream now also ships `workflow-family-recovery-control-parity-v1`
 - [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
 
 ## Still To Do On `develop`
@@ -375,6 +376,31 @@
     - result: `passed`
   - `cd frontend && timeout 120 env NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
     - result: `54 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
+
+### `workflow-family-recovery-control-parity-v1`
+
+- status: in progress on `feat/workflow-family-recovery-batch-ac-v1`
+- root causes addressed:
+  - family rows could already continue and branch from checkpoints, but they still hid the direct `retry step` and `repair step` actions that the triage surface exposed for the same failed workflow state
+  - that left the workflow inspector inconsistent: the selected timeline and triage lane were recovery-aware, while best-continuation and failure-lineage family rows still stopped at generic continuation
+- scope:
+  - best-continuation and related family rows now expose direct `retry step` and `repair step` controls when the underlying failed step actually supports those actions
+  - the new controls reuse `failedWorkflowStep()`, `repairWorkflowReplay()`, and existing recovery helpers instead of inventing a second family-row recovery model
+  - family-row recovery controls stay fail closed when no failed step or repair action exists
+- review findings fixed during implementation:
+  - the first family-row recovery pass only exercised retry from existing continuation text, so it still did not prove that family-row `repair step` was grounded in a real failed-step recovery payload
+  - fixed by upgrading the child-branch fixture to carry explicit `recovery_actions` on the failed checkpoint step and then pinning the new best-continuation and failure-lineage actions in the branch-family spec
+- validation:
+  - `cd frontend && timeout 60 env NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
+    - result: `passed`
+  - `cd frontend && timeout 120 env NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `passed`
   - `cd frontend && npm run build`
     - result: `passed`
   - `cd docs && npm run build`

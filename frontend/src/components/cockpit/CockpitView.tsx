@@ -3143,6 +3143,51 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       </button>
     ));
   }
+  function renderWorkflowRecoveryControls(
+    workflow: WorkflowRunRecord,
+    scopeLabel: string,
+    keyPrefix: string,
+  ) {
+    const failedStep = failedWorkflowStep(workflow);
+    const controls: ReactNode[] = [];
+    if (workflow.retryFromStepDraft) {
+      controls.push(
+        <button
+          key={`${keyPrefix}:retry-step`}
+          className="cockpit-feedback-button"
+          aria-label={`Retry step for ${scopeLabel} ${workflow.workflowName}`}
+          onClick={() => queueComposerDraft(workflow.retryFromStepDraft ?? "")}
+        >
+          Retry Step
+        </button>,
+      );
+    }
+    if (workflow.replayAllowed === false && workflow.replayRecommendedActions?.length) {
+      controls.push(
+        <button
+          key={`${keyPrefix}:repair-replay`}
+          className="cockpit-feedback-button"
+          aria-label={`Repair replay for ${scopeLabel} ${workflow.workflowName}`}
+          onClick={() => void repairWorkflowReplay(workflow)}
+        >
+          Repair Replay
+        </button>,
+      );
+    }
+    if (failedStep?.recoveryActions?.length) {
+      controls.push(
+        <button
+          key={`${keyPrefix}:repair-step:${failedStep.id}`}
+          className="cockpit-feedback-button"
+          aria-label={`Repair step ${failedStep.id} for ${scopeLabel} ${workflow.workflowName}`}
+          onClick={() => void runCapabilityActions(readActionList(failedStep.recoveryActions), `${workflow.workflowName} ${failedStep.id}`)}
+        >
+          Repair Step
+        </button>,
+      );
+    }
+    return controls;
+  }
   function buildWorkflowRedirectDraft(workflow: WorkflowRunRecord): string {
     const resolved = resolveWorkflowRun(workflow);
     const parts = [
@@ -6307,6 +6352,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     "best continuation",
                     `${selectedWorkflow.id}:best-continuation`,
                   )}
+                  {renderWorkflowRecoveryControls(
+                    selectedWorkflowBestContinuation,
+                    "best continuation",
+                    `${selectedWorkflow.id}:best-continuation`,
+                  )}
                 </div>
               )}
               {(selectedWorkflowOutputPath || selectedWorkflowBestContinuation || failureLineage.length > 0 || familyOutputs.length > 0) && (
@@ -6354,6 +6404,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </button>
                   )}
                   {renderWorkflowCheckpointControls(
+                    entry,
+                    index === 0 ? "failure lineage branch" : "failure branch",
+                    `${selectedWorkflow.id}:failure-lineage-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
                     entry,
                     index === 0 ? "failure lineage branch" : "failure branch",
                     `${selectedWorkflow.id}:failure-lineage-controls:${entry.runIdentity ?? entry.id}`,
@@ -6447,6 +6502,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     index === 0 ? "parent run" : "ancestor run",
                     `${selectedWorkflow.id}:ancestor-controls:${entry.runIdentity ?? entry.id}`,
                   )}
+                  {renderWorkflowRecoveryControls(
+                    entry,
+                    index === 0 ? "parent run" : "ancestor run",
+                    `${selectedWorkflow.id}:ancestor-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
                 </div>
               ))}
               {childRuns.map((entry) => (
@@ -6493,6 +6553,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </button>
                   )}
                   {renderWorkflowCheckpointControls(
+                    entry,
+                    "child branch",
+                    `${selectedWorkflow.id}:child-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
                     entry,
                     "child branch",
                     `${selectedWorkflow.id}:child-controls:${entry.runIdentity ?? entry.id}`,
@@ -6546,6 +6611,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </button>
                   )}
                   {renderWorkflowCheckpointControls(
+                    entry,
+                    "peer branch",
+                    `${selectedWorkflow.id}:peer-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
                     entry,
                     "peer branch",
                     `${selectedWorkflow.id}:peer-controls:${entry.runIdentity ?? entry.id}`,

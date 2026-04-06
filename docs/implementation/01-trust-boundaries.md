@@ -276,6 +276,24 @@
   - the first proof shape targeted a low-risk managed-connector package and therefore would not have exercised the hardened lifecycle path at all
   - fixed by pinning the regression on the already high-risk `wave2` pack, where changing only the non-secret `node_url` now requires fresh approval while a redacted no-op reconfigure stays direct
 
+### `authenticated-source-audit-visibility-hardening-v1`
+
+- status: complete on `feat/authenticated-source-audit-hardening-batch-ad-v8`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - authenticated-source and approval context were only guaranteed in audit events when a tool supplied custom MCP audit payloads, so wrapper-composed tools could lose source provenance and privilege context from default `tool_call`, `tool_result`, or `tool_failed` events
+  - that weakened the operator trail exactly where Batch AD is trying to make privileged paths easier to inspect and explain
+- scope:
+  - the audit wrapper now enriches default and custom audit payloads with wrapper-visible source context and approval context whenever they are available
+  - authenticated MCP tools keep their credential/source provenance visible even when they rely on default audit summaries instead of custom payload hooks
+  - the enrichment remains additive and fail-open, so existing custom audit payloads still win for summaries and bespoke fields
+- validation:
+  - `python3 -m py_compile backend/src/tools/audit.py backend/tests/test_tool_audit.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_tool_audit.py -q -k "secret_ref_wrapper_preserves_authenticated_mcp_failure_audit_payload or audited_tool_defaults_include_authenticated_source_context"`
+  - `git diff --check`
+- review pass:
+  - the real risk here was not missing audit entirely, but silent loss of authenticated-source provenance whenever a wrapper chain fell back to the generic audit path
+  - fixed by enriching audit details centrally in the audit wrapper instead of requiring every privileged tool surface to remember its own source-context plumbing
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

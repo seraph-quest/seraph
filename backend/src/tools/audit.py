@@ -12,7 +12,7 @@ from src.approval.runtime import get_current_session_id
 from src.audit.formatting import format_tool_call_summary, redact_for_audit, summarize_tool_result
 from src.audit.repository import audit_repository
 from src.llm_runtime import get_current_llm_request_id
-from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level
+from src.tools.policy import get_current_tool_policy_mode, get_tool_risk_level, get_tool_source_context
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,22 @@ def _custom_audit_arguments(tool: Any, arguments: dict[str, Any]) -> dict[str, A
     return None
 
 
+def _enrich_audit_details(
+    tool: Any,
+    arguments: dict[str, Any],
+    details: dict[str, Any],
+    *,
+    approval_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    enriched = dict(details)
+    source_context = get_tool_source_context(tool)
+    if isinstance(source_context, dict) and "source_context" not in enriched:
+        enriched["source_context"] = dict(source_context)
+    if isinstance(approval_context, dict) and approval_context and "approval_context" not in enriched:
+        enriched["approval_context"] = dict(approval_context)
+    return enriched
+
+
 class AuditedTool(Tool):
     """Tool wrapper that records execution lifecycle events for real invocations."""
 
@@ -118,6 +134,7 @@ class AuditedTool(Tool):
         audit_arguments = _custom_audit_arguments(self.wrapped_tool, arguments)
         if audit_arguments is None:
             audit_arguments = redact_for_audit(arguments)
+        approval_context = self.get_approval_context(arguments)
 
         if session_id is None:
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
@@ -128,6 +145,12 @@ class AuditedTool(Tool):
         else:
             call_summary = format_tool_call_summary(self.name, arguments, set())
             call_details = {"arguments": audit_arguments}
+        call_details = _enrich_audit_details(
+            self.wrapped_tool,
+            arguments,
+            call_details,
+            approval_context=approval_context,
+        )
         call_event_id = self._log_event(
             session_id=session_id,
             event_type="tool_call",
@@ -147,6 +170,12 @@ class AuditedTool(Tool):
                     "arguments": audit_arguments,
                     "error": redact_for_audit(str(exc)),
                 }
+            failure_details = _enrich_audit_details(
+                self.wrapped_tool,
+                arguments,
+                failure_details,
+                approval_context=approval_context,
+            )
             if call_event_id and "call_event_id" not in failure_details:
                 failure_details = {
                     **failure_details,
@@ -165,6 +194,12 @@ class AuditedTool(Tool):
             result_summary, result_details = custom_payload
         else:
             result_summary, result_details = summarize_tool_result(self.name, str(result))
+        result_details = _enrich_audit_details(
+            self.wrapped_tool,
+            arguments,
+            result_details,
+            approval_context=approval_context,
+        )
         if call_event_id and "call_event_id" not in result_details:
             result_details = {
                 **result_details,

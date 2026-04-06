@@ -88,6 +88,33 @@ class DummyAuthenticatedMCPFailTool(Tool):
         )
 
 
+class DummyAuthenticatedMCPDefaultAuditTool(Tool):
+    name = "mcp_fetch_repo"
+    description = "Dummy authenticated MCP tool with default audit payloads"
+    inputs = {"query": {"type": "string", "description": "Query"}}
+    output_type = "string"
+
+    def __init__(self):
+        super().__init__()
+        self.seraph_source_context = {
+            "server_name": "github",
+            "authenticated_source": True,
+            "credential_sources": ["header:authorization"],
+        }
+        self.is_initialized = True
+
+    def forward(self, query: str) -> str:
+        return f"ok:{query}"
+
+    def get_approval_context(self, _arguments):
+        return {
+            "execution_boundaries": ["external_mcp", "authenticated_external_source"],
+            "authenticated_source": True,
+            "server_name": "github",
+            "credential_sources": ["header:authorization"],
+        }
+
+
 def _tool_context() -> CurrentContext:
     return CurrentContext(tool_policy_mode="full", mcp_policy_mode="full")
 
@@ -222,6 +249,31 @@ def test_secret_ref_wrapper_preserves_authenticated_mcp_failure_audit_payload(as
     failure = next(e for e in events if e["event_type"] == "tool_failed" and e["tool_name"] == "mcp_fetch_repo")
     assert failure["summary"] == "mcp_fetch_repo failed for authenticated source"
     assert failure["details"]["source_context"]["authenticated_source"] is True
+
+
+def test_audited_tool_defaults_include_authenticated_source_context(async_db):
+    tool = wrap_tools_for_audit(
+        wrap_tools_for_secret_refs([DummyAuthenticatedMCPDefaultAuditTool()]),
+        treat_all_as_mcp=True,
+    )[0]
+    tokens = set_runtime_context("s1", "high_risk")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            assert tool(query="repo") == "ok:repo"
+    finally:
+        reset_runtime_context(tokens)
+
+    events = asyncio.run(audit_repository.list_events(limit=10))
+    call = next(e for e in events if e["event_type"] == "tool_call" and e["tool_name"] == "mcp_fetch_repo")
+    result = next(e for e in events if e["event_type"] == "tool_result" and e["tool_name"] == "mcp_fetch_repo")
+    assert call["details"]["source_context"]["authenticated_source"] is True
+    assert call["details"]["approval_context"]["execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+    ]
+    assert result["details"]["source_context"]["credential_sources"] == ["header:authorization"]
+    assert result["details"]["approval_context"]["authenticated_source"] is True
 
 
 def test_onboarding_agent_uses_audited_tools():

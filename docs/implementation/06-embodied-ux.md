@@ -31,6 +31,7 @@
 - [x] cockpit operator-terminal density now also includes an active triage lane for pending approvals, workflow branch families, queued guardian items, and reach failures with direct continue, open-thread, latest-branch, approve or deny, and desktop-shell actions instead of forcing operators to scan four separate panes for the next action
 - [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
 - [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
+- [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -50,12 +51,13 @@
 - [x] this workstream now ships the denser operator-terminal layer with live operator feed, saved runbook macros, approval-aware workflow timeline actions, and a separate Activity Ledger window
 - [x] this workstream now ships `workflow-step-focus-and-handoff-v1`
 - [x] this workstream now ships `cockpit-density-and-cross-surface-command-control-v2` with active triage, denser evidence shortcuts, and keyboard-first operator control for approvals, workflow recovery, queued guardian items, degraded reach, artifacts, and trace
-- [x] this workstream now hands the queue forward to a visual workflow debugger, richer cockpit density, and deeper studio ergonomics rather than first-pass branch/resume control
+- [x] this workstream now also ships `workflow-branch-debugging-and-long-running-control-v1`
+- [x] this workstream now hands the queue forward to richer branch comparison/history, broader long-running control, and deeper studio ergonomics rather than first-pass workflow branch debugging
 
 ## Still To Do On `develop`
 
 - [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight, repair, bounded bootstrap, and first studio save flows
-- [ ] richer workflow history, broader keyboard/operator control, visual branch/resume step-level visibility, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
+- [ ] richer workflow history, branch comparison, broader keyboard/operator control, and more flexible workspace ergonomics inside the cockpit beyond the first dedicated workflow-run layer, branch debugger, Activity Ledger, pane model, extension studio, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 
@@ -144,6 +146,30 @@
   - `cd docs && npm run build`
     - result: `passed`
   - `git diff --check`
+
+### `workflow-branch-debugging-and-long-running-control-v1`
+
+- status: complete on `feat/workflow-branch-debug-batch-s-v1` and ready for PR
+- root causes addressed:
+  - the cockpit already carried truthful branch/checkpoint metadata, but operators still had to infer branch origin, the best continuation target, and recent family failures from scattered chips, action rows, and timestamps
+  - branch-family debugging still favored "latest branch" over "best continuation", which is not the same thing once a family has multiple resumable or failed descendants
+  - failed-branch history was still visible only indirectly through generic timelines or parent/child rows, making long-running workflow recovery harder than it needed to be
+- scope:
+  - workflow rows now include concise branch-debug summaries for origin, best continuation, and latest family failure
+  - the workflow inspector now exposes explicit branch-origin, best-continuation, and failure-lineage rows with direct open, continue, and output reuse actions
+  - the branch-debug surface stays on the existing workflow-family lineage model instead of inventing a second workflow-debug state machine
+- review findings fixed before PR:
+  - the first pass surfaced multiple legitimate `recovery ready` and `Open Parent` affordances, which broke older uniqueness assumptions in the branch-family cockpit test
+  - fixed by tightening the branch-family test to assert presence of the new debugger surface without treating duplicated valid affordances as regressions
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
+    - result: `passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
     - result: `passed`
 
 ## Non-Goals

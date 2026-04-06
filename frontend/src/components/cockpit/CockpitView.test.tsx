@@ -3737,6 +3737,9 @@ describe("CockpitView", () => {
     expect(rootRow).not.toBeNull();
     expect(within(rootRow as HTMLElement).getByText(/supervision branched/i)).toBeInTheDocument();
     expect(within(rootRow as HTMLElement).getByText(/1 child branch/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/root branch/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/continue resume-review/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/latest failure branch review needs continuation/i)).toBeInTheDocument();
 
     fireEvent.click(rootSummary);
 
@@ -3744,7 +3747,12 @@ describe("CockpitView", () => {
     expect(within(inspector).getByRole("button", { name: "Open Latest Branch" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Continue Latest Branch" })).toBeInTheDocument();
     expect(within(inspector).getByText("child branch")).toBeInTheDocument();
-    expect(within(inspector).getByText(/recovery ready/i)).toBeInTheDocument();
+    expect(within(inspector).getByText("branch origin")).toBeInTheDocument();
+    expect(within(inspector).getByText("best continuation")).toBeInTheDocument();
+    expect(within(inspector).getByText("failure lineage")).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
     await waitFor(() =>
@@ -3755,7 +3763,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect((inspector.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("branch review needs continuation"),
     );
-    expect(within(inspector).getByRole("button", { name: "Open Parent" })).toBeInTheDocument();
+    expect(within(inspector).getAllByRole("button", { name: "Open Parent" }).length).toBeGreaterThan(0);
     expect(within(inspector).getByText("parent run")).toBeInTheDocument();
   });
 

@@ -28,8 +28,8 @@
 - [x] cockpit workflow views now expose first branch/resume checkpoints, lineage metadata, and resume drafts tied to existing inputs instead of only replay-from-start or retry-from-step cues
 - [x] cockpit session continuity now restores the active thread on reload, preserves explicit fresh-thread semantics, and marks background thread activity in the session list
 - [x] cockpit approvals, workflow runs, native notifications, queued interventions, and recent interventions now expose explicit continue/open-thread controls instead of forcing continuity guesswork
-- [x] cockpit operator-terminal density now also includes an active triage lane for pending approvals, workflow branch families, queued guardian items, and reach failures with direct continue, open-thread, latest-branch, approve or deny, and desktop-shell actions instead of forcing operators to scan four separate panes for the next action
-- [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
+- [x] cockpit operator-terminal density now also includes an active triage lane for pending approvals, workflow branch families, queued guardian items, and reach failures with direct continue, latest-output reuse, best-continuation comparison, next-step drafting, open-thread, latest-branch, approve or deny, and desktop-shell actions instead of forcing operators to scan four separate panes for the next action
+- [x] cockpit operator-terminal density now also includes evidence shortcuts for approval context, recent trace, and artifact lineage plus keyboard-first inspect, approve, continue, open-thread, latest-branch, redirect, and evidence-inspect shortcuts so operators can act on active work without pane-hopping
 - [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
 - [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
 - [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, and draft continuation plans without reconstructing lineage manually
@@ -55,7 +55,7 @@
 - [x] this workstream now also ships `workflow-branch-debugging-and-long-running-control-v1`
 - [x] this workstream now also ships `workflow-history-comparison-and-family-output-control-v1`
 - [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
-- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, and family-plan bundling
+- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, and triage quick actions
 
 ## Still To Do On `develop`
 
@@ -241,6 +241,26 @@
   - `cd docs && npm run build`
     - result: `passed`
   - `git diff --check`
+    - result: `passed`
+
+### `workflow-triage-quick-actions-and-follow-through-control-v1`
+
+- status: in progress on `feat/workflow-triage-quick-actions-batch-w-v1`
+- root causes addressed:
+  - Batch V made bundled workflow-family planning available once the operator opened the inspector, but the active triage lane still treated workflows mostly as inspect-first rows
+  - the triage lane already knew when a workflow had reusable output, a distinct best continuation, or a latest branch, but those follow-through actions still required an inspector hop
+- scope:
+  - workflow triage rows now expose direct `use output`, `compare best`, and `draft next step` actions when the underlying family/output state is truthful
+  - keyboard-first workflow control now also includes `Shift+L` for opening the latest branch on the primary workflow target
+  - compare-best stays fail closed when the current run and best continuation resolve to the same output path
+- review findings fixed during implementation:
+  - the first pass would have allowed `compare best` to compare a workflow output against the same file path, which is not a real comparison surface
+  - the first pass also still let some workflows treat the current run as its own “best continuation,” which would have made the new triage actions surface self-comparisons and weaker next-step guidance
+  - fixed by preferring a distinct family continuation over the current run when available and by suppressing triage comparison when both sides resolve to the same output path
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
     - result: `passed`
 
 ## Non-Goals

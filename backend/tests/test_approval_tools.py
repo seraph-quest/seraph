@@ -129,13 +129,13 @@ def test_secret_ref_wrapper_preserves_authenticated_mcp_approval_context(async_d
     try:
         with pytest.raises(ApprovalRequired) as excinfo:
             tool(query="repo")
-        pending = asyncio.run(approval_repository.get_pending("s1"))
+        pending = asyncio.run(approval_repository.list_pending(session_id="s1"))
     finally:
         reset_runtime_context(tokens)
 
-    request = next(item for item in pending if item.id == excinfo.value.approval_id)
-    assert request.details["approval_context"]["authenticated_source"] is True
-    assert request.details["approval_context"]["execution_boundaries"] == [
+    request = next(item for item in pending if item["id"] == excinfo.value.approval_id)
+    assert request["approval_context"]["authenticated_source"] is True
+    assert request["approval_context"]["execution_boundaries"] == [
         "external_mcp",
         "authenticated_external_source",
     ]

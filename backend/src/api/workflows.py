@@ -832,6 +832,10 @@ def _workflow_replay_policy(
     return True, None
 
 
+def _workflow_resume_surface_allowed(*, replay_block_reason: str | None) -> bool:
+    return replay_block_reason not in {"approval_context_changed", "approval_context_missing"}
+
+
 def _workflow_runtime_statuses() -> dict[str, dict[str, Any]]:
     base_tools, active_skill_names, _ = get_base_tools_and_active_skills()
     available_tool_names = [tool.name for tool in base_tools]
@@ -1299,10 +1303,17 @@ async def _list_workflow_runs(
             approvals=approvals,
             continued_error_steps=list(run.get("continued_error_steps", [])),
         )
+        resume_surface_allowed = _workflow_resume_surface_allowed(
+            replay_block_reason=replay_block_reason,
+        )
         resume_from_step = (
-            "approval_gate"
-            if approvals
-            else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+            (
+                "approval_gate"
+                if approvals
+                else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+            )
+            if resume_surface_allowed
+            else None
         )
         retry_from_step_draft = (
             _workflow_retry_from_step_draft(
@@ -1314,7 +1325,8 @@ async def _list_workflow_runs(
                 branch_kind="retry_failed_step",
                 branch_depth=int(lineage.get("branch_depth") or 0) + 1,
             )
-            if replay_allowed
+            if resume_surface_allowed
+            and replay_allowed
             and run.get("continued_error_steps")
             and (
                 bool(run.get("checkpoint_context_available"))
@@ -1346,7 +1358,7 @@ async def _list_workflow_runs(
             "resume_checkpoint_label": _resume_checkpoint_label(
                 approvals=approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
-            ),
+            ) if resume_surface_allowed else None,
             "approval_recovery_message": (
                 f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
                 if bool(run.get("approval_context_mismatch"))
@@ -1384,8 +1396,12 @@ async def _list_workflow_runs(
             ),
             **lineage,
         })
-        run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
-        run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
+        if resume_surface_allowed:
+            run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
+            run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
+        else:
+            run["checkpoint_candidates"] = []
+            run["resume_plan"] = None
         completed.append(run)
 
     for run_queue in pending_by_key.values():
@@ -1494,10 +1510,17 @@ async def _list_workflow_runs(
                 approvals=approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
             )
+            resume_surface_allowed = _workflow_resume_surface_allowed(
+                replay_block_reason=replay_block_reason,
+            )
             resume_from_step = (
-                "approval_gate"
-                if approvals
-                else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+                (
+                    "approval_gate"
+                    if approvals
+                    else (run["continued_error_steps"][0] if run.get("continued_error_steps") else None)
+                )
+                if resume_surface_allowed
+                else None
             )
             run.update({
                 "thread_id": run.get("session_id"),
@@ -1525,7 +1548,8 @@ async def _list_workflow_runs(
                         branch_kind="retry_failed_step",
                         branch_depth=int(lineage.get("branch_depth") or 0) + 1,
                     )
-                    if replay_allowed
+                    if resume_surface_allowed
+                    and replay_allowed
                     and run.get("continued_error_steps")
                     and (
                         bool(run.get("checkpoint_context_available"))
@@ -1540,7 +1564,7 @@ async def _list_workflow_runs(
                 "resume_checkpoint_label": _resume_checkpoint_label(
                     approvals=approvals,
                     continued_error_steps=list(run.get("continued_error_steps", [])),
-                ),
+                ) if resume_surface_allowed else None,
                 "approval_recovery_message": (
                     f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
                     if bool(run.get("approval_context_mismatch"))
@@ -1578,8 +1602,12 @@ async def _list_workflow_runs(
                 ),
                 **lineage,
             })
-            run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
-            run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
+            if resume_surface_allowed:
+                run["checkpoint_candidates"] = _workflow_checkpoint_candidates(run, approvals=approvals)
+                run["resume_plan"] = _workflow_resume_plan(run, approvals=approvals)
+            else:
+                run["checkpoint_candidates"] = []
+                run["resume_plan"] = None
             completed.append(run)
 
     completed.sort(

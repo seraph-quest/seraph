@@ -333,6 +333,25 @@
   - the first implementation pass had a real syntax regression in the replay recovery-message branch because I duplicated the nested conditional while adding the new `approval_context_missing` case
   - after fixing that, I reran the targeted seam set to make sure the older authenticated-source and delegated-stability cases still behaved the same while only the legacy protected runs started failing closed
 
+### `workflow-surface-boundary-truthfulness-v1`
+
+- status: complete on `feat/workflow-surface-boundary-hardening-batch-ad-v12`, intended for the next Batch AD PR for `#299`
+- root cause addressed:
+  - the workflows runs API already marked trust-boundary drift correctly with `approval_context_changed` and `approval_context_missing`, but it still serialized checkpoint candidates and a concrete `resume_plan` for those same blocked runs
+  - that left operator surfaces with stale branch/retry metadata even though `/api/workflows/runs/{run_identity}/resume-plan` would fail closed, which made the API contract less truthful than the runtime boundary
+- scope:
+  - workflow run projection now clears `resume_from_step`, `resume_checkpoint_label`, `checkpoint_candidates`, and `resume_plan` whenever replay is blocked because the trust boundary changed or because the run predates tracked lineage for the current privileged surface
+  - the same fail-closed rule now applies to both completed workflow runs reconstructed from audit events and still-pending runs reconstructed from call state, so the operator surface does not advertise stale continuation paths on either side
+  - pending approvals, repair guidance, and other non-boundary replay blocks still keep their existing branch metadata where that metadata is part of the intended operator contract
+- validation:
+  - `python3 -m py_compile backend/src/api/workflows.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py -q -k "approval_context_changes or authenticated_source_context_drift or delegated_specialist_context_drift or approval_context_is_missing_for_authenticated_surface or approval_context_list_reordering or authenticated_source_system_reordering or delegated_specialist_reordering"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the real issue here was not backend resume enforcement, which was already fail-closed, but surface drift: blocked runs still looked resumable because branch metadata was generated before the trust-boundary stop was applied consistently across the serialized run shape
+  - fixed by moving the trust-boundary decision up into the run projection itself and pinning both mismatch and legacy-missing-context cases in the workflow suite
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

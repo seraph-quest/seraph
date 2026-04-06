@@ -263,6 +263,32 @@
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch"`
     - result: `passed`
 
+### `workflow-triage-branch-debug-and-best-continuation-control-v1`
+
+- status: complete on `feat/workflow-triage-branch-debug-batch-x-v1`, intended for the aggregate Batch X PR for `#283`
+- root causes addressed:
+  - Batch W made triage useful for output reuse, comparison, and next-step drafting, but the hottest workflow rows still hid failure-context reuse and direct best-continuation control behind an inspector hop
+  - the operator shell still needed broader keyboard-first workflow branch-debug control beyond inspect/latest-branch/output-only shortcuts
+- scope:
+  - workflow triage rows now expose direct `use failure`, `open best`, and `continue best` actions when the underlying failed-step and family-continuation state is truthful
+  - keyboard-first workflow control now also includes `Shift+F` for failure-context reuse on the primary workflow target
+  - the latest family failure used for triage reuse is now sorted by actual workflow recency instead of unsorted family order
+- review findings fixed during implementation:
+  - the first pass was reusing the first failed family run instead of the newest failed family run, which could surface stale failure context from older branches
+  - the first pass also needed explicit distinct-continuation gating so triage would not surface `open best` or `continue best` for a workflow that only resolved back to itself
+  - fixed by sorting failure lineage by workflow recency before extracting failure context and by suppressing best-continuation triage actions unless a distinct family continuation actually exists
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures"`
+    - result: `passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
+
 ## Non-Goals
 
 - cosmetic polish detached from guardian value

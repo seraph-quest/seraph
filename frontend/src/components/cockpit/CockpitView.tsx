@@ -2949,6 +2949,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     inspectWorkflowRun(workflowLatestBranchRun(workflow));
   }
+  function inspectWorkflowBestContinuation(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    if (!bestContinuation) return;
+    if ((bestContinuation.runIdentity ?? bestContinuation.id) === (resolved.runIdentity ?? resolved.id)) return;
+    inspectWorkflowRun(bestContinuation);
+  }
+  function continueWorkflowBestContinuation(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    if (!bestContinuation) return;
+    if ((bestContinuation.runIdentity ?? bestContinuation.id) === (resolved.runIdentity ?? resolved.id)) return;
+    continueWorkflowRun(bestContinuation);
+  }
   function queueWorkflowBestContinuationComparison(workflow: WorkflowRunRecord | null | undefined) {
     if (!workflow) return;
     const resolved = resolveWorkflowRun(workflow);
@@ -2960,11 +2976,35 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
   function workflowFailureLineage(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
     const familyRuns = workflowFamilyRuns(workflow);
-    return familyRuns.filter((entry) => (
-      entry.status === "failed"
-      || entry.status === "degraded"
-      || entry.continuedErrorSteps.length > 0
-    ));
+    return familyRuns
+      .filter((entry) => (
+        entry.status === "failed"
+        || entry.status === "degraded"
+        || entry.continuedErrorSteps.length > 0
+      ))
+      .sort(compareWorkflowRunsNewestFirst);
+  }
+  function workflowLatestFailureContext(
+    workflow: WorkflowRunRecord | null | undefined,
+  ): { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null {
+    if (!workflow) return null;
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    const candidates = [resolved, ...workflowFailureLineage(resolved)]
+      .filter((entry) => {
+        const key = entry.runIdentity ?? entry.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort(compareWorkflowRunsNewestFirst);
+    for (const candidate of candidates) {
+      const step = failedWorkflowStep(candidate);
+      if (step) {
+        return { workflow: candidate, step };
+      }
+    }
+    return null;
   }
   function workflowComparisonSummary(base: WorkflowRunRecord, target: WorkflowRunRecord): string[] {
     const summary: string[] = [];
@@ -3608,6 +3648,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "e") {
         event.preventDefault();
         inspectOperatorEvidenceEntry(primaryEvidenceEntry);
+      } else if (key === "f") {
+        event.preventDefault();
+        queueWorkflowLatestFailureContext(primaryWorkflowShortcutTarget());
       } else if (key === "w") {
         event.preventDefault();
         inspectPrimaryWorkflowEntry();
@@ -3638,6 +3681,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     inspectLatestWorkflowBranch,
     inspectPrimaryWorkflowEntry,
     queueWorkflowFamilyPlan,
+    queueWorkflowLatestFailureContext,
     primaryWorkflowShortcutTarget,
     queueWorkflowOutputContext,
     redirectOperatorWorkflowEntry,
@@ -5223,6 +5267,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       "Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.",
     ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
     queueComposerDraft(parts.join(" "));
+  }
+  function queueWorkflowLatestFailureContext(workflow: WorkflowRunRecord | null | undefined) {
+    const latestFailure = workflowLatestFailureContext(workflow);
+    if (!latestFailure) return;
+    queueWorkflowStepContext(latestFailure.workflow, latestFailure.step);
   }
 
   function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
@@ -7900,7 +7949,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+U use latest output · Shift+P draft next step
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+U use latest output · Shift+P draft next step
                     </div>
                   </div>
 
@@ -7912,6 +7961,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     {operatorTriageEntries.map((entry) => {
                       const latestBranch = entry.workflow ? workflowLatestBranchRun(entry.workflow) : null;
                       const bestContinuation = entry.workflow ? workflowBestContinuationRun(entry.workflow) : null;
+                      const latestFailureContext = entry.workflow ? workflowLatestFailureContext(entry.workflow) : null;
                       const hasCurrentOutput = entry.workflow ? workflowPrimaryOutputPath(entry.workflow) : null;
                       const bestContinuationOutput = bestContinuation ? workflowPrimaryOutputPath(bestContinuation) : null;
                       const hasDistinctBestContinuation = entry.workflow && bestContinuation
@@ -7948,6 +7998,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               onClick={() => queueWorkflowOutputContext(entry.workflow)}
                             >
                               use output
+                            </button>
+                          )}
+                          {entry.workflow && latestFailureContext && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Use failure context for ${entry.label}`}
+                              onClick={() => queueWorkflowLatestFailureContext(entry.workflow)}
+                            >
+                              use failure
+                            </button>
+                          )}
+                          {entry.workflow && hasDistinctBestContinuation && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open best continuation for ${entry.label}`}
+                              onClick={() => inspectWorkflowBestContinuation(entry.workflow)}
+                            >
+                              open best
+                            </button>
+                          )}
+                          {entry.workflow && hasDistinctBestContinuation && bestContinuation && workflowCanContinue(bestContinuation) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Continue best continuation for ${entry.label}`}
+                              onClick={() => continueWorkflowBestContinuation(entry.workflow)}
+                            >
+                              continue best
                             </button>
                           )}
                           {entry.workflow && (

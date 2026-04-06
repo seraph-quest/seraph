@@ -3426,6 +3426,115 @@ class TestWorkflowSurfaces:
         ]
         assert _checkpoint_context_allowed(approval_context) is False
 
+    def test_workflow_approval_context_marks_delegated_vault_routes_high_risk(self):
+        workflow = Workflow(
+            name="vault-delegation",
+            description="Delegate secret handling",
+            inputs={},
+            steps=[
+                WorkflowStep(
+                    id="delegate",
+                    tool="delegate_task",
+                    arguments={
+                        "task": "Store this API key in the vault.",
+                        "specialist": "vault",
+                    },
+                )
+            ],
+            requires_tools=["delegate_task"],
+        )
+
+        approval_context = _approval_context_for_workflow(workflow)
+
+        assert approval_context["risk_level"] == "high"
+        assert approval_context["delegated_specialists"] == ["vault_keeper"]
+        assert "delegation" in approval_context["execution_boundaries"]
+        assert "secret_management" in approval_context["execution_boundaries"]
+        assert "secret_injection" in approval_context["execution_boundaries"]
+        assert _checkpoint_context_allowed(approval_context) is False
+
+    def test_workflow_tool_approval_context_includes_authenticated_delegated_source(self):
+        workflow = Workflow(
+            name="delegated-mcp-sync",
+            description="Delegate authenticated source work",
+            inputs={
+                "task": {"type": "string", "required": True},
+                "specialist": {"type": "string", "required": True},
+            },
+            steps=[
+                WorkflowStep(
+                    id="delegate",
+                    tool="delegate_task",
+                    arguments={
+                        "task": "{{ task }}",
+                        "specialist": "{{ specialist }}",
+                    },
+                )
+            ],
+            requires_tools=["delegate_task"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {"delegate_task": DummyTool("delegate_task", lambda **_kwargs: "delegated")},
+        )
+        mcp_tool = MagicMock()
+        mcp_tool.name = "mcp_github_issues"
+        mcp_tool.seraph_source_context = {
+            "server_name": "github",
+            "hostname": "api.github.com",
+            "source": "extension",
+            "authenticated_source": True,
+        }
+        github_specialist = SimpleNamespace(name="mcp_github", tools=[mcp_tool])
+
+        with patch("src.agent.specialists.build_all_specialists", return_value=[github_specialist]):
+            approval_context = workflow_tool.get_approval_context(
+                {
+                    "task": "Review the assigned issues.",
+                    "specialist": "mcp_github",
+                }
+            )
+
+        assert approval_context["risk_level"] == "high"
+        assert approval_context["authenticated_source"] is True
+        assert approval_context["delegated_specialists"] == ["mcp_github"]
+        assert "external_mcp" in approval_context["execution_boundaries"]
+        assert "authenticated_external_source" in approval_context["execution_boundaries"]
+        assert approval_context["source_systems"] == [
+            {
+                "server_name": "github",
+                "hostname": "api.github.com",
+                "source": "extension",
+                "authenticated_source": True,
+            }
+        ]
+        assert _checkpoint_context_allowed(approval_context) is False
+
+    def test_workflow_metadata_fails_closed_when_delegate_target_is_dynamic(self):
+        workflow = Workflow(
+            name="dynamic-delegation",
+            description="Dynamic delegation workflow",
+            inputs={"task": {"type": "string", "required": True}},
+            steps=[
+                WorkflowStep(
+                    id="delegate",
+                    tool="delegate_task",
+                    arguments={"task": "{{ task }}"},
+                )
+            ],
+            requires_tools=["delegate_task"],
+        )
+        mgr = WorkflowManager()
+        mgr._workflows = [workflow]
+
+        metadata = mgr.get_tool_metadata(workflow.tool_name)
+
+        assert metadata is not None
+        assert metadata["policy_modes"] == ["full"]
+        assert metadata["risk_level"] == "high"
+        assert metadata["accepts_secret_refs"] is True
+        assert metadata["approval_context"]["delegation_target_unresolved"] is True
+
     def test_build_all_specialists_adds_workflow_runner(self):
         native_tool = MagicMock()
         native_tool.name = "read_file"

@@ -1,5 +1,5 @@
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 from scripts.run_backend_test_shard import run_shard_files
@@ -57,3 +57,27 @@ def test_run_shard_files_stops_after_first_failure(tmp_path: Path):
 
 def test_run_shard_files_accepts_empty_shards(tmp_path: Path):
     assert run_shard_files(tmp_path, []) == 0
+
+
+def test_run_shard_files_passes_per_file_timeout(tmp_path: Path):
+    files = ["tests/test_alpha.py"]
+
+    with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
+        mock_run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+
+        result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
+
+    assert result == 0
+    assert mock_run.call_args.kwargs["timeout"] == 900
+
+
+def test_run_shard_files_returns_timeout_code_when_file_hangs(tmp_path: Path):
+    files = ["tests/test_alpha.py", "tests/test_beta.py"]
+
+    with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
+        mock_run.side_effect = TimeoutExpired(cmd=["pytest"], timeout=600)
+
+        result = run_shard_files(tmp_path, files, file_timeout_seconds=600)
+
+    assert result == 124
+    assert mock_run.call_count == 1

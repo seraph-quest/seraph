@@ -102,6 +102,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "memory_commitment_continuity_behavior" in captured.out
     assert "memory_collaborator_lookup_behavior" in captured.out
     assert "memory_provider_user_model_behavior" in captured.out
+    assert "memory_provider_stale_evidence_behavior" in captured.out
     assert "memory_provider_writeback_behavior" in captured.out
     assert "bounded_memory_snapshot_behavior" in captured.out
     assert "memory_supersession_filter_behavior" in captured.out
@@ -217,6 +218,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "memory_commitment_continuity_behavior",
                 "memory_collaborator_lookup_behavior",
                 "memory_provider_user_model_behavior",
+                "memory_provider_stale_evidence_behavior",
                 "memory_provider_writeback_behavior",
                 "bounded_memory_snapshot_behavior",
                 "memory_supersession_filter_behavior",
@@ -1032,6 +1034,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_collaborator"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_obligation"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["memory_context_has_provider_project"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_hit_count"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_bucket"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
@@ -1251,6 +1257,7 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
             [
                 "memory_decay_contradiction_cleanup_behavior",
                 "procedural_memory_adaptation_behavior",
+                "memory_provider_stale_evidence_behavior",
                 "memory_provider_writeback_behavior",
             ]
         )
@@ -1280,6 +1287,8 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
     assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True

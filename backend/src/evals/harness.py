@@ -3790,6 +3790,128 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
         }
 
 
+async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
+    import json
+    import tempfile
+    from dataclasses import dataclass
+    from datetime import datetime, timedelta, timezone
+
+    from src.extensions.registry import _current_seraph_version
+    from src.memory.providers import (
+        MemoryProviderHit,
+        MemoryProviderRetrievalResult,
+        clear_memory_provider_adapters,
+        register_memory_provider_adapter,
+    )
+    from src.memory.retrieval_planner import plan_memory_retrieval
+
+    @dataclass
+    class EvalMemoryProviderAdapter:
+        name: str = "graph-memory"
+        provider_kind: str = "vector_plugin"
+        capabilities: tuple[str, ...] = ("user_model",)
+
+        def health(self) -> dict[str, object]:
+            return {"status": "ready", "summary": "Eval memory provider connected."}
+
+        async def retrieve(self, *, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult()
+
+        async def augment_model(self, *, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult(
+                hits=(
+                    MemoryProviderHit(
+                        text="Atlas launch remains the live project anchor.",
+                        score=0.71,
+                        provider_name=self.name,
+                        bucket="project",
+                        created_at=datetime.now(timezone.utc) - timedelta(days=3),
+                    ),
+                    MemoryProviderHit(
+                        text="Alice owns Atlas launch communications.",
+                        score=0.83,
+                        provider_name=self.name,
+                        bucket="collaborator",
+                        created_at=datetime.now(timezone.utc) - timedelta(days=180),
+                    ),
+                ),
+                summary="Provider-backed user model available.",
+            )
+
+    workspace_dir = tempfile.mkdtemp(prefix="seraph-memory-provider-stale-")
+    pack_dir = os.path.join(workspace_dir, "extensions", "graph-memory-pack", "connectors", "memory")
+    os.makedirs(pack_dir, exist_ok=True)
+    current_version = _current_seraph_version()
+    with open(os.path.join(workspace_dir, "extensions", "graph-memory-pack", "manifest.yaml"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "id: seraph.graph-memory-pack\n"
+            f"version: {current_version}\n"
+            "display_name: Graph Memory Pack\n"
+            "kind: connector-pack\n"
+            "compatibility:\n"
+            f"  seraph: \">={current_version}\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "contributes:\n"
+            "  memory_providers:\n"
+            "    - connectors/memory/graph-memory.yaml\n"
+        )
+    with open(os.path.join(pack_dir, "graph-memory.yaml"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "name: graph-memory\n"
+            "description: Additive modeling provider.\n"
+            "provider_kind: vector_plugin\n"
+            "enabled: true\n"
+            "capabilities:\n"
+            "  - user_model\n"
+            "canonical_memory_owner: seraph\n"
+            "canonical_write_mode: additive_only\n"
+            "config_fields:\n"
+            "  - key: api_key\n"
+            "    label: API Key\n"
+            "    input: password\n"
+            "    required: true\n"
+        )
+    with open(os.path.join(workspace_dir, "extensions-state.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "extensions": {
+                    "seraph.graph-memory-pack": {
+                        "config": {"memory_providers": {"graph-memory": {"api_key": "secret"}}},
+                        "connector_state": {
+                            "connectors/memory/graph-memory.yaml": {"enabled": True},
+                        },
+                    }
+                }
+            },
+            handle,
+        )
+
+    adapter = EvalMemoryProviderAdapter()
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", workspace_dir),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep Atlas moving", {"goal": ("Keep Atlas moving",)}),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    diagnostics = retrieval.provider_diagnostics[0]
+    return {
+        "fresh_project_kept": "Atlas launch remains the live project anchor." in retrieval.semantic_context,
+        "stale_collaborator_suppressed": "Alice owns Atlas launch communications." not in retrieval.semantic_context,
+        "stale_hit_count": diagnostics["stale_hit_count"] == 1,
+        "stale_collaborator_bucket": diagnostics["stale_bucket_counts"].get("collaborator") == 1,
+        "lane_stays_provider_model": retrieval.lane == "structured_plus_provider_model",
+    }
+
+
 async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
     import json
     import tempfile
@@ -7905,6 +8027,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Additive memory providers can augment live project and collaborator understanding without becoming canonical memory owners.",
         runner=_eval_memory_provider_user_model_behavior,
+    ),
+    EvalScenario(
+        name="memory_provider_stale_evidence_behavior",
+        category="behavior",
+        description="Stale additive provider evidence is suppressed so external memory does not override fresher guardian-grounded context.",
+        runner=_eval_memory_provider_stale_evidence_behavior,
     ),
     EvalScenario(
         name="memory_provider_writeback_behavior",

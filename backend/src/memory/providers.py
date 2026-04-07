@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from config.settings import settings
+from src.db.models import MemoryKind
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
-from src.memory.types import ConsolidatedMemoryItem
+from src.memory.types import ConsolidatedMemoryItem, normalize_memory_kind
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,22 @@ _MODELING_BUCKETS = (
     "routine",
     "timeline",
 )
+
+_PROVIDER_STALE_WINDOWS_DAYS = {
+    MemoryKind.commitment: 30,
+    MemoryKind.project: 45,
+    MemoryKind.timeline: 30,
+    MemoryKind.preference: 120,
+    MemoryKind.communication_preference: 120,
+    MemoryKind.procedural: 45,
+    MemoryKind.collaborator: 120,
+    MemoryKind.obligation: 60,
+    MemoryKind.routine: 90,
+    MemoryKind.goal: 180,
+    MemoryKind.pattern: 180,
+    MemoryKind.reflection: 180,
+    MemoryKind.fact: 180,
+}
 
 
 @dataclass(frozen=True)
@@ -199,6 +216,44 @@ def _normalize_modeling_hits(hits: tuple[MemoryProviderHit, ...], *, provider_na
             continue
         normalized.append(hit)
     return tuple(normalized)
+
+
+def _normalize_provider_timestamp(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _provider_hit_is_stale(hit: MemoryProviderHit, *, now: datetime) -> bool:
+    created_at = _normalize_provider_timestamp(hit.created_at)
+    if created_at is None:
+        return False
+    try:
+        bucket_kind = normalize_memory_kind(hit.bucket)
+    except ValueError:
+        return False
+    window_days = _PROVIDER_STALE_WINDOWS_DAYS.get(bucket_kind)
+    if window_days is None:
+        return False
+    age_days = max(0.0, (now - created_at).total_seconds() / 86_400)
+    return age_days > float(window_days)
+
+
+def _filter_stale_provider_hits(
+    hits: tuple[MemoryProviderHit, ...] | list[MemoryProviderHit],
+    *,
+    now: datetime,
+) -> tuple[tuple[MemoryProviderHit, ...], dict[str, int]]:
+    fresh: list[MemoryProviderHit] = []
+    stale_bucket_counts: dict[str, int] = {}
+    for hit in hits:
+        if _provider_hit_is_stale(hit, now=now):
+            stale_bucket_counts[hit.bucket] = stale_bucket_counts.get(hit.bucket, 0) + 1
+            continue
+        fresh.append(hit)
+    return tuple(fresh), stale_bucket_counts
 
 
 def _required_config_missing(config_fields: list[dict[str, Any]], config_entry: dict[str, Any]) -> bool:
@@ -411,6 +466,7 @@ async def retrieve_additive_memory_provider_context(
     all_hits: list[MemoryProviderHit] = []
     diagnostics: list[dict[str, Any]] = []
     degraded = False
+    now = datetime.now(timezone.utc)
 
     for item in items:
         if not isinstance(item, dict):
@@ -436,12 +492,15 @@ async def retrieve_additive_memory_provider_context(
         provider_hits: list[MemoryProviderHit] = []
         provider_notes: list[str] = []
         provider_summaries: list[str] = []
+        attempted_capabilities: list[str] = []
         capabilities_used: list[str] = []
         failed_capabilities: list[str] = []
         provider_degraded = False
+        stale_bucket_counts: dict[str, int] = {}
 
         retrieval_state = str(capability_states.get("retrieval") or "")
         if query.strip() and retrieval_state in {"ready", "degraded"} and "retrieval" in item.get("capabilities", []):
+            attempted_capabilities.append("retrieval")
             try:
                 result = await adapter.retrieve(
                     query=query,
@@ -454,10 +513,14 @@ async def retrieve_additive_memory_provider_context(
                 failed_capabilities.append("retrieval")
                 provider_notes.append("Provider retrieval failed; canonical guardian memory remained in control.")
             else:
-                provider_hits.extend(result.hits[:limit])
+                fresh_hits, stale_counts = _filter_stale_provider_hits(result.hits[:limit], now=now)
+                for bucket, count in stale_counts.items():
+                    stale_bucket_counts[bucket] = stale_bucket_counts.get(bucket, 0) + count
+                provider_hits.extend(fresh_hits)
                 provider_summaries.append(result.summary)
                 _merge_provider_notes(provider_notes, result.notes)
-                capabilities_used.append("retrieval")
+                if fresh_hits:
+                    capabilities_used.append("retrieval")
                 provider_degraded = provider_degraded or result.degraded or retrieval_state == "degraded"
 
         user_model_state = str(capability_states.get("user_model") or "")
@@ -469,6 +532,7 @@ async def retrieve_additive_memory_provider_context(
             and "user_model" in item.get("capabilities", [])
             and callable(augment_model)
         ):
+            attempted_capabilities.append("user_model")
             try:
                 result = await augment_model(
                     active_projects=active_projects,
@@ -481,13 +545,23 @@ async def retrieve_additive_memory_provider_context(
                 provider_notes.append("Provider user-model augmentation failed; canonical guardian memory remained in control.")
             else:
                 normalized_hits = _normalize_modeling_hits(result.hits[:limit], provider_name=name)
-                provider_hits.extend(normalized_hits)
+                fresh_hits, stale_counts = _filter_stale_provider_hits(normalized_hits, now=now)
+                for bucket, count in stale_counts.items():
+                    stale_bucket_counts[bucket] = stale_bucket_counts.get(bucket, 0) + count
+                provider_hits.extend(fresh_hits)
                 provider_summaries.append(result.summary)
                 _merge_provider_notes(provider_notes, result.notes)
-                capabilities_used.append("user_model")
+                if fresh_hits:
+                    capabilities_used.append("user_model")
                 provider_degraded = provider_degraded or result.degraded or user_model_state == "degraded"
 
-        if not capabilities_used and not failed_capabilities:
+        stale_hit_count = sum(stale_bucket_counts.values())
+        if stale_hit_count:
+            provider_notes.append(
+                "Stale provider evidence was suppressed so canonical guardian memory remained the active source of truth."
+            )
+
+        if not attempted_capabilities and not failed_capabilities:
             continue
 
         all_hits.extend(provider_hits[:limit])
@@ -506,9 +580,12 @@ async def retrieve_additive_memory_provider_context(
                 "degraded": provider_degraded,
                 "summary": " ".join(summary for summary in provider_summaries if summary).strip(),
                 "notes": provider_notes,
+                "attempted_capabilities": attempted_capabilities,
                 "capabilities_used": capabilities_used,
                 "failed_capabilities": failed_capabilities,
                 "bucket_counts": bucket_counts,
+                "stale_hit_count": stale_hit_count,
+                "stale_bucket_counts": stale_bucket_counts,
             }
         )
 

@@ -5,11 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.audit.repository import audit_repository
 from src.db.models import MemoryKind, MemorySnapshotKind
 from src.agent.session import SessionManager
 from src.memory.consolidator import consolidate_session
 from src.memory.decay import DecayMaintenanceResult
+from src.memory.pipeline.merge import PersistedMemoryStats
+from src.memory.providers import MemoryProviderWritebackAggregateResult
 from src.memory.repository import memory_repository
+from src.memory.types import ConsolidatedMemoryItem, kind_to_category, normalize_memory_kind
 
 
 @pytest.fixture
@@ -229,6 +233,240 @@ class TestConsolidateSession:
             and event["details"]["stored_memory_count"] == 2
             and event["details"]["source_link_count"] >= 1
             for event in consolidation_events
+        )
+
+    async def test_consolidation_records_provider_writeback_diagnostics(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch is the active release project.")
+        await sm.add_message("s1", "assistant", "I will store that project context.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the active release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.91,
+                    "importance": 0.9,
+                    "project": "Atlas",
+                }
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-project",
+        ), patch(
+            "src.memory.consolidator.writeback_additive_memory_providers",
+            AsyncMock(
+                return_value=MemoryProviderWritebackAggregateResult(
+                    diagnostics=(
+                        {
+                            "name": "graph-memory",
+                            "runtime_state": "ready",
+                            "stored_count": 1,
+                            "partial_write_count": 0,
+                            "write_failure_count": 0,
+                            "degraded": False,
+                            "summary": "Provider writeback stored canonical memory copies.",
+                            "notes": [],
+                            "capabilities_used": ["consolidation"],
+                            "failed_capabilities": [],
+                            "accepted_kinds": ["project"],
+                        },
+                    ),
+                    partial_write_count=0,
+                    write_failure_count=0,
+                )
+            ),
+        ):
+            await consolidate_session("s1")
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "session_consolidation"
+            and event["details"]["provider_writeback_count"] == 1
+            and event["details"]["provider_writeback_failure_count"] == 0
+            and event["details"]["provider_writeback_diagnostics"][0]["name"] == "graph-memory"
+            for event in events
+        )
+
+    async def test_provider_writeback_only_receives_canonically_persisted_memories(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch is the active release project.")
+        await sm.add_message("s1", "assistant", "I will store that project context.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the active release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.91,
+                    "importance": 0.9,
+                    "project": "Atlas",
+                },
+                {
+                    "text": "Prepare the investor briefing after Atlas launch.",
+                    "kind": "commitment",
+                    "summary": "Prepare the investor briefing",
+                    "confidence": 0.83,
+                    "importance": 0.8,
+                    "project": "Atlas",
+                },
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        persisted_only = (
+            ConsolidatedMemoryItem(
+                text="Atlas launch is the active release project.",
+                category=kind_to_category(normalize_memory_kind("project")),
+                kind=normalize_memory_kind("project"),
+                summary="Atlas launch",
+                confidence=0.91,
+                importance=0.9,
+                project_name="Atlas",
+            ),
+        )
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.persist_extracted_memories",
+            AsyncMock(
+                return_value=PersistedMemoryStats(
+                    stored_count=1,
+                    created_count=1,
+                    merged_count=0,
+                    vector_stored=1,
+                    source_link_count=1,
+                    partial_write_count=1,
+                    write_failure_count=1,
+                    persisted_memories=persisted_only,
+                )
+            ),
+        ), patch(
+            "src.memory.consolidator.writeback_additive_memory_providers",
+            AsyncMock(
+                return_value=MemoryProviderWritebackAggregateResult(
+                    diagnostics=(
+                        {
+                            "name": "graph-memory",
+                            "runtime_state": "ready",
+                            "stored_count": 1,
+                            "partial_write_count": 0,
+                            "write_failure_count": 0,
+                            "degraded": False,
+                            "summary": "Provider writeback stored canonical memory copies.",
+                            "notes": [],
+                            "capabilities_used": ["consolidation"],
+                            "failed_capabilities": [],
+                            "accepted_kinds": ["project"],
+                        },
+                    ),
+                    partial_write_count=0,
+                    write_failure_count=0,
+                )
+            ),
+        ) as mock_writeback:
+            await consolidate_session("s1")
+
+        mock_writeback.assert_awaited_once()
+        assert tuple(mock_writeback.await_args.kwargs["memories"]) == persisted_only
+
+    async def test_provider_writeback_failure_only_partially_degrades_consolidation(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Atlas launch is the active release project.")
+        await sm.add_message("s1", "assistant", "I will store that project context.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the active release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.91,
+                    "importance": 0.9,
+                    "project": "Atlas",
+                }
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            return_value="vec-project",
+        ), patch(
+            "src.memory.consolidator.writeback_additive_memory_providers",
+            AsyncMock(
+                return_value=MemoryProviderWritebackAggregateResult(
+                    diagnostics=(
+                        {
+                            "name": "graph-memory",
+                            "runtime_state": "unavailable",
+                            "stored_count": 0,
+                            "partial_write_count": 1,
+                            "write_failure_count": 1,
+                            "degraded": True,
+                            "summary": "",
+                            "notes": [
+                                "Provider writeback failed after canonical guardian persistence; canonical memory remained authoritative."
+                            ],
+                            "capabilities_used": [],
+                            "failed_capabilities": ["consolidation"],
+                            "accepted_kinds": [],
+                        },
+                    ),
+                    partial_write_count=1,
+                    write_failure_count=1,
+                )
+            ),
+        ):
+            await consolidate_session("s1")
+
+        memories = await memory_repository.list_memories_by_kinds(
+            kinds=(MemoryKind.project,),
+            limit_per_kind=2,
+        )
+        assert memories["project"][0].summary == "Atlas launch"
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_partially_succeeded"
+            and event["tool_name"] == "session_consolidation"
+            and event["details"]["provider_writeback_partial_count"] == 1
+            and event["details"]["provider_writeback_failure_count"] == 1
+            and event["details"]["write_failure_count"] >= 1
+            and event["details"]["provider_writeback_diagnostics"][0]["failed_capabilities"] == ["consolidation"]
+            for event in events
         )
 
     async def test_extracts_typed_memory_objects_with_provenance(self, async_db, sm):

@@ -43,6 +43,7 @@ class PersistedMemoryStats:
     source_link_count: int = 0
     partial_write_count: int = 0
     write_failure_count: int = 0
+    persisted_memories: tuple[ConsolidatedMemoryItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,6 +205,7 @@ async def persist_extracted_memories(
     source_link_count = 0
     partial_write_count = 0
     write_failure_count = 0
+    persisted_memories: list[ConsolidatedMemoryItem] = []
 
     for item in extracted_memories:
         metadata = dict(item.metadata or {})
@@ -297,6 +299,7 @@ async def persist_extracted_memories(
                     partial_write_count += 1
                 stored += 1
                 merged += 1
+                persisted_memories.append(item)
             except Exception:
                 logger.exception("memory merge failed for session %s", session_id[:8])
                 partial_write_count += 1
@@ -347,6 +350,7 @@ async def persist_extracted_memories(
                     source_link_count += 1
             stored += 1
             created += 1
+            persisted_memories.append(item)
         except Exception:
             logger.exception("structured memory write failed for session %s", session_id[:8])
 
@@ -363,4 +367,5 @@ async def persist_extracted_memories(
         source_link_count=source_link_count,
         partial_write_count=partial_write_count,
         write_failure_count=write_failure_count,
+        persisted_memories=tuple(persisted_memories),
     )

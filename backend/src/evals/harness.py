@@ -3790,6 +3790,188 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
         }
 
 
+async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
+    import json
+    import tempfile
+    from dataclasses import dataclass, field
+    from unittest.mock import AsyncMock
+
+    from src.api.memory import list_memory_providers
+    from src.extensions.registry import _current_seraph_version
+    from src.memory.providers import (
+        MemoryProviderRetrievalResult,
+        MemoryProviderWritebackResult,
+        clear_memory_provider_adapters,
+        register_memory_provider_adapter,
+    )
+
+    @dataclass
+    class EvalMemoryProviderAdapter:
+        name: str = "graph-memory"
+        provider_kind: str = "vector_plugin"
+        capabilities: tuple[str, ...] = ("consolidation",)
+        writeback_calls: list[dict[str, Any]] = field(default_factory=list)
+
+        def health(self) -> dict[str, object]:
+            return {"status": "ready", "summary": "Eval memory provider connected."}
+
+        async def retrieve(self, *, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult()
+
+        async def writeback(
+            self,
+            *,
+            memories,
+            session_id: str,
+            trigger: str,
+            workflow_name: str | None = None,
+            config=None,
+        ):
+            self.writeback_calls.append(
+                {
+                    "session_id": session_id,
+                    "trigger": trigger,
+                    "workflow_name": workflow_name,
+                    "kinds": [memory.kind.value for memory in memories],
+                }
+            )
+            return MemoryProviderWritebackResult(
+                stored_count=len(memories),
+                summary="Provider writeback stored canonical memory copies.",
+                accepted_kinds=tuple(sorted({memory.kind.value for memory in memories})),
+            )
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("provider-writeback-session")
+        await session_manager.add_message(
+            "provider-writeback-session",
+            "user",
+            "Atlas launch is the active release project and send the investor brief before Friday.",
+        )
+        await session_manager.add_message(
+            "provider-writeback-session",
+            "assistant",
+            "I will store the project and commitment canonically, then mirror them into the provider.",
+        )
+
+        workspace_dir = tempfile.mkdtemp(prefix="seraph-memory-provider-writeback-")
+        pack_dir = os.path.join(workspace_dir, "extensions", "graph-memory-pack", "connectors", "memory")
+        os.makedirs(pack_dir, exist_ok=True)
+        current_version = _current_seraph_version()
+        with open(os.path.join(workspace_dir, "extensions", "graph-memory-pack", "manifest.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "id: seraph.graph-memory-pack\n"
+                f"version: {current_version}\n"
+                "display_name: Graph Memory Pack\n"
+                "kind: connector-pack\n"
+                "compatibility:\n"
+                f"  seraph: \">={current_version}\"\n"
+                "publisher:\n"
+                "  name: Seraph\n"
+                "trust: local\n"
+                "contributes:\n"
+                "  memory_providers:\n"
+                "    - connectors/memory/graph-memory.yaml\n"
+            )
+        with open(os.path.join(pack_dir, "graph-memory.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "name: graph-memory\n"
+                "description: Additive consolidation provider.\n"
+                "provider_kind: vector_plugin\n"
+                "enabled: true\n"
+                "capabilities:\n"
+                "  - consolidation\n"
+                "canonical_memory_owner: seraph\n"
+                "canonical_write_mode: additive_only\n"
+                "config_fields:\n"
+                "  - key: api_key\n"
+                "    label: API Key\n"
+                "    input: password\n"
+                "    required: true\n"
+            )
+        with open(os.path.join(workspace_dir, "extensions-state.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "extensions": {
+                        "seraph.graph-memory-pack": {
+                            "config": {"memory_providers": {"graph-memory": {"api_key": "secret"}}},
+                            "connector_state": {
+                                "connectors/memory/graph-memory.yaml": {"enabled": True},
+                            },
+                        }
+                    }
+                },
+                handle,
+            )
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "memories": [
+                {
+                    "text": "Atlas launch is the active release project.",
+                    "kind": "project",
+                    "summary": "Atlas launch",
+                    "confidence": 0.91,
+                    "importance": 0.9,
+                    "project": "Atlas launch",
+                },
+                {
+                    "text": "Send the investor brief before Friday.",
+                    "kind": "commitment",
+                    "summary": "Send investor brief before Friday",
+                    "confidence": 0.87,
+                    "importance": 0.86,
+                    "project": "Atlas launch",
+                },
+            ],
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        adapter = EvalMemoryProviderAdapter()
+        register_memory_provider_adapter(adapter)
+        try:
+            with (
+                patch.object(settings, "workspace_dir", workspace_dir),
+                patch(
+                    "src.memory.consolidator.completion_with_fallback",
+                    AsyncMock(return_value=mock_resp),
+                ),
+                patch("src.memory.consolidator.add_memory", side_effect=["vec-project", "vec-commitment"]),
+                patch(
+                    "src.memory.consolidator.sync_soul_file_to_profile",
+                    AsyncMock(return_value={"Identity": "Builder"}),
+                ),
+                patch(
+                    "src.memory.consolidator.log_background_task_event",
+                    AsyncMock(),
+                ) as mock_log_background_task_event,
+            ):
+                await consolidate_session("provider-writeback-session")
+                inventory = await list_memory_providers()
+        finally:
+            clear_memory_provider_adapters()
+
+        consolidation_event = mock_log_background_task_event.await_args.kwargs["details"]
+        stored_memories = await memory_repository.list_memories(limit=10)
+        provider = inventory["providers"][0]
+        return {
+            "provider_consolidation_ready": provider["capability_states"]["consolidation"] == "ready",
+            "provider_writeback_called": bool(adapter.writeback_calls),
+            "provider_writeback_kinds": adapter.writeback_calls[0]["kinds"] if adapter.writeback_calls else [],
+            "audit_has_provider_writeback": consolidation_event["provider_writeback_count"] == 2,
+            "audit_has_no_provider_failures": consolidation_event["provider_writeback_failure_count"] == 0,
+            "canonical_memory_kept_project": any(memory.summary == "Atlas launch" for memory in stored_memories),
+        }
+
+
 async def _eval_bounded_memory_snapshot_behavior() -> dict[str, Any]:
     from src.memory.snapshots import refresh_bounded_guardian_snapshot
 
@@ -7723,6 +7905,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Additive memory providers can augment live project and collaborator understanding without becoming canonical memory owners.",
         runner=_eval_memory_provider_user_model_behavior,
+    ),
+    EvalScenario(
+        name="memory_provider_writeback_behavior",
+        category="behavior",
+        description="Additive memory-provider writeback runs after canonical persistence and degrades cleanly without taking ownership away from guardian memory.",
+        runner=_eval_memory_provider_writeback_behavior,
     ),
     EvalScenario(
         name="bounded_memory_snapshot_behavior",

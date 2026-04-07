@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from dataclasses import field
 from unittest.mock import patch
 
 import pytest
@@ -19,10 +20,13 @@ from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
 from src.memory.providers import (
     MemoryProviderHit,
     MemoryProviderRetrievalResult,
+    MemoryProviderWritebackResult,
     clear_memory_provider_adapters,
     register_memory_provider_adapter,
+    writeback_additive_memory_providers,
 )
 from src.memory.retrieval_planner import plan_memory_retrieval
+from src.memory.types import ConsolidatedMemoryItem, kind_to_category, normalize_memory_kind
 
 
 @dataclass
@@ -33,7 +37,9 @@ class FakeMemoryProviderAdapter:
     degraded: bool = False
     should_fail: bool = False
     model_should_fail: bool = False
+    writeback_should_fail: bool = False
     model_hits: tuple[MemoryProviderHit, ...] = ()
+    writeback_calls: list[dict[str, object]] = field(default_factory=list)
 
     def health(self) -> dict[str, object]:
         return {
@@ -81,6 +87,32 @@ class FakeMemoryProviderAdapter:
             hits=hits,
             degraded=self.degraded,
             summary="Provider-backed user model available.",
+        )
+
+    async def writeback(
+        self,
+        *,
+        memories: tuple[ConsolidatedMemoryItem, ...],
+        session_id: str,
+        trigger: str,
+        workflow_name: str | None = None,
+        config=None,
+    ):
+        self.writeback_calls.append(
+            {
+                "session_id": session_id,
+                "trigger": trigger,
+                "workflow_name": workflow_name,
+                "kinds": [memory.kind.value for memory in memories],
+                "texts": [memory.text for memory in memories],
+            }
+        )
+        if self.writeback_should_fail:
+            raise RuntimeError("provider writeback down")
+        return MemoryProviderWritebackResult(
+            stored_count=len(memories),
+            summary="Provider writeback stored canonical memory copies.",
+            accepted_kinds=tuple(sorted({memory.kind.value for memory in memories})),
         )
 
 
@@ -190,10 +222,10 @@ async def test_memory_provider_inventory_surfaces_capability_governance_states(t
     provider = payload["providers"][0]
     assert provider["capability_states"]["retrieval"] == "ready"
     assert provider["capability_states"]["user_model"] == "ready"
-    assert provider["capability_states"]["consolidation"] == "unsupported"
-    assert "writeback_state" in provider["governance"]
+    assert provider["capability_states"]["consolidation"] == "ready"
+    assert provider["governance"]["writeback_state"] == "ready"
     assert payload["summary"]["user_model_ready_count"] == 1
-    assert payload["summary"]["consolidation_ready_count"] == 0
+    assert payload["summary"]["consolidation_ready_count"] == 1
 
 
 def test_memory_provider_inventory_route_is_registered():
@@ -426,3 +458,75 @@ async def test_plan_memory_retrieval_tolerates_provider_health_failures(tmp_path
     assert "Canonical memory still available" in retrieval.semantic_context
     assert retrieval.provider_diagnostics == ()
     assert inventory["providers"][0]["runtime_state"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_memory_provider_writeback_runs_after_canonical_memory_is_persisted(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("consolidation",))
+    adapter = FakeMemoryProviderAdapter(capabilities=("consolidation",))
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            result = await writeback_additive_memory_providers(
+                memories=(
+                    ConsolidatedMemoryItem(
+                        text="Atlas launch is the active release project.",
+                        kind=normalize_memory_kind("project"),
+                        category=kind_to_category("project"),
+                        summary="Atlas launch",
+                    ),
+                    ConsolidatedMemoryItem(
+                        text="Send the investor brief before Friday.",
+                        kind=normalize_memory_kind("commitment"),
+                        category=kind_to_category("commitment"),
+                        summary="Send investor brief before Friday",
+                    ),
+                ),
+                session_id="s1",
+                trigger="workflow_completed",
+                workflow_name="atlas-launch",
+            )
+    finally:
+        clear_memory_provider_adapters()
+
+    assert result.partial_write_count == 0
+    assert result.write_failure_count == 0
+    assert result.diagnostics[0]["name"] == "graph-memory"
+    assert result.diagnostics[0]["runtime_state"] == "ready"
+    assert result.diagnostics[0]["stored_count"] == 2
+    assert result.diagnostics[0]["capabilities_used"] == ["consolidation"]
+    assert set(result.diagnostics[0]["accepted_kinds"]) == {"commitment", "project"}
+    assert adapter.writeback_calls[0]["session_id"] == "s1"
+    assert adapter.writeback_calls[0]["trigger"] == "workflow_completed"
+
+
+@pytest.mark.asyncio
+async def test_memory_provider_writeback_degrades_cleanly_when_provider_fails(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("consolidation",))
+    adapter = FakeMemoryProviderAdapter(capabilities=("consolidation",), writeback_should_fail=True)
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            result = await writeback_additive_memory_providers(
+                memories=(
+                    ConsolidatedMemoryItem(
+                        text="Atlas launch is the active release project.",
+                        kind=normalize_memory_kind("project"),
+                        category=kind_to_category("project"),
+                        summary="Atlas launch",
+                    ),
+                ),
+                session_id="s1",
+                trigger="post_response",
+            )
+    finally:
+        clear_memory_provider_adapters()
+
+    assert result.partial_write_count == 1
+    assert result.write_failure_count == 1
+    assert result.diagnostics[0]["runtime_state"] == "unavailable"
+    assert result.diagnostics[0]["failed_capabilities"] == ["consolidation"]

@@ -7499,8 +7499,12 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("extension health")).toBeInTheDocument());
-    expect(screen.getByText("1 installed · 1 degraded · 1 updates · 1 approval gated · 1 attention")).toBeInTheDocument();
-    expect(screen.getByText("1 available · 1 updates · 1 extension packs · 1 compatible")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("1 installed · 1 degraded · 1 updates · 1 approval gated · 1 attention")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("1 available · 1 updates · 1 extension packs · 1 compatible")).toBeInTheDocument();
+    });
 
     const healthSection = screen.getByText("extension health").closest(".cockpit-operator-section");
     expect(healthSection).not.toBeNull();

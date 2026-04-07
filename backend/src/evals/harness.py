@@ -6706,6 +6706,92 @@ async def _eval_source_review_routine_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_source_mutation_boundary_behavior() -> dict[str, Any]:
+    from src.extensions.source_operations import build_source_mutation_plan
+
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [{"name": "raw-github-mcp", "reason": "raw_mcp_only"}],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "query",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "runtime_server": "github",
+                        "tool_name": "create_issue",
+                        "result_kind": "work_item",
+                    }
+                ],
+            }
+        ],
+    }
+    degraded_inventory = {
+        **adapter_inventory,
+        "adapters": [
+            {
+                **adapter_inventory["adapters"][0],
+                "operations": [
+                    {
+                        **adapter_inventory["adapters"][0]["operations"][0],
+                        "executable": False,
+                        "tool_name": "",
+                        "reason": "route_not_defined",
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        ready_plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Open a follow-up issue for the blocked trust boundary",
+            target_reference="seraph-quest/seraph#342",
+            fields=["title", "body"],
+        )
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=degraded_inventory),
+    ):
+        degraded_plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Close the issue when the route exists",
+            target_reference="seraph-quest/seraph#342",
+            fields=["state"],
+        )
+
+    return {
+        "ready_status": ready_plan["status"],
+        "ready_requires_approval": ready_plan["requires_approval"],
+        "ready_scope_reference": ready_plan["approval_scope"]["target"]["reference"],
+        "ready_field_count": ready_plan["approval_scope"]["change_scope"]["field_count"],
+        "ready_runtime_server": ready_plan["audit_payload"]["runtime_server"],
+        "ready_execution_boundaries": ready_plan["approval_context"]["execution_boundaries"],
+        "degraded_status": degraded_plan["status"],
+        "degraded_warning_mentions_route": "route_not_defined" in degraded_plan["warnings"][0],
+        "degraded_route_executable": degraded_plan["approval_scope"]["runtime_scope"]["route_executable"],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -7913,6 +7999,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Source review routines stay connector-first, expose reusable provider-neutral review steps, and surface ready fallback paths without hardcoded provider pipelines.",
         runner=_eval_source_review_routine_behavior,
+    ),
+    EvalScenario(
+        name="source_mutation_boundary_behavior",
+        category="behavior",
+        description="Connector-backed mutation paths stay planned, approval-scoped, and auditable instead of being implied as direct executable access.",
+        runner=_eval_source_mutation_boundary_behavior,
     ),
     EvalScenario(
         name="capability_repair_behavior",

@@ -72,12 +72,16 @@ def _render_adapters(adapter_inventory: dict[str, object]) -> list[str]:
             op_contract = str(operation.get("contract") or "")
             op_mode = str(operation.get("input_mode") or "")
             op_state = "ready" if operation.get("executable") else str(operation.get("reason") or "unavailable")
+            op_prefix = "mutation" if operation.get("mutating") else "op"
             runtime_server = str(operation.get("runtime_server") or "")
             tool_name = str(operation.get("tool_name") or "")
             runtime_suffix = ""
             if runtime_server and tool_name:
                 runtime_suffix = f" · {runtime_server}/{tool_name}"
-            lines.append(f"  op {op_contract} via {op_mode} · {op_state}{runtime_suffix}")
+            approval_suffix = " · approval_required" if operation.get("requires_approval") else ""
+            lines.append(
+                f"  {op_prefix} {op_contract} via {op_mode} · {op_state}{approval_suffix}{runtime_suffix}"
+            )
     return lines
 
 

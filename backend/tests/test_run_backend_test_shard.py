@@ -79,6 +79,7 @@ def test_run_shard_files_passes_per_file_timeout(tmp_path: Path):
 def test_timeout_for_file_uses_runtime_heavy_override():
     assert timeout_for_file("tests/test_workflows.py", 900) == 1_500
     assert timeout_for_file("tests/test_eval_harness.py", None) == 1_500
+    assert timeout_for_file("tests/test_delivery.py", 900) == 1_200
     assert timeout_for_file("tests/test_alpha.py", 900) == 900
 
 
@@ -147,3 +148,72 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
         "not test_run_runtime_evals_passes_all_scenarios",
     ]
     assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
+
+
+def test_pytest_invocations_for_target_splits_workflows_contract():
+    invocations = pytest_invocations_for_target("tests/test_workflows.py")
+
+    assert invocations == [
+        (
+            "tests/test_workflows.py::boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::remaining",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "not (approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint)",
+            ],
+        ),
+    ]
+
+
+def test_pytest_invocations_for_target_splits_delivery_contract():
+    invocations = pytest_invocations_for_target("tests/test_delivery.py")
+
+    assert invocations == [
+        (
+            "tests/test_delivery.py::channel_and_bundle",
+            [
+                "tests/test_delivery.py",
+                "-k",
+                "native_channel or channel_routing or queued_bundle",
+            ],
+        ),
+        (
+            "tests/test_delivery.py::remaining",
+            [
+                "tests/test_delivery.py",
+                "-k",
+                "not (native_channel or channel_routing or queued_bundle)",
+            ],
+        ),
+    ]
+
+
+def test_pytest_invocations_for_target_splits_observer_api_contract():
+    invocations = pytest_invocations_for_target("tests/test_observer_api.py")
+
+    assert invocations == [
+        (
+            "tests/test_observer_api.py::continuity_and_notifications",
+            [
+                "tests/test_observer_api.py",
+                "-k",
+                "continuity or native_notification or intervention_feedback",
+            ],
+        ),
+        (
+            "tests/test_observer_api.py::remaining",
+            [
+                "tests/test_observer_api.py",
+                "-k",
+                "not (continuity or native_notification or intervention_feedback)",
+            ],
+        ),
+    ]

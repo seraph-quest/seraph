@@ -28,6 +28,7 @@ from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, de
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.extensions.source_operations import (
     build_source_review_plan,
+    build_source_mutation_plan,
     collect_source_evidence_bundle,
     list_source_adapter_inventory,
 )
@@ -124,6 +125,14 @@ class SourceReviewPlanRequest(BaseModel):
     url: str = ""
 
 
+class SourceMutationPlanRequest(BaseModel):
+    contract: str
+    source: str = ""
+    action_summary: str = ""
+    target_reference: str = ""
+    fields: list[str] = []
+
+
 class WorkflowDraftRequest(BaseModel):
     content: str
 
@@ -151,6 +160,17 @@ async def source_review_plan(req: SourceReviewPlanRequest):
         time_window=req.time_window,
         source=req.source,
         url=req.url,
+    )
+
+
+@router.post("/capabilities/source-mutation-plan")
+async def source_mutation_plan(req: SourceMutationPlanRequest):
+    return build_source_mutation_plan(
+        contract=req.contract,
+        source=req.source,
+        action_summary=req.action_summary,
+        target_reference=req.target_reference,
+        fields=req.fields,
     )
 
 

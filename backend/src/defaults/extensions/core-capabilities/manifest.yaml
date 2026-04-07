@@ -19,6 +19,7 @@ permissions:
     - get_goals
     - http_request
     - plan_source_review
+    - plan_source_mutation
     - read_file
     - source_capabilities
     - view_soul

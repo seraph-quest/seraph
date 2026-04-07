@@ -805,6 +805,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["source_review_routine_behavior"]["goal_plan_status"] == "ready"
     assert details_by_name["source_review_routine_behavior"]["goal_runbook"] == "runbook:source-goal-alignment"
     assert details_by_name["source_review_routine_behavior"]["goal_starter_pack"] == "source-goal-alignment"
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_status"] == "approval_required"
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_requires_approval"] is True
+    assert (
+        details_by_name["source_mutation_boundary_behavior"]["ready_scope_reference"]
+        == "seraph-quest/seraph#342"
+    )
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_field_count"] == 2
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_runtime_server"] == "github"
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+        "connector_mutation",
+    ]
+    assert details_by_name["source_mutation_boundary_behavior"]["degraded_status"] == "degraded"
+    assert details_by_name["source_mutation_boundary_behavior"]["degraded_warning_mentions_route"] is True
+    assert details_by_name["source_mutation_boundary_behavior"]["degraded_route_executable"] is False
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]

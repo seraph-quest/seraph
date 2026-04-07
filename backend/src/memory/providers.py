@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from config.settings import settings
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
+from src.memory.types import ConsolidatedMemoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,17 @@ class MemoryProviderAdapter(Protocol):
     ) -> MemoryProviderRetrievalResult:
         ...
 
+    async def writeback(
+        self,
+        *,
+        memories: tuple[ConsolidatedMemoryItem, ...],
+        session_id: str,
+        trigger: str,
+        workflow_name: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> "MemoryProviderWritebackResult":
+        ...
+
 
 @dataclass(frozen=True)
 class MemoryProviderInventoryItem:
@@ -100,6 +112,24 @@ class MemoryProviderAggregateResult:
     buckets: dict[str, tuple[str, ...]]
     degraded: bool
     diagnostics: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class MemoryProviderWritebackResult:
+    stored_count: int = 0
+    partial_write_count: int = 0
+    write_failure_count: int = 0
+    degraded: bool = False
+    summary: str = ""
+    notes: tuple[str, ...] = ()
+    accepted_kinds: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MemoryProviderWritebackAggregateResult:
+    diagnostics: tuple[dict[str, Any], ...] = ()
+    partial_write_count: int = 0
+    write_failure_count: int = 0
 
 
 _REGISTERED_MEMORY_PROVIDER_ADAPTERS: dict[str, MemoryProviderAdapter] = {}
@@ -363,7 +393,7 @@ def list_memory_provider_inventory() -> dict[str, Any]:
         ],
         "governance_rules": [
             "Provider-backed user or project modeling is additive only; it must not silently replace canonical guardian memory.",
-            "Provider-backed consolidation or writeback stays unavailable until an explicit runtime handler is registered and surfaced.",
+            "Provider-backed consolidation or writeback runs only after canonical guardian persistence succeeds and remains advisory.",
             "When canonical and provider context conflict, guardian-owned memory remains authoritative and provider evidence is advisory.",
         ],
     }
@@ -500,4 +530,108 @@ async def retrieve_additive_memory_provider_context(
         buckets={key: tuple(values) for key, values in bucket_values.items()},
         degraded=degraded,
         diagnostics=tuple(diagnostics),
+    )
+
+
+async def writeback_additive_memory_providers(
+    *,
+    memories: tuple[ConsolidatedMemoryItem, ...],
+    session_id: str,
+    trigger: str,
+    workflow_name: str | None = None,
+) -> MemoryProviderWritebackAggregateResult:
+    if not memories:
+        return MemoryProviderWritebackAggregateResult()
+
+    inventory = list_memory_provider_inventory()
+    items = inventory.get("providers", [])
+    diagnostics: list[dict[str, Any]] = []
+    partial_write_count = 0
+    write_failure_count = 0
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("enabled")) or not bool(item.get("configured")):
+            continue
+        if str(item.get("runtime_state") or "") not in {"ready", "degraded"}:
+            continue
+        if "consolidation" not in item.get("capabilities", []):
+            continue
+        capability_states = item.get("capability_states")
+        if not isinstance(capability_states, dict):
+            capability_states = {}
+        consolidation_state = str(capability_states.get("consolidation") or "")
+        if consolidation_state not in {"ready", "degraded"}:
+            continue
+
+        name = str(item.get("name") or "")
+        adapter = get_memory_provider_adapter(name)
+        writeback = getattr(adapter, "writeback", None) if adapter is not None else None
+        if not callable(writeback):
+            continue
+
+        config = _memory_provider_config(
+            load_extension_state_payload().get("extensions")
+            if isinstance(load_extension_state_payload().get("extensions"), dict)
+            else {},
+            str(item.get("extension_id") or ""),
+            name,
+        )
+        provider_notes: list[str] = []
+        try:
+            result = await writeback(
+                memories=memories,
+                session_id=session_id,
+                trigger=trigger,
+                workflow_name=workflow_name,
+                config=config,
+            )
+        except Exception:
+            logger.debug("Memory provider writeback failed", exc_info=True)
+            provider_notes.append(
+                "Provider writeback failed after canonical guardian persistence; canonical memory remained authoritative."
+            )
+            diagnostics.append(
+                {
+                    "name": name,
+                    "runtime_state": "unavailable",
+                    "stored_count": 0,
+                    "partial_write_count": 1,
+                    "write_failure_count": 1,
+                    "degraded": True,
+                    "summary": "",
+                    "notes": provider_notes,
+                    "capabilities_used": [],
+                    "failed_capabilities": ["consolidation"],
+                    "accepted_kinds": [],
+                }
+            )
+            partial_write_count += 1
+            write_failure_count += 1
+            continue
+
+        _merge_provider_notes(provider_notes, result.notes)
+        diagnostics.append(
+            {
+                "name": name,
+                "runtime_state": "degraded" if result.degraded or consolidation_state == "degraded" else "ready",
+                "stored_count": int(result.stored_count),
+                "partial_write_count": int(result.partial_write_count),
+                "write_failure_count": int(result.write_failure_count),
+                "degraded": bool(result.degraded),
+                "summary": result.summary.strip(),
+                "notes": provider_notes,
+                "capabilities_used": ["consolidation"],
+                "failed_capabilities": ["consolidation"] if result.write_failure_count else [],
+                "accepted_kinds": [kind for kind in result.accepted_kinds if kind],
+            }
+        )
+        partial_write_count += int(result.partial_write_count)
+        write_failure_count += int(result.write_failure_count)
+
+    return MemoryProviderWritebackAggregateResult(
+        diagnostics=tuple(diagnostics),
+        partial_write_count=partial_write_count,
+        write_failure_count=write_failure_count,
     )

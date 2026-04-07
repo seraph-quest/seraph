@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         working-directory: backend
@@ -35,7 +35,7 @@ jobs:
         run: uv sync --group dev
 
       - name: List backend shard
-        run: uv run python scripts/backend_test_shards.py --shard-count 6 --shard-index ${{ matrix.shard }}
+        run: uv run python scripts/backend_test_shards.py --shard-count 8 --shard-index ${{ matrix.shard }}
 
       - name: Run tests
         env:
@@ -43,7 +43,7 @@ jobs:
           WORKSPACE_DIR: /tmp/seraph-test
         timeout-minutes: 25
         run: |
-          uv run python scripts/backend_test_shards.py --shard-count 6 --shard-index ${{ matrix.shard }} > /tmp/backend-shard.txt
+          uv run python scripts/backend_test_shards.py --shard-count 8 --shard-index ${{ matrix.shard }} > /tmp/backend-shard.txt
           xargs uv run pytest -q < /tmp/backend-shard.txt
 
   frontend-tests:

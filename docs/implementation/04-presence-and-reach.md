@@ -19,6 +19,7 @@
 - [x] cross-surface continuity now also exposes explicit open-thread and continue flows across native notifications, queued interventions, and recent interventions
 - [x] route-health snapshots now expose whether browser websocket and native delivery are actually reachable at runtime, including ready, fallback, and unavailable states with operator-readable repair hints instead of only static route bindings
 - [x] queued-bundle native delivery now preserves same-thread resume when every deferred item belongs to the same session, and the shared continuity snapshot now carries one continuation contract across notifications, queued insights, and recent interventions
+- [x] the shared continuity snapshot now also synthesizes continuity health, grouped follow-through threads, and explicit recovery actions, and the cockpit desktop shell now uses that richer contract instead of reconstructing cross-surface recovery from raw notifications, queued items, and route rows
 
 ## Working On Now
 
@@ -29,12 +30,13 @@
 - [x] this workstream now ships `native-channel-expansion-v1`
 - [x] this workstream now ships `native-channel-expansion-v2`
 - [x] this workstream now ships `production-reach-hardening-v1`
+- [x] this workstream now also ships `cross-surface-recovery-summary-v1`
 
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell and continuity layer
 - [ ] broader external communication channels
-- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new continuity snapshot, action-card continuation model, and desktop-shell open-thread control card
+- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new synthesized continuity summary, thread groups, recovery actions, action-card continuation model, and desktop-shell follow-through controls
 
 ## Non-Goals
 

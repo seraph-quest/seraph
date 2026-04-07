@@ -441,6 +441,24 @@ class TestObserverAPI:
         assert payload["queued_insights"][0]["thread_label"] == "Bundle thread"
         assert payload["queued_insights"][0]["thread_source"] == "session"
         assert payload["queued_insights"][0]["continuation_mode"] == "resume_thread"
+        assert payload["summary"]["continuity_health"] == "attention"
+        assert payload["summary"]["recommended_focus"] == "Bundle delivery"
+        assert payload["summary"]["actionable_thread_count"] == 2
+        assert payload["summary"]["degraded_route_count"] >= 1
+        assert payload["threads"][0]["thread_id"] == "session-1"
+        assert payload["threads"][0]["pending_notification_count"] == 1
+        assert payload["threads"][0]["continue_message"] == "Continue from this guardian intervention: Desktop fallback is active."
+        assert any(
+            item["kind"] == "thread_follow_up"
+            and item["thread_id"] == "session-2"
+            and item["continue_message"] == "Follow up on this deferred guardian item: Bundle this until the next browser check-in."
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "reach_repair"
+            and item["route"] == "live_delivery"
+            for item in payload["recovery_actions"]
+        )
         assert {item["continuity_surface"] for item in payload["recent_interventions"]} >= {
             "native_notification",
             "bundle_queue",

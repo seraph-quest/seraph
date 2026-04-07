@@ -3626,6 +3626,170 @@ async def _eval_memory_collaborator_lookup_behavior() -> dict[str, Any]:
         }
 
 
+async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
+    import json
+    import tempfile
+    from dataclasses import dataclass
+    from unittest.mock import AsyncMock
+
+    from src.api.memory import list_memory_providers
+    from src.extensions.registry import _current_seraph_version
+    from src.memory.providers import (
+        MemoryProviderHit,
+        MemoryProviderRetrievalResult,
+        clear_memory_provider_adapters,
+        register_memory_provider_adapter,
+    )
+
+    @dataclass
+    class EvalMemoryProviderAdapter:
+        name: str = "graph-memory"
+        provider_kind: str = "vector_plugin"
+        capabilities: tuple[str, ...] = ("user_model",)
+
+        def health(self) -> dict[str, object]:
+            return {"status": "ready", "summary": "Eval memory provider connected."}
+
+        async def retrieve(self, *, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult()
+
+        async def augment_model(self, *, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult(
+                hits=(
+                    MemoryProviderHit(
+                        text="Atlas launch remains the live project anchor.",
+                        score=0.66,
+                        provider_name=self.name,
+                        bucket="project",
+                    ),
+                    MemoryProviderHit(
+                        text="Alice owns Atlas launch communications.",
+                        score=0.83,
+                        provider_name=self.name,
+                        bucket="collaborator",
+                    ),
+                    MemoryProviderHit(
+                        text="Weekly investor note goes out on Friday.",
+                        score=0.61,
+                        provider_name=self.name,
+                        bucket="obligation",
+                    ),
+                ),
+                summary="Provider-backed user model available.",
+            )
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("provider-memory-current")
+        await session_manager.add_message("provider-memory-current", "user", "What matters for Atlas today?")
+        await session_manager.add_message("provider-memory-current", "assistant", "Let me ground that in provider-backed memory.")
+
+        workspace_dir = tempfile.mkdtemp(prefix="seraph-memory-provider-")
+        pack_dir = os.path.join(workspace_dir, "extensions", "graph-memory-pack", "connectors", "memory")
+        os.makedirs(pack_dir, exist_ok=True)
+        current_version = _current_seraph_version()
+        with open(os.path.join(workspace_dir, "extensions", "graph-memory-pack", "manifest.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "id: seraph.graph-memory-pack\n"
+                f"version: {current_version}\n"
+                "display_name: Graph Memory Pack\n"
+                "kind: connector-pack\n"
+                "compatibility:\n"
+                f"  seraph: \">={current_version}\"\n"
+                "publisher:\n"
+                "  name: Seraph\n"
+                "trust: local\n"
+                "contributes:\n"
+                "  memory_providers:\n"
+                "    - connectors/memory/graph-memory.yaml\n"
+            )
+        with open(os.path.join(pack_dir, "graph-memory.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "name: graph-memory\n"
+                "description: Additive modeling provider.\n"
+                "provider_kind: vector_plugin\n"
+                "enabled: true\n"
+                "capabilities:\n"
+                "  - user_model\n"
+                "canonical_memory_owner: seraph\n"
+                "canonical_write_mode: additive_only\n"
+                "config_fields:\n"
+                "  - key: api_key\n"
+                "    label: API Key\n"
+                "    input: password\n"
+                "    required: true\n"
+            )
+        with open(os.path.join(workspace_dir, "extensions-state.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "extensions": {
+                        "seraph.graph-memory-pack": {
+                            "config": {"memory_providers": {"graph-memory": {"api_key": "secret"}}},
+                            "connector_state": {
+                                "connectors/memory/graph-memory.yaml": {"enabled": True},
+                            },
+                        }
+                    }
+                },
+                handle,
+            )
+
+        adapter = EvalMemoryProviderAdapter()
+        register_memory_provider_adapter(adapter)
+        try:
+            ctx = _make_context(
+                active_goals_summary="Support Atlas launch",
+                active_window="VS Code",
+                screen_context="Editing Atlas release notes",
+                data_quality="good",
+                observer_confidence="grounded",
+                salience_level="high",
+                salience_reason="active_goals",
+                interruption_cost="low",
+            )
+
+            with (
+                patch.object(settings, "workspace_dir", workspace_dir),
+                patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+                patch(
+                    "src.profile.service.sync_soul_file_to_profile",
+                    AsyncMock(return_value={"Identity": "Builder"}),
+                ),
+                patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+                patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+                patch(
+                    "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                    return_value=["Atlas launch"],
+                ),
+                patch(
+                    "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+                    return_value="",
+                ),
+            ):
+                state = await build_guardian_state(
+                    session_id="provider-memory-current",
+                    user_message="",
+                    memory_query="",
+                )
+                inventory = await list_memory_providers()
+        finally:
+            clear_memory_provider_adapters()
+
+        provider = inventory["providers"][0]
+        return {
+            "provider_runtime_ready": provider["runtime_state"] == "ready",
+            "provider_user_model_ready": provider["capability_states"]["user_model"] == "ready",
+            "provider_consolidation_unsupported": provider["capability_states"].get("consolidation") == "unsupported"
+            if "consolidation" in provider["capability_states"]
+            else True,
+            "world_model_has_provider_collaborator": "Alice owns Atlas launch communications." in state.world_model.collaborators,
+            "world_model_has_provider_obligation": "Weekly investor note goes out on Friday." in state.world_model.recurring_obligations,
+            "memory_context_has_provider_project": "Atlas launch remains the live project anchor." in state.memory_context,
+        }
+
+
 async def _eval_bounded_memory_snapshot_behavior() -> dict[str, Any]:
     from src.memory.snapshots import refresh_bounded_guardian_snapshot
 
@@ -7553,6 +7717,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Project-linked collaborator memory is recoverable through guardian state for active work instead of staying as inert text.",
         runner=_eval_memory_collaborator_lookup_behavior,
+    ),
+    EvalScenario(
+        name="memory_provider_user_model_behavior",
+        category="behavior",
+        description="Additive memory providers can augment live project and collaborator understanding without becoming canonical memory owners.",
+        runner=_eval_memory_provider_user_model_behavior,
     ),
     EvalScenario(
         name="bounded_memory_snapshot_behavior",

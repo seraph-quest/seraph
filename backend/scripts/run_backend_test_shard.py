@@ -8,7 +8,14 @@ import sys
 import time
 from pathlib import Path
 
-from scripts.backend_test_shards import shard_for_index
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+try:
+    from scripts.backend_test_shards import shard_for_index
+except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
+    from backend_test_shards import shard_for_index
 
 
 def run_shard_files(

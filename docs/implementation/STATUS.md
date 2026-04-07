@@ -54,7 +54,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The runtime now exposes provider-neutral source contracts and source inventory for public-web tools, managed authenticated connectors, and raw MCP gaps, so Seraph can compose source-aware routines without hardcoding one provider pipeline per use case.
 - [x] The runtime now also exposes reusable source-review planning for daily review, progress review, and goal-alignment review, so source routines can stay connector-first and provider-neutral even when one preferred adapter cannot satisfy every review step.
 - [x] Authenticated MCP-backed sources now keep their source context through runtime wrappers, so operator metadata, approval context, and workflow checkpoint gating can distinguish generic external MCP from authenticated external-source execution.
-- [x] Guardian memory now exposes a first additive memory-provider surface: extension-backed provider inventory, lifecycle-managed provider config/toggle state, additive retrieval integration, and explicit canonical-memory precedence when external providers are configured or unavailable.
+- [x] Guardian memory now exposes a deeper additive memory-provider surface: extension-backed provider inventory, lifecycle-managed provider config/toggle state, capability-state governance, additive retrieval, additive user/project modeling augmentation, and explicit canonical-memory precedence when external providers are configured or unavailable.
 - [x] The cockpit now exposes denser workflow-operating control through step-focus summaries, direct failed-step context handoff, direct output reuse and output-comparison drafts from workflow family rows, explicit branch-origin and failure-lineage debugging, family-history comparison, best-continuation controls, denser ancestor/peer/failure-lineage follow-through actions, direct family-row checkpoint drill-in, direct family-row retry/repair controls, bundled family next-step planning drafts, and active-triage workflow quick actions including failure-context reuse, direct best-continuation control, direct recovery controls, and keyboard-first best-continuation/comparison follow-through instead of leaving those actions buried in the inspector.
 - [x] The cockpit desktop shell and presence pane now also surface continuity health, grouped thread follow-through, top recovery actions, and recommended focus across browser/native reach instead of only raw route rows and continuity item lists.
 - [x] The cockpit desktop shell, presence pane, and active triage now also surface degraded typed source adapters and imported capability-family attention from the observer continuity contract, so broader reach issues are actionable from the same operator flow as route failures and queued follow-through.
@@ -74,7 +74,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] activity-ledger routing summaries, native thread metadata, and LLM spend attribution that make both live continuation state and day-scale budget use easier to inspect
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel-routing surfaces that stay visible and governed through the same extension lifecycle
 - [x] typed longitudinal memory and explicit guardian state
-- [x] additive external memory-provider retrieval and provider inventory that can augment recall without replacing canonical guardian memory
+- [x] additive external memory-provider retrieval, user/project augmentation, and provider governance inventory that can augment recall and live modeling without replacing canonical guardian memory
 - [x] policy-driven interventions with clear defer / bundle / act / request-approval decisions
 - [x] non-browser presence through a first coherent desktop surface, notifications, native reach, and action-card continuation payloads
 - [x] reusable workflow composition plus explicit feedback capture and future improvement loops
@@ -212,7 +212,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 ### Guardian intelligence
 
 - [ ] stronger learning and feedback loops beyond the current evidence-weighted delivery/channel/timing/blocked-state/suppression layer and first live-versus-durable procedural arbitration pass
-- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer plus the first focus-provenance and contradiction-aware confidence pass
+- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer, the first additive provider-backed user/project augmentation pass, and the first focus-provenance plus contradiction-aware confidence pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 
 ### Interface and presence

@@ -32,6 +32,8 @@ class FakeMemoryProviderAdapter:
     capabilities: tuple[str, ...] = ("retrieval",)
     degraded: bool = False
     should_fail: bool = False
+    model_should_fail: bool = False
+    model_hits: tuple[MemoryProviderHit, ...] = ()
 
     def health(self) -> dict[str, object]:
         return {
@@ -54,6 +56,33 @@ class FakeMemoryProviderAdapter:
             summary="Provider-assisted retrieval available.",
         )
 
+    async def augment_model(self, *, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+        if self.model_should_fail:
+            raise RuntimeError("provider model down")
+        if self.model_hits:
+            hits = self.model_hits[:limit]
+        else:
+            active_project = active_projects[0] if active_projects else "current work"
+            hits = (
+                MemoryProviderHit(
+                    text=f"{active_project} remains the live project anchor.",
+                    score=0.63,
+                    provider_name=self.name,
+                    bucket="project",
+                ),
+                MemoryProviderHit(
+                    text=f"Alice owns {active_project} communications.",
+                    score=0.72,
+                    provider_name=self.name,
+                    bucket="collaborator",
+                ),
+            )
+        return MemoryProviderRetrievalResult(
+            hits=hits,
+            degraded=self.degraded,
+            summary="Provider-backed user model available.",
+        )
+
 
 @dataclass
 class ExplodingHealthMemoryProviderAdapter(FakeMemoryProviderAdapter):
@@ -61,7 +90,13 @@ class ExplodingHealthMemoryProviderAdapter(FakeMemoryProviderAdapter):
         raise RuntimeError("health unavailable")
 
 
-def _write_memory_provider_extension(workspace, *, enabled: bool = True, configured: bool = True) -> None:
+def _write_memory_provider_extension(
+    workspace,
+    *,
+    enabled: bool = True,
+    configured: bool = True,
+    capabilities: tuple[str, ...] = ("retrieval",),
+) -> None:
     pack = workspace / "extensions" / "graph-memory-pack"
     (pack / "connectors" / "memory").mkdir(parents=True)
     current_version = _current_seraph_version()
@@ -81,19 +116,21 @@ def _write_memory_provider_extension(workspace, *, enabled: bool = True, configu
         encoding="utf-8",
     )
     pack.joinpath("connectors", "memory", "graph-memory.yaml").write_text(
-        "name: graph-memory\n"
-        "description: Additive retrieval provider.\n"
-        "provider_kind: vector_plugin\n"
-        f"enabled: {'true' if enabled else 'false'}\n"
-        "capabilities:\n"
-        "  - retrieval\n"
-        "canonical_memory_owner: seraph\n"
-        "canonical_write_mode: additive_only\n"
-        "config_fields:\n"
-        "  - key: api_key\n"
-        "    label: API Key\n"
-        "    input: password\n"
-        "    required: true\n",
+        (
+            "name: graph-memory\n"
+            "description: Additive retrieval provider.\n"
+            "provider_kind: vector_plugin\n"
+            f"enabled: {'true' if enabled else 'false'}\n"
+            "capabilities:\n"
+            + "".join(f"  - {capability}\n" for capability in capabilities)
+            + "canonical_memory_owner: seraph\n"
+            + "canonical_write_mode: additive_only\n"
+            + "config_fields:\n"
+            + "  - key: api_key\n"
+            + "    label: API Key\n"
+            + "    input: password\n"
+            + "    required: true\n"
+        ),
         encoding="utf-8",
     )
     state = {
@@ -133,6 +170,30 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     assert provider["canonical_memory_owner"] == "seraph"
     assert provider["canonical_write_mode"] == "additive_only"
     assert "Canonical guardian memory remains authoritative" in provider["notes"][0]
+    assert provider["capability_states"]["retrieval"] == "ready"
+    assert provider["governance"]["authoritative_memory"] == "guardian"
+
+
+@pytest.mark.asyncio
+async def test_memory_provider_inventory_surfaces_capability_governance_states(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("retrieval", "user_model", "consolidation"))
+    adapter = FakeMemoryProviderAdapter(capabilities=("retrieval", "user_model", "consolidation"))
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            payload = await list_memory_providers()
+    finally:
+        clear_memory_provider_adapters()
+
+    provider = payload["providers"][0]
+    assert provider["capability_states"]["retrieval"] == "ready"
+    assert provider["capability_states"]["user_model"] == "ready"
+    assert provider["capability_states"]["consolidation"] == "unsupported"
+    assert "writeback_state" in provider["governance"]
+    assert payload["summary"]["user_model_ready_count"] == 1
+    assert payload["summary"]["consolidation_ready_count"] == 0
 
 
 def test_memory_provider_inventory_route_is_registered():
@@ -214,6 +275,88 @@ async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_can
 
 
 @pytest.mark.asyncio
+async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project_without_query(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("user_model",))
+    adapter = FakeMemoryProviderAdapter(
+        capabilities=("user_model",),
+        model_hits=(
+            MemoryProviderHit(
+                text="Atlas launch remains the live project anchor.",
+                score=0.71,
+                provider_name="graph-memory",
+                bucket="project",
+            ),
+            MemoryProviderHit(
+                text="Alice owns Atlas launch communications.",
+                score=0.83,
+                provider_name="graph-memory",
+                bucket="collaborator",
+            ),
+            MemoryProviderHit(
+                text="Atlas launch timeline ends on Friday.",
+                score=0.64,
+                provider_name="graph-memory",
+                bucket="timeline",
+            ),
+        ),
+    )
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep Atlas moving", {"goal": ("Keep Atlas moving",)}),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    assert retrieval.lane == "structured_plus_provider_model"
+    assert "Alice owns Atlas launch communications." in retrieval.semantic_context
+    assert retrieval.memory_buckets["collaborator"] == ("Alice owns Atlas launch communications.",)
+    assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["user_model"]
+    assert retrieval.provider_diagnostics[0]["bucket_counts"]["timeline"] == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_memory_retrieval_combines_retrieval_and_user_model_provider_context(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("retrieval", "user_model"))
+    adapter = FakeMemoryProviderAdapter(capabilities=("retrieval", "user_model"))
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep canonical memory first", {"goal": ("Keep canonical memory first",)}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.retrieve_hybrid_memory",
+                return_value=HybridMemoryRetrievalResult(
+                    context="- [project] Atlas launch",
+                    buckets={"project": ("Atlas launch",)},
+                    degraded=False,
+                    hits=(),
+                ),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="atlas launch", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    assert retrieval.lane == "hybrid_plus_provider_model"
+    assert "Provider recall for atlas launch" in retrieval.semantic_context
+    assert "Alice owns Atlas launch communications." in retrieval.semantic_context
+    assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["retrieval", "user_model"]
+
+
+@pytest.mark.asyncio
 async def test_plan_memory_retrieval_degrades_cleanly_when_provider_fails(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -246,6 +389,7 @@ async def test_plan_memory_retrieval_degrades_cleanly_when_provider_fails(tmp_pa
     assert "Keep canonical memory first" in retrieval.semantic_context
     assert "Provider recall" not in retrieval.semantic_context
     assert retrieval.provider_diagnostics[0]["runtime_state"] == "unavailable"
+    assert retrieval.provider_diagnostics[0]["failed_capabilities"] == ["retrieval"]
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,18 @@ def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):
     assert "-x" in second_call.args[0]
 
 
+def test_run_shard_files_supports_script_dir_import_fallback(tmp_path: Path):
+    files = ["tests/test_alpha.py"]
+
+    with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
+        mock_run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+
+        result = run_shard_files(tmp_path, files)
+
+    assert result == 0
+    assert mock_run.call_args.args[0][0].endswith("python")
+
+
 def test_run_shard_files_stops_after_first_failure(tmp_path: Path):
     files = ["tests/test_alpha.py", "tests/test_beta.py"]
 

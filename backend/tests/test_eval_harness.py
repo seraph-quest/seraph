@@ -101,6 +101,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "session_consolidation_behavior" in captured.out
     assert "memory_commitment_continuity_behavior" in captured.out
     assert "memory_collaborator_lookup_behavior" in captured.out
+    assert "memory_provider_user_model_behavior" in captured.out
     assert "bounded_memory_snapshot_behavior" in captured.out
     assert "memory_supersession_filter_behavior" in captured.out
     assert "memory_decay_contradiction_cleanup_behavior" in captured.out
@@ -214,6 +215,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "session_consolidation_behavior",
                 "memory_commitment_continuity_behavior",
                 "memory_collaborator_lookup_behavior",
+                "memory_provider_user_model_behavior",
                 "bounded_memory_snapshot_behavior",
                 "memory_supersession_filter_behavior",
                 "memory_decay_contradiction_cleanup_behavior",
@@ -1023,6 +1025,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_collaborator_lookup_behavior"]["collaborator_present"] is True
     assert details_by_name["memory_collaborator_lookup_behavior"]["memory_context_has_collaborator"] is True
     assert details_by_name["memory_collaborator_lookup_behavior"]["active_projects_has_atlas"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_runtime_ready"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_user_model_ready"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_collaborator"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_obligation"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_context_has_provider_project"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_is_stable_within_session"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_includes_todo_overlay"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_line_count"] <= 8

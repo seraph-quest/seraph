@@ -43,7 +43,7 @@ This file explains:
 ### 1. Guardian state and human model
 
 - [x] shipped foundations: soul, vector memory, goals, observer context, first observer salience/confidence/interruption-cost scoring, explicit guardian-state synthesis, a structured world-model layer for focus, focus provenance, commitments, active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, continuity threads, recent execution pressure, receptivity, and judgment risks, plus learned communication guidance carried back into guardian state and first cross-source project arbitration when several projects compete
-- [ ] still missing: stronger human/world modeling quality, richer multi-signal learning, and additive memory-provider extensibility beyond the new project/routine/collaborator/obligation-aware world-model, contradiction-aware confidence pass, and first guidance layer
+- [ ] still missing: stronger human/world modeling quality, richer multi-signal learning, and deeper additive memory-provider follow-through beyond the new project/routine/collaborator/obligation-aware world-model, the first provider-backed user/project augmentation pass, contradiction-aware confidence, and first guidance layer
 - owners: Workstream 05
 
 ### 2. Intervention quality and timing

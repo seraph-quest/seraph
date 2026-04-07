@@ -21,6 +21,8 @@
 - [x] queued-bundle native delivery now preserves same-thread resume when every deferred item belongs to the same session, and the shared continuity snapshot now carries one continuation contract across notifications, queued insights, and recent interventions
 - [x] the shared continuity snapshot now also synthesizes continuity health, grouped follow-through threads, and explicit recovery actions, and the cockpit desktop shell now uses that richer contract instead of reconstructing cross-surface recovery from raw notifications, queued items, and route rows
 - [x] the shared continuity snapshot now also carries imported capability-family attention and typed source-adapter degradation, so browser/native route health is no longer the only reach surface visible in observer continuity or cockpit recovery flows
+- [x] broader reach continuity now also propagates into the operator timeline and Activity Ledger, so typed source-adapter and imported-reach recovery is not stranded in the observer endpoint or cockpit-only surfaces
+- [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 
 ## Working On Now
 
@@ -33,6 +35,7 @@
 - [x] this workstream now ships `production-reach-hardening-v1`
 - [x] this workstream now also ships `cross-surface-recovery-summary-v1`
 - [x] this workstream now also ships `broader-channel-adapter-surface-v1`
+- [x] this workstream now also ships `reach-evals-and-integration-hardening-v2`
 
 ## Still To Do On `develop`
 

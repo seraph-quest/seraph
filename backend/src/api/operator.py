@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from src.agent.session import session_manager
-from src.api.observer import _continuity_surface
+from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
 from src.api.workflows import (
     _list_workflow_runs,
     workflow_surface_continue_message,
@@ -30,13 +30,82 @@ def _parse_iso(value: str | datetime | None) -> datetime:
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _timeline_timestamp(value: str | datetime | None) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value or "")
+
+
+def _continuity_action_timestamp(snapshot: dict[str, Any]) -> str:
+    daemon = snapshot.get("daemon") if isinstance(snapshot, dict) else {}
+    if isinstance(daemon, dict):
+        last_post = daemon.get("last_post")
+        if isinstance(last_post, (int, float)):
+            return datetime.fromtimestamp(float(last_post), tz=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _continuity_operator_items(
+    snapshot: dict[str, Any],
+    *,
+    session_id: str | None,
+    session_titles: dict[str, str],
+) -> list[dict[str, Any]]:
+    recovery_actions = snapshot.get("recovery_actions")
+    if not isinstance(recovery_actions, list):
+        return []
+    updated_at = _continuity_action_timestamp(snapshot)
+    items: list[dict[str, Any]] = []
+    for action in recovery_actions:
+        if not isinstance(action, dict):
+            continue
+        thread_id = action.get("thread_id") if isinstance(action.get("thread_id"), str) else None
+        if session_id and thread_id not in {None, session_id}:
+            continue
+        items.append({
+            "id": f"continuity:{action.get('id') or len(items)}",
+            "kind": "reach_recovery",
+            "title": str(action.get("label") or "Reach recovery"),
+            "summary": str(action.get("detail") or "Inspect live continuity recovery."),
+            "status": str(action.get("status") or "attention"),
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "thread_id": thread_id,
+            "thread_label": session_titles.get(thread_id) if thread_id else None,
+            "continue_message": action.get("continue_message"),
+            "replay_draft": None,
+            "replay_allowed": False,
+            "replay_block_reason": None,
+            "recommended_actions": [],
+            "source": "continuity",
+            "metadata": {
+                "surface": action.get("surface"),
+                "kind": action.get("kind"),
+                "route": action.get("route"),
+                "repair_hint": action.get("repair_hint"),
+                "open_thread_available": bool(action.get("open_thread_available")),
+                "continuity_health": (
+                    snapshot.get("summary", {}).get("continuity_health")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "primary_surface": (
+                    snapshot.get("summary", {}).get("primary_surface")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "recommended_focus": (
+                    snapshot.get("summary", {}).get("recommended_focus")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+            },
+        })
+    return items
 
 
 @router.get("/operator/timeline")
@@ -58,6 +127,7 @@ async def get_operator_timeline(
         session_id=session_id,
     )
     audit_events = await audit_repository.list_events(limit=max(limit, 20), session_id=session_id)
+    continuity_snapshot = await build_observer_continuity_snapshot()
 
     items: list[dict[str, Any]] = []
 
@@ -309,6 +379,14 @@ async def get_operator_timeline(
                 "risk_level": event.get("risk_level"),
             },
         })
+
+    items.extend(
+        _continuity_operator_items(
+            continuity_snapshot,
+            session_id=session_id,
+            session_titles=session_titles,
+        )
+    )
 
     items.sort(
         key=lambda item: _parse_iso(str(item.get("updated_at") or item.get("created_at"))),

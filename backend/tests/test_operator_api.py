@@ -4,6 +4,25 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _default_empty_continuity_snapshot():
+    with patch(
+        "src.api.operator.build_observer_continuity_snapshot",
+        AsyncMock(
+            return_value={
+                "daemon": {},
+                "summary": {
+                    "continuity_health": "ready",
+                    "primary_surface": "browser",
+                    "recommended_focus": None,
+                },
+                "recovery_actions": [],
+            }
+        ),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_operator_timeline_aggregates_threaded_workflows_notifications_and_repairs(client):
     with (
@@ -183,6 +202,79 @@ async def test_operator_timeline_uses_session_scoped_interventions_for_requested
 
     assert resp.status_code == 200
     intervention_repo.assert_awaited_once_with(limit=12, session_id="session-1")
+
+
+@pytest.mark.asyncio
+async def test_operator_timeline_surfaces_observer_recovery_actions(client):
+    with (
+        patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.operator.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.operator.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.operator.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "daemon": {"last_post": 1_775_521_600.0},
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "source_adapter",
+                        "recommended_focus": "github-managed",
+                    },
+                    "recovery_actions": [
+                        {
+                            "id": "adapter:github-managed",
+                            "kind": "source_adapter_repair",
+                            "label": "Restore source adapter github-managed",
+                            "detail": "Reconnect the authenticated source adapter runtime.",
+                            "status": "degraded",
+                            "surface": "source_adapter",
+                            "route": None,
+                            "repair_hint": "Inspect the typed source adapter inventory and runtime bridge.",
+                            "thread_id": None,
+                            "continue_message": "Draft a repair plan for github-managed.",
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "imported:messaging",
+                            "kind": "imported_reach_attention",
+                            "label": "Inspect imported reach family messaging",
+                            "detail": "Messaging capability packages need operator attention.",
+                            "status": "attention",
+                            "surface": "imported_reach",
+                            "route": None,
+                            "repair_hint": "Inspect imported reach coverage before planning outreach.",
+                            "thread_id": None,
+                            "continue_message": None,
+                            "open_thread_available": True,
+                        },
+                    ],
+                }
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Session 1"}]),
+        ),
+    ):
+        resp = await client.get("/api/operator/timeline", params={"limit": 20})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    adapter_item = next(item for item in payload["items"] if item["id"] == "continuity:adapter:github-managed")
+    assert adapter_item["kind"] == "reach_recovery"
+    assert adapter_item["source"] == "continuity"
+    assert adapter_item["continue_message"] == "Draft a repair plan for github-managed."
+    assert adapter_item["metadata"]["kind"] == "source_adapter_repair"
+    assert adapter_item["metadata"]["surface"] == "source_adapter"
+    assert adapter_item["metadata"]["recommended_focus"] == "github-managed"
+
+    imported_item = next(item for item in payload["items"] if item["id"] == "continuity:imported:messaging")
+    assert imported_item["metadata"]["kind"] == "imported_reach_attention"
+    assert imported_item["metadata"]["surface"] == "imported_reach"
+    assert imported_item["metadata"]["primary_surface"] == "source_adapter"
 
 
 @pytest.mark.asyncio

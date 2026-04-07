@@ -11,6 +11,25 @@ def _iso_offset(*, hours: int = 0, minutes: int = 0, seconds: int = 0) -> str:
     return (NOW + timedelta(hours=hours, minutes=minutes, seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
+@pytest.fixture(autouse=True)
+def _default_empty_continuity_snapshot():
+    with patch(
+        "src.api.activity.build_observer_continuity_snapshot",
+        AsyncMock(
+            return_value={
+                "daemon": {},
+                "summary": {
+                    "continuity_health": "ready",
+                    "primary_surface": "browser",
+                    "recommended_focus": None,
+                },
+                "recovery_actions": [],
+            }
+        ),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(client):
     with (
@@ -347,6 +366,76 @@ async def test_activity_ledger_summary_counts_full_window_beyond_visible_limit(c
     assert payload["summary"]["llm_call_count"] == 6
     assert payload["summary"]["llm_cost_usd"] == pytest.approx(0.006)
     assert payload["summary"]["user_triggered_llm_calls"] == 6
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_surfaces_observer_recovery_actions(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch(
+            "src.api.activity.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "daemon": {"last_post": NOW.timestamp()},
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "source_adapter",
+                        "recommended_focus": "github-managed",
+                    },
+                    "recovery_actions": [
+                        {
+                            "id": "adapter:github-managed",
+                            "kind": "source_adapter_repair",
+                            "label": "Restore source adapter github-managed",
+                            "detail": "Reconnect the authenticated source adapter runtime.",
+                            "status": "degraded",
+                            "surface": "source_adapter",
+                            "route": None,
+                            "repair_hint": "Inspect the typed source adapter inventory and runtime bridge.",
+                            "thread_id": None,
+                            "continue_message": "Draft a repair plan for github-managed.",
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "imported:messaging",
+                            "kind": "imported_reach_attention",
+                            "label": "Inspect imported reach family messaging",
+                            "detail": "Messaging capability packages need operator attention.",
+                            "status": "attention",
+                            "surface": "imported_reach",
+                            "route": None,
+                            "repair_hint": "Inspect imported reach coverage before planning outreach.",
+                            "thread_id": None,
+                            "continue_message": None,
+                            "open_thread_available": True,
+                        },
+                    ],
+                }
+            ),
+        ),
+        patch("src.api.activity.session_manager.list_sessions", AsyncMock(return_value=[])),
+    ):
+        response = await client.get("/api/activity/ledger", params={"limit": 20, "window_hours": 24})
+
+    assert response.status_code == 200
+    payload = response.json()
+    adapter_item = next(item for item in payload["items"] if item["id"] == "continuity:adapter:github-managed")
+    assert adapter_item["kind"] == "reach_recovery"
+    assert adapter_item["category"] == "system"
+    assert adapter_item["source"] == "continuity"
+    assert adapter_item["continue_message"] == "Draft a repair plan for github-managed."
+    assert adapter_item["metadata"]["kind"] == "source_adapter_repair"
+    assert adapter_item["metadata"]["recommended_focus"] == "github-managed"
+
+    imported_item = next(item for item in payload["items"] if item["id"] == "continuity:imported:messaging")
+    assert imported_item["metadata"]["kind"] == "imported_reach_attention"
+    assert imported_item["metadata"]["surface"] == "imported_reach"
 
 
 @pytest.mark.asyncio

@@ -907,6 +907,18 @@ def _continuation_mode(thread_id: str | None) -> str:
     return "resume_thread" if thread_id else "open_thread"
 
 
+def _notification_payload(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return dict(item)
+    to_dict = getattr(item, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+    payload = getattr(item, "__dict__", None)
+    if isinstance(payload, dict):
+        return dict(payload)
+    raise TypeError("notification payload is not serializable")
+
+
 def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
     from src.extensions.channel_routing import (
         SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
@@ -941,12 +953,12 @@ def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
 
 
 @router.get("/observer/continuity", response_model=ObserverContinuityResponse)
-async def get_observer_continuity():
-    """Return a single continuity snapshot for browser and daemon surfaces."""
+async def build_observer_continuity_snapshot() -> dict[str, Any]:
+    """Build a single live continuity snapshot for browser and daemon surfaces."""
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.insight_queue import insight_queue
 
-    notifications = [item.to_dict() for item in await native_notification_queue.list()]
+    notifications = [_notification_payload(item) for item in await native_notification_queue.list()]
     queued_insights = await insight_queue.peek_all()
     recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
     session_titles = {
@@ -1103,6 +1115,12 @@ async def get_observer_continuity():
         "threads": thread_payload,
         "recovery_actions": recovery_actions_payload,
     }
+
+
+@router.get("/observer/continuity", response_model=ObserverContinuityResponse)
+async def get_observer_continuity():
+    """Return a single continuity snapshot for browser and daemon surfaces."""
+    return await build_observer_continuity_snapshot()
 
 
 @router.get("/observer/notifications", response_model=NativeNotificationListResponse)

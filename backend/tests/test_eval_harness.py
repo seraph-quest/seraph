@@ -81,6 +81,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "approval_explainability_surface_behavior" in captured.out
+    assert "source_report_action_workflow_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -199,6 +200,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "threaded_operator_timeline_behavior",
                 "workflow_boundary_blocked_surface_behavior",
                 "approval_explainability_surface_behavior",
+                "source_report_action_workflow_behavior",
                 "capability_repair_behavior",
                 "capability_preflight_behavior",
                 "activity_ledger_attribution_behavior",
@@ -821,6 +823,31 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["source_mutation_boundary_behavior"]["degraded_status"] == "degraded"
     assert details_by_name["source_mutation_boundary_behavior"]["degraded_warning_mentions_route"] is True
     assert details_by_name["source_mutation_boundary_behavior"]["degraded_route_executable"] is False
+    assert details_by_name["source_report_action_workflow_behavior"]["report_status"] == "ready"
+    assert details_by_name["source_report_action_workflow_behavior"]["publish_status"] == "approval_required"
+    assert details_by_name["source_report_action_workflow_behavior"]["publish_action_kind"] == "comment"
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["publish_target_reference"]
+        == "seraph-quest/seraph#343"
+    )
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["recommended_runbook"]
+        == "runbook:source-progress-report"
+    )
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["recommended_starter_pack"]
+        == "source-progress-report"
+    )
+    assert details_by_name["source_report_action_workflow_behavior"]["execution_status"] == "ok"
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["execution_tool_name"]
+        == "add_comment_to_issue"
+    )
+    assert details_by_name["source_report_action_workflow_behavior"]["execution_argument_keys"] == [
+        "comment",
+        "issue_number",
+        "repo_full_name",
+    ]
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]

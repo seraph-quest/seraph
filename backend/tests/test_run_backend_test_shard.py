@@ -79,6 +79,8 @@ def test_run_shard_files_passes_per_file_timeout(tmp_path: Path):
 def test_timeout_for_file_uses_runtime_heavy_override():
     assert timeout_for_file("tests/test_workflows.py", 900) == 1_500
     assert timeout_for_file("tests/test_eval_harness.py", None) == 1_500
+    assert timeout_for_file("tests/test_approvals_api.py", 900) == 1_200
+    assert timeout_for_file("tests/test_context_window.py", 900) == 1_200
     assert timeout_for_file("tests/test_delivery.py", 900) == 1_200
     assert timeout_for_file("tests/test_alpha.py", 900) == 900
 

@@ -33,6 +33,30 @@ runtime_adapter:
       tool_names:
         - search_issues
       result_kind: work_item
+    work_items.write:
+      result_kind: work_item
+      actions:
+        create:
+          tool_names:
+            - create_issue
+          target_reference_mode: repository
+          target_argument_name: repo_full_name
+          required_payload_fields:
+            - title
+            - body
+          payload_argument_map:
+            title: title
+            body: body
+        comment:
+          tool_names:
+            - add_comment_to_issue
+          target_reference_mode: work_item
+          target_argument_name: repo_full_name
+          number_argument_name: issue_number
+          required_payload_fields:
+            - body
+          payload_argument_map:
+            body: comment
     code_activity.read:
       tool_names:
         - search_pull_requests

@@ -1,0 +1,4 @@
+id: runbook:source-progress-report
+title: Source Progress Report
+summary: Gather provider-neutral progress evidence and publish a concise status report through an authenticated work-item adapter when available.
+starter_pack: source-progress-report

@@ -1,0 +1,7 @@
+{
+  "name": "source-progress-report",
+  "label": "Source Progress Report",
+  "description": "Plan a progress report from typed source adapters and publish it to an authenticated work item when available.",
+  "skills": ["source-progress-report"],
+  "sample_prompt": "Plan a source progress report for adapter-backed authenticated operations and post it to seraph-quest/seraph#343."
+}

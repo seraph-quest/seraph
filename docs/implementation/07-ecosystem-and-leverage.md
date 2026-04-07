@@ -45,9 +45,11 @@
 - [x] first adapter-backed source-evidence runtime that turns typed public-web contracts into normalized evidence bundles, exposes degraded managed-connector truth instead of implied access, and gives Seraph one reusable `collect_source_evidence` path for public discovery, explicit pages, and existing browser-session snapshots
 - [x] first connector-backed authenticated source-read bridge that binds a managed connector to a live MCP runtime when the connector is enabled and configured, so typed source contracts can execute normalized `repository.read`, `work_items.read`, and `code_activity.read` evidence reads instead of staying permanently degraded
 - [x] reusable connector-first source review planning and bundled source-review routines, so daily review, progress review, and goal-alignment review can compose provider-neutral mixed-source plans with explicit degraded-step truth instead of spawning bespoke provider pipelines
+- [x] first connector-backed authenticated source-action path that can execute bounded `work_items.write` actions through managed adapters, expose action-scoped approval and audit metadata, and compose provider-neutral report publication flows instead of falling back to bespoke provider-specific write pipelines
 - [x] backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting long-tail runtime skew dominate workflow delivery
 - [x] extension lifecycle, catalog, and capability surfaces now expose package version lines, compatibility truth, publisher metadata, and diagnostics summaries together, while the cockpit operator surface now summarizes extension health, governance, and update/studio actions instead of forcing package triage through raw studio or catalog lists
 - [x] backend CI now also applies per-file watchdog timeouts for the historically heaviest backend suites instead of letting `test_workflows.py` or `test_eval_harness.py` consume an entire shard window when they hang on hosted runners
+- [x] backend CI now also gives the historically slow approvals/context suites explicit shard weights and timeout headroom instead of letting those long-tail trust-boundary tests destabilize the backend matrix
 
 ## Working On Now
 
@@ -58,6 +60,12 @@
 - [x] this workstream now ships `capability-discovery-and-activation-v1`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, and `extension-debugging-and-recovery-v1`
 - [x] this workstream now also ships `capability-preflight-and-autorepair-v1`, `threaded-operator-timeline-v1`, and `workflow-runbooks-and-parameterized-replay-v1`
 - [x] this workstream now also ships `extension-ecosystem-maturity-and-marketplace-depth-v2`, including richer lifecycle/catalog diagnostics truth, operator-facing extension health triage, and heavier-suite CI shard watchdogs
+- [x] this workstream now also ships the first `adapter-backed-authenticated-operations-and-report-workflows-v1` Batch AM aggregate, including executable connector-backed source actions, provider-neutral source report publication, structured mutation audit visibility, and backend shard stabilization for the heaviest approvals/context suites
+- [x] local review findings fixed while landing `adapter-backed-authenticated-operations-and-report-workflows-v1`:
+  - report publication was initially pinned to the adapter chosen for a `work_items.read` review step, which prevented fallback to another ready `work_items.write` adapter and made mixed-source report publication unnecessarily unavailable
+  - report publication initially surfaced `approval_required` even when `target_reference` was empty, which implied an executable publish path even though mutation execution would fail target parsing immediately
+  - single-action authenticated write routes initially omitted `mutation_action_kind` from approval and audit payloads when the caller relied on implicit action selection, which weakened action-scoped explainability for the common one-action case
+  - the final subagent re-review reported no remaining material findings after those fixes and the follow-up CI shard assertions landed
 - [x] this workstream now hands the queue forward to the full extension-platform transition program rather than isolated extension UX slices
 - [x] the first extension-platform foundation slices now cover terminology cleanup, canonical manifests, the transitional registry seam, and structured doctor diagnostics
 - [x] the extension-platform foundation now also pins one canonical on-disk package layout and package-boundary resolution rules for contribution files

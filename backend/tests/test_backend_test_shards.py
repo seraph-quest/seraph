@@ -38,6 +38,8 @@ def test_discover_test_files_only_returns_pytest_files(tmp_path: Path):
 
 def test_hinted_test_weight_can_raise_runtime_heavy_files_above_size_weight():
     assert hinted_test_weight("tests/test_eval_harness.py", 90_000) == 240_000
+    assert hinted_test_weight("tests/test_approvals_api.py", 90_000) == 170_000
+    assert hinted_test_weight("tests/test_context_window.py", 90_000) == 160_000
     assert hinted_test_weight("tests/test_small.py", 1_200) == 1_200
 
 

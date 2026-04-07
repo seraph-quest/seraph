@@ -82,6 +82,19 @@ def _render_adapters(adapter_inventory: dict[str, object]) -> list[str]:
             lines.append(
                 f"  {op_prefix} {op_contract} via {op_mode} · {op_state}{approval_suffix}{runtime_suffix}"
             )
+            actions = operation.get("actions") or []
+            if isinstance(actions, list) and actions:
+                lines.append("    actions:")
+                for action in actions:
+                    if not isinstance(action, dict):
+                        continue
+                    required_fields = ", ".join(str(item) for item in action.get("required_payload_fields") or []) or "none"
+                    lines.append(
+                        f"    - {action.get('kind')} · "
+                        f"{'ready' if action.get('executable') else action.get('reason') or 'unavailable'} · "
+                        f"target={action.get('target_reference_mode') or 'none'} · "
+                        f"required={required_fields}"
+                    )
     return lines
 
 

@@ -29,7 +29,7 @@
 - [x] workflow run history now also exposes pending-approval details, awaiting-approval state, replay guardrails, and thread-aware recovery metadata instead of only recent run summaries
 - [x] workflow run history now also persists approval-context snapshots and blocks replay/resume when the workflow trust boundary changes instead of reusing stale approval assumptions
 - [x] workflow runtime now persists reusable checkpoint context for safe branches, records structured failed-step payloads for later recovery, and keeps workflow-run listing truthful when a later checkpoint cannot actually be resumed
-- [x] typed source-capability surfaces now also expose connector-backed authenticated mutation planning, scoped approval metadata, and a native mutation-plan tool instead of leaving privileged write paths as implicit connector lore
+- [x] typed source-capability surfaces now also expose connector-backed authenticated mutation planning, executable bounded write routes, scoped approval and audit metadata, native mutation/report planning tools, and provider-neutral report publication workflows instead of leaving privileged write paths as implicit connector lore
 - [x] cockpit workflow surfaces now derive branch-family supervision from persisted lineage, including child/peer branch inspection plus latest-branch continue/open-parent controls, instead of treating every workflow run as an isolated replay row
 - [x] built-in delegation now exposes a separate `vault_keeper` specialist for secret-management tools so generic memory delegation stops carrying direct vault read/write capability
 - [x] capability bootstrap now limits automatic repair to low-risk local workflow or skill toggles, leaving policy lifts and capability-surface expansion as explicit operator actions instead of workflow-planning side effects, and generated repair bundles no longer batch-run multiple privileged mutations from one cockpit click
@@ -48,6 +48,7 @@
 - [x] this workstream now also ships `authenticated-source-boundary-hardening-v1` for wrapper-stable source context and fail-closed authenticated workflow checkpoints
 - [x] this workstream now also ships the first `authenticated-mutation-and-boundary-explainability-v1` Batch AL aggregate for scoped extension mutation approvals, boundary-aware workflow surfaces, and safer sync runtime-audit behavior
 - [x] this workstream now also ships `connector-backed-authenticated-mutation-boundaries-v1` for typed source-write planning, scoped connector mutation approvals, and CI stabilization around the heaviest backend/frontend suites
+- [x] this workstream now also ships the first `adapter-backed-authenticated-operations-and-report-workflows-v1` Batch AM aggregate for executable connector-backed source actions, provider-neutral report publication planning, structured mutation execution audit, and heavier backend shard weighting for the approval/context suites
 
 ## Still To Do On `develop`
 

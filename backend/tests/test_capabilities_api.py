@@ -386,13 +386,17 @@ async def test_capabilities_overview_includes_catalog_extension_packs(client):
             "installed": False,
             "update_available": False,
             "version": "2026.3.23",
+            "version_line": None,
             "installed_version": None,
+            "compatibility": None,
+            "publisher": None,
             "trust": "bundled",
             "contribution_types": ["context_packs", "skills"],
             "status": "ready",
             "doctor_ok": True,
             "issues": [],
             "load_errors": [],
+            "diagnostics_summary": None,
             "recommended_actions": [
                 {
                     "type": "install_catalog_item",

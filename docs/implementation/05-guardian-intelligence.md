@@ -29,7 +29,7 @@
 - [x] guardian state now also carries learned communication guidance derived from recent intervention outcomes, including timing, suppression, blocked-state, and thread-preference bias, instead of only raw outcome history
 - [x] guardian world-model receptivity and intervention policy can now learn blocked-state async handling instead of only direct/native/timing bias
 - [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
-- [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, and lowers receptivity further when negative intervention trends line up with that conflicting execution evidence
+- [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, lowers receptivity further when negative intervention trends line up with that conflicting execution evidence, and tracks multi-day plus scheduled outcome spread so guardian state can surface explicit goal-alignment, routine, and collaborator watchpoints instead of only short-window bias summaries
 - [x] guardian state now also prioritizes live-project cross-thread continuity from recent sessions, carries matching recent-thread commitments into `next_up` and dominant-thread synthesis, and surfaces explicit follow-through risk when open project commitments and recent execution setbacks line up on the same live project
 - [x] guardian world-model synthesis now also ranks competing projects from observer, recent-session, memory, and execution evidence, prefers stronger cross-source project anchors over passive list order, preserves richer canonical project labels, and surfaces explicit ambiguity or drift risks when project evidence stays split
 - [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, provider-backed user/project modeling augmentation, stale-provider-evidence suppression, post-canonical provider writeback, capability-state governance, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
@@ -44,7 +44,7 @@
 ## Still To Do On `develop`
 
 - [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, stale-support and stale-execution contradiction grounding, and contradiction-aware confidence downgrades
-- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new negative-trend-plus-execution follow-through gating, the new cross-thread commitment carryover pass, and the first multi-project arbitration pass
+- [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new negative-trend-plus-execution follow-through gating, the new multi-day and scheduled-outcome watchpoint pass, the new cross-thread commitment carryover pass, and the first multi-project arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
 - [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale-provider-evidence suppression, first post-canonical writeback pass, and inventory/governance layer, especially broader ecosystem coverage and stronger long-horizon quality diagnostics
@@ -1081,6 +1081,36 @@ This section records the internal Batch C slices on the feature branch before th
     - wired `memory_providers` through `backend/src/extensions/lifecycle.py` so extension connector listing, config writes, enable/disable flows, and package toggle targets now include memory providers
     - wrapped provider health checks in `backend/src/memory/providers.py` and kept provider availability in diagnostics instead of globally downgrading canonical memory retrieval state
     - narrowed the supported write mode to `additive_only` until a real read-through path exists
+
+## Batch AI Branch Review Log
+
+### `long-horizon-guardian-learning-and-intervention-quality-v3`
+
+- status: complete on `feat/long-horizon-guardian-learning-batch-ai-v1`, pending inclusion in the aggregate Batch AI PR
+- scope:
+  - extended `backend/src/guardian/feedback.py` and `backend/src/guardian/learning_evidence.py` so guardian learning tracks multi-day and scheduled outcome spread instead of only short-window outcome counts
+  - carried that spread into `backend/src/memory/procedural.py` and `backend/src/memory/procedural_guidance.py` so procedural recall can preserve the same longer-horizon evidence lanes
+  - upgraded `backend/src/guardian/world_model.py` so guardian state now surfaces explicit goal-alignment, routine, and collaborator watchpoints and lowers receptivity further when multi-day negative trends line up with conflicting support or execution evidence
+  - added targeted regressions in `backend/tests/test_guardian_feedback.py` and `backend/tests/test_guardian_state.py`, plus the new `guardian_long_horizon_learning_behavior` scenario in `backend/src/evals/harness.py`
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/feedback.py backend/src/guardian/world_model.py backend/src/memory/procedural.py backend/src/memory/procedural_guidance.py backend/src/evals/harness.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py backend/tests/test_capabilities_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_feedback.py tests/test_guardian_state.py -q -k "multi_day or long_horizon or watchpoint or guardian_world_model_behavior"`
+    - result: `4 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "test_main_lists_available_scenarios"`
+    - result: `1 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_capabilities_api.py -q -k "test_capabilities_overview_includes_catalog_extension_packs"`
+    - result: `1 passed`
+  - `cd docs && npm run build`
+- subagent review:
+  - reviewer: `Epicurus` (`019d6840-e266-72c2-85c2-0f73e114ba85`)
+  - findings:
+    - the first routine-watchpoint selector could let an unrelated obligation dominate the live project watchpoint just because it was listed first
+    - the new long-horizon eval seeded March 2026 interventions but still used wall-clock `now` during guardian-state synthesis, so the runtime scenario would have aged out over time
+  - fixed before the slice stayed marked complete:
+    - narrowed obligation priority in `backend/src/guardian/world_model.py` so obligations only outrank anchor timeline context when they are actually relevant to the live project/goals/event context
+    - patched `src.guardian.feedback._now` inside the eval scenario so the new long-horizon proof stays time-stable instead of drifting with wall-clock time
+  - local CI follow-up:
+    - fixed the live `develop` backend failure by updating `backend/tests/test_capabilities_api.py` to the current extension-pack payload shape; the failing shard was asserting the pre-AJ catalog contract and then cancelling sibling backend shards through fail-fast
 
 ## Non-Goals
 

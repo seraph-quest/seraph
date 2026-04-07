@@ -262,6 +262,8 @@ async def sync_learning_signal_memories(
             metadata["weighted_support"] = round(float(axis_evidence.weighted_support), 3)
             metadata["evidence_confidence_score"] = round(float(axis_evidence.confidence_score), 3)
             metadata["evidence_quality_score"] = round(float(axis_evidence.quality_score), 3)
+            metadata["active_day_count"] = max(0, int(axis_evidence.active_day_count))
+            metadata["scheduled_day_count"] = max(0, int(axis_evidence.scheduled_day_count))
             if axis_evidence.last_confirmed_at is not None:
                 metadata["evidence_last_confirmed_at"] = axis_evidence.last_confirmed_at.isoformat()
         await memory_repository.sync_scoped_memory(

@@ -37,6 +37,9 @@ class GuardianWorldModel:
     collaborators: tuple[str, ...] = ()
     recurring_obligations: tuple[str, ...] = ()
     project_timeline: tuple[str, ...] = ()
+    goal_alignment_signals: tuple[str, ...] = ()
+    routine_watchpoints: tuple[str, ...] = ()
+    collaborator_watchpoints: tuple[str, ...] = ()
     corroboration_sources: tuple[str, ...] = ()
     judgment_risks: tuple[str, ...] = ()
 
@@ -94,6 +97,18 @@ class GuardianWorldModel:
         if self.project_timeline:
             lines.append("Project timeline:")
             lines.extend(f"- {item}" for item in self.project_timeline)
+
+        if self.goal_alignment_signals:
+            lines.append("Goal alignment signals:")
+            lines.extend(f"- {item}" for item in self.goal_alignment_signals)
+
+        if self.routine_watchpoints:
+            lines.append("Routine watchpoints:")
+            lines.extend(f"- {item}" for item in self.routine_watchpoints)
+
+        if self.collaborator_watchpoints:
+            lines.append("Collaborator watchpoints:")
+            lines.extend(f"- {item}" for item in self.collaborator_watchpoints)
 
         if self.open_loops_or_pressure:
             lines.append("Open loops and pressure:")
@@ -220,6 +235,18 @@ def _text_matches_topic(candidate: str, topic: str | None) -> bool:
         normalized_topic in normalized_candidate
         or normalized_candidate in normalized_topic
     )
+
+
+def _shares_topic_token(candidate: str, topic: str | None) -> bool:
+    normalized_candidate = _normalize_topic(candidate)
+    normalized_topic = _normalize_topic(topic)
+    if not normalized_candidate or not normalized_topic:
+        return False
+    candidate_tokens = {token for token in normalized_candidate.split() if len(token) >= 4}
+    topic_tokens = {token for token in normalized_topic.split() if len(token) >= 4}
+    if not candidate_tokens or not topic_tokens:
+        return False
+    return bool(candidate_tokens & topic_tokens)
 
 
 def _project_candidate_signals(
@@ -351,6 +378,17 @@ def _derive_intervention_receptivity(
         positive_outcomes = int(
             learning_signal.helpful_count + learning_signal.acknowledged_count
         )
+        if (
+            learning_signal.multi_day_negative_days >= 3
+            and learning_signal.multi_day_negative_days > learning_signal.multi_day_positive_days
+            and (has_supporting_context_conflict or has_execution_context_conflict)
+        ):
+            return "low"
+        if (
+            learning_signal.multi_day_negative_days >= 2
+            and learning_signal.multi_day_negative_days > learning_signal.multi_day_positive_days
+        ):
+            return "medium"
     if (
         observer_context.interruption_mode == "focus"
         or observer_context.user_state in {"deep_work", "in_meeting", "away"}
@@ -391,6 +429,150 @@ def _derive_intervention_receptivity(
     ):
         return "medium"
     return "high"
+
+
+def _event_summaries(observer_context: CurrentContext, *, limit: int = 2) -> tuple[str, ...]:
+    summaries: list[str] = []
+    for event in observer_context.upcoming_events[:limit]:
+        summary = _clean_line(str(event.get("summary") or ""))
+        if summary:
+            summaries.append(summary)
+    return tuple(summaries)
+
+
+def _build_goal_alignment_signals(
+    *,
+    project_anchor: str,
+    observer_context: CurrentContext,
+    active_projects: tuple[str, ...],
+    matching_anchor_threads: list[str],
+    matching_anchor_execution: list[str],
+    learning_signal: GuardianLearningSignal | None,
+) -> tuple[str, ...]:
+    signals: list[str] = []
+    event_summaries = _event_summaries(observer_context)
+    if (
+        project_anchor
+        and observer_context.active_goals_summary
+        and _text_matches_topic(observer_context.active_goals_summary, project_anchor)
+    ):
+        signals.append(
+            f"Live goal summary still aligns with project anchor '{project_anchor}'."
+        )
+    if event_summaries and project_anchor and any(_text_matches_topic(item, project_anchor) for item in event_summaries):
+        signals.append(
+            f"Upcoming event pressure still lines up with project anchor '{project_anchor}'."
+        )
+    if matching_anchor_threads and matching_anchor_execution:
+        signals.append(
+            f"Recent continuity and execution evidence are both reinforcing '{project_anchor}'."
+        )
+    if (
+        learning_signal is not None
+        and learning_signal.scheduled_positive_days >= 2
+        and learning_signal.scheduled_positive_days >= learning_signal.scheduled_negative_days
+    ):
+        signals.append(
+            f"Scheduled review and briefing outcomes have reinforced follow-through across {learning_signal.scheduled_positive_days} day(s)."
+        )
+    if (
+        learning_signal is not None
+        and learning_signal.scheduled_negative_days >= 2
+        and learning_signal.scheduled_negative_days > learning_signal.scheduled_positive_days
+    ):
+        signals.append(
+            f"Scheduled review and briefing outcomes have been unstable across {learning_signal.scheduled_negative_days} day(s)."
+        )
+    if (
+        project_anchor
+        and active_projects
+        and not any(_text_matches_topic(item, project_anchor) for item in active_projects)
+    ):
+        signals.append(
+            f"Recent project activity does not yet reinforce the current anchor '{project_anchor}'."
+        )
+    return _dedupe(signals)
+
+
+def _build_routine_watchpoints(
+    *,
+    project_anchor: str,
+    active_routines: list[str],
+    recurring_obligations: list[str],
+    project_timeline: tuple[str, ...],
+    observer_context: CurrentContext,
+    matching_anchor_execution: list[str],
+    learning_signal: GuardianLearningSignal | None,
+) -> tuple[str, ...]:
+    watchpoints: list[str] = []
+    event_summaries = _event_summaries(observer_context)
+    anchor_context = list(recurring_obligations) + list(project_timeline) + list(active_routines)
+    related_obligation = next(
+        (
+            item
+            for item in recurring_obligations
+            if (
+                _text_matches_topic(item, project_anchor)
+                or _shares_topic_token(item, observer_context.active_goals_summary)
+                or any(_shares_topic_token(item, event_summary) for event_summary in event_summaries)
+            )
+        ),
+        "",
+    )
+    matching_anchor_context = [
+        item for item in anchor_context
+        if project_anchor and _text_matches_topic(item, project_anchor)
+    ] if project_anchor else []
+    primary_context = (
+        related_obligation
+        if related_obligation
+        else (
+            matching_anchor_context[0]
+            if matching_anchor_context
+            else (anchor_context[0] if anchor_context else "")
+        )
+    )
+    if primary_context and event_summaries:
+        watchpoints.append(
+            f"{primary_context} should stay ahead of {event_summaries[0]}."
+        )
+    if primary_context and matching_anchor_execution:
+        watchpoints.append(
+            f"{primary_context} is exposed by recent execution setbacks on '{project_anchor}'."
+        )
+    if (
+        learning_signal is not None
+        and learning_signal.multi_day_negative_days >= 3
+        and primary_context
+    ):
+        watchpoints.append(
+            f"{primary_context} still lacks clean follow-through after negative outcomes across {learning_signal.multi_day_negative_days} day(s)."
+        )
+    return _dedupe(watchpoints)
+
+
+def _build_collaborator_watchpoints(
+    *,
+    project_anchor: str,
+    collaborators: list[str],
+    observer_context: CurrentContext,
+    matching_anchor_execution: list[str],
+) -> tuple[str, ...]:
+    watchpoints: list[str] = []
+    event_summaries = _event_summaries(observer_context)
+    anchor_collaborators = [
+        item for item in collaborators
+        if project_anchor and _text_matches_topic(item, project_anchor)
+    ] if project_anchor else []
+    if anchor_collaborators and event_summaries:
+        watchpoints.append(
+            f"{anchor_collaborators[0]} is part of the follow-through path before {event_summaries[0]}."
+        )
+    if anchor_collaborators and matching_anchor_execution:
+        watchpoints.append(
+            f"{anchor_collaborators[0]} is exposed by the latest execution setback on '{project_anchor}'."
+        )
+    return _dedupe(watchpoints)
 
 
 def build_guardian_world_model(
@@ -501,6 +683,29 @@ def build_guardian_world_model(
         + list(active_projects[:2])
         + matching_anchor_execution[:2]
         + matching_anchor_threads[:1]
+    )
+    goal_alignment_signals = _build_goal_alignment_signals(
+        project_anchor=project_anchor,
+        observer_context=observer_context,
+        active_projects=active_projects,
+        matching_anchor_threads=matching_anchor_threads,
+        matching_anchor_execution=matching_anchor_execution,
+        learning_signal=learning_signal,
+    )
+    routine_watchpoints = _build_routine_watchpoints(
+        project_anchor=project_anchor,
+        active_routines=active_routines,
+        recurring_obligations=recurring_obligations,
+        project_timeline=project_timeline,
+        observer_context=observer_context,
+        matching_anchor_execution=matching_anchor_execution,
+        learning_signal=learning_signal,
+    )
+    collaborator_watchpoints = _build_collaborator_watchpoints(
+        project_anchor=project_anchor,
+        collaborators=collaborators,
+        observer_context=observer_context,
+        matching_anchor_execution=matching_anchor_execution,
     )
     memory_signals = _dedupe(
         goal_memory
@@ -744,6 +949,22 @@ def build_guardian_world_model(
             judgment_risks.append(
                 "Recent execution setbacks and intervention misses suggest follow-through risk."
             )
+    if (
+        learning_signal is not None
+        and learning_signal.multi_day_negative_days >= 3
+        and learning_signal.multi_day_negative_days > learning_signal.multi_day_positive_days
+    ):
+        judgment_risks.append(
+            f"Multi-day intervention outcomes have skewed negative across {learning_signal.multi_day_negative_days} day(s)."
+        )
+    if (
+        learning_signal is not None
+        and learning_signal.scheduled_negative_days >= 2
+        and learning_signal.scheduled_negative_days > learning_signal.scheduled_positive_days
+    ):
+        judgment_risks.append(
+            f"Scheduled review and briefing outcomes have degraded across {learning_signal.scheduled_negative_days} day(s)."
+        )
 
     return GuardianWorldModel(
         current_focus=current_focus,
@@ -771,6 +992,9 @@ def build_guardian_world_model(
         collaborators=_dedupe(collaborators),
         recurring_obligations=_dedupe(recurring_obligations),
         project_timeline=project_timeline,
+        goal_alignment_signals=goal_alignment_signals,
+        routine_watchpoints=routine_watchpoints,
+        collaborator_watchpoints=collaborator_watchpoints,
         corroboration_sources=_dedupe(corroboration_sources),
         judgment_risks=_dedupe(judgment_risks),
     )

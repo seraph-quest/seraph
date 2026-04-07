@@ -104,7 +104,7 @@ async def consolidate_session(
             link_resolver=resolve_memory_links,
         )
         provider_writeback_result = await writeback_additive_memory_providers(
-            memories=extraction.memories,
+            memories=persist_result.persisted_memories,
             session_id=session_id,
             trigger=trigger,
             workflow_name=workflow_name,

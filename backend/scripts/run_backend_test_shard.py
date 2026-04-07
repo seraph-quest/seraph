@@ -28,6 +28,32 @@ RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
 }
 
 SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
+    "tests/test_capabilities_api.py": [
+        (
+            "tests/test_capabilities_api.py::overview_and_catalog",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "load_starter_packs or attach_ or mcp_status or doctor_reports or capabilities_overview",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_ or ensure_bundled_workflow_available",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_and_validation",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_ or workflow_draft_validation_and_save",
+            ],
+        ),
+    ],
     "tests/test_delivery.py": [
         (
             "tests/test_delivery.py::channel_and_bundle",

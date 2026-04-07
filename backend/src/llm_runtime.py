@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from dataclasses import dataclass
 import logging
 import math
 from fnmatch import fnmatchcase
@@ -23,12 +24,39 @@ _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
+_target_feedback_lock = Lock()
 _KNOWN_RUNTIME_PROFILES = {"default", "local"}
 _GUARDRAIL_TIERS = {"low": 0, "medium": 1, "high": 2}
+_RECENT_FEEDBACK_WINDOW_SECONDS = 900.0
+_FAILURE_KIND_SCORES = {
+    "auth": 4.0,
+    "rate_limited": 2.5,
+    "timeout": 2.0,
+    "unavailable": 2.0,
+    "server_error": 1.5,
+    "validation": 1.0,
+    "unknown": 1.0,
+}
 _runtime_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "llm_runtime_request_id",
     default=None,
 )
+
+
+@dataclass
+class _TargetFeedback:
+    success_count: int = 0
+    failure_count: int = 0
+    consecutive_failures: int = 0
+    recent_success_count: int = 0
+    recent_failure_count: int = 0
+    last_success_at: float | None = None
+    last_failure_at: float | None = None
+    last_failure_kind: str | None = None
+    last_error: str | None = None
+
+
+_target_feedback: dict[tuple[str, str | None, str | None], _TargetFeedback] = {}
 
 
 def _primary_api_key() -> str:
@@ -626,6 +654,118 @@ def _target_cooldown_seconds() -> int:
 def _reset_target_health() -> None:
     with _target_health_lock:
         _unhealthy_targets.clear()
+    with _target_feedback_lock:
+        _target_feedback.clear()
+
+
+def _target_feedback_entry(
+    *,
+    model_id: str,
+    api_base: str | None,
+    api_key: str | None,
+) -> _TargetFeedback:
+    target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+    with _target_feedback_lock:
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            entry = _TargetFeedback()
+            _target_feedback[target_key] = entry
+        return entry
+
+
+def _classify_runtime_failure(error: Exception) -> str:
+    message = str(error).lower()
+    if any(token in message for token in ("401", "403", "auth", "unauthorized", "forbidden", "invalid api key")):
+        return "auth"
+    if any(token in message for token in ("429", "rate limit", "too many requests")):
+        return "rate_limited"
+    if any(token in message for token in ("timeout", "timed out")):
+        return "timeout"
+    if any(token in message for token in ("503", "unavailable", "connection refused", "connection reset", "down")):
+        return "unavailable"
+    if any(token in message for token in ("500", "502", "504", "server error")):
+        return "server_error"
+    if any(token in message for token in ("context length", "invalid", "bad request")):
+        return "validation"
+    return "unknown"
+
+
+def _feedback_snapshot(
+    *,
+    model_id: str,
+    api_base: str | None,
+    api_key: str | None,
+) -> dict[str, Any]:
+    target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+    now = monotonic()
+    cooldown_remaining_seconds = 0.0
+    with _target_health_lock:
+        unhealthy_until = _unhealthy_targets.get(target_key)
+        if unhealthy_until is not None:
+            cooldown_remaining_seconds = max(0.0, unhealthy_until - now)
+    with _target_feedback_lock:
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            return {
+                "success_count": 0,
+                "failure_count": 0,
+                "consecutive_failures": 0,
+                "recent_success_count": 0,
+                "recent_failure_count": 0,
+                "last_failure_kind": None,
+                "last_error": None,
+                "cooldown_remaining_seconds": 0.0,
+                "failure_risk_score": 0.0,
+                "production_readiness": "ready",
+                "feedback_state": "clear",
+            }
+        recent_failure_count = entry.recent_failure_count
+        recent_success_count = entry.recent_success_count
+        effective_consecutive_failures = entry.consecutive_failures
+        effective_last_failure_kind = entry.last_failure_kind
+        effective_last_error = entry.last_error
+        if entry.last_failure_at is not None and now - entry.last_failure_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            recent_failure_count = 0
+            effective_consecutive_failures = 0
+            effective_last_failure_kind = None
+            effective_last_error = None
+        if entry.last_success_at is not None and now - entry.last_success_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            recent_success_count = 0
+        failure_kind_score = _FAILURE_KIND_SCORES.get(effective_last_failure_kind or "", 0.0)
+        failure_risk_score = max(
+            0.0,
+            failure_kind_score
+            + (float(effective_consecutive_failures) * 1.5)
+            + (float(recent_failure_count) * 0.75)
+            + (1.0 if cooldown_remaining_seconds > 0 else 0.0)
+            - min(float(recent_success_count) * 0.5, 1.5),
+        )
+        feedback_state = "clear"
+        production_readiness = "ready"
+        if cooldown_remaining_seconds > 0:
+            feedback_state = "cooldown"
+            production_readiness = "degraded"
+        elif effective_consecutive_failures >= 2 or recent_failure_count >= 2:
+            feedback_state = "unstable"
+            production_readiness = "degraded"
+        elif recent_failure_count > 0:
+            feedback_state = "recovering"
+            production_readiness = "guarded"
+        elif recent_success_count > 0:
+            feedback_state = "stable"
+        return {
+            "success_count": entry.success_count,
+            "failure_count": entry.failure_count,
+            "consecutive_failures": effective_consecutive_failures,
+            "recent_success_count": recent_success_count,
+            "recent_failure_count": recent_failure_count,
+            "last_failure_kind": effective_last_failure_kind,
+            "last_error": effective_last_error,
+            "cooldown_remaining_seconds": round(cooldown_remaining_seconds, 3),
+            "failure_risk_score": round(failure_risk_score, 3),
+            "production_readiness": production_readiness,
+            "feedback_state": feedback_state,
+        }
 
 
 def _mark_target_failed(
@@ -633,14 +773,29 @@ def _mark_target_failed(
     model_id: str,
     api_base: str | None,
     api_key: str | None,
+    error: Exception | None = None,
 ) -> None:
     cooldown_seconds = _target_cooldown_seconds()
-    if cooldown_seconds <= 0:
-        return
-    with _target_health_lock:
-        _unhealthy_targets[_target_key(model_id=model_id, api_base=api_base, api_key=api_key)] = (
-            monotonic() + cooldown_seconds
-        )
+    now = monotonic()
+    if cooldown_seconds > 0:
+        with _target_health_lock:
+            _unhealthy_targets[_target_key(model_id=model_id, api_base=api_base, api_key=api_key)] = now + cooldown_seconds
+    with _target_feedback_lock:
+        target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            entry = _TargetFeedback()
+            _target_feedback[target_key] = entry
+        entry.failure_count += 1
+        if entry.last_failure_at is None or now - entry.last_failure_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            entry.recent_failure_count = 1
+        else:
+            entry.recent_failure_count += 1
+        entry.consecutive_failures += 1
+        entry.last_failure_at = now
+        if error is not None:
+            entry.last_failure_kind = _classify_runtime_failure(error)
+            entry.last_error = str(error)
 
 
 def _mark_target_succeeded(
@@ -654,6 +809,21 @@ def _mark_target_succeeded(
             _target_key(model_id=model_id, api_base=api_base, api_key=api_key),
             None,
         )
+    now = monotonic()
+    with _target_feedback_lock:
+        target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            entry = _TargetFeedback()
+            _target_feedback[target_key] = entry
+        entry.success_count += 1
+        if entry.last_success_at is None or now - entry.last_success_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            entry.recent_success_count = 1
+        else:
+            entry.recent_success_count += 1
+        entry.last_success_at = now
+        entry.consecutive_failures = 0
+        entry.last_error = None
 
 
 def _is_target_healthy(
@@ -833,6 +1003,11 @@ def _order_targets_by_policy(
             max_budget_class=assessment["max_budget_class"],
             steering_mode=budget_steering_mode,
         )
+        annotated_target["live_feedback"] = _feedback_snapshot(
+            model_id=str(annotated_target["model_id"]),
+            api_base=annotated_target.get("api_base"),
+            api_key=annotated_target.get("api_key"),
+        )
         if assessment["policy_compliant"]:
             any_compliant = True
         annotated_targets.append((index, annotated_target))
@@ -850,9 +1025,10 @@ def _order_targets_by_policy(
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], float, int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], float, float, int]:
         index, target = item
         assessment = target["policy_assessment"]
+        live_feedback = target["live_feedback"]
         capabilities = set(
             provider_capabilities(
                 str(target["model_id"]),
@@ -889,6 +1065,7 @@ def _order_targets_by_policy(
             safeguard_penalty,
             -local_score - capability_score,
             capability_priority,
+            float(live_feedback.get("failure_risk_score", 0.0)),
             -float(target.get("budget_preference_score", 0.0)),
             index,
         )
@@ -1077,6 +1254,11 @@ def _build_routing_decision_details(
     candidate_targets: list[dict[str, Any]] = []
     for target in ordered_targets:
         assessment = target["policy_assessment"]
+        live_feedback = target.get("live_feedback") or _feedback_snapshot(
+            model_id=str(target["model_id"]),
+            api_base=target.get("api_base"),
+            api_key=target.get("api_key"),
+        )
         healthy = _is_target_healthy(
             model_id=str(target["model_id"]),
             api_base=target.get("api_base"),
@@ -1145,6 +1327,10 @@ def _build_routing_decision_details(
                 "budget_headroom": budget_headroom,
                 "budget_preference_score": budget_preference_score,
                 "simulation_score": simulation_score,
+                "failure_risk_score": live_feedback["failure_risk_score"],
+                "feedback_state": live_feedback["feedback_state"],
+                "production_readiness": live_feedback["production_readiness"],
+                "live_feedback": live_feedback,
                 "reason_codes": _candidate_reason_codes(
                     source=target["source"],
                     decision=decision,
@@ -1222,6 +1408,28 @@ def _build_routing_decision_details(
         for target in candidate_targets
         if target["decision"] != "selected"
     ]
+    rejected_target_summaries = [
+        {
+            "model_id": target["model_id"],
+            "source": target["source"],
+            "decision": target["decision"],
+            "production_readiness": target["production_readiness"],
+            "failure_risk_score": target["failure_risk_score"],
+            "reason_codes": target["reason_codes"],
+        }
+        for target in rejected_targets
+    ]
+    route_explanation_parts = [
+        f"selected {selected_candidate['model_id']}",
+        f"readiness={selected_candidate['production_readiness']}",
+        f"failure_risk={selected_candidate['failure_risk_score']}",
+    ]
+    if selected_candidate["matched_policy_intents"]:
+        route_explanation_parts.append(
+            "matched=" + ",".join(selected_candidate["matched_policy_intents"])
+        )
+    if rejected_targets:
+        route_explanation_parts.append(f"rejected={len(rejected_targets)}")
 
     return {
         "runtime_path": runtime_path,
@@ -1243,14 +1451,19 @@ def _build_routing_decision_details(
         "selected_budget_headroom": selected_candidate["budget_headroom"],
         "selected_budget_preference_score": selected_candidate["budget_preference_score"],
         "selected_route_score": selected_candidate["simulation_score"],
+        "selected_failure_risk_score": selected_candidate["failure_risk_score"],
+        "selected_production_readiness": selected_candidate["production_readiness"],
+        "selected_live_feedback": selected_candidate["live_feedback"],
         "attempt_order": attempt_order,
         "reroute_cause": reroute_cause,
         "rerouted_from_unhealthy_primary": rerouted and primary_unhealthy,
         "rerouted_from_policy_guardrails": rerouted_due_to_policy,
         "guardrail_compliant_targets_present": compliant_targets_present,
+        "route_explanation": "; ".join(route_explanation_parts),
         "candidate_targets": candidate_targets,
         "simulated_routes": simulated_routes,
         "rejected_targets": rejected_targets,
+        "rejected_target_summaries": rejected_target_summaries,
         "rejected_target_count": len(rejected_targets),
     }
 
@@ -1596,6 +1809,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         model_id=primary_model,
                         api_base=self.api_base,
                         api_key=self.api_key,
+                        error=error,
                     )
                 else:
                     fallback_model = target["model"]
@@ -1603,6 +1817,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         model_id=fallback_model.model_id,
                         api_base=fallback_model.api_base,
                         api_key=fallback_model.api_key,
+                        error=error,
                     )
                     fallback_errors.append(
                         {
@@ -1839,6 +2054,7 @@ def completion_with_fallback_sync(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),
                         api_key=primary_kwargs.get("api_key"),
+                        error=error,
                     )
                 else:
                     fallback_model = str(target["model_id"])
@@ -1846,6 +2062,7 @@ def completion_with_fallback_sync(
                         model_id=fallback_model,
                         api_base=target["api_base"],
                         api_key=target["api_key"],
+                        error=error,
                     )
                     fallback_errors.append(
                         {

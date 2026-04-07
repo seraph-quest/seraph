@@ -20,7 +20,7 @@
 - [x] wildcard runtime-path routing rules, with exact-path overrides taking precedence
 - [x] first-class local runtime profile for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with degrade-open behavior when no compliant target exists
-- [x] first simulation-grade provider planning pass that scores candidate routes before execution, makes budget steering explicit, and exposes chosen-versus-rejected route details plus simulated route order across runtime audit, operator timeline, and activity-ledger surfaces
+- [x] first simulation-grade provider planning pass that scores candidate routes before execution, makes budget steering explicit, carries per-target live feedback and production-readiness state into route choice, and exposes chosen-versus-rejected route details plus simulated route order across runtime audit, operator timeline, and activity-ledger surfaces
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
@@ -37,7 +37,7 @@
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider selection policy beyond the first simulation-grade route scoring and explicit budget steering pass, especially with stronger live-provider health, cost, and production-like failure feedback
+- [ ] deepen provider selection policy beyond the first simulation-grade route scoring and explicit budget steering pass, especially with stronger live-provider feedback loops and production-like failure modeling beyond the new per-target failure-risk/readiness layer
 - [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, strategist-learning continuity, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair/bootstrap, delegated workflow, and workflow-composition behavioral contracts
 
 ## Completed PR Sequence
@@ -70,6 +70,40 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
    expand behavioral eval coverage beyond chat and scheduler seams into observer refresh, consolidation, proactive delivery, and policy-mode guardrails so broader guardian behavior is regression-tested
 
 ## Current Slice Record
+
+### `runtime-planning-provider-feedback-and-live-eval-depth-v2`
+
+- status: complete on `feat/runtime-planning-batch-ak-v1`, pending inclusion in the aggregate Batch AK PR for `#307`
+- root cause addressed:
+  - the first simulation-grade router could score candidates and expose budget steering, but it still treated live provider failures too shallowly once a target left immediate cooldown
+  - route explanations and downstream operator/activity surfaces still lacked a denser production-readiness or failure-risk summary, and the heaviest runtime eval seam was still brittle enough to burn an entire backend shard
+- scope:
+  - updated `backend/src/llm_runtime.py` so runtime routing now carries per-target live feedback, recent failure classification, production-readiness state, failure-risk scoring, and rejected-target summaries into candidate ranking and route explanations
+  - extended `backend/src/api/operator.py` and `backend/src/api/activity.py` so operator and activity surfaces preserve `selected_live_feedback`, `selected_failure_risk_score`, `selected_production_readiness`, `route_explanation`, and `rejected_target_summaries`
+  - extended `backend/src/evals/harness.py` so the runtime audit eval now proves the richer failure-risk, readiness, and route-explanation contract instead of only selected model order
+  - updated `backend/scripts/run_backend_test_shard.py` to split the heavy `tests/test_eval_harness.py` runtime-eval seam into isolated shard invocations so one long-running scenario cannot consume the whole backend shard budget
+- local regression fixed before the slice stayed complete:
+  - the first shard-runner regression test still asserted the pre-split command shape for the remaining eval-harness invocation and failed locally once the specialized invocation path landed
+  - fixed by pinning the post-split invocation shape in `backend/tests/test_run_backend_test_shard.py` and rerunning the shard-runner suite
+- PR review follow-up fixed on the same batch branch:
+  - stale provider failures were not decaying out of live routing state, so a target could stay `degraded` after the recent-feedback window had actually expired
+  - fixed by expiring recent failure and success counts inside `_feedback_snapshot(...)` and pinning the decay behavior in `backend/tests/test_llm_runtime.py`
+- validation:
+  - `python3 -m py_compile backend/src/llm_runtime.py backend/src/api/operator.py backend/src/api/activity.py backend/src/evals/harness.py backend/tests/test_llm_runtime.py backend/tests/test_operator_api.py backend/tests/test_activity_api.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_llm_runtime.py -q -k "live_feedback or logs_routing_decision or reroutes_away_from_unhealthy_primary"`
+    - result: `4 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_operator_api.py tests/test_activity_api.py -q -k "routing_metadata or capability_family"`
+    - result: `3 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "provider_routing_decision_audit or test_main_lists_available_scenarios"`
+    - result: `1 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_run_backend_test_shard.py tests/test_backend_test_shards.py -q`
+    - result: `15 passed`
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario provider_routing_decision_audit --indent 0`
+    - result: `passed`
+- subagent review:
+  - focused read-only subagent review was run on the runtime/eval seam and on the API/shard-runner seam
+  - both review passes ended with no remaining material findings
+  - the only material review finding was the stale-feedback decay bug above, which was fixed on the same branch before PR open
 
 ### `provider-policy-simulation-and-budget-planning-v1`
 

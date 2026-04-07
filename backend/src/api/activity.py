@@ -751,11 +751,14 @@ async def get_activity_ledger(
             "selected_source",
             "budget_steering_mode",
             "selected_route_score",
+            "selected_failure_risk_score",
+            "selected_production_readiness",
             "selected_budget_preference_score",
             "required_task_class",
             "max_budget_class",
             "max_cost_tier",
             "max_latency_tier",
+            "route_explanation",
         ):
             value = _request_metadata_value(details, key)
             if value is not None:
@@ -767,6 +770,12 @@ async def get_activity_ledger(
                 for intent in required_policy_intents
                 if str(intent).strip()
             ]
+        selected_live_feedback = details.get("selected_live_feedback")
+        if isinstance(selected_live_feedback, dict) and selected_live_feedback:
+            metadata_entry["selected_live_feedback"] = selected_live_feedback
+        rejected_target_summaries = details.get("rejected_target_summaries")
+        if isinstance(rejected_target_summaries, list) and rejected_target_summaries:
+            metadata_entry["rejected_target_summaries"] = rejected_target_summaries
 
     for event in audit_events:
         details = event.get("details") if isinstance(event.get("details"), dict) else {}
@@ -873,6 +882,14 @@ async def get_activity_ledger(
                 "selected_source": _request_metadata_value(routing_metadata, "selected_source"),
                 "budget_steering_mode": _request_metadata_value(routing_metadata, "budget_steering_mode"),
                 "selected_route_score": _request_metadata_value(routing_metadata, "selected_route_score"),
+                "selected_failure_risk_score": _request_metadata_value(
+                    routing_metadata,
+                    "selected_failure_risk_score",
+                ),
+                "selected_production_readiness": _request_metadata_value(
+                    routing_metadata,
+                    "selected_production_readiness",
+                ),
                 "selected_budget_preference_score": _request_metadata_value(
                     routing_metadata,
                     "selected_budget_preference_score",
@@ -882,6 +899,9 @@ async def get_activity_ledger(
                 "max_cost_tier": _request_metadata_value(routing_metadata, "max_cost_tier"),
                 "max_latency_tier": _request_metadata_value(routing_metadata, "max_latency_tier"),
                 "required_policy_intents": routing_metadata.get("required_policy_intents", []),
+                "selected_live_feedback": routing_metadata.get("selected_live_feedback"),
+                "route_explanation": _request_metadata_value(routing_metadata, "route_explanation"),
+                "rejected_target_summaries": routing_metadata.get("rejected_target_summaries", []),
                 "capability_family": capability_family,
             },
         })

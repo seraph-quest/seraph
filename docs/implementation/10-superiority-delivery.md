@@ -54,8 +54,8 @@ This file explains:
 
 ### 3. Reliability and legibility
 
-- [x] shipped foundations: runtime routing, fallbacks, weighted scoring, strict required-capability plus cost/latency/task-class/budget safeguard routing, structured audit visibility, and deterministic eval harness coverage
-- [ ] still missing: broader behavioral eval depth and richer provider-policy explainability beyond the current weighted-plus-safeguard router
+- [x] shipped foundations: runtime routing, fallbacks, weighted scoring, strict required-capability plus cost/latency/task-class/budget safeguard routing, per-target live feedback plus production-readiness route diagnostics, structured audit visibility, and deterministic eval harness coverage
+- [ ] still missing: broader behavioral eval depth and richer provider-policy explainability beyond the current weighted-plus-safeguard router and first live feedback/failure-risk layer
 - owners: Workstream 03
 
 ### 4. Presence and reach

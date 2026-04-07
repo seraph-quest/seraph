@@ -23,6 +23,23 @@ RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_workflows.py": 1_500,
 }
 
+SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
+    "tests/test_eval_harness.py": [
+        (
+            "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios",
+            ["tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios"],
+        ),
+        (
+            "tests/test_eval_harness.py::remaining",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "not test_run_runtime_evals_passes_all_scenarios",
+            ],
+        ),
+    ],
+}
+
 
 def timeout_for_file(path: str, default_timeout_seconds: int | None) -> int | None:
     hinted_timeout = RUNTIME_HEAVY_FILE_TIMEOUTS.get(path)
@@ -31,6 +48,10 @@ def timeout_for_file(path: str, default_timeout_seconds: int | None) -> int | No
     if hinted_timeout is None:
         return default_timeout_seconds
     return max(default_timeout_seconds, hinted_timeout)
+
+
+def pytest_invocations_for_target(path: str) -> list[tuple[str, list[str]]]:
+    return SPECIALIZED_TEST_INVOCATIONS.get(path, [(path, [path])])
 
 
 def run_shard_files(
@@ -46,30 +67,31 @@ def run_shard_files(
 
     extra_args = list(pytest_args or [])
     for path in files:
-        command = [sys.executable, "-m", "pytest", "-q", path, *extra_args]
-        timeout_seconds = timeout_for_file(path, file_timeout_seconds)
-        started_at = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=root,
-                check=False,
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
+        for label, invocation_args in pytest_invocations_for_target(path):
+            command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args]
+            timeout_seconds = timeout_for_file(path, file_timeout_seconds)
+            started_at = time.perf_counter()
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=root,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                duration_s = time.perf_counter() - started_at
+                print(
+                    f"[backend-shard] {label} -> 124 ({duration_s:.2f}s) timed out after "
+                    f"{timeout_seconds}s"
+                )
+                return 124
             duration_s = time.perf_counter() - started_at
             print(
-                f"[backend-shard] {path} -> 124 ({duration_s:.2f}s) timed out after "
-                f"{timeout_seconds}s"
+                f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)"
+                f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
             )
-            return 124
-        duration_s = time.perf_counter() - started_at
-        print(
-            f"[backend-shard] {path} -> {completed.returncode} ({duration_s:.2f}s)"
-            f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
-        )
-        if completed.returncode != 0:
-            return completed.returncode
+            if completed.returncode != 0:
+                return completed.returncode
     return 0
 
 

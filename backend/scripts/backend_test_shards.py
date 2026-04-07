@@ -16,6 +16,25 @@ class TestFile:
 TestFile.__test__ = False
 
 
+# File size alone underestimates a few high-latency suites that dominate backend CI.
+RUNTIME_HINT_WEIGHTS: dict[str, int] = {
+    "tests/test_workflows.py": 260_000,
+    "tests/test_extensions_api.py": 230_000,
+    "tests/test_llm_runtime.py": 220_000,
+    "tests/test_guardian_state.py": 210_000,
+    "tests/test_eval_harness.py": 240_000,
+    "tests/test_delivery.py": 180_000,
+    "tests/test_activity_api.py": 150_000,
+    "tests/test_observer_api.py": 145_000,
+    "tests/test_operator_api.py": 140_000,
+    "tests/test_memory_providers.py": 135_000,
+}
+
+
+def hinted_test_weight(relative_path: str, base_weight: int) -> int:
+    return max(base_weight, RUNTIME_HINT_WEIGHTS.get(relative_path, 0))
+
+
 def discover_test_files(root: Path) -> list[TestFile]:
     tests_dir = root / "tests"
     discovered: list[TestFile] = []
@@ -24,7 +43,13 @@ def discover_test_files(root: Path) -> list[TestFile]:
             weight = path.stat().st_size
         except OSError:
             continue
-        discovered.append(TestFile(path=str(path.relative_to(root)), weight=max(weight, 1)))
+        relative_path = str(path.relative_to(root))
+        discovered.append(
+            TestFile(
+                path=relative_path,
+                weight=hinted_test_weight(relative_path, max(weight, 1)),
+            )
+        )
     return discovered
 
 

@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
@@ -20,7 +21,7 @@ def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):
     first_call = mock_run.call_args_list[0]
     second_call = mock_run.call_args_list[1]
     assert first_call.kwargs["cwd"] == tmp_path
-    assert first_call.args[0][0].endswith("python")
+    assert first_call.args[0][0] == sys.executable
     assert first_call.args[0][1:4] == ["-m", "pytest", "-q"]
     assert "tests/test_alpha.py" in first_call.args[0]
     assert "-x" in first_call.args[0]
@@ -37,7 +38,7 @@ def test_run_shard_files_supports_script_dir_import_fallback(tmp_path: Path):
         result = run_shard_files(tmp_path, files)
 
     assert result == 0
-    assert mock_run.call_args.args[0][0].endswith("python")
+    assert mock_run.call_args.args[0][0] == sys.executable
 
 
 def test_run_shard_files_stops_after_first_failure(tmp_path: Path):

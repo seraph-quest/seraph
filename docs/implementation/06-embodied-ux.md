@@ -36,6 +36,7 @@
 - [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
 - [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, family-row checkpoint drill-in, direct family-row retry/repair controls, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, branch or retry from family checkpoints, repair failed family steps, and draft continuation plans without reconstructing lineage manually
 - [x] cockpit artifact control now also exposes source-run provenance when lineage is uniquely visible, related family outputs, follow-on workflow rows, artifact next-step drafting, and keyboard-first artifact inspect/plan/run shortcuts instead of treating artifacts as generic file-context handoff only
+- [x] cockpit artifact control now also exposes source-run open/continue, source-failure reuse, related-output comparison, family-output continuation/recovery parity, and explicit candidate-source rows when lineage is ambiguous instead of collapsing artifact follow-through into one inspector-only path
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -61,6 +62,7 @@
 - [x] this workstream now also ships `workflow-family-checkpoint-drilldown-and-step-control-v1`
 - [x] this workstream now also ships `workflow-family-recovery-control-parity-v1`
 - [x] this workstream now also ships `artifact-lineage-and-follow-on-control-v1`
+- [x] this workstream now also ships `artifact-lineage-and-long-running-control-v2`
 - [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
 
 ## Still To Do On `develop`
@@ -93,6 +95,38 @@
   - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
     - result: `55 passed`
   - `cd frontend && npm run build`
+    - result: `passed`
+
+### `artifact-lineage-and-long-running-control-v2`
+
+- status: complete on `feat/long-running-workflow-control-batch-ah-v2` and ready for PR
+- root causes addressed:
+  - Batch AH v1 made artifact provenance and related outputs visible, but operators still had to hop between evidence shortcuts, recent outputs, and the artifact inspector to keep acting on the same artifact thread
+  - artifact lineage still degraded too hard once provenance was ambiguous, even when the runtime could truthfully surface a bounded set of recent candidate source runs for operator review
+  - backend CI was still showing shard fragility from long-tail runtime skew and a stale shard-runner executable assertion, which kept muddying workflow-control delivery with infrastructure noise
+- scope:
+  - evidence shortcuts and recent outputs now expose direct artifact source-run open/continue, source-failure reuse, and related-output comparison actions from the same primary artifact target
+  - workflow family-output rows and artifact inspector rows now reach parity on continue, failure-context reuse, checkpoint drill-in, and recovery controls instead of splitting long-running workflow control between artifact and workflow surfaces
+  - ambiguous artifact lineage now fails closed with explicit candidate source rows and candidate failure reuse actions rather than implying one guessed source run
+  - backend shard planning now weights historically slow suites explicitly, the GitHub workflow runs ten backend shards instead of eight, and shard-runner tests now pin the real Python executable contract used in CI
+- review findings fixed during implementation:
+  - the ambiguous-lineage case needed an explicit operator surface instead of silent disable, otherwise artifact actions would still collapse once provenance stopped being unique
+  - the first pass reused family-level failure context for family-output and related-output rows whose labels implied run-local failure, which could have drafted recovery against the wrong workflow
+  - the first ambiguous-lineage candidate rows also exposed continue/checkpoint/recovery actions even though artifact provenance was explicitly unresolved, which was a fail-open contract for a surface that claimed ambiguity
+  - the concrete CI failure was a stale test assumption that the shard runner executable would always end with `python`, while the hosted runner uses `.venv/bin/python3`
+  - the broader CI fragility was runtime skew across a few heavy suites, so the fix had to rebalance shard assignment and shard count instead of pretending there was one product assertion failure
+- validation:
+  - `cd backend && .venv/bin/python -m pytest tests/test_run_backend_test_shard.py tests/test_backend_test_shards.py -q`
+    - result: `11 passed`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx -t "surfaces workflow branch families and can continue the latest branch|surfaces evidence shortcuts and keyboard-first triage control|surfaces artifact lineage and follow-on control across outputs and the inspector|fails closed when artifact lineage is ambiguous across recent runs"`
+    - result: `4 passed | 53 skipped`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `57 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
     - result: `passed`
 
 ### `onboarding-web-context-v1`

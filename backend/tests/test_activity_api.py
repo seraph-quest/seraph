@@ -83,6 +83,31 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
                         "thread_label": "Research thread",
                         "resume_message": "Resume after approval.",
                         "risk_level": "high",
+                        "extension_id": "seraph.wave2-contribution",
+                        "extension_display_name": "Wave2 contribution",
+                        "action": "configure",
+                        "package_path": "/tmp/extensions/wave2-contribution",
+                        "permissions": {"tool_names": ["write_file"]},
+                        "approval_profile": {
+                            "requires_lifecycle_approval": True,
+                            "lifecycle_boundaries": ["workspace_write"],
+                        },
+                        "approval_scope": {
+                            "action": "configure",
+                            "target": {
+                                "type": "extension_package",
+                                "name": "Wave2 contribution",
+                                "reference": "manifest.yaml",
+                            },
+                            "config_scope": {
+                                "config_types": ["node_adapters"],
+                                "changed_target_count": 1,
+                            },
+                        },
+                        "approval_context": {
+                            "risk_level": "high",
+                            "execution_boundaries": ["workspace_write"],
+                        },
                     }
                 ]
             ),
@@ -184,6 +209,14 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
 
     workflow_item = next(item for item in items if item["kind"] == "workflow_run")
     assert workflow_item["continue_message"] == "Continue from this workflow run."
+    approval_item = next(item for item in items if item["kind"] == "approval")
+    assert approval_item["metadata"]["approval_id"] == "approval-1"
+    assert approval_item["metadata"]["extension_id"] == "seraph.wave2-contribution"
+    assert approval_item["metadata"]["extension_action"] == "configure"
+    assert approval_item["metadata"]["approval_scope"]["target"]["reference"] == "manifest.yaml"
+    assert approval_item["metadata"]["approval_scope"]["config_scope"]["config_types"] == [
+        "node_adapters"
+    ]
 
 
 @pytest.mark.asyncio
@@ -214,6 +247,16 @@ async def test_activity_ledger_hides_stale_resume_surface_when_workflow_boundary
                         "replay_recommended_actions": [
                             {"type": "set_tool_policy", "label": "Allow write_file", "mode": "full"}
                         ],
+                        "trust_boundary": {
+                            "status": "changed",
+                            "blocked": True,
+                            "reason": "approval_context_changed",
+                            "message": (
+                                "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+                                "Start a fresh run instead of replaying or resuming."
+                            ),
+                            "changed_fields": ["authenticated_source", "source_systems"],
+                        },
                         "risk_level": "medium",
                         "execution_boundaries": ["authenticated_external_source", "workspace_write"],
                         "pending_approval_count": 0,
@@ -266,6 +309,8 @@ async def test_activity_ledger_hides_stale_resume_surface_when_workflow_boundary
     assert workflow_item["metadata"]["resume_checkpoint_label"] is None
     assert workflow_item["metadata"]["checkpoint_candidates"] == []
     assert workflow_item["metadata"]["resume_plan"] is None
+    assert workflow_item["metadata"]["trust_boundary"]["status"] == "changed"
+    assert workflow_item["metadata"]["trust_boundary"]["reason"] == "approval_context_changed"
 
 
 @pytest.mark.asyncio

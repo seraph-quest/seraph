@@ -80,6 +80,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_approval_threading_behavior" in captured.out
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
+    assert "approval_explainability_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -197,6 +198,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "workflow_approval_threading_behavior",
                 "threaded_operator_timeline_behavior",
                 "workflow_boundary_blocked_surface_behavior",
+                "approval_explainability_surface_behavior",
                 "capability_repair_behavior",
                 "capability_preflight_behavior",
                 "activity_ledger_attribution_behavior",
@@ -760,6 +762,25 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_recommended_actions_empty"] is True
     assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_resume_plan_is_none"] is True
     assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_checkpoint_candidates_empty"] is True
+    assert details_by_name["approval_explainability_surface_behavior"][
+        "pending_requires_lifecycle_approval"
+    ] is True
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["pending_scope_target_reference"]
+        == "workflows/write-note.md"
+    )
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["operator_scope_target_reference"]
+        == "workflows/write-note.md"
+    )
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["activity_scope_target_reference"]
+        == "workflows/write-note.md"
+    )
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["activity_extension_action"]
+        == "source_save"
+    )
     assert details_by_name["source_adapter_evidence_behavior"]["adapter_count"] >= 4
     assert details_by_name["source_adapter_evidence_behavior"]["ready_adapter_count"] >= 3
     assert details_by_name["source_adapter_evidence_behavior"]["github_adapter_state"] == "ready"

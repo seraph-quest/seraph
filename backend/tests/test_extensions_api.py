@@ -1879,6 +1879,8 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         assert changed_node_url.status_code == 409
         changed_node_url_detail = changed_node_url.json()["detail"]
         assert changed_node_url_detail["type"] == "approval_required"
+        assert changed_node_url_detail["approval_scope"]["config_scope"]["config_types"] == ["node_adapters"]
+        assert changed_node_url_detail["approval_scope"]["config_scope"]["changed_target_count"] == 1
 
         approve_changed_node_url = await client.post(
             f"/api/approvals/{changed_node_url_detail['approval_id']}/approve"
@@ -3090,6 +3092,14 @@ async def test_high_risk_extension_source_save_requires_lifecycle_approval(clien
         assert save_response.status_code == 409
         approval_detail = save_response.json()["detail"]
         assert approval_detail["type"] == "approval_required"
+        assert approval_detail["approval_scope"]["target"]["reference"] == "workflows/write-note.md"
+        assert approval_detail["approval_scope"]["source_scope"]["reference"] == "workflows/write-note.md"
+        assert approval_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+        assert approval_detail["approval_scope"]["source_scope"]["current_content_hash"]
+        assert (
+            approval_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+            != approval_detail["approval_scope"]["source_scope"]["current_content_hash"]
+        )
 
         approve_save = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
         assert approve_save.status_code == 200
@@ -3209,6 +3219,88 @@ async def test_high_risk_extension_source_save_requires_new_approval_if_package_
         assert second_save.status_code == 409
         second_approval_id = second_save.json()["detail"]["approval_id"]
         assert second_approval_id != first_approval_id
+
+
+@pytest.mark.asyncio
+async def test_high_risk_source_save_requires_new_approval_if_requested_content_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        first_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert first_save.status_code == 409
+        first_detail = first_save.json()["detail"]
+
+        approve_save = await client.post(f"/api/approvals/{first_detail['approval_id']}/approve")
+        assert approve_save.status_code == 200
+
+        second_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Alternate high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-alt.md\n"
+                    "      content: alternate\n"
+                    "---\n\n"
+                    "Write an alternate note.\n"
+                ),
+            },
+        )
+        assert second_save.status_code == 409
+        second_detail = second_save.json()["detail"]
+        assert second_detail["approval_id"] != first_detail["approval_id"]
+        assert (
+            second_detail["approval_scope"]["source_scope"]["current_content_hash"]
+            == first_detail["approval_scope"]["source_scope"]["current_content_hash"]
+        )
+        assert (
+            second_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+            != first_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+        )
 
 
 @pytest.mark.asyncio

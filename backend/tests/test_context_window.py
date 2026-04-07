@@ -1,7 +1,7 @@
 """Tests for the token-aware context window."""
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -311,3 +311,26 @@ class TestOfflineReliability:
             assert "message number 19" in result
         finally:
             context_window._load_encoding.cache_clear()
+
+    def test_sync_summary_skips_persisted_runtime_audit_without_running_loop(self):
+        from src.agent.context_window import _summarize_middle
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "offline summary"
+
+        with (
+            patch(
+                "src.agent.context_window.completion_with_fallback_sync",
+                return_value=mock_response,
+            ),
+            patch("src.audit.runtime.audit_repository.log_event", AsyncMock()) as mock_log_event,
+        ):
+            result = _summarize_middle(
+                [_msg("user", "hello world")],
+                session_id="offline-sync",
+                range_key="0-1",
+            )
+
+        assert result == "offline summary"
+        mock_log_event.assert_not_awaited()

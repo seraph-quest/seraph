@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from src.audit.repository import audit_repository
+from src.utils.background import track_task
 
 logger = logging.getLogger(__name__)
 
@@ -156,26 +157,25 @@ def log_integration_event_sync(
 ) -> None:
     """Sync wrapper for integration runtime events used by non-async callers."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        try:
-            asyncio.run(log_integration_event(
+        logger.debug(
+            "Skipping persisted integration runtime audit event for %s:%s because no event loop is running",
+            integration_type,
+            name,
+        )
+        return
+
+    try:
+        track_task(
+            log_integration_event(
                 integration_type=integration_type,
                 name=name,
                 outcome=outcome,
                 details=details,
-            ))
-        except Exception:
-            logger.debug("Failed to run integration runtime audit logger", exc_info=True)
-        return
-
-    try:
-        loop.create_task(log_integration_event(
-            integration_type=integration_type,
-            name=name,
-            outcome=outcome,
-            details=details,
-        ))
+            ),
+            name=f"runtime_audit:integration:{integration_type}:{name}",
+        )
     except Exception:
         logger.debug("Failed to run integration runtime audit logger", exc_info=True)
 
@@ -189,25 +189,23 @@ def log_background_task_event_sync(
 ) -> None:
     """Sync wrapper for background/helper runtime events used by non-async callers."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        try:
-            asyncio.run(log_background_task_event(
+        logger.debug(
+            "Skipping persisted background runtime audit event for %s because no event loop is running",
+            task_name,
+        )
+        return
+
+    try:
+        track_task(
+            log_background_task_event(
                 task_name=task_name,
                 outcome=outcome,
                 session_id=session_id,
                 details=details,
-            ))
-        except Exception:
-            logger.debug("Failed to run background runtime audit logger", exc_info=True)
-        return
-
-    try:
-        loop.create_task(log_background_task_event(
-            task_name=task_name,
-            outcome=outcome,
-            session_id=session_id,
-            details=details,
-        ))
+            ),
+            name=f"runtime_audit:background:{task_name}:{outcome}",
+        )
     except Exception:
         logger.debug("Failed to run background runtime audit logger", exc_info=True)

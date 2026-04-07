@@ -1720,6 +1720,10 @@ async def test_workflow_runs_endpoint_hides_resume_metadata_when_pending_run_lac
     assert run["resume_plan"] is None
     assert run["thread_continue_message"] is None
     assert "predates trust-boundary tracking" in run["approval_recovery_message"]
+    assert run["trust_boundary"]["status"] == "missing"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_missing"
+    assert run["trust_boundary"]["current"]["authenticated_source"] is True
 
 
 @pytest.mark.asyncio
@@ -2617,6 +2621,13 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
     assert run["checkpoint_candidates"] == []
     assert run["resume_plan"] is None
     assert "trust boundary" in run["approval_recovery_message"]
+    assert run["trust_boundary"]["status"] == "changed"
+    assert run["trust_boundary"]["blocked"] is True
+    assert run["trust_boundary"]["reason"] == "approval_context_changed"
+    assert "risk_level" in run["trust_boundary"]["changed_fields"]
+    assert "execution_boundaries" in run["trust_boundary"]["changed_fields"]
+    assert run["trust_boundary"]["recorded"]["risk_level"] == "medium"
+    assert run["trust_boundary"]["current"]["risk_level"] == "high"
 
 
 @pytest.mark.asyncio

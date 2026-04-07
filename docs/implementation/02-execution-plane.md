@@ -34,6 +34,8 @@
 - [x] capability bootstrap now limits automatic repair to low-risk local workflow or skill toggles, leaving policy lifts and capability-surface expansion as explicit operator actions instead of workflow-planning side effects, and generated repair bundles no longer batch-run multiple privileged mutations from one cockpit click
 - [x] provider-neutral source capability discovery now exposes typed public-web tools, managed authenticated connectors, and explicit raw-MCP gaps so execution planning can inspect real external-source seams before composing a routine
 - [x] wrapped MCP tools now preserve authenticated source context through audit, approval, and secret-ref layers, so workflow approval context and operator tool metadata can distinguish generic external MCP from authenticated external-source execution at runtime
+- [x] high-risk extension configure and source-save paths now bind approvals to materially changed config targets or exact requested source content, and pending approval/operator/activity surfaces carry structured approval scope, lifecycle boundary, and trust-context metadata instead of flattening privileged mutations into generic approval rows
+- [x] sync helper runtime-audit logging now fails soft when no event loop is active and uses tracked background tasks when a loop exists, so audit persistence no longer destabilizes sync execution paths in CI teardown
 
 ## Working On Now
 
@@ -43,6 +45,7 @@
 - [x] this workstream now also ships `retire-village-and-editor-v1` and `execution-safety-hardening-v7` alongside richer workflow replay metadata, failed-step visibility, and retry-from-step control surfaces
 - [x] this workstream now also ships `adapter-first-capability-contracts-v1` for source-capability discovery and connector-first external evidence planning
 - [x] this workstream now also ships `authenticated-source-boundary-hardening-v1` for wrapper-stable source context and fail-closed authenticated workflow checkpoints
+- [x] this workstream now also ships the first `authenticated-mutation-and-boundary-explainability-v1` Batch AL aggregate for scoped extension mutation approvals, boundary-aware workflow surfaces, and safer sync runtime-audit behavior
 
 ## Still To Do On `develop`
 

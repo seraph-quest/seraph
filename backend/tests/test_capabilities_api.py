@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException
 import pytest
 
+from src.app import create_app
 from src.observer.context import CurrentContext
 from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
 
@@ -338,7 +340,7 @@ def test_doctor_reports_missing_mcp_server_reference_for_toolset_preset(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_includes_catalog_extension_packs(client):
+async def test_capabilities_overview_includes_catalog_extension_packs():
     catalog_payload = {
         "skills": [],
         "mcp_servers": [],
@@ -371,7 +373,11 @@ async def test_capabilities_overview_includes_catalog_extension_packs(client):
         patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
         patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
     ):
-        response = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/api/capabilities/overview")
 
     assert response.status_code == 200
     payload = response.json()
@@ -421,7 +427,7 @@ async def test_capabilities_overview_includes_catalog_extension_packs(client):
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_id(client):
+async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_id():
     catalog_payload = {
         "skills": [],
         "mcp_servers": [],
@@ -458,7 +464,11 @@ async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_i
         patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
         patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
     ):
-        response = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/api/capabilities/overview")
 
     assert response.status_code == 200
     payload = response.json()
@@ -484,7 +494,7 @@ async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_i
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs(client):
+async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -580,7 +590,11 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
             ],
         ),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -624,7 +638,6 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
 
 @pytest.mark.asyncio
 async def test_capabilities_overview_includes_manifest_starter_pack_and_explicit_runbook(
-    client,
     _setup_manifest_pack_and_runbook_managers,
 ):
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
@@ -682,7 +695,11 @@ async def test_capabilities_overview_includes_manifest_starter_pack_and_explicit
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -1103,7 +1120,7 @@ async def test_activate_starter_pack_reports_degraded_when_enable_fails(client):
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_workflows(client):
+async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_workflows():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -1145,7 +1162,11 @@ async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_work
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -1164,7 +1185,7 @@ async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_work
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_counts_missing_install_items_in_pack_availability(client):
+async def test_capabilities_overview_counts_missing_install_items_in_pack_availability():
     ctx = CurrentContext(tool_policy_mode="full", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -1214,7 +1235,11 @@ async def test_capabilities_overview_counts_missing_install_items_in_pack_availa
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -1287,7 +1312,7 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_tool_policy_blocks(client):
+async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_tool_policy_blocks():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -1335,7 +1360,11 @@ async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -1345,7 +1374,7 @@ async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks(client):
+async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -1406,7 +1435,11 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()

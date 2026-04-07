@@ -20,6 +20,7 @@
 - [x] route-health snapshots now expose whether browser websocket and native delivery are actually reachable at runtime, including ready, fallback, and unavailable states with operator-readable repair hints instead of only static route bindings
 - [x] queued-bundle native delivery now preserves same-thread resume when every deferred item belongs to the same session, and the shared continuity snapshot now carries one continuation contract across notifications, queued insights, and recent interventions
 - [x] the shared continuity snapshot now also synthesizes continuity health, grouped follow-through threads, and explicit recovery actions, and the cockpit desktop shell now uses that richer contract instead of reconstructing cross-surface recovery from raw notifications, queued items, and route rows
+- [x] the shared continuity snapshot now also carries imported capability-family attention and typed source-adapter degradation, so browser/native route health is no longer the only reach surface visible in observer continuity or cockpit recovery flows
 
 ## Working On Now
 
@@ -31,12 +32,13 @@
 - [x] this workstream now ships `native-channel-expansion-v2`
 - [x] this workstream now ships `production-reach-hardening-v1`
 - [x] this workstream now also ships `cross-surface-recovery-summary-v1`
+- [x] this workstream now also ships `broader-channel-adapter-surface-v1`
 
 ## Still To Do On `develop`
 
-- [ ] richer interruption channels outside the browser/native desktop shell and continuity layer
+- [ ] richer interruption channels outside the browser/native desktop shell, imported capability reach, and typed source-adapter continuity layer
 - [ ] broader external communication channels
-- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new synthesized continuity summary, thread groups, recovery actions, action-card continuation model, and desktop-shell follow-through controls
+- [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new synthesized continuity summary, imported reach/source-adapter recovery, thread groups, recovery actions, action-card continuation model, and desktop-shell follow-through controls
 
 ## Non-Goals
 

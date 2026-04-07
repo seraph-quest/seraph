@@ -555,6 +555,102 @@ class TestObserverAPI:
         await native_notification_queue.clear()
 
     @pytest.mark.asyncio
+    async def test_observer_continuity_surfaces_imported_reach_and_source_adapter_attention(self, client):
+        await native_notification_queue.clear()
+        with (
+            patch(
+                "src.api.observer._observer_reach_payload",
+                return_value={
+                    "transport_statuses": [],
+                    "route_statuses": [
+                        {
+                            "route": "live_delivery",
+                            "label": "Live delivery",
+                            "status": "ready",
+                            "summary": "Browser and desktop delivery are available.",
+                            "selected_transport": "websocket",
+                            "repair_hint": None,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer._observer_imported_reach_payload",
+                return_value={
+                    "summary": {
+                        "family_count": 1,
+                        "active_family_count": 1,
+                        "attention_family_count": 1,
+                        "approval_family_count": 0,
+                    },
+                    "families": [
+                        {
+                            "type": "messaging_connectors",
+                            "label": "messaging",
+                            "total": 1,
+                            "installed": 1,
+                            "ready": 0,
+                            "attention": 1,
+                            "approval": 0,
+                            "packages": ["Seraph Relay Pack"],
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer._observer_source_adapter_payload",
+                return_value={
+                    "summary": {
+                        "adapter_count": 1,
+                        "ready_adapter_count": 0,
+                        "degraded_adapter_count": 1,
+                        "authenticated_adapter_count": 1,
+                        "authenticated_ready_adapter_count": 0,
+                        "authenticated_degraded_adapter_count": 1,
+                    },
+                    "adapters": [
+                        {
+                            "name": "github-managed",
+                            "provider": "github",
+                            "source_kind": "managed_connector",
+                            "authenticated": True,
+                            "runtime_state": "requires_runtime",
+                            "adapter_state": "degraded",
+                            "contracts": ["work_items.read", "code_activity.read"],
+                            "degraded_reason": "runtime_adapter_missing",
+                            "next_best_sources": [{"name": "web_search", "reason": "fallback", "description": "Use public context."}],
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["imported_reach"]["summary"]["attention_family_count"] == 1
+        assert payload["source_adapters"]["summary"]["degraded_adapter_count"] == 1
+        assert payload["summary"]["continuity_health"] == "attention"
+        assert payload["summary"]["primary_surface"] == "source_adapter"
+        assert payload["summary"]["recommended_focus"] == "github-managed"
+        assert any(
+            item["kind"] == "source_adapter_repair"
+            and item["surface"] == "source_adapter"
+            and item["label"] == "Restore source adapter github-managed"
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "imported_reach_attention"
+            and item["surface"] == "imported_reach"
+            and item["label"] == "Review imported messaging"
+            for item in payload["recovery_actions"]
+        )
+
+    @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):
         await native_notification_queue.clear()
         intervention = await guardian_feedback_repository.create_intervention(

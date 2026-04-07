@@ -122,6 +122,59 @@ interface ObserverReachRouteStatus {
   repair_hint?: string | null;
 }
 
+interface ObserverImportedReachFamily {
+  type: string;
+  label: string;
+  total: number;
+  installed: number;
+  ready: number;
+  attention: number;
+  approval: number;
+  packages: string[];
+}
+
+interface ObserverImportedReachSummary {
+  family_count: number;
+  active_family_count: number;
+  attention_family_count: number;
+  approval_family_count: number;
+}
+
+interface ObserverImportedReachSnapshot {
+  summary: ObserverImportedReachSummary;
+  families: ObserverImportedReachFamily[];
+}
+
+interface ObserverSourceAdapterSummary {
+  adapter_count: number;
+  ready_adapter_count: number;
+  degraded_adapter_count: number;
+  authenticated_adapter_count: number;
+  authenticated_ready_adapter_count: number;
+  authenticated_degraded_adapter_count: number;
+}
+
+interface ObserverSourceAdapter {
+  name: string;
+  provider: string;
+  source_kind: string;
+  authenticated: boolean;
+  runtime_state: string;
+  adapter_state: string;
+  contracts: string[];
+  degraded_reason?: string | null;
+  next_best_sources: Array<{
+    name: string;
+    reason: string;
+    description: string;
+  }>;
+}
+
+interface ObserverSourceAdapterSnapshot {
+  summary: ObserverSourceAdapterSummary;
+  adapters: ObserverSourceAdapter[];
+}
+
 interface ObserverContinuitySummary {
   continuity_health: string;
   primary_surface: string;
@@ -132,6 +185,8 @@ interface ObserverContinuitySummary {
   queued_insight_count: number;
   recent_intervention_count: number;
   degraded_route_count: number;
+  degraded_source_adapter_count: number;
+  attention_family_count: number;
 }
 
 interface ObserverContinuityThread {
@@ -204,6 +259,8 @@ interface ObserverContinuitySnapshot {
   reach?: {
     route_statuses?: ObserverReachRouteStatus[];
   };
+  imported_reach?: ObserverImportedReachSnapshot;
+  source_adapters?: ObserverSourceAdapterSnapshot;
   summary?: ObserverContinuitySummary;
   threads?: ObserverContinuityThread[];
   recovery_actions?: ObserverContinuityRecoveryAction[];
@@ -775,9 +832,11 @@ interface OperatorTriageEntry {
   priority: number;
   threadId?: string | null;
   continueMessage?: string | null;
+  repairDraft?: string | null;
   approval?: PendingApproval;
   workflow?: WorkflowRunRecord;
   route?: ObserverReachRouteStatus;
+  recoveryAction?: ObserverContinuityRecoveryAction;
 }
 
 interface OperatorEvidenceEntry {
@@ -2399,6 +2458,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
   const [desktopRouteStatuses, setDesktopRouteStatuses] = useState<ObserverReachRouteStatus[]>([]);
+  const [continuityImportedReach, setContinuityImportedReach] = useState<ObserverImportedReachSnapshot | null>(null);
+  const [continuitySourceAdapters, setContinuitySourceAdapters] = useState<ObserverSourceAdapterSnapshot | null>(null);
   const [continuitySummary, setContinuitySummary] = useState<ObserverContinuitySummary | null>(null);
   const [continuityThreads, setContinuityThreads] = useState<ObserverContinuityThread[]>([]);
   const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ObserverContinuityRecoveryAction[]>([]);
@@ -2630,6 +2691,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
       setRecentInterventions(continuityPayload.recent_interventions ?? []);
       setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
+      setContinuityImportedReach(continuityPayload.imported_reach ?? null);
+      setContinuitySourceAdapters(continuityPayload.source_adapters ?? null);
       setContinuitySummary(continuityPayload.summary ?? null);
       setContinuityThreads(continuityPayload.threads ?? []);
       setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
@@ -3348,6 +3411,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       pendingNotificationCount: continuitySummary?.pending_notification_count ?? desktopNotifications.length,
       queuedInsightCount: continuitySummary?.queued_insight_count ?? queuedInsights.length,
       degradedRouteCount: continuitySummary?.degraded_route_count ?? desktopRouteStatuses.filter((route) => route.status !== "ready").length,
+      degradedSourceAdapterCount: continuitySummary?.degraded_source_adapter_count ?? continuitySourceAdapters?.summary.degraded_adapter_count ?? 0,
+      attentionImportedFamilyCount: continuitySummary?.attention_family_count ?? continuityImportedReach?.summary.attention_family_count ?? 0,
       actionableThreadCount: continuitySummary?.actionable_thread_count ?? continuityThreads.length,
       continuityHealth: continuitySummary?.continuity_health ?? null,
       recommendedFocus: continuitySummary?.recommended_focus ?? null,
@@ -3364,11 +3429,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ambientState,
       connectionStatus,
       continuitySummary?.actionable_thread_count,
+      continuitySummary?.attention_family_count,
       continuitySummary?.continuity_health,
       continuitySummary?.degraded_route_count,
+      continuitySummary?.degraded_source_adapter_count,
       continuitySummary?.pending_notification_count,
       continuitySummary?.queued_insight_count,
       continuitySummary?.recommended_focus,
+      continuityImportedReach?.summary.attention_family_count,
+      continuitySourceAdapters?.summary.degraded_adapter_count,
       continuityThreads.length,
       desktopNotifications.length,
       desktopRouteStatuses,
@@ -3588,10 +3657,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         });
       });
 
+    continuityRecoveryActions
+      .filter((action) => action.kind === "source_adapter_repair" || action.kind === "imported_reach_attention")
+      .forEach((action) => {
+        entries.push({
+          id: `recovery:${action.id}`,
+          kind: "reach",
+          label: `reach: ${action.label}`,
+          detail: `${formatContinuityLabel(action.status)} · ${action.detail}`,
+          meta: [
+            formatContinuityLabel(action.surface),
+            action.repair_hint,
+          ].filter(Boolean).join(" · "),
+          priority: action.kind === "source_adapter_repair" ? 80 : 74,
+          repairDraft: `Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`,
+          recoveryAction: action,
+        });
+      });
+
     return entries
       .sort((left, right) => right.priority - left.priority || left.label.localeCompare(right.label))
       .slice(0, 8);
   }, [
+    continuityRecoveryActions,
     desktopRouteStatuses,
     pendingApprovals,
     queuedInsights,
@@ -3690,6 +3778,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       inspectWorkflowRun(entry.workflow);
       return;
     }
+    if (entry.recoveryAction && !entry.route) {
+      focusPane("operator_surface_pane");
+      return;
+    }
     focusPane("desktop_shell_pane");
   }
   function continueOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
@@ -3701,6 +3793,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (entry.workflow) {
       continueWorkflowRun(entry.workflow);
     }
+  }
+  function draftOperatorTriageRepair(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.repairDraft) return;
+    queueComposerDraft(entry.repairDraft);
   }
   function approveOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry?.approval) return;
@@ -7964,9 +8060,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                       <div className="cockpit-sublist-item">
                         alerts {continuitySummary.pending_notification_count} · queued {continuitySummary.queued_insight_count} · degraded routes {continuitySummary.degraded_route_count}
+                        {continuitySummary.degraded_source_adapter_count ? ` · adapters ${continuitySummary.degraded_source_adapter_count} degraded` : ""}
+                        {continuitySummary.attention_family_count ? ` · imported ${continuitySummary.attention_family_count} attention` : ""}
                         {continuitySummary.recommended_focus ? ` · focus ${continuitySummary.recommended_focus}` : ""}
                       </div>
                     </>
+                  )}
+                  {continuitySourceAdapters?.summary && (
+                    <div className="cockpit-sublist-item">
+                      typed adapters {continuitySourceAdapters.summary.ready_adapter_count}/{continuitySourceAdapters.summary.adapter_count} ready
+                      {continuitySourceAdapters.summary.authenticated_adapter_count
+                        ? ` · authenticated ${continuitySourceAdapters.summary.authenticated_ready_adapter_count}/${continuitySourceAdapters.summary.authenticated_adapter_count}`
+                        : ""}
+                    </div>
+                  )}
+                  {continuityImportedReach?.summary && (
+                    <div className="cockpit-sublist-item">
+                      imported reach {continuityImportedReach.summary.active_family_count}/{continuityImportedReach.summary.family_count} active
+                      {continuityImportedReach.summary.attention_family_count
+                        ? ` · ${continuityImportedReach.summary.attention_family_count} attention`
+                        : ""}
+                    </div>
                   )}
                   {desktopRouteStatuses.map((route) => (
                     <div key={route.route} className="cockpit-sublist-item">
@@ -8012,6 +8126,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           >
                             Draft repair
                           </button>
+                        )}
+                        {(action.kind === "source_adapter_repair" || action.kind === "imported_reach_attention") && (
+                          <>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => queueComposerDraft(`Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`)}
+                            >
+                              Draft repair
+                            </button>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => focusPane("operator_surface_pane")}
+                            >
+                              Operator
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -8324,6 +8454,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               continue
                             </button>
                           )}
+                          {entry.repairDraft && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft repair for ${entry.label}`}
+                              onClick={() => draftOperatorTriageRepair(entry)}
+                            >
+                              draft repair
+                            </button>
+                          )}
                           {triageWorkflow && hasCurrentOutput && (
                             <button
                               type="button"
@@ -8465,6 +8605,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               onClick={() => inspectOperatorTriageEntry(entry)}
                             >
                               desktop shell
+                            </button>
+                          )}
+                          {entry.recoveryAction && !entry.route && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open operator surface for ${entry.label}`}
+                              onClick={() => inspectOperatorTriageEntry(entry)}
+                            >
+                              operator
                             </button>
                           )}
                         </div>

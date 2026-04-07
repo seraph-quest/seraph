@@ -126,6 +126,55 @@ class ObserverReachResponse(BaseModel):
     route_statuses: list[dict[str, Any]]
 
 
+class ObserverImportedReachFamilyResponse(BaseModel):
+    type: str
+    label: str
+    total: int
+    installed: int
+    ready: int
+    attention: int
+    approval: int
+    packages: list[str]
+
+
+class ObserverImportedReachSummaryResponse(BaseModel):
+    family_count: int
+    active_family_count: int
+    attention_family_count: int
+    approval_family_count: int
+
+
+class ObserverImportedReachResponse(BaseModel):
+    summary: ObserverImportedReachSummaryResponse
+    families: list[ObserverImportedReachFamilyResponse]
+
+
+class ObserverSourceAdapterResponse(BaseModel):
+    name: str
+    provider: str
+    source_kind: str
+    authenticated: bool
+    runtime_state: str
+    adapter_state: str
+    contracts: list[str]
+    degraded_reason: str | None = None
+    next_best_sources: list[dict[str, str]]
+
+
+class ObserverSourceAdapterSummaryResponse(BaseModel):
+    adapter_count: int
+    ready_adapter_count: int
+    degraded_adapter_count: int
+    authenticated_adapter_count: int
+    authenticated_ready_adapter_count: int
+    authenticated_degraded_adapter_count: int
+
+
+class ObserverSourceAdapterInventoryResponse(BaseModel):
+    summary: ObserverSourceAdapterSummaryResponse
+    adapters: list[ObserverSourceAdapterResponse]
+
+
 class ObserverContinuitySummaryResponse(BaseModel):
     continuity_health: str
     primary_surface: str
@@ -136,6 +185,8 @@ class ObserverContinuitySummaryResponse(BaseModel):
     queued_insight_count: int
     recent_intervention_count: int
     degraded_route_count: int
+    degraded_source_adapter_count: int
+    attention_family_count: int
 
 
 class ObserverContinuityThreadResponse(BaseModel):
@@ -177,6 +228,8 @@ class ObserverContinuityResponse(BaseModel):
     queued_insight_count: int
     recent_interventions: list[RecentInterventionResponse]
     reach: ObserverReachResponse
+    imported_reach: ObserverImportedReachResponse
+    source_adapters: ObserverSourceAdapterInventoryResponse
     summary: ObserverContinuitySummaryResponse
     threads: list[ObserverContinuityThreadResponse]
     recovery_actions: list[ObserverContinuityRecoveryActionResponse]
@@ -316,13 +369,203 @@ def _continuity_timestamp(value: str | None) -> datetime:
 def _continuity_surface_priority(surface: str | None) -> int:
     if surface == "reach":
         return 0
-    if surface == "native_notification":
+    if surface == "source_adapter":
         return 1
-    if surface == "bundle_queue":
+    if surface == "imported_reach":
         return 2
-    if surface == "delivery_failed":
+    if surface == "native_notification":
         return 3
-    return 4
+    if surface == "bundle_queue":
+        return 4
+    if surface == "delivery_failed":
+        return 5
+    return 6
+
+
+_IMPORTED_REACH_FAMILY_DEFS: tuple[tuple[str, str], ...] = (
+    ("toolset_presets", "toolsets"),
+    ("context_packs", "context packs"),
+    ("browser_providers", "browser providers"),
+    ("automation_triggers", "automation triggers"),
+    ("messaging_connectors", "messaging"),
+    ("speech_profiles", "speech"),
+    ("node_adapters", "node adapters"),
+    ("canvas_outputs", "canvas outputs"),
+    ("workflow_runtimes", "workflow runtimes"),
+    ("channel_adapters", "channel adapters"),
+    ("observer_definitions", "observer sources"),
+)
+
+
+def _extension_contribution_active(contribution: dict[str, Any]) -> bool:
+    health = contribution.get("health")
+    health_state = health.get("state") if isinstance(health, dict) else ""
+    status = str(contribution.get("status") or health_state or "").strip().lower()
+    if contribution.get("loaded") is False:
+        return False
+    if contribution.get("enabled") is False:
+        return False
+    if isinstance(health, dict):
+        if health.get("enabled") is False:
+            return False
+        if health.get("configured") is False:
+            return False
+    if contribution.get("configured") is False:
+        return False
+    return status not in {
+        "planned",
+        "requires_config",
+        "invalid",
+        "invalid_config",
+        "overridden",
+        "disabled",
+        "unloaded",
+    }
+
+
+def _observer_imported_reach_payload() -> dict[str, Any]:
+    from src.extensions.lifecycle import list_extensions
+
+    payload = list_extensions()
+    extensions = [
+        item
+        for item in payload.get("extensions", [])
+        if isinstance(item, dict)
+    ]
+    families: list[dict[str, Any]] = []
+
+    for family_type, label in _IMPORTED_REACH_FAMILY_DEFS:
+        entries: list[dict[str, Any]] = []
+        for extension in extensions:
+            contributions = extension.get("contributions")
+            if not isinstance(contributions, list):
+                continue
+            for contribution in contributions:
+                if not isinstance(contribution, dict):
+                    continue
+                if str(contribution.get("type") or "") != family_type:
+                    continue
+                entries.append(
+                    {
+                        "package_label": str(extension.get("display_name") or extension.get("id") or ""),
+                        "contribution": contribution,
+                    }
+                )
+
+        if not entries:
+            continue
+
+        active_entries = [
+            item
+            for item in entries
+            if _extension_contribution_active(item["contribution"])
+        ]
+        ready = 0
+        attention = 0
+        approval = 0
+        packages = sorted(
+            {
+                str(item["package_label"])
+                for item in entries
+                if str(item["package_label"]).strip()
+            }
+        )
+        for item in entries:
+            contribution = item["contribution"]
+            health = contribution.get("health")
+            health_state = health.get("state") if isinstance(health, dict) else ""
+            status = str(contribution.get("status") or health_state or "").strip().lower()
+            permission_profile = contribution.get("permission_profile")
+            if _extension_contribution_active(contribution) and (
+                (bool(health.get("ready")) if isinstance(health, dict) else False)
+                or status in {"ready", "active"}
+            ):
+                ready += 1
+            if status in {
+                "degraded",
+                "invalid",
+                "invalid_config",
+                "requires_config",
+                "planned",
+                "overridden",
+            } or (
+                isinstance(permission_profile, dict)
+                and str(permission_profile.get("status") or "") == "missing_permissions"
+            ):
+                attention += 1
+            if (
+                isinstance(permission_profile, dict)
+                and bool(permission_profile.get("requires_approval"))
+            ) or str(contribution.get("approval_behavior") or "") == "always":
+                approval += 1
+
+        families.append(
+            {
+                "type": family_type,
+                "label": label,
+                "total": len(active_entries),
+                "installed": len(entries),
+                "ready": ready,
+                "attention": attention,
+                "approval": approval,
+                "packages": packages,
+            }
+        )
+
+    return {
+        "summary": {
+            "family_count": len(families),
+            "active_family_count": sum(1 for item in families if int(item.get("total") or 0) > 0),
+            "attention_family_count": sum(1 for item in families if int(item.get("attention") or 0) > 0),
+            "approval_family_count": sum(1 for item in families if int(item.get("approval") or 0) > 0),
+        },
+        "families": families,
+    }
+
+
+def _observer_source_adapter_payload() -> dict[str, Any]:
+    from src.extensions.source_operations import list_source_adapter_inventory
+
+    inventory = list_source_adapter_inventory()
+    adapters = [
+        {
+            "name": str(item.get("name") or ""),
+            "provider": str(item.get("provider") or ""),
+            "source_kind": str(item.get("source_kind") or ""),
+            "authenticated": bool(item.get("authenticated")),
+            "runtime_state": str(item.get("runtime_state") or "unknown"),
+            "adapter_state": str(item.get("adapter_state") or "unknown"),
+            "contracts": [
+                str(contract)
+                for contract in item.get("contracts", [])
+                if isinstance(contract, str) and contract.strip()
+            ],
+            "degraded_reason": str(item.get("degraded_reason") or "").strip() or None,
+            "next_best_sources": [
+                {
+                    "name": str(candidate.get("name") or ""),
+                    "reason": str(candidate.get("reason") or ""),
+                    "description": str(candidate.get("description") or ""),
+                }
+                for candidate in item.get("next_best_sources", [])
+                if isinstance(candidate, dict)
+            ],
+        }
+        for item in inventory.get("adapters", [])
+        if isinstance(item, dict)
+    ]
+    authenticated_adapters = [item for item in adapters if item["authenticated"]]
+    return {
+        "summary": {
+            "adapter_count": len(adapters),
+            "ready_adapter_count": sum(1 for item in adapters if item["adapter_state"] == "ready"),
+            "degraded_adapter_count": sum(1 for item in adapters if item["adapter_state"] != "ready"),
+            "authenticated_adapter_count": len(authenticated_adapters),
+            "authenticated_ready_adapter_count": sum(1 for item in authenticated_adapters if item["adapter_state"] == "ready"),
+            "authenticated_degraded_adapter_count": sum(1 for item in authenticated_adapters if item["adapter_state"] != "ready"),
+        },
+        "adapters": adapters,
+    }
 
 
 def _summarize_thread_surfaces(surfaces: list[str]) -> str:
@@ -462,6 +705,8 @@ def _build_continuity_threads(
 def _build_continuity_recovery_actions(
     *,
     route_statuses: list[dict[str, Any]],
+    imported_reach: dict[str, Any],
+    source_adapters: dict[str, Any],
     threads: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
@@ -479,6 +724,77 @@ def _build_continuity_recovery_actions(
             "surface": "reach",
             "route": route.get("route"),
             "repair_hint": route.get("repair_hint"),
+            "thread_id": None,
+            "continue_message": None,
+            "open_thread_available": False,
+        })
+
+    for adapter in source_adapters.get("adapters", []):
+        if not isinstance(adapter, dict):
+            continue
+        if str(adapter.get("adapter_state") or "unknown") == "ready":
+            continue
+        next_best_sources = [
+            str(item.get("name") or "")
+            for item in adapter.get("next_best_sources", [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        degraded_reason = str(adapter.get("degraded_reason") or "").strip()
+        detail = (
+            f"{adapter.get('provider') or 'provider'} adapter is "
+            f"{str(adapter.get('adapter_state') or 'unknown').replace('_', ' ')}"
+        )
+        if degraded_reason:
+            detail += f" ({degraded_reason})"
+        detail += "."
+        actions.append({
+            "id": f"source:{adapter.get('name')}",
+            "kind": "source_adapter_repair",
+            "label": f"Restore source adapter {adapter.get('name')}",
+            "detail": detail,
+            "status": str(adapter.get("adapter_state") or "unknown"),
+            "surface": "source_adapter",
+            "route": None,
+            "repair_hint": (
+                f"Next best: {', '.join(next_best_sources[:2])}."
+                if next_best_sources
+                else "Inspect the typed source adapter inventory and runtime bridge."
+            ),
+            "thread_id": None,
+            "continue_message": None,
+            "open_thread_available": False,
+        })
+
+    for family in imported_reach.get("families", []):
+        if not isinstance(family, dict):
+            continue
+        attention = int(family.get("attention") or 0)
+        if attention <= 0:
+            continue
+        packages = [
+            str(item)
+            for item in family.get("packages", [])
+            if isinstance(item, str) and item.strip()
+        ]
+        package_count = len(packages)
+        actions.append({
+            "id": f"imported:{family.get('type')}",
+            "kind": "imported_reach_attention",
+            "label": f"Review imported {family.get('label')}",
+            "detail": (
+                f"{attention} imported contribution"
+                f"{'' if attention == 1 else 's'} need attention"
+                f"{f' across {package_count} package' if package_count else ''}"
+                f"{'' if package_count == 1 else 's' if package_count else ''}."
+            ),
+            "status": "attention",
+            "surface": "imported_reach",
+            "route": None,
+            "repair_hint": (
+                f"Inspect {', '.join(packages[:2])} in the operator surface."
+                if packages
+                else "Inspect imported capability reach in the operator surface."
+            ),
             "thread_id": None,
             "continue_message": None,
             "open_thread_available": False,
@@ -505,7 +821,7 @@ def _build_continuity_recovery_actions(
     return sorted(
         actions,
         key=lambda item: (
-            0 if item["kind"] == "reach_repair" else 1,
+            0 if item["kind"] == "reach_repair" else 1 if item["kind"] == "source_adapter_repair" else 2 if item["kind"] == "imported_reach_attention" else 3,
             _continuity_surface_priority(item.get("surface")),
             item["label"],
         ),
@@ -518,9 +834,21 @@ def _build_continuity_summary(
     queued_insights: list[dict[str, Any]],
     recent_interventions: list[dict[str, Any]],
     route_statuses: list[dict[str, Any]],
+    imported_reach: dict[str, Any],
+    source_adapters: dict[str, Any],
     threads: list[dict[str, Any]],
 ) -> dict[str, Any]:
     degraded_routes = [item for item in route_statuses if str(item.get("status") or "") != "ready"]
+    degraded_source_adapters = [
+        item
+        for item in source_adapters.get("adapters", [])
+        if isinstance(item, dict) and str(item.get("adapter_state") or "unknown") != "ready"
+    ]
+    attention_families = [
+        item
+        for item in imported_reach.get("families", [])
+        if isinstance(item, dict) and int(item.get("attention") or 0) > 0
+    ]
     ambient_item_count = sum(
         int(item.get("item_count", 0))
         for item in threads
@@ -541,6 +869,16 @@ def _build_continuity_summary(
         continuity_health = "degraded" if top_route.get("status") == "unavailable" else "attention"
         primary_surface = "reach"
         recommended_focus = str(top_route.get("label") or "reach recovery")
+    elif degraded_source_adapters:
+        lead_adapter = degraded_source_adapters[0]
+        continuity_health = "attention"
+        primary_surface = "source_adapter"
+        recommended_focus = str(lead_adapter.get("name") or "source adapter recovery")
+    elif attention_families:
+        lead_family = attention_families[0]
+        continuity_health = "attention"
+        primary_surface = "imported_reach"
+        recommended_focus = str(lead_family.get("label") or "imported reach review")
     elif threads:
         lead_thread = threads[0]
         continuity_health = "attention"
@@ -560,6 +898,8 @@ def _build_continuity_summary(
         "queued_insight_count": len(queued_insights),
         "recent_intervention_count": len(recent_interventions),
         "degraded_route_count": len(degraded_routes),
+        "degraded_source_adapter_count": len(degraded_source_adapters),
+        "attention_family_count": len(attention_families),
     }
 
 
@@ -638,6 +978,8 @@ async def get_observer_continuity():
         )
 
     reach_payload = _observer_reach_payload()
+    imported_reach_payload = _observer_imported_reach_payload()
+    source_adapter_payload = _observer_source_adapter_payload()
 
     notifications_payload = [
         {
@@ -734,6 +1076,8 @@ async def get_observer_continuity():
     )
     recovery_actions_payload = _build_continuity_recovery_actions(
         route_statuses=reach_payload["route_statuses"],
+        imported_reach=imported_reach_payload,
+        source_adapters=source_adapter_payload,
         threads=thread_payload,
     )
     summary_payload = _build_continuity_summary(
@@ -741,6 +1085,8 @@ async def get_observer_continuity():
         queued_insights=queued_insights_payload,
         recent_interventions=recent_interventions_payload,
         route_statuses=reach_payload["route_statuses"],
+        imported_reach=imported_reach_payload,
+        source_adapters=source_adapter_payload,
         threads=thread_payload,
     )
 
@@ -751,6 +1097,8 @@ async def get_observer_continuity():
         "queued_insight_count": len(queued_insights),
         "recent_interventions": recent_interventions_payload,
         "reach": reach_payload,
+        "imported_reach": imported_reach_payload,
+        "source_adapters": source_adapter_payload,
         "summary": summary_payload,
         "threads": thread_payload,
         "recovery_actions": recovery_actions_payload,

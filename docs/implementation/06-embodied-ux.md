@@ -124,6 +124,33 @@
     - result: `57 passed`
   - `cd frontend && npm run build`
     - result: `passed`
+
+### `workflow-history-and-lineage-density-v2`
+
+- status: complete on `feat/workflow-history-density-batch-ah-v3` and ready for PR
+- root causes addressed:
+  - the cockpit already exposed branch-family controls, but operators still had to mentally reconstruct chronology across outputs, checkpoints, and timeline events
+  - workflow rows still summarized runs one layer at a time, which made long-running branch state visible but not dense enough to debug without opening and cross-referencing several panes
+  - older dense-inspector tests were still overfitting single-row timeline text, which hid whether the new history layer actually stayed usable once lineage events became explicit
+- scope:
+  - workflow rows now surface history density directly, including family size, output history depth, checkpoint count, lineage-event count, and related-run count
+  - the workflow inspector now exposes explicit output-history rows, checkpoint-history rows, and lineage-event rows instead of leaving artifact chronology and recovery state split between branch-family rows and the raw timeline
+  - lineage-event rows now carry open, output reuse, failure-context reuse, checkpoint retry, and repair actions when the underlying run truthfully supports them, including degraded or failed events whose timeline entry did not carry a direct `step_id`
+- review findings fixed during implementation:
+  - the first output-history pass double-counted same-run outputs when both `artifacts` and `artifact_paths` pointed at the same file, which inflated the new history layer and duplicated controls
+  - the first summary pass counted recovery actions as checkpoints, which overstated the logical checkpoint history instead of separating checkpoints from recovery paths
+  - the first lineage-event pass only surfaced failure reuse when the timeline entry declared `step_id`, which hid real degraded/failed recovery context even though the workflow still had a recoverable failed step
+  - the first test pass overfit a single timeline summary string after the new history surface intentionally duplicated that information at a denser lineage layer
+  - fixed by deduping same-run outputs on run+path, separating checkpoint counts from recovery-path counts, falling back to the workflow’s failed-step record for degraded/failed lineage events, and retargeting the stale inspector test to the actual retry control
+- validation:
+  - `cd frontend && npm test -- --run src/components/cockpit/CockpitView.test.tsx`
+    - result: `57 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
+  - `cd docs && npm run build`
+    - result: `passed`
+  - `git diff --check`
+    - result: `passed`
   - `cd docs && npm run build`
     - result: `passed`
   - `git diff --check`
@@ -503,5 +530,5 @@
 - [x] settings and priorities now present as workspace-styled modal overlays instead of legacy shell overlays
 - [x] the docs and active repo now treat the village/editor line as removed history rather than as a fallback product branch
 - [ ] the cockpit still needs richer install/recommend/repair guidance beyond the first "what can I do now?" capability surface, blocked-state explanation, starter-pack view, preflight/autorepair, and bounded bootstrap layer
-- [ ] the cockpit still needs broader workflow history, deeper branch/resume step control, and more flexible workspace ergonomics
+- [ ] the cockpit still needs broader multi-session workflow orchestration, deeper cross-pane command density, and more flexible workspace ergonomics beyond the shipped output-history, checkpoint-history, and lineage-event workflow debugger
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

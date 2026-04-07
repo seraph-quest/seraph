@@ -107,7 +107,7 @@
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the current install/recommendation, preflight/autorepair, policy-aware recovery, catalog-install, and bounded bootstrap flow
 - [ ] richer extension health/test surfaces and production-grade connector hardening beyond the current lifecycle API, governance queue, and deterministic eval coverage
-- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
+- [ ] deeper multi-session workflow operating surfaces beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, explicit output/checkpoint/lineage workflow history rows, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the current operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, extension studio, and skill-registry loop
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

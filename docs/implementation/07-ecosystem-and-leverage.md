@@ -46,6 +46,8 @@
 - [x] first connector-backed authenticated source-read bridge that binds a managed connector to a live MCP runtime when the connector is enabled and configured, so typed source contracts can execute normalized `repository.read`, `work_items.read`, and `code_activity.read` evidence reads instead of staying permanently degraded
 - [x] reusable connector-first source review planning and bundled source-review routines, so daily review, progress review, and goal-alignment review can compose provider-neutral mixed-source plans with explicit degraded-step truth instead of spawning bespoke provider pipelines
 - [x] backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting long-tail runtime skew dominate workflow delivery
+- [x] extension lifecycle, catalog, and capability surfaces now expose package version lines, compatibility truth, publisher metadata, and diagnostics summaries together, while the cockpit operator surface now summarizes extension health, governance, and update/studio actions instead of forcing package triage through raw studio or catalog lists
+- [x] backend CI now also applies per-file watchdog timeouts for the historically heaviest backend suites instead of letting `test_workflows.py` or `test_eval_harness.py` consume an entire shard window when they hang on hosted runners
 
 ## Working On Now
 
@@ -55,6 +57,7 @@
 - [x] this workstream now ships `extension-operator-surface-v1`
 - [x] this workstream now ships `capability-discovery-and-activation-v1`, `starter-skill-and-workflow-packs-v1`, `workflow-history-and-replay-v1`, and `extension-debugging-and-recovery-v1`
 - [x] this workstream now also ships `capability-preflight-and-autorepair-v1`, `threaded-operator-timeline-v1`, and `workflow-runbooks-and-parameterized-replay-v1`
+- [x] this workstream now also ships `extension-ecosystem-maturity-and-marketplace-depth-v2`, including richer lifecycle/catalog diagnostics truth, operator-facing extension health triage, and heavier-suite CI shard watchdogs
 - [x] this workstream now hands the queue forward to the full extension-platform transition program rather than isolated extension UX slices
 - [x] the first extension-platform foundation slices now cover terminology cleanup, canonical manifests, the transitional registry seam, and structured doctor diagnostics
 - [x] the extension-platform foundation now also pins one canonical on-disk package layout and package-boundary resolution rules for contribution files
@@ -106,7 +109,7 @@
 ## Still To Do On `develop`
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the current install/recommendation, preflight/autorepair, policy-aware recovery, catalog-install, and bounded bootstrap flow
-- [ ] richer extension health/test surfaces and production-grade connector hardening beyond the current lifecycle API, governance queue, and deterministic eval coverage
+- [ ] richer extension health/test surfaces, deeper marketplace curation, and production-grade connector hardening beyond the current lifecycle API, governance queue, diagnostics summaries, operator health triage, and deterministic eval coverage
 - [ ] deeper multi-session workflow operating surfaces beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, explicit output/checkpoint/lineage workflow history rows, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the current operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, extension studio, and skill-registry loop
 - [ ] better leverage of delegation without making the product harder to trust or reason about

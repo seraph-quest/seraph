@@ -628,13 +628,17 @@ def _recommended_actions(
             "installed": installed,
             "update_available": update_available,
             "version": extension.get("version"),
+            "version_line": extension.get("version_line"),
             "installed_version": extension.get("installed_version"),
+            "compatibility": extension.get("compatibility"),
+            "publisher": extension.get("publisher"),
             "trust": extension.get("trust"),
             "contribution_types": list(extension.get("contribution_types") or []),
             "status": status,
             "doctor_ok": bool(extension.get("doctor_ok", status == "ready")),
             "issues": list(extension.get("issues") or []),
             "load_errors": list(extension.get("load_errors") or []),
+            "diagnostics_summary": extension.get("diagnostics_summary"),
             "recommended_actions": recommended_actions,
         })
         if status != "ready" or (installed and not update_available):

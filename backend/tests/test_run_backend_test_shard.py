@@ -3,7 +3,7 @@ from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
-from scripts.run_backend_test_shard import run_shard_files
+from scripts.run_backend_test_shard import run_shard_files, timeout_for_file
 
 
 def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):
@@ -72,6 +72,12 @@ def test_run_shard_files_passes_per_file_timeout(tmp_path: Path):
     assert mock_run.call_args.kwargs["timeout"] == 900
 
 
+def test_timeout_for_file_uses_runtime_heavy_override():
+    assert timeout_for_file("tests/test_workflows.py", 900) == 1_500
+    assert timeout_for_file("tests/test_eval_harness.py", None) == 1_500
+    assert timeout_for_file("tests/test_alpha.py", 900) == 900
+
+
 def test_run_shard_files_returns_timeout_code_when_file_hangs(tmp_path: Path):
     files = ["tests/test_alpha.py", "tests/test_beta.py"]
 
@@ -82,3 +88,15 @@ def test_run_shard_files_returns_timeout_code_when_file_hangs(tmp_path: Path):
 
     assert result == 124
     assert mock_run.call_count == 1
+
+
+def test_run_shard_files_uses_heavy_file_timeout_override(tmp_path: Path):
+    files = ["tests/test_workflows.py"]
+
+    with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
+        mock_run.return_value = CompletedProcess(args=["pytest"], returncode=0)
+
+        result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
+
+    assert result == 0
+    assert mock_run.call_args.kwargs["timeout"] == 1_500

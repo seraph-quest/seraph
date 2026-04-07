@@ -181,6 +181,10 @@ def _metadata_support_count(metadata: dict[str, object]) -> int:
     return _metadata_int(metadata, "evidence_count")
 
 
+def _metadata_day_count(metadata: dict[str, object], key: str) -> int:
+    return _metadata_int(metadata, key)
+
+
 def _metadata_weighted_support(metadata: dict[str, object]) -> float:
     explicit = _metadata_nonnegative_float(metadata, "weighted_support")
     if explicit is not None:
@@ -367,6 +371,8 @@ async def load_procedural_memory_guidance(
                 metadata_complete=metadata_complete,
             ),
             last_confirmed_at=last_confirmed_at,
+            active_day_count=_metadata_day_count(matching_metadata, "active_day_count"),
+            scheduled_day_count=_metadata_day_count(matching_metadata, "scheduled_day_count"),
             metadata_complete=metadata_complete,
         )
 

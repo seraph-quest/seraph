@@ -116,6 +116,8 @@ class GuardianLearningAxisEvidence:
     confidence_score: float = 0.0
     quality_score: float = 0.0
     last_confirmed_at: datetime | None = None
+    active_day_count: int = 0
+    scheduled_day_count: int = 0
     metadata_complete: bool = True
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlmodel import select
 
@@ -84,6 +84,10 @@ class GuardianLearningSignal:
     blocked_direct_failure_count: int
     blocked_native_success_count: int
     available_direct_success_count: int
+    multi_day_positive_days: int = 0
+    multi_day_negative_days: int = 0
+    scheduled_positive_days: int = 0
+    scheduled_negative_days: int = 0
     axis_evidence: tuple[GuardianLearningAxisEvidence, ...] = ()
 
     def evidence_by_axis(self) -> dict[str, GuardianLearningAxisEvidence]:
@@ -115,6 +119,10 @@ class GuardianLearningSignal:
             blocked_direct_failure_count=0,
             blocked_native_success_count=0,
             available_direct_success_count=0,
+            multi_day_positive_days=0,
+            multi_day_negative_days=0,
+            scheduled_positive_days=0,
+            scheduled_negative_days=0,
             axis_evidence=tuple(
                 neutral_axis_evidence(axis, source="live_signal")
                 for axis in ordered_learning_axes()
@@ -153,6 +161,13 @@ def _average_score(values: list[float]) -> float:
     if not values:
         return 0.0
     return round(sum(values) / len(values), 3)
+
+
+def _outcome_day_bucket(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return normalized.astimezone(timezone.utc).date().isoformat()
 
 
 def _scope_priority(scope: str) -> int:
@@ -212,6 +227,30 @@ def _negative_outcome_weight(item: GuardianIntervention) -> float:
     if item.feedback_type == "not_helpful" or item.latest_outcome == "failed":
         return 1.0
     return 0.0
+
+
+def _is_positive_outcome(item: GuardianIntervention) -> bool:
+    return _positive_delivery_outcome_weight(item) > 0.0
+
+
+def _is_negative_outcome(item: GuardianIntervention) -> bool:
+    return _negative_outcome_weight(item) > 0.0
+
+
+def _distinct_outcome_days(
+    interventions: list[GuardianIntervention],
+    *,
+    predicate,
+) -> int:
+    return len(
+        {
+            bucket
+            for item in interventions
+            if predicate(item)
+            for bucket in [_outcome_day_bucket(item.updated_at)]
+            if bucket is not None
+        }
+    )
 
 
 def _bias_outcome_weight(axis: str, bias: str, item: GuardianIntervention) -> float:
@@ -428,6 +467,14 @@ def _build_live_axis_evidence(
                     [data_quality_score(item.data_quality) for item in contributors]
                 ),
                 last_confirmed_at=last_confirmed_at,
+                active_day_count=_distinct_outcome_days(
+                    contributors,
+                    predicate=lambda _item: True,
+                ),
+                scheduled_day_count=_distinct_outcome_days(
+                    contributors,
+                    predicate=lambda item: bool(item.is_scheduled),
+                ),
             )
         )
     return tuple(evidence_items)
@@ -885,6 +932,14 @@ class GuardianFeedbackRepository:
                 stmt.order_by(GuardianIntervention.updated_at.desc()).limit(limit)
             )
             interventions = list(result.scalars().all())
+            horizon_stmt = stmt.where(
+                GuardianIntervention.updated_at
+                >= (_now() - timedelta(days=21))
+            )
+            horizon_result = await db.execute(
+                horizon_stmt.order_by(GuardianIntervention.updated_at.desc()).limit(max(limit * 4, 60))
+            )
+            long_horizon_interventions = list(horizon_result.scalars().all())
 
         helpful_count = sum(1 for item in interventions if item.feedback_type == "helpful")
         not_helpful_count = sum(1 for item in interventions if item.feedback_type == "not_helpful")
@@ -919,6 +974,22 @@ class GuardianFeedbackRepository:
             and _is_explicit_direct_transport(item.transport)
             and _positive_delivery_outcome_weight(item) > 0.0
         )
+        multi_day_positive_days = _distinct_outcome_days(
+            long_horizon_interventions,
+            predicate=_is_positive_outcome,
+        )
+        multi_day_negative_days = _distinct_outcome_days(
+            long_horizon_interventions,
+            predicate=_is_negative_outcome,
+        )
+        scheduled_positive_days = _distinct_outcome_days(
+            long_horizon_interventions,
+            predicate=lambda item: bool(item.is_scheduled) and _is_positive_outcome(item),
+        )
+        scheduled_negative_days = _distinct_outcome_days(
+            long_horizon_interventions,
+            predicate=lambda item: bool(item.is_scheduled) and _is_negative_outcome(item),
+        )
 
         bias_by_axis = {
             axis: _select_weighted_bias(interventions, axis=axis)
@@ -952,6 +1023,10 @@ class GuardianFeedbackRepository:
             blocked_direct_failure_count=blocked_direct_failures,
             blocked_native_success_count=blocked_state_positive_native,
             available_direct_success_count=available_window_positive,
+            multi_day_positive_days=multi_day_positive_days,
+            multi_day_negative_days=multi_day_negative_days,
+            scheduled_positive_days=scheduled_positive_days,
+            scheduled_negative_days=scheduled_negative_days,
             axis_evidence=_build_live_axis_evidence(
                 interventions=interventions,
                 bias_by_axis=bias_by_axis,

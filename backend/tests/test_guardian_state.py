@@ -1284,6 +1284,162 @@ async def test_build_guardian_state_prefers_scoped_project_guidance_over_global_
     assert "When possible, deliver nudges while the user is explicitly available." not in state.learning_guidance
 
 
+def test_build_guardian_world_model_surfaces_long_horizon_watchpoints():
+    observer_context = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Prepare investor brief",
+        active_project="Investor brief",
+        active_window="Arc",
+        screen_context="Reviewing investor meeting notes",
+        upcoming_events=[{"summary": "Investor sync", "start": "2026-03-18T14:00:00Z"}],
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="medium",
+        attention_budget_remaining=2,
+    )
+    model = build_guardian_world_model(
+        observer_context=observer_context,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary='- Investor brief follow-up: assistant said "Close the investor brief loop before tomorrow."',
+        recent_intervention_feedback="",
+        active_projects=("Investor brief",),
+        recent_execution_summary="- Workflow investor-brief degraded at write_file",
+        memory_buckets={
+            "routine": ("Review investor brief every morning",),
+            "collaborator": ("Alice owns investor brief updates",),
+            "obligation": ("Weekly investor note goes out on Friday",),
+            "timeline": ("Investor brief needs a clean draft before sync",),
+        },
+        learning_signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=1,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
+            suppression_bias="extend_suppression",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+            multi_day_positive_days=1,
+            multi_day_negative_days=3,
+            scheduled_positive_days=1,
+            scheduled_negative_days=2,
+        ),
+    )
+
+    assert any(
+        "Live goal summary still aligns with project anchor 'Investor brief'." == item
+        for item in model.goal_alignment_signals
+    )
+    assert any("Scheduled review and briefing outcomes have been unstable" in item for item in model.goal_alignment_signals)
+    assert any("Weekly investor note goes out on Friday" in item for item in model.routine_watchpoints)
+    assert any("Alice owns investor brief updates" in item for item in model.collaborator_watchpoints)
+    assert any("Multi-day intervention outcomes have skewed negative" in item for item in model.judgment_risks)
+
+
+def test_build_guardian_world_model_lowers_receptivity_on_multi_day_negative_trend():
+    observer_context = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect focus time",
+        active_project="Atlas",
+        active_window="Calendar",
+        screen_context="Meeting prep",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        user_state="available",
+    )
+    model = build_guardian_world_model(
+        observer_context=observer_context,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="",
+        recent_intervention_feedback="",
+        active_projects=("Atlas",),
+        recent_execution_summary="",
+        memory_buckets={},
+        learning_signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=1,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="neutral",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="neutral",
+            blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+            multi_day_positive_days=1,
+            multi_day_negative_days=3,
+            scheduled_positive_days=0,
+            scheduled_negative_days=0,
+        ),
+    )
+
+    assert model.intervention_receptivity == "medium"
+
+
+def test_build_guardian_world_model_ignores_unrelated_obligation_watchpoints():
+    observer_context = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Prepare investor brief",
+        active_project="Investor brief",
+        active_window="Arc",
+        screen_context="Reviewing investor meeting notes",
+        upcoming_events=[{"summary": "Investor sync", "start": "2026-03-18T14:00:00Z"}],
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="aligned_work_activity",
+        interruption_cost="medium",
+        attention_budget_remaining=2,
+    )
+    model = build_guardian_world_model(
+        observer_context=observer_context,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="",
+        recent_intervention_feedback="",
+        active_projects=("Investor brief",),
+        recent_execution_summary="- Workflow investor-brief degraded at write_file",
+        memory_buckets={
+            "routine": ("Review investor brief every morning",),
+            "obligation": ("Payroll reconciliation closes on Tuesday",),
+            "timeline": ("Investor brief needs a clean draft before sync",),
+        },
+        learning_signal=GuardianLearningSignal.neutral("advisory"),
+    )
+
+    assert any("Investor brief needs a clean draft before sync" in item for item in model.routine_watchpoints)
+    assert not any("Payroll reconciliation closes on Tuesday" in item for item in model.routine_watchpoints)
+
+
 @pytest.mark.asyncio
 async def test_build_guardian_state_prefers_thread_scoped_procedural_guidance_over_project_scope(async_db):
     sm = SessionManager()

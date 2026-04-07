@@ -971,6 +971,113 @@ async def test_learning_signal_prefers_grounded_delivery_evidence_over_degraded_
     assert delivery_evidence.weighted_support == pytest.approx(2.0)
 
 
+async def test_learning_signal_tracks_multi_day_and_scheduled_outcome_days(async_db):
+    base_time = datetime.now(timezone.utc)
+    for offset_days, feedback_type, is_scheduled in (
+        (6, "not_helpful", True),
+        (4, "not_helpful", True),
+        (2, "not_helpful", False),
+        (1, "helpful", True),
+    ):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id=None,
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=2,
+            content="Track long-horizon guardian outcomes across several days.",
+            reasoning="available_capacity",
+            is_scheduled=is_scheduled,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="websocket",
+        )
+        await guardian_feedback_repository.record_feedback(intervention.id, feedback_type=feedback_type)
+
+        async with async_db() as db:
+            stored = (
+                await db.execute(
+                    select(GuardianIntervention).where(GuardianIntervention.id == intervention.id)
+                )
+            ).scalar_one()
+            stored.updated_at = base_time - timedelta(days=offset_days)
+            if stored.feedback_at is not None:
+                stored.feedback_at = stored.updated_at
+            db.add(stored)
+            await db.flush()
+
+    signal = await guardian_feedback_repository.get_learning_signal(
+        intervention_type="advisory",
+        limit=4,
+    )
+    suppression_evidence = signal.evidence_for_axis("suppression")
+
+    assert signal.multi_day_negative_days == 3
+    assert signal.multi_day_positive_days == 1
+    assert signal.scheduled_negative_days == 2
+    assert signal.scheduled_positive_days == 1
+    assert suppression_evidence.active_day_count == 3
+    assert suppression_evidence.scheduled_day_count == 2
+
+
+async def test_sync_learning_signal_memories_preserves_day_spread_metadata(async_db):
+    axis_evidence = tuple(
+        GuardianLearningAxisEvidence(
+            axis=item_axis,
+            field_name=learning_field_for_axis(item_axis),
+            source="live_signal",
+            bias="extend_suppression" if item_axis == "suppression" else "neutral",
+            support_count=3 if item_axis == "suppression" else 0,
+            weighted_support=3.0 if item_axis == "suppression" else 0.0,
+            recency_score=0.9 if item_axis == "suppression" else 0.0,
+            confidence_score=1.0 if item_axis == "suppression" else 0.0,
+            quality_score=1.0 if item_axis == "suppression" else 0.0,
+            active_day_count=3 if item_axis == "suppression" else 0,
+            scheduled_day_count=2 if item_axis == "suppression" else 0,
+        )
+        for item_axis in ordered_learning_axes()
+    )
+    await sync_learning_signal_memories(
+        intervention_type="advisory",
+        signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=3,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="reduce_interruptions",
+            phrasing_bias="neutral",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="avoid_focus_windows",
+            blocked_state_bias="avoid_blocked_state_interruptions",
+            suppression_bias="extend_suppression",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=2,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+            multi_day_positive_days=0,
+            multi_day_negative_days=3,
+            scheduled_positive_days=0,
+            scheduled_negative_days=2,
+            axis_evidence=axis_evidence,
+        ),
+    )
+
+    guidance = await load_procedural_memory_guidance("advisory")
+    suppression_evidence = guidance.evidence_for_axis("suppression")
+
+    assert suppression_evidence.bias == "extend_suppression"
+    assert suppression_evidence.active_day_count == 3
+    assert suppression_evidence.scheduled_day_count == 2
+
+
 async def test_learning_signal_ignores_unobserved_phrasing_cadence_and_thread_axes(async_db):
     for feedback_type in ("helpful", "helpful", "not_helpful", "not_helpful", "failed", "failed"):
         intervention = await guardian_feedback_repository.create_intervention(

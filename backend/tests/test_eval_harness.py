@@ -55,6 +55,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
     assert "guardian_judgment_behavior" in captured.out
+    assert "guardian_long_horizon_learning_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
@@ -174,6 +175,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
                 "guardian_judgment_behavior",
+                "guardian_long_horizon_learning_behavior",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
@@ -427,6 +429,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_judgment_behavior"]["includes_project_anchor_drift"] is True
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["scheduled_negative_days"] == 2
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["intervention_receptivity"] == "medium"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_goal_alignment_signal"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_unstable_review_signal"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_routine_watchpoint"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_collaborator_watchpoint"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_multi_day_risk"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
     assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"

@@ -4813,6 +4813,151 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import guardian_feedback_repository
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("current")
+        await session_manager.add_message("current", "user", "What is slipping on Investor brief?")
+        await session_manager.add_message("current", "assistant", "I will reconcile the long-horizon signals.")
+
+        await memory_repository.create_memory(
+            content="Alice owns investor brief updates.",
+            kind=MemoryKind.collaborator,
+            summary="Alice owns investor brief updates",
+            importance=0.82,
+        )
+        await memory_repository.create_memory(
+            content="Weekly investor note goes out on Friday.",
+            kind=MemoryKind.obligation,
+            summary="Weekly investor note goes out on Friday",
+            importance=0.8,
+        )
+        await memory_repository.create_memory(
+            content="Investor brief needs a clean draft before sync.",
+            kind=MemoryKind.timeline,
+            summary="Investor brief needs a clean draft before sync",
+            importance=0.78,
+        )
+        await memory_repository.create_memory(
+            content="Review investor brief every morning.",
+            kind=MemoryKind.routine,
+            summary="Review investor brief every morning",
+            importance=0.76,
+        )
+
+        base_time = datetime(2026, 3, 18, 9, 0, tzinfo=timezone.utc)
+        for offset_days, feedback_type, is_scheduled in (
+            (6, "not_helpful", True),
+            (4, "not_helpful", True),
+            (2, "not_helpful", False),
+            (1, "helpful", True),
+        ):
+            ts = base_time - timedelta(days=offset_days)
+            with patch("src.guardian.feedback._now", return_value=ts):
+                intervention = await guardian_feedback_repository.create_intervention(
+                    session_id="current",
+                    message_type="proactive",
+                    intervention_type="advisory",
+                    urgency=3,
+                    content="Track long-horizon investor brief follow-through.",
+                    reasoning="available_capacity",
+                    is_scheduled=is_scheduled,
+                    guardian_confidence="grounded",
+                    data_quality="good",
+                    user_state="available",
+                    active_project="Investor brief",
+                    interruption_mode="balanced",
+                    policy_action="act",
+                    policy_reason="available_capacity",
+                    delivery_decision="deliver",
+                    latest_outcome="delivered",
+                    transport="websocket",
+                )
+                await guardian_feedback_repository.record_feedback(
+                    intervention.id,
+                    feedback_type=feedback_type,
+                )
+
+        ctx = _make_context(
+            active_goals_summary="Prepare investor brief",
+            active_project="Investor brief",
+            active_window="Arc",
+            screen_context="Reviewing investor meeting notes",
+            upcoming_events=[{"summary": "Investor sync", "start": "2026-03-18T14:00:00Z"}],
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="aligned_work_activity",
+            interruption_cost="medium",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+            patch(
+                "src.audit.repository.audit_repository.list_events",
+                return_value=[
+                    {
+                        "event_type": "tool_result",
+                        "tool_name": "workflow_investor_brief",
+                        "details": {
+                            "workflow_name": "investor-brief",
+                            "continued_error_steps": ["write_file"],
+                        },
+                    }
+                ],
+            ),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Investor brief"],
+            ),
+            patch("src.guardian.feedback._now", return_value=base_time),
+        ):
+            state = await build_guardian_state(
+                session_id="current",
+                user_message="What is slipping on Investor brief?",
+            )
+            signal = await guardian_feedback_repository.get_learning_signal(
+                intervention_type="advisory",
+                session_id="current",
+                active_project="Investor brief",
+            )
+
+    return {
+        "multi_day_negative_days": signal.multi_day_negative_days,
+        "scheduled_negative_days": signal.scheduled_negative_days,
+        "intervention_receptivity": state.world_model.intervention_receptivity,
+        "has_goal_alignment_signal": any(
+            "aligns with project anchor 'Investor brief'" in item
+            for item in state.world_model.goal_alignment_signals
+        ),
+        "has_unstable_review_signal": any(
+            "Scheduled review and briefing outcomes have been unstable" in item
+            for item in state.world_model.goal_alignment_signals
+        ),
+        "has_routine_watchpoint": any(
+            "Weekly investor note goes out on Friday" in item
+            for item in state.world_model.routine_watchpoints
+        ),
+        "has_collaborator_watchpoint": any(
+            "Alice owns investor brief updates" in item
+            for item in state.world_model.collaborator_watchpoints
+        ),
+        "has_multi_day_risk": any(
+            "Multi-day intervention outcomes have skewed negative" in item
+            for item in state.world_model.judgment_risks
+        ),
+    }
+
+
 async def _eval_observer_delivery_gate_audit() -> dict[str, Any]:
     delivered_ctx = _make_context(user_state="available", interruption_mode="balanced", attention_budget_remaining=3)
     queued_ctx = _make_context(user_state="deep_work", interruption_mode="balanced", attention_budget_remaining=3)
@@ -7817,6 +7962,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Conflicting or weakly corroborated world-model evidence lowers guardian confidence and suppresses medium-urgency nudges.",
         runner=_eval_guardian_judgment_behavior,
+    ),
+    EvalScenario(
+        name="guardian_long_horizon_learning_behavior",
+        category="guardian",
+        description="Long-horizon intervention outcomes and scheduled review drift feed routine, collaborator, and goal-alignment watchpoints into guardian state.",
+        runner=_eval_guardian_long_horizon_learning_behavior,
     ),
     EvalScenario(
         name="observer_refresh_behavior",

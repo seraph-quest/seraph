@@ -35,6 +35,7 @@
 - [x] cockpit workflow density now also exposes step-focus rows with direct step-context handoff, step-output handoff, repair or retry actions, richer workflow-row focus summaries, and keyboard-first top-workflow inspect/output shortcuts instead of leaving step-level debugging buried in generic timelines
 - [x] cockpit workflow density now also exposes visual branch-debug summaries, explicit branch-origin and failure-lineage rows, and best-continuation controls with direct open, continue, and output reuse actions instead of leaving branch debugging as implicit lineage metadata
 - [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, family-row checkpoint drill-in, direct family-row retry/repair controls, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, branch or retry from family checkpoints, repair failed family steps, and draft continuation plans without reconstructing lineage manually
+- [x] cockpit artifact control now also exposes source-run provenance when lineage is uniquely visible, related family outputs, follow-on workflow rows, artifact next-step drafting, and keyboard-first artifact inspect/plan/run shortcuts instead of treating artifacts as generic file-context handoff only
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -59,6 +60,7 @@
 - [x] this workstream now also ships `workflow-output-comparison-drafts-and-family-diff-control-v1`
 - [x] this workstream now also ships `workflow-family-checkpoint-drilldown-and-step-control-v1`
 - [x] this workstream now also ships `workflow-family-recovery-control-parity-v1`
+- [x] this workstream now also ships `artifact-lineage-and-follow-on-control-v1`
 - [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
 
 ## Still To Do On `develop`
@@ -69,6 +71,29 @@
 - [ ] stronger mobile and cross-surface UX coherence
 
 ## Current Branch Record
+
+### `artifact-lineage-and-follow-on-control-v1`
+
+- status: in progress on `feat/long-running-workflow-control-batch-ah-v1`
+- root causes addressed:
+  - the cockpit already had dense workflow-family control, but artifacts were still treated mostly as generic file-context handoff with one or two compatible workflow buttons
+  - operators still had to jump back into workflow lineage views to understand which run produced an artifact, which related outputs existed in the same family, and what the best follow-on action was
+  - keyboard-first control still had no artifact-specific planning path even though artifact evidence was already one of the freshest operator surfaces
+- scope:
+  - artifact inspectors now surface verified source-run provenance when available, explicit unresolved lineage when it is not, related family outputs, follow-on workflow rows, compare/use controls, and direct source-failure reuse
+  - evidence shortcuts now draft artifact next-step plans instead of collapsing every artifact into generic file-context reuse
+  - keyboard-first control now also includes artifact-specific inspect, next-step, and suggested-follow-on shortcuts
+  - cockpit regression coverage now pins the richer artifact lineage/follow-on contract end-to-end
+- review findings fixed during implementation:
+  - the first pass left a real TypeScript nullability hole in the artifact-family-output helper, which broke the frontend build
+  - the first test pass also overfit exact draft strings and assumed the Recent outputs pane title would be the easiest stable selector, which was not true in the rendered window chrome
+  - the first artifact-lineage pass could also attribute a file to the wrong workflow when several recent runs wrote the same path, and it used a narrower session-scoped workflow window than the artifact list itself
+  - fixed by failing closed on nullable or ambiguous lineage helpers, resolving artifact provenance from a broader lineage window, tightening the artifact tests around stable visible contract rather than exact prose, and binding the new artifact control proof to the evidence shortcut plus inspector surfaces directly
+- validation:
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+    - result: `55 passed`
+  - `cd frontend && npm run build`
+    - result: `passed`
 
 ### `onboarding-web-context-v1`
 

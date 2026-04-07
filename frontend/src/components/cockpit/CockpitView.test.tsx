@@ -802,15 +802,67 @@ describe("CockpitView", () => {
             native_tools_total: 0,
             skills_ready: 0,
             skills_total: 0,
-            workflows_ready: 0,
-            workflows_total: 0,
+            workflows_ready: 2,
+            workflows_total: 2,
             starter_packs_ready: 0,
             starter_packs_total: 0,
             mcp_servers_ready: 0,
             mcp_servers_total: 0,
           },
           native_tools: [],
-          workflows: [],
+          workflows: [
+            {
+              name: "web-brief-to-file",
+              tool_name: "workflow_web_brief_to_file",
+              description: "Write a brief into a workspace file",
+              inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+              requires_tools: ["write_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/web-brief-to-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read", "workspace_write"],
+              risk_level: "medium",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+              output_surface_artifact_types: ["markdown_document"],
+            },
+            {
+              name: "summarize-file",
+              tool_name: "workflow_summarize_file",
+              description: "Summarize a workspace file",
+              inputs: {
+                file_path: {
+                  type: "string",
+                  description: "Workspace file",
+                  required: true,
+                  artifact_input: true,
+                  artifact_types: ["markdown_document", "workspace_file"],
+                },
+              },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/summarize-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+            },
+          ],
           skills: [],
           mcp_servers: [],
           starter_packs: [],
@@ -1266,7 +1318,7 @@ describe("CockpitView", () => {
 
     fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/brief.md" }));
     await waitFor(() =>
-      expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument(),
+      expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/brief\.md"\./)).toBeInTheDocument(),
     );
 
     fireEvent.keyDown(window, { key: "I", shiftKey: true });
@@ -1291,10 +1343,18 @@ describe("CockpitView", () => {
     fireEvent.keyDown(window, { key: "E", shiftKey: true });
     await waitFor(() => expect(screen.getByRole("button", { name: "Use In Command Bar" })).toBeInTheDocument());
 
+    fireEvent.keyDown(window, { key: "J", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/brief\.md"\./)).toBeInTheDocument(),
+    );
+
     fireEvent.keyDown(window, { key: "W", shiftKey: true });
     await waitFor(() =>
       expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument(),
     );
+
+    fireEvent.keyDown(window, { key: "M", shiftKey: true });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Source Run" })).toBeInTheDocument());
 
     fireEvent.keyDown(window, { key: "U", shiftKey: true });
     await waitFor(() =>
@@ -4404,6 +4464,617 @@ describe("CockpitView", () => {
       ).toBeInTheDocument(),
     );
   });
+
+  it("surfaces artifact lineage and follow-on control across outputs and the inspector", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-root-output",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved root review output",
+            created_at: "2026-03-20T09:05:00Z",
+            details: { arguments: { file_path: "notes/root-review.md" } },
+          },
+          {
+            id: "audit-peer-output",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved peer review output",
+            created_at: "2026-03-20T09:07:30Z",
+            details: { arguments: { file_path: "notes/peer-review.md" } },
+          },
+          {
+            id: "audit-branch-output",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved branch review output",
+            created_at: "2026-03-20T09:08:00Z",
+            details: { arguments: { file_path: "notes/branch-review.md" } },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 2,
+            workflows_total: 2,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [
+            {
+              name: "resume-review",
+              tool_name: "workflow_resume_review",
+              description: "Resume a review workflow",
+              inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/resume-review.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+              output_surface_artifact_types: ["markdown_document"],
+            },
+            {
+              name: "summarize-file",
+              tool_name: "workflow_summarize_file",
+              description: "Summarize a workspace file",
+              inputs: {
+                file_path: {
+                  type: "string",
+                  description: "Workspace file",
+                  required: true,
+                  artifact_input: true,
+                  artifact_types: ["markdown_document", "workspace_file"],
+                },
+              },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/summarize-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+            },
+          ],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/root-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "replay_from_start",
+              branch_depth: 0,
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
+              replay_allowed: true,
+              replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
+            },
+            {
+              id: "run-child",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-20T09:06:00Z",
+              updated_at: "2026-03-20T09:08:00Z",
+              summary: "branch review needs continuation",
+              step_tools: ["read_file"],
+              step_records: [
+                {
+                  id: "review_checkpoint",
+                  index: 0,
+                  tool: "read_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/branch-review.md"],
+                  error_summary: "review checkpoint needs continuation",
+                  recovery_actions: [
+                    {
+                      type: "set_tool_policy",
+                      label: "Allow read_file",
+                      mode: "full",
+                    },
+                  ],
+                  is_recoverable: true,
+                },
+              ],
+              artifact_paths: ["notes/branch-review.md"],
+              continued_error_steps: ["review_checkpoint"],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-child-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "review_checkpoint",
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "retry_failed_step",
+                },
+              ],
+              replay_allowed: true,
+              thread_continue_message: "Continue child branch from the review checkpoint.",
+              retry_from_step_draft:
+                'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+            },
+            {
+              id: "run-peer",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:07:00Z",
+              updated_at: "2026-03-20T09:07:30Z",
+              summary: "peer review branch completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/peer-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-peer-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "peer_checkpoint",
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "peer_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="peer_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
+              replay_allowed: true,
+              thread_continue_message: "Continue peer branch from the peer checkpoint.",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/branch-review.md" })).toBeInTheDocument();
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/branch-review\.md"\./)).toBeInTheDocument(),
+    );
+    expect(screen.getByDisplayValue(/summarize-file/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/notes\/peer-review\.md/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/notes\/root-review\.md/)).toBeInTheDocument();
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Inspect artifact: notes/branch-review.md" }));
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Open Source Run" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue Source Run" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use Source Failure" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare Related Output" })).toBeInTheDocument();
+    expect(within(inspector).getByText("source run")).toBeInTheDocument();
+    expect(within(inspector).getByText("follow-on")).toBeInTheDocument();
+    expect(within(inspector).getAllByText("related output").length).toBeGreaterThan(0);
+    expect(within(inspector).getByRole("button", { name: "Run summarize-file from artifact notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare related output notes/peer-review.md with artifact notes/branch-review.md" })).toBeInTheDocument();
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use Source Failure" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review workflow "resume-review" step "review_checkpoint" \(read_file\)\./)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare related output notes/peer-review.md with artifact notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/branch-review.md" and "notes/peer-review.md". Summarize the key differences, what changed between these artifact outputs, and which file is the better base for the next step.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Run summarize-file from artifact notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/branch-review\.md"\./)).toBeInTheDocument(),
+    );
+  }, 15000);
+
+  it("resolves artifact source lineage from the broader workflow window", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        { id: "session-2", title: "Research thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+          { id: "session-2", title: "Research thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+          imported_reach: { summary: { family_count: 0, active_family_count: 0, attention_family_count: 0, approval_family_count: 0 }, families: [] },
+          source_adapters: { summary: { adapter_count: 0, ready_adapter_count: 0, degraded_adapter_count: 0, authenticated_adapter_count: 0, authenticated_ready_adapter_count: 0, authenticated_degraded_adapter_count: 0 }, adapters: [] },
+          summary: { continuity_health: "steady", primary_surface: "browser", actionable_thread_count: 0, ambient_item_count: 0, pending_notification_count: 0, queued_insight_count: 0, recent_intervention_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_family_count: 0 },
+          threads: [],
+          recovery_actions: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-artifact",
+            session_id: "session-2",
+            tool_name: "write_file",
+            event_type: "tool_result",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Research summary saved",
+            created_at: "2026-03-21T10:05:00Z",
+            details: { arguments: { file_path: "notes/shared-brief.md" } },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          native_tools: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/workflows/runs?limit=40")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-source",
+              tool_name: "workflow_research_brief",
+              workflow_name: "research-brief",
+              session_id: "session-2",
+              status: "succeeded",
+              started_at: "2026-03-21T10:00:00Z",
+              updated_at: "2026-03-21T10:05:00Z",
+              summary: "research brief completed",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/shared-brief.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Research thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue research brief",
+              run_identity: "research-run",
+              root_run_identity: "research-run",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "session-local-run",
+              tool_name: "workflow_local_note",
+              workflow_name: "local-note",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-21T10:01:00Z",
+              updated_at: "2026-03-21T10:02:00Z",
+              summary: "local note completed",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/local.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue local note",
+              run_identity: "local-run",
+              root_run_identity: "local-run",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(await within(evidence).findByText("artifact: notes/shared-brief.md")).toBeInTheDocument();
+    expect(within(evidence).getByText(/research-brief · succeeded/)).toBeInTheDocument();
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Inspect artifact: notes/shared-brief.md" }));
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Open Source Run" })).toBeInTheDocument();
+    expect(within(inspector).getByText("source run")).toBeInTheDocument();
+    expect(within(inspector).getByText(/research-brief · research brief completed/)).toBeInTheDocument();
+  }, 15000);
+
+  it("fails closed when artifact lineage is ambiguous across recent runs", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+          imported_reach: { summary: { family_count: 0, active_family_count: 0, attention_family_count: 0, approval_family_count: 0 }, families: [] },
+          source_adapters: { summary: { adapter_count: 0, ready_adapter_count: 0, degraded_adapter_count: 0, authenticated_adapter_count: 0, authenticated_ready_adapter_count: 0, authenticated_degraded_adapter_count: 0 }, adapters: [] },
+          summary: { continuity_health: "steady", primary_surface: "browser", actionable_thread_count: 0, ambient_item_count: 0, pending_notification_count: 0, queued_insight_count: 0, recent_intervention_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_family_count: 0 },
+          threads: [],
+          recovery_actions: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-ambiguous",
+            session_id: "session-1",
+            tool_name: "write_file",
+            event_type: "tool_result",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Shared review saved",
+            created_at: "2026-03-21T11:05:00Z",
+            details: { arguments: { file_path: "notes/shared.md" } },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          native_tools: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-a",
+              tool_name: "workflow_write_summary",
+              workflow_name: "write-summary",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-21T11:00:00Z",
+              updated_at: "2026-03-21T11:02:00Z",
+              summary: "summary branch completed",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/shared.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-a",
+              root_run_identity: "run-a",
+            },
+            {
+              id: "run-b",
+              tool_name: "workflow_update_summary",
+              workflow_name: "update-summary",
+              session_id: "session-1",
+              status: "failed",
+              started_at: "2026-03-21T11:03:00Z",
+              updated_at: "2026-03-21T11:04:00Z",
+              summary: "update branch failed after writing shared output",
+              step_tools: ["write_file"],
+              step_records: [
+                {
+                  id: "write_shared",
+                  index: 0,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/shared.md"],
+                  error_summary: "write verification failed",
+                },
+              ],
+              artifact_paths: ["notes/shared.md"],
+              continued_error_steps: ["write_shared"],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-b",
+              root_run_identity: "run-b",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(await within(evidence).findByText("artifact: notes/shared.md")).toBeInTheDocument();
+    expect(within(evidence).getAllByText(/source ambiguous/).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/shared.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Source workflow is ambiguous across 2 recent runs/)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Inspect artifact: notes/shared.md" }));
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).queryByRole("button", { name: "Open Source Run" })).not.toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: "Use Source Failure" })).not.toBeInTheDocument();
+    expect(within(inspector).getByText("source ambiguous (2 candidates)")).toBeInTheDocument();
+    expect(within(inspector).getByText("unresolved · 2 recent runs wrote notes/shared.md")).toBeInTheDocument();
+  }, 15000);
 
   it("surfaces workflow approval, artifact, and trace density inside the inspector", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -7658,7 +8329,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(12));
+    await waitFor(() => expect(cockpitFetchCount).toBe(13));
     view.unmount();
 
     await act(async () => {

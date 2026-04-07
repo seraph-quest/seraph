@@ -37,6 +37,7 @@
 - [x] typed artifact-input handoff plus checkpoint-truthful branch actions in the cockpit, so follow-on workflow drafts now respect declared artifact compatibility and failed-step controls only appear when the runtime persisted reusable checkpoint state
 - [x] workflow cockpit surfaces now derive parent/peer/child branch families from persisted lineage, letting operators inspect related runs and continue the latest branch directly from the workflow surface instead of reconstructing branches manually
 - [x] cockpit workflow surfaces now promote step-focus debugging, direct step/output handoff actions, bundled family next-step planning drafts, denser ancestor/peer/failure-lineage follow-through, direct family-row checkpoint drill-in, direct family-row retry/repair controls, and active-triage workflow quick actions including failure-context reuse, direct best-continuation control, direct recovery actions, and keyboard-first best-continuation/comparison follow-through, so operators can act on the hottest failed or recoverable workflow step without reconstructing that context from raw history
+- [x] cockpit artifact surfaces now preserve verified source-run lineage when it is uniquely visible, related family outputs, and direct artifact follow-on control, so typed artifact-to-workflow chaining is visible as an operator workflow graph instead of only a one-off draft button
 - [x] Hermes runtime-parity primitives including `execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`, stronger scheduled execution, and tighter runtime security controls
 - [x] packaged browser providers, messaging connectors, automation triggers, node adapters, canvas outputs, workflow runtimes, and channel routing through the extension platform instead of ad hoc side paths
 - [x] operator-surface imported reach, extension governance, and LLM spend attribution by runtime path and capability family
@@ -73,6 +74,7 @@
 - [x] `adapter-first-capability-contracts-v1` now ships provider-neutral source contracts, managed-connector inventory, explicit raw-MCP disclosure, and one reusable source-evidence review skill instead of forcing provider-specific reporting glue
 - [x] `adapter-backed-authenticated-source-operations-v1` now ships source-adapter inventory, normalized evidence bundles, executable public-web read contracts, explicit degraded managed-connector semantics, and one reusable `collect_source_evidence` tool/API path instead of leaving source routines to stitch raw surface metadata together
 - [x] `adapter-backed-authenticated-source-operations-v3` now ships reusable `plan_source_review` planning, bundled daily/progress/goal-alignment source-review starter packs and runbooks, explicit mixed-source review fallback truth, and backend CI sharding for the growing test surface
+- [x] `artifact-lineage-and-follow-on-control-v1` now ships verified artifact source-run provenance with explicit unresolved-state fallback, related family outputs, richer follow-on workflow rows, and artifact-specific planning shortcuts instead of leaving typed artifact chaining buried inside workflow-only inspector actions
 
 ## Review Follow-Up
 
@@ -103,7 +105,7 @@
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the current install/recommendation, preflight/autorepair, policy-aware recovery, catalog-install, and bounded bootstrap flow
 - [ ] richer extension health/test surfaces and production-grade connector hardening beyond the current lifecycle API, governance queue, and deterministic eval coverage
-- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, typed artifact handoff, step records, branch-family supervision, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
+- [ ] deeper workflow operating surfaces and richer workflow history beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the current operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, extension studio, and skill-registry loop
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

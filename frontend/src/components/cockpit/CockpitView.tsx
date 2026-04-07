@@ -855,6 +855,13 @@ interface OperatorEvidenceEntry {
   audit?: CockpitAuditEvent | null;
 }
 
+interface ArtifactLineageResolution {
+  sourceWorkflow: WorkflowRunRecord | null;
+  candidateWorkflows: WorkflowRunRecord[];
+  ambiguous: boolean;
+  unresolvedReason: "ambiguous" | "unavailable" | null;
+}
+
 type ToolPolicyMode = "safe" | "balanced" | "full";
 type McpPolicyMode = "disabled" | "approval" | "full";
 type ApprovalMode = "off" | "high_risk";
@@ -2465,6 +2472,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ObserverContinuityRecoveryAction[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
+  const [artifactLineageRuns, setArtifactLineageRuns] = useState<WorkflowRunRecord[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
@@ -2651,6 +2659,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       extensionsResult,
       activityLedgerResult,
       workflowRunsResult,
+      artifactLineageRunsResult,
       toolModeResult,
       mcpModeResult,
       approvalModeResult,
@@ -2664,6 +2673,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
       fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
       fetchJson(`${API_URL}/api/settings/approval-mode`),
@@ -2750,6 +2760,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
           : [],
       );
+    }
+    if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
+      const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
+      setArtifactLineageRuns(
+        Array.isArray(runs)
+          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+          : [],
+      );
+    } else {
+      setArtifactLineageRuns([]);
     }
     if (toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
       setToolPolicyMode(((toolModeResult.payload as { mode?: string }).mode ?? "unknown") as ToolPolicyMode | "unknown");
@@ -2895,6 +2915,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         .filter((artifact): artifact is ArtifactRecord => artifact != null),
     }));
   }, [artifacts, workflowRuns]);
+  const artifactLineageRunsWithArtifacts = useMemo(() => {
+    const artifactMap = new Map(
+      artifacts.map((artifact) => [`${artifact.sessionId ?? "global"}:${artifact.filePath}`, artifact]),
+    );
+    return artifactLineageRuns.map((run) => ({
+      ...run,
+      artifacts: run.artifactPaths
+        .map((filePath) => artifactMap.get(`${run.sessionId ?? "global"}:${filePath}`))
+        .filter((artifact): artifact is ArtifactRecord => artifact != null),
+    }));
+  }, [artifactLineageRuns, artifacts]);
   const workflowRunById = useMemo(
     () => new Map(workflowRunsWithArtifacts.map((workflow) => [workflow.id, workflow])),
     [workflowRunsWithArtifacts],
@@ -3688,27 +3719,34 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ]);
   const operatorEvidenceEntries = useMemo<OperatorEvidenceEntry[]>(() => {
     const entries: OperatorEvidenceEntry[] = [];
-    const latestArtifactEvidence = workflowRunsWithArtifacts
-      .flatMap((workflow) => workflow.artifacts.map((artifact) => ({ workflow, artifact })))
-      .sort((left, right) => (
-        new Date(right.artifact.createdAt).getTime() - new Date(left.artifact.createdAt).getTime()
-        || compareWorkflowRunsNewestFirst(left.workflow, right.workflow)
-      ))[0] ?? null;
+    const latestArtifactEvidence = [...artifacts]
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+      .map((artifact) => ({ artifact, lineage: resolveArtifactLineage(artifact) }))[0] ?? null;
     if (latestArtifactEvidence) {
-      const { workflow: workflowWithArtifact, artifact } = latestArtifactEvidence;
-      const threadLabel = workflowWithArtifact.threadLabel
-        ?? (workflowWithArtifact.threadId ? sessionTitleById[workflowWithArtifact.threadId] : null)
-        ?? (workflowWithArtifact.threadId ? `thread ${workflowWithArtifact.threadId.slice(0, 6)}` : null);
+      const { artifact, lineage } = latestArtifactEvidence;
+      const workflowWithArtifact = lineage.sourceWorkflow;
+      const threadLabel = workflowWithArtifact
+        ? workflowWithArtifact.threadLabel
+          ?? (workflowWithArtifact.threadId ? sessionTitleById[workflowWithArtifact.threadId] : null)
+          ?? (workflowWithArtifact.threadId ? `thread ${workflowWithArtifact.threadId.slice(0, 6)}` : null)
+        : null;
       entries.push({
         id: `artifact:${artifact.id}`,
         kind: "artifact",
         label: `artifact: ${artifact.filePath}`,
-        detail: `${workflowWithArtifact.workflowName} · ${formatContinuityLabel(workflowWithArtifact.status)} · ${artifact.summary}`,
-        meta: [artifact.source, threadLabel, formatAge(artifact.createdAt)].filter(Boolean).join(" · "),
+        detail: workflowWithArtifact
+          ? `${workflowWithArtifact.workflowName} · ${formatContinuityLabel(workflowWithArtifact.status)} · ${artifact.summary}`
+          : `${lineage.ambiguous ? "source ambiguous" : "source unresolved"} · ${artifact.summary}`,
+        meta: [
+          artifact.source,
+          lineage.ambiguous ? "source ambiguous" : !workflowWithArtifact ? "source unresolved" : null,
+          threadLabel,
+          formatAge(artifact.createdAt),
+        ].filter(Boolean).join(" · "),
         sortKey: new Date(artifact.createdAt).getTime(),
-        threadId: workflowWithArtifact.threadId ?? workflowWithArtifact.sessionId ?? artifact.sessionId ?? null,
+        threadId: workflowWithArtifact?.threadId ?? workflowWithArtifact?.sessionId ?? artifact.sessionId ?? null,
         artifact,
-        workflow: workflowWithArtifact,
+        workflow: workflowWithArtifact ?? undefined,
       });
     }
 
@@ -3759,10 +3797,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       .slice(0, 3);
   }, [
     auditEvents,
+    artifacts,
     pendingApprovals,
     recentTrace,
     sessionTitleById,
-    workflowRunsWithArtifacts,
   ]);
   const primaryTriageEntry = operatorTriageEntries[0] ?? null;
   const primaryApprovalTriageEntry = operatorTriageEntries.find((entry) => entry.approval) ?? null;
@@ -3831,16 +3869,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return;
     }
     if (entry.artifact) {
-      const workflow = compatibleArtifactWorkflows(
-        entry.artifact.filePath,
-        undefined,
-        entry.workflow ? [entry.workflow.workflowName, entry.workflow.toolName] : [],
-      )[0];
-      if (workflow) {
-        queueArtifactWorkflowDraft(workflow, entry.artifact.filePath);
-        return;
-      }
-      queueComposerDraft(`Use the workspace file "${entry.artifact.filePath}" as context for the next action.`);
+      queueArtifactFollowOnPlan(entry.artifact);
     }
   }
   useEffect(() => {
@@ -3901,6 +3930,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "t") {
         event.preventDefault();
         queueWorkflowRecoveryDraft(primaryWorkflowShortcutTarget());
+      } else if (key === "m") {
+        event.preventDefault();
+        inspectPrimaryArtifactEntry();
+      } else if (key === "j") {
+        event.preventDefault();
+        queueArtifactFollowOnPlan(primaryArtifactShortcutTarget());
+      } else if (key === "y") {
+        event.preventDefault();
+        queueArtifactTopFollowOnWorkflowDraft(primaryArtifactShortcutTarget());
       }
     };
     window.addEventListener("keydown", handleOperatorShortcut);
@@ -3917,13 +3955,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     primaryTriageEntry,
     primaryWorkflowTriageEntry,
     inspectLatestWorkflowBranch,
+    inspectPrimaryArtifactEntry,
     inspectWorkflowBestContinuation,
     inspectPrimaryWorkflowEntry,
     continueWorkflowBestContinuation,
+    queueArtifactFollowOnPlan,
+    queueArtifactTopFollowOnWorkflowDraft,
     queueWorkflowBestContinuationComparison,
     queueWorkflowFamilyPlan,
     queueWorkflowLatestFailureContext,
     queueWorkflowRecoveryDraft,
+    primaryArtifactShortcutTarget,
     primaryWorkflowShortcutTarget,
     queueWorkflowOutputContext,
     redirectOperatorWorkflowEntry,
@@ -5470,6 +5512,206 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return resolved.artifacts[0]?.filePath ?? resolved.artifactPaths[0] ?? null;
   }
 
+  function workflowsForArtifactRecord(artifact: ArtifactRecord): WorkflowRunRecord[] {
+    const seen = new Set<string>();
+    return artifactLineageRunsWithArtifacts
+      .map((workflow) => resolveWorkflowRun(workflow))
+      .map((workflow) => {
+        const exactArtifact = workflow.artifacts.some((entry) => entry.id === artifact.id);
+        const sessionPathMatch = workflow.artifacts.some((entry) => (
+          entry.filePath === artifact.filePath
+          && (entry.sessionId ?? workflow.sessionId ?? null) === (artifact.sessionId ?? null)
+        ));
+        const sessionArtifactPathMatch = workflow.artifactPaths.includes(artifact.filePath)
+          && (workflow.sessionId ?? null) === (artifact.sessionId ?? null);
+        const score = exactArtifact ? 3 : sessionPathMatch ? 2 : sessionArtifactPathMatch ? 1 : 0;
+        return { workflow, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .filter((workflow) => {
+        const key = workflow.workflow.runIdentity ?? workflow.workflow.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((left, right) => right.score - left.score || compareWorkflowRunsNewestFirst(left.workflow, right.workflow))
+      .map((entry) => entry.workflow);
+  }
+
+  function resolveArtifactLineage(artifact: ArtifactRecord | null | undefined): ArtifactLineageResolution {
+    if (!artifact) {
+      return {
+        sourceWorkflow: null,
+        candidateWorkflows: [],
+        ambiguous: false,
+        unresolvedReason: "unavailable",
+      };
+    }
+    const candidates = workflowsForArtifactRecord(artifact);
+    if (candidates.length === 0) {
+      return {
+        sourceWorkflow: null,
+        candidateWorkflows: [],
+        ambiguous: false,
+        unresolvedReason: "unavailable",
+      };
+    }
+    const candidateFamilies = new Set(candidates.map((workflow) => workflowFamilyRootIdentity(workflow)));
+    if (candidateFamilies.size === 1) {
+      return {
+        sourceWorkflow: candidates[0] ?? null,
+        candidateWorkflows: candidates,
+        ambiguous: false,
+        unresolvedReason: null,
+      };
+    }
+    if (candidates.length > 1) {
+      return {
+        sourceWorkflow: null,
+        candidateWorkflows: candidates,
+        ambiguous: true,
+        unresolvedReason: "ambiguous",
+      };
+    }
+    return {
+      sourceWorkflow: candidates[0] ?? null,
+      candidateWorkflows: candidates,
+      ambiguous: false,
+      unresolvedReason: null,
+    };
+  }
+
+  function artifactSourceWorkflow(artifact: ArtifactRecord | null | undefined): WorkflowRunRecord | null {
+    return resolveArtifactLineage(artifact).sourceWorkflow;
+  }
+
+  function artifactSourceOutputSurfaceTypes(artifact: ArtifactRecord | null | undefined): string[] | undefined {
+    const sourceWorkflow = artifactSourceWorkflow(artifact);
+    if (!sourceWorkflow) return undefined;
+    return workflowDefinitionByName.get(sourceWorkflow.workflowName)?.output_surface_artifact_types;
+  }
+
+  function artifactCompatibleFollowOnWorkflows(artifact: ArtifactRecord | null | undefined): WorkflowInfo[] {
+    if (!artifact) return [];
+    const sourceWorkflow = artifactSourceWorkflow(artifact);
+    const excludeWorkflowNames = sourceWorkflow
+      ? [sourceWorkflow.workflowName, sourceWorkflow.toolName]
+      : [];
+    return compatibleArtifactWorkflows(
+      artifact.filePath,
+      artifactSourceOutputSurfaceTypes(artifact),
+      excludeWorkflowNames,
+    );
+  }
+
+  function artifactRelatedFamilyOutputs(artifact: ArtifactRecord | null | undefined): WorkflowFamilyArtifactOutput[] {
+    if (!artifact) return [];
+    const sourceWorkflow = artifactSourceWorkflow(artifact);
+    if (!sourceWorkflow) return [];
+    return workflowFamilyArtifactOutputs(sourceWorkflow).filter((output) => output.filePath !== artifact.filePath);
+  }
+
+  function artifactInspectorSummary(artifact: ArtifactRecord | null | undefined): string[] {
+    if (!artifact) return [];
+    const lineage = resolveArtifactLineage(artifact);
+    const sourceWorkflow = lineage.sourceWorkflow;
+    const followOnWorkflows = artifactCompatibleFollowOnWorkflows(artifact);
+    const relatedOutputs = artifactRelatedFamilyOutputs(artifact);
+    const summary: string[] = [];
+    if (sourceWorkflow) {
+      summary.push(`source ${sourceWorkflow.workflowName}`);
+      summary.push(workflowSupervisionLabel(sourceWorkflow));
+      if (workflowCanContinue(sourceWorkflow)) {
+        summary.push("continue available");
+      }
+    }
+    if (lineage.ambiguous) {
+      summary.push(`source ambiguous (${lineage.candidateWorkflows.length} candidates)`);
+    } else if (!sourceWorkflow) {
+      summary.push("source unavailable");
+    }
+    if (followOnWorkflows.length > 0) {
+      summary.push(`${followOnWorkflows.length} follow-on ${followOnWorkflows.length === 1 ? "workflow" : "workflows"}`);
+    }
+    if (relatedOutputs.length > 0) {
+      summary.push(`${relatedOutputs.length} related ${relatedOutputs.length === 1 ? "output" : "outputs"}`);
+    }
+    return summary;
+  }
+
+  function queueArtifactOutputComparison(
+    artifact: ArtifactRecord | null | undefined,
+    relatedOutputPath: string | null | undefined,
+  ) {
+    if (!artifact || !relatedOutputPath || relatedOutputPath === artifact.filePath) return;
+    queueComposerDraft(
+      `Compare the workspace files "${artifact.filePath}" and "${relatedOutputPath}". `
+      + "Summarize the key differences, what changed between these artifact outputs, and which file is the better base for the next step.",
+    );
+  }
+
+  function queueArtifactFollowOnPlan(artifact: ArtifactRecord | null | undefined) {
+    if (!artifact) return;
+    const lineage = resolveArtifactLineage(artifact);
+    const sourceWorkflow = lineage.sourceWorkflow;
+    const followOnWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 4);
+    const relatedOutputs = artifactRelatedFamilyOutputs(artifact).slice(0, 4);
+    const latestFailure = workflowLatestFailureContext(sourceWorkflow);
+    if (!sourceWorkflow && !lineage.ambiguous && followOnWorkflows.length === 0 && relatedOutputs.length === 0) {
+      queueComposerDraft(`Use the workspace file "${artifact.filePath}" as context for the next action.`);
+      return;
+    }
+    const parts = [
+      `Review next steps for artifact "${artifact.filePath}".`,
+      sourceWorkflow
+        ? `Source workflow: "${sourceWorkflow.workflowName}" (${sourceWorkflow.summary}).`
+        : null,
+      lineage.ambiguous
+        ? `Source workflow is ambiguous across ${lineage.candidateWorkflows.length} recent runs, so do not assume a single source run.`
+        : null,
+      !sourceWorkflow && !lineage.ambiguous
+        ? "A verified source workflow is not available in the current lineage window."
+        : null,
+      sourceWorkflow && workflowCanContinue(sourceWorkflow)
+        ? `The source workflow can continue from its current state.`
+        : null,
+      latestFailure?.step.errorSummary
+        ? `Latest source failure: ${latestFailure.step.errorSummary}.`
+        : null,
+      followOnWorkflows.length > 0
+        ? `Compatible follow-on workflows: ${followOnWorkflows.map((workflow) => `"${workflow.name}"`).join(", ")}.`
+        : null,
+      relatedOutputs.length > 0
+        ? `Related family outputs: ${relatedOutputs.map((output) => `"${output.filePath}"`).join(", ")}.`
+        : null,
+      "Recommend whether to continue the source workflow, compare against a related output, or run one of the compatible follow-on workflows.",
+    ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    queueComposerDraft(parts.join(" "));
+  }
+
+  function queueArtifactTopFollowOnWorkflowDraft(artifact: ArtifactRecord | null | undefined) {
+    if (!artifact) return;
+    const workflow = artifactCompatibleFollowOnWorkflows(artifact)[0];
+    if (!workflow) {
+      queueArtifactFollowOnPlan(artifact);
+      return;
+    }
+    queueArtifactWorkflowDraft(workflow, artifact.filePath, artifactSourceOutputSurfaceTypes(artifact));
+  }
+
+  function primaryArtifactShortcutTarget(): ArtifactRecord | null {
+    if (selectedInspector?.kind === "artifact") {
+      return selectedInspector.artifact;
+    }
+    return primaryEvidenceEntry?.artifact ?? artifacts[0] ?? null;
+  }
+
+  function inspectPrimaryArtifactEntry() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    setSelectedInspector({ kind: "artifact", artifact });
+  }
+
   function queueWorkflowOutputComparison(
     currentWorkflow: WorkflowRunRecord | null | undefined,
     relatedWorkflow: WorkflowRunRecord | null | undefined,
@@ -6891,31 +7133,214 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
           </div>
         )}
-        {selectedInspector.kind === "artifact" && (
-          <div className="cockpit-feedback-row">
-            <button
-              className="cockpit-feedback-button"
-              onClick={() =>
-                queueComposerDraft(
-                  `Use the workspace file "${selectedInspector.artifact.filePath}" as context for the next action.`,
-                )
-              }
-              >
-                Use In Command Bar
-              </button>
-            {compatibleArtifactWorkflows(selectedInspector.artifact.filePath).slice(0, 2).map((workflow) => (
-              <button
-                key={`${selectedInspector.artifact.id}:${workflow.name}`}
-                className="cockpit-feedback-button"
-                onClick={() =>
-                  queueArtifactWorkflowDraft(workflow, selectedInspector.artifact.filePath)
-                }
-              >
-                Run {workflow.name}
-              </button>
-            ))}
-          </div>
-        )}
+        {selectedInspector.kind === "artifact" && (() => {
+          const artifact = selectedInspector.artifact;
+          const lineage = resolveArtifactLineage(artifact);
+          const sourceWorkflow = lineage.sourceWorkflow;
+          const sourceFailure = workflowLatestFailureContext(sourceWorkflow);
+          const relatedOutputs = artifactRelatedFamilyOutputs(artifact).slice(0, 3);
+          const primaryRelatedOutput = relatedOutputs[0] ?? null;
+          const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 3);
+          return (
+            <>
+              <div className="cockpit-feedback-row">
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() =>
+                    queueComposerDraft(
+                      `Use the workspace file "${artifact.filePath}" as context for the next action.`,
+                    )
+                  }
+                >
+                  Use In Command Bar
+                </button>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => queueArtifactFollowOnPlan(artifact)}
+                >
+                  Draft Next Step
+                </button>
+                {sourceWorkflow && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => inspectWorkflowRun(sourceWorkflow)}
+                  >
+                    Open Source Run
+                  </button>
+                )}
+                {sourceWorkflow && workflowCanContinue(sourceWorkflow) && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => continueWorkflowRun(sourceWorkflow)}
+                  >
+                    Continue Source Run
+                  </button>
+                )}
+                {sourceFailure && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step)}
+                  >
+                    Use Source Failure
+                  </button>
+                )}
+                {primaryRelatedOutput && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => queueArtifactOutputComparison(artifact, primaryRelatedOutput.filePath)}
+                  >
+                    Compare Related Output
+                  </button>
+                )}
+                {compatibleWorkflows.map((workflow) => (
+                  <button
+                    key={`${artifact.id}:${workflow.name}`}
+                    className="cockpit-feedback-button"
+                    onClick={() =>
+                      queueArtifactWorkflowDraft(
+                        workflow,
+                        artifact.filePath,
+                        artifactSourceOutputSurfaceTypes(artifact),
+                      )
+                    }
+                  >
+                    Run {workflow.name}
+                  </button>
+                ))}
+              </div>
+              {artifactInspectorSummary(artifact).length > 0 && (
+                <div className="cockpit-chip-row">
+                  {artifactInspectorSummary(artifact).map((detail) => (
+                    <span key={`${artifact.id}:artifact-summary:${detail}`} className="cockpit-chip">
+                      {detail}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {(sourceWorkflow || compatibleWorkflows.length > 0 || relatedOutputs.length > 0 || !sourceWorkflow) && (
+                <div className="cockpit-inspector-stack">
+                  {!sourceWorkflow && (
+                    <div className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">source run</div>
+                      <div className="cockpit-value">
+                        {lineage.ambiguous
+                          ? `unresolved · ${lineage.candidateWorkflows.length} recent runs wrote ${artifact.filePath}`
+                          : "unresolved · source run not visible in the current lineage window"}
+                      </div>
+                    </div>
+                  )}
+                  {sourceWorkflow && (
+                    <div className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">source run</div>
+                      <div className="cockpit-value">
+                        {[
+                          sourceWorkflow.workflowName,
+                          sourceWorkflow.summary,
+                          workflowSupervisionLabel(sourceWorkflow),
+                          formatAge(sourceWorkflow.updatedAt),
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Open source run for artifact ${artifact.filePath}`}
+                        onClick={() => inspectWorkflowRun(sourceWorkflow)}
+                      >
+                        Open
+                      </button>
+                      {workflowCanContinue(sourceWorkflow) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Continue source run for artifact ${artifact.filePath}`}
+                          onClick={() => continueWorkflowRun(sourceWorkflow)}
+                        >
+                          Continue
+                        </button>
+                      )}
+                      {sourceFailure && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Use source failure for artifact ${artifact.filePath}`}
+                          onClick={() => queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step)}
+                        >
+                          Use Failure
+                        </button>
+                      )}
+                      {primaryRelatedOutput && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Compare related output for artifact ${artifact.filePath}`}
+                          onClick={() => queueArtifactOutputComparison(artifact, primaryRelatedOutput.filePath)}
+                        >
+                          Compare
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {compatibleWorkflows.map((workflow) => (
+                    <div key={`${artifact.id}:follow-on:${workflow.name}`} className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">follow-on</div>
+                      <div className="cockpit-value">
+                        {[
+                          workflow.name,
+                          workflow.description,
+                          workflow.risk_level,
+                          workflow.availability ?? "ready",
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Run ${workflow.name} from artifact ${artifact.filePath}`}
+                        onClick={() =>
+                          queueArtifactWorkflowDraft(
+                            workflow,
+                            artifact.filePath,
+                            artifactSourceOutputSurfaceTypes(artifact),
+                          )
+                        }
+                      >
+                        Run
+                      </button>
+                    </div>
+                  ))}
+                  {relatedOutputs.map((output) => (
+                    <div key={`${artifact.id}:related-output:${output.key}`} className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">related output</div>
+                      <div className="cockpit-value">
+                        {[
+                          output.filePath,
+                          output.sourceWorkflow.workflowName,
+                          output.sourceLabel,
+                          formatAge(output.createdAt),
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Open related output run ${output.filePath}`}
+                        onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
+                      >
+                        Open Run
+                      </button>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Use related output ${output.filePath}`}
+                        onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
+                      >
+                        Use Output
+                      </button>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Compare related output ${output.filePath} with artifact ${artifact.filePath}`}
+                        onClick={() => queueArtifactOutputComparison(artifact, output.filePath)}
+                      >
+                        Compare
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          );
+        })()}
         <div className="cockpit-inspector-details">
           {Object.entries(details).map(([key, value]) => (
             <div key={key} className="cockpit-inspector-detail">
@@ -7219,21 +7644,77 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("outputs_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
-                  <div className="cockpit-sublist">
-                    {artifacts.map((artifact) => (
-                      <button
-                        key={artifact.id}
-                        className={`cockpit-sublist-button ${
-                          selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
-                            ? "active"
-                            : ""
-                        }`}
-                        onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
-                      >
-                        <span>{artifact.filePath}</span>
-                        <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
-                      </button>
-                    ))}
+                  <div className="cockpit-list">
+                    {artifacts.map((artifact) => {
+                      const lineage = resolveArtifactLineage(artifact);
+                      const sourceWorkflow = lineage.sourceWorkflow;
+                      const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 1);
+                      return (
+                        <div key={artifact.id} className="cockpit-row">
+                          <button
+                            className={`cockpit-row-button ${
+                              selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
+                                ? "active"
+                                : ""
+                            }`}
+                            onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                          >
+                            <div className="cockpit-row-header">
+                              <span className="cockpit-role">{artifact.filePath}</span>
+                              <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
+                            </div>
+                            <div className="cockpit-row-body">{artifact.summary}</div>
+                            <div className="cockpit-row-meta">
+                              {artifact.source}
+                              {sourceWorkflow ? ` · ${sourceWorkflow.workflowName} · ${workflowSupervisionLabel(sourceWorkflow)}` : ""}
+                              {lineage.ambiguous ? ` · source ambiguous` : !sourceWorkflow ? ` · source unresolved` : ""}
+                              {compatibleWorkflows.length > 0 ? ` · ${compatibleWorkflows.length} follow-on ready` : ""}
+                            </div>
+                          </button>
+                          <div className="cockpit-feedback-row">
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() =>
+                                queueComposerDraft(
+                                  `Use the workspace file "${artifact.filePath}" as context for the next action.`,
+                                )
+                              }
+                            >
+                              Use
+                            </button>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => queueArtifactFollowOnPlan(artifact)}
+                            >
+                              Draft Next Step
+                            </button>
+                            {sourceWorkflow && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => inspectWorkflowRun(sourceWorkflow)}
+                              >
+                                Open Source
+                              </button>
+                            )}
+                            {compatibleWorkflows.map((workflow) => (
+                              <button
+                                key={`${artifact.id}:outputs-pane:${workflow.name}`}
+                                className="cockpit-feedback-button"
+                                onClick={() =>
+                                  queueArtifactWorkflowDraft(
+                                    workflow,
+                                    artifact.filePath,
+                                    artifactSourceOutputSurfaceTypes(artifact),
+                                  )
+                                }
+                              >
+                                Run {workflow.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
                     {artifacts.length === 0 && (
                       <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
                     )}
@@ -8411,7 +8892,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
                     </div>
                   </div>
 

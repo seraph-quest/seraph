@@ -56,6 +56,14 @@ async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(tmp_p
 
     assert payload["summary"]["authenticated_typed_source_count"] >= 1
     assert payload["adapter_summary"]["ready_adapter_count"] >= 2
+    managed_adapter = adapters_by_name["github-managed"]
+    write_operation = next(
+        item for item in managed_adapter["operations"] if item["contract"] == "work_items.write"
+    )
+    assert write_operation["mutating"] is True
+    assert write_operation["requires_approval"] is True
+    assert write_operation["approval_scope_type"] == "connector_mutation"
+    assert write_operation["audit_category"] == "authenticated_source_mutation"
     assert payload["untyped_sources"][0]["name"] == "raw-github-mcp"
     assert payload["untyped_sources"][0]["source_kind"] == "mcp_server"
     assert payload["composition_rules"][0].startswith("Prefer typed authenticated connectors")
@@ -106,15 +114,23 @@ def test_source_capabilities_tool_reports_connector_first_guidance():
                 "contracts": ["repository.read", "work_items.read"],
                 "degraded_reason": "no_runtime_adapter",
                 "operations": [
-                    {
-                        "contract": "work_items.read",
-                        "input_mode": "adapter_defined",
-                        "executable": False,
-                        "reason": "no_runtime_adapter",
-                    }
-                ],
-            }
-        ]
+                {
+                    "contract": "work_items.read",
+                    "input_mode": "adapter_defined",
+                    "executable": False,
+                    "reason": "no_runtime_adapter",
+                },
+                {
+                    "contract": "work_items.write",
+                    "input_mode": "query",
+                    "executable": False,
+                    "reason": "route_not_defined",
+                    "mutating": True,
+                    "requires_approval": True,
+                },
+            ],
+        }
+    ]
     }
 
     with (
@@ -127,6 +143,7 @@ def test_source_capabilities_tool_reports_connector_first_guidance():
     assert "raw-github-mcp" in result
     assert "Prefer typed authenticated connectors over browser login" in result
     assert "no_runtime_adapter" in result
+    assert "approval_required" in result
 
 
 def test_source_capabilities_tool_reports_bound_runtime_routes():

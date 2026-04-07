@@ -19,11 +19,31 @@ except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
 
 
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
+    "tests/test_delivery.py": 1_200,
     "tests/test_eval_harness.py": 1_500,
+    "tests/test_observer_api.py": 1_200,
     "tests/test_workflows.py": 1_500,
 }
 
 SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
+    "tests/test_delivery.py": [
+        (
+            "tests/test_delivery.py::channel_and_bundle",
+            [
+                "tests/test_delivery.py",
+                "-k",
+                "native_channel or channel_routing or queued_bundle",
+            ],
+        ),
+        (
+            "tests/test_delivery.py::remaining",
+            [
+                "tests/test_delivery.py",
+                "-k",
+                "not (native_channel or channel_routing or queued_bundle)",
+            ],
+        ),
+    ],
     "tests/test_eval_harness.py": [
         (
             "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios",
@@ -35,6 +55,42 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
                 "tests/test_eval_harness.py",
                 "-k",
                 "not test_run_runtime_evals_passes_all_scenarios",
+            ],
+        ),
+    ],
+    "tests/test_observer_api.py": [
+        (
+            "tests/test_observer_api.py::continuity_and_notifications",
+            [
+                "tests/test_observer_api.py",
+                "-k",
+                "continuity or native_notification or intervention_feedback",
+            ],
+        ),
+        (
+            "tests/test_observer_api.py::remaining",
+            [
+                "tests/test_observer_api.py",
+                "-k",
+                "not (continuity or native_notification or intervention_feedback)",
+            ],
+        ),
+    ],
+    "tests/test_workflows.py": [
+        (
+            "tests/test_workflows.py::boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::remaining",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "not (approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint)",
             ],
         ),
     ],

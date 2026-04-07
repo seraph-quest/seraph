@@ -7,8 +7,9 @@ from src.app import create_app
 from src.observer.context import CurrentContext
 from src.browser.sessions import browser_session_runtime
 from src.api.capabilities import _build_capability_overview
-from src.extensions.source_operations import build_source_review_plan
+from src.extensions.source_operations import build_source_mutation_plan, build_source_review_plan
 from src.tools.source_evidence_tool import collect_source_evidence
+from src.tools.source_mutation_tool import plan_source_mutation
 from src.tools.source_review_tool import plan_source_review
 
 
@@ -256,6 +257,10 @@ async def test_source_adapters_endpoint_promotes_managed_connector_when_runtime_
     assert work_items_route["executable"] is True
     assert work_items_route["runtime_server"] == "github"
     assert work_items_route["tool_name"] == "search_issues"
+    work_items_write_route = next(item for item in managed["operations"] if item["contract"] == "work_items.write")
+    assert work_items_write_route["mutating"] is True
+    assert work_items_write_route["requires_approval"] is True
+    assert work_items_write_route["reason"] == "route_not_defined"
 
 
 @pytest.mark.asyncio
@@ -502,6 +507,264 @@ async def test_source_review_plan_endpoint_returns_structured_steps(tmp_path):
     assert payload["status"] == "ready"
     assert payload["steps"][-1]["contract"] == "webpage.read"
     assert payload["steps"][-1]["source"] == "browse_webpage"
+
+
+def test_build_source_mutation_plan_requires_explicit_write_contract():
+    plan = build_source_mutation_plan(
+        contract="work_items.read",
+        source="github-managed",
+        action_summary="close stale issue",
+    )
+
+    assert plan["status"] == "failed"
+    assert "not a typed mutation contract" in plan["warnings"][0]
+
+
+def test_build_source_mutation_plan_returns_scoped_approval_for_bound_write_route():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "query",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "runtime_server": "github",
+                        "tool_name": "create_issue",
+                        "result_kind": "work_item",
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Open a follow-up issue for the failing shard contract",
+            target_reference="seraph-quest/seraph#349",
+            fields=["title", "body", "labels"],
+        )
+
+    assert plan["status"] == "approval_required"
+    assert plan["requires_approval"] is True
+    assert plan["approval_scope"]["target"]["reference"] == "seraph-quest/seraph#349"
+    assert plan["approval_scope"]["target"]["target_kind"] == "work_item"
+    assert plan["approval_scope"]["change_scope"]["field_names"] == ["title", "body", "labels"]
+    assert plan["approval_context"]["execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+        "connector_mutation",
+    ]
+    assert plan["audit_payload"]["tool_name"] == "create_issue"
+
+
+def test_build_source_mutation_plan_reports_missing_runtime_route():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [{"name": "raw-github-mcp", "reason": "raw_mcp_only"}],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "query",
+                        "executable": False,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "reason": "route_not_defined",
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Close the issue once the source write path is implemented",
+            target_reference="seraph-quest/seraph#342",
+            fields=["state"],
+        )
+
+    assert plan["status"] == "degraded"
+    assert "cannot execute 'work_items.write' right now" in plan["warnings"][0]
+    assert plan["approval_scope"]["runtime_scope"]["route_executable"] is False
+    assert plan["next_best_sources"][0]["name"] == "raw-github-mcp"
+
+
+def test_build_source_mutation_plan_preserves_mutation_scope_for_missing_runtime_adapter():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 0},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "degraded",
+                "degraded_reason": "no_runtime_adapter",
+                "contracts": ["work_items.write"],
+                "next_best_sources": [{"name": "raw-github-mcp", "reason": "raw_mcp_only"}],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "query",
+                        "executable": False,
+                        "reason": "no_runtime_adapter",
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Update the tracked work item once runtime binding exists",
+            target_reference="seraph-quest/seraph#342",
+            fields=["state"],
+        )
+
+    assert plan["status"] == "degraded"
+    assert plan["requires_approval"] is True
+    assert plan["approval_scope"]["type"] == "connector_mutation"
+    assert plan["approval_context"]["execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+        "connector_mutation",
+    ]
+    assert plan["audit_payload"]["event_type"] == "authenticated_source_mutation"
+    assert "cannot execute 'work_items.write' right now" in plan["warnings"][0]
+
+
+@pytest.mark.asyncio
+async def test_source_mutation_plan_endpoint_returns_structured_scope():
+    mutation_plan = {
+        "status": "approval_required",
+        "adapter": {
+            "name": "github-managed",
+            "adapter_state": "ready",
+        },
+        "operation": {
+            "mutating": True,
+            "requires_approval": True,
+            "runtime_server": "github",
+            "tool_name": "create_issue",
+        },
+        "requires_approval": True,
+        "approval_scope": {
+            "target": {
+                "provider": "github",
+                "target_kind": "work_item",
+                "reference": "seraph-quest/seraph#342",
+            },
+            "change_scope": {
+                "action_summary": "Open the issue",
+                "field_names": ["title", "body"],
+            },
+        },
+        "warnings": [],
+        "next_best_sources": [],
+    }
+
+    with patch("src.api.capabilities.build_source_mutation_plan", return_value=mutation_plan):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-mutation-plan",
+                json={
+                    "contract": "work_items.write",
+                    "source": "github-managed",
+                    "action_summary": "Open the issue",
+                    "target_reference": "seraph-quest/seraph#342",
+                    "fields": ["title", "body"],
+                },
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "approval_required"
+    assert payload["approval_scope"]["target"]["reference"] == "seraph-quest/seraph#342"
+
+
+def test_plan_source_mutation_tool_renders_structured_scope():
+    mutation_plan = {
+        "status": "approval_required",
+        "adapter": {
+            "name": "github-managed",
+            "adapter_state": "ready",
+        },
+        "operation": {
+            "mutating": True,
+            "requires_approval": True,
+            "runtime_server": "github",
+            "tool_name": "create_issue",
+        },
+        "approval_scope": {
+            "target": {
+                "provider": "github",
+                "target_kind": "work_item",
+                "reference": "seraph-quest/seraph#342",
+            },
+            "change_scope": {
+                "action_summary": "Open the issue",
+                "field_names": ["title", "body"],
+            },
+        },
+        "warnings": [],
+    }
+
+    with patch("src.tools.source_mutation_tool.build_source_mutation_plan", return_value=mutation_plan):
+        result = plan_source_mutation.forward(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Open the issue",
+            target_reference="seraph-quest/seraph#342",
+            fields="title, body",
+        )
+
+    assert "status: approval_required" in result
+    assert "adapter_state: ready" in result
+    assert "github work_item seraph-quest/seraph#342" in result
+    assert "fields: title, body" in result
 
 
 def test_plan_source_review_tool_renders_structured_plan():

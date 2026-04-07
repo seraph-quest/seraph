@@ -383,6 +383,31 @@
   - the first targeted proof for source-save scoping also reused a packaged MCP source file path and picked up unrelated draft-validation behavior, so the regression was moved to a multi-workflow high-risk package where the approval contract itself was the only variable
   - the live CI review also surfaced a separate real backend failure: sync runtime-audit helpers were creating closed-loop teardown noise through `asyncio.run(...)`; the fix now skips persisted runtime audit when no loop exists instead of pretending the path is safe
 
+### `connector-backed-authenticated-mutation-boundaries-v1`
+
+- status: complete on `feat/execution-hardening-batch-al-v2`, intended for the next Batch AL PR for `#342`
+- root cause addressed:
+  - Seraph already exposed typed authenticated source-read planning, but connector-backed write paths still degraded into generic unavailable operations without a first-class mutation boundary, which left approvals, audit, and operator guidance too implicit for privileged source writes
+  - the growing backend matrix also still let a few heavy suites dominate hosted-runner time when they stalled, and frontend CI was still depending on worker concurrency that did not match the stable local contract
+- scope:
+  - typed managed-connector write contracts now surface explicit mutation planning metadata, including whether the operation mutates state, whether approval is required, the scoped approval boundary to request, and the audit category to record
+  - `/api/capabilities/source-mutation-plan` now returns structured connector-backed mutation scope for authenticated source writes, and the native `plan_source_mutation` tool exposes the same boundary to operator-facing planning flows without pretending the write is executable when no runtime route exists
+  - source-capability rendering now distinguishes mutating operations from read/evidence paths and makes approval-required write surfaces explicit instead of flattening them into generic capability rows
+  - deterministic regression coverage now pins connector-backed write planning, scoped approval payloads for ready and degraded routes, the native mutation-plan tool contract, and the heavier CI shard/frontend stability contract
+  - backend shard execution now applies per-file timeouts and file-level splits for the long-tail delivery, observer, and workflow suites, while frontend CI runs the canonical test script with a single worker so hosted runs match the stable local path
+- validation:
+  - `python3 -m py_compile backend/src/extensions/source_operations.py backend/src/api/capabilities.py backend/src/tools/source_mutation_tool.py backend/src/tools/source_capabilities_tool.py backend/src/native_tools/registry.py backend/src/evals/harness.py backend/scripts/run_backend_test_shard.py backend/tests/test_source_operations.py backend/tests/test_source_capabilities.py backend/tests/test_run_backend_test_shard.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_source_operations.py tests/test_source_capabilities.py tests/test_run_backend_test_shard.py -q`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "source_mutation_boundary_behavior or source_adapter_evidence_behavior or source_review_routine_behavior or test_main_lists_available_scenarios"`
+  - `cd frontend && npm test -- --maxWorkers=1`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first connector-mutation proof shape reused a low-risk managed connector fixture, which would not have exercised the high-risk approval boundary at all; the regression was moved onto a real bound write route with explicit approval metadata
+  - degraded connector write routes initially dropped their mutation and approval metadata for `requires_config`, `disabled`, and `no_runtime_adapter`, which made the new planner and capability rendering understate privileged write scope on broken authenticated connectors; the shipped path now preserves mutation metadata for those degraded states and pins the real inventory builder contract
+  - the first mutation-plan output also hardcoded generic scope and audit values instead of reading the route metadata it had just attached, so the planner would have silently mis-scoped future write routes; the shipped path now derives approval-scope and audit-event values from the selected operation metadata
+  - the live CI review showed the practical failure mode was still runner stability rather than a clean product assertion, so the batch ships heavier shard splitting plus single-worker frontend CI instead of claiming a phantom logic bug
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

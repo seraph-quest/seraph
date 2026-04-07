@@ -52,6 +52,10 @@ class SourceOperation:
     tool_name: str = ""
     result_kind: str = ""
     per_page_param: str = ""
+    mutating: bool = False
+    requires_approval: bool = False
+    approval_scope_type: str = ""
+    audit_category: str = ""
 
     def as_payload(self) -> dict[str, Any]:
         payload = {
@@ -59,6 +63,8 @@ class SourceOperation:
             "description": self.description,
             "input_mode": self.input_mode,
             "executable": self.executable,
+            "mutating": self.mutating,
+            "requires_approval": self.requires_approval,
         }
         if self.reason:
             payload["reason"] = self.reason
@@ -70,6 +76,10 @@ class SourceOperation:
             payload["result_kind"] = self.result_kind
         if self.per_page_param:
             payload["per_page_param"] = self.per_page_param
+        if self.approval_scope_type:
+            payload["approval_scope_type"] = self.approval_scope_type
+        if self.audit_category:
+            payload["audit_category"] = self.audit_category
         return payload
 
 
@@ -110,6 +120,11 @@ _PREFERRED_SOURCE_ORDER: dict[str, tuple[str, ...]] = {
     "source_discovery.read": ("web_search",),
     "webpage.read": ("browse_webpage", "browser_session"),
     "browser_session.manage": ("browser_session",),
+}
+
+_CONNECTOR_MUTATION_TARGET_KIND: dict[str, str] = {
+    "work_items.write": "work_item",
+    "repository.write": "repository",
 }
 
 _SOURCE_REVIEW_TEMPLATES: dict[str, dict[str, Any]] = {
@@ -238,6 +253,14 @@ def _normalize_string_tuple(values: Any) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _is_mutating_contract(contract: str) -> bool:
+    return contract.endswith(".write")
+
+
+def _mutation_target_kind(contract: str) -> str:
+    return _CONNECTOR_MUTATION_TARGET_KIND.get(contract, "external_record")
+
+
 def _runtime_adapter_payload(source: dict[str, Any]) -> dict[str, Any]:
     runtime_adapter = source.get("runtime_adapter")
     return dict(runtime_adapter) if isinstance(runtime_adapter, dict) else {}
@@ -293,6 +316,10 @@ def _resolve_mcp_runtime_operations(
                 input_mode="query",
                 executable=False,
                 reason=reason,
+                mutating=_is_mutating_contract(contract),
+                requires_approval=_is_mutating_contract(contract),
+                approval_scope_type="connector_mutation" if _is_mutating_contract(contract) else "",
+                audit_category="authenticated_source_mutation" if _is_mutating_contract(contract) else "",
             )
             for contract in contracts
         )
@@ -308,6 +335,10 @@ def _resolve_mcp_runtime_operations(
                 input_mode="query",
                 executable=False,
                 reason=reason,
+                mutating=_is_mutating_contract(contract),
+                requires_approval=_is_mutating_contract(contract),
+                approval_scope_type="connector_mutation" if _is_mutating_contract(contract) else "",
+                audit_category="authenticated_source_mutation" if _is_mutating_contract(contract) else "",
             )
             for contract in contracts
         )
@@ -329,6 +360,7 @@ def _resolve_mcp_runtime_operations(
     executable_count = 0
     default_reason = "no_connected_runtime"
     for contract in contracts:
+        mutating = _is_mutating_contract(contract)
         route = routes.get(contract)
         tool_names = _normalize_string_tuple(route.get("tool_names")) if route else ()
         result_kind = (
@@ -357,6 +389,10 @@ def _resolve_mcp_runtime_operations(
                     reason="route_not_defined",
                     result_kind=result_kind,
                     per_page_param=per_page_param,
+                    mutating=mutating,
+                    requires_approval=mutating,
+                    approval_scope_type="connector_mutation" if mutating else "",
+                    audit_category="authenticated_source_mutation" if mutating else "",
                 )
             )
             default_reason = "route_not_defined"
@@ -371,6 +407,10 @@ def _resolve_mcp_runtime_operations(
                     reason="no_connected_runtime",
                     result_kind=result_kind,
                     per_page_param=per_page_param,
+                    mutating=mutating,
+                    requires_approval=mutating,
+                    approval_scope_type="connector_mutation" if mutating else "",
+                    audit_category="authenticated_source_mutation" if mutating else "",
                 )
             )
             continue
@@ -387,6 +427,10 @@ def _resolve_mcp_runtime_operations(
                     runtime_server=bound_server,
                     result_kind=result_kind,
                     per_page_param=per_page_param,
+                    mutating=mutating,
+                    requires_approval=mutating,
+                    approval_scope_type="connector_mutation" if mutating else "",
+                    audit_category="authenticated_source_mutation" if mutating else "",
                 )
             )
             default_reason = "missing_runtime_tool"
@@ -402,6 +446,10 @@ def _resolve_mcp_runtime_operations(
                 tool_name=matched_tool_name,
                 result_kind=result_kind,
                 per_page_param=per_page_param,
+                mutating=mutating,
+                requires_approval=mutating,
+                approval_scope_type="connector_mutation" if mutating else "",
+                audit_category="authenticated_source_mutation" if mutating else "",
             )
         )
 
@@ -714,6 +762,163 @@ def _operation_for_contract(adapter: dict[str, Any], contract: str) -> dict[str,
         if isinstance(operation, dict) and str(operation.get("contract") or "") == contract:
             return operation
     return None
+
+
+def _normalize_change_fields(fields: Any) -> list[str]:
+    if not isinstance(fields, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in fields:
+        if isinstance(item, str):
+            value = item.strip()
+        elif isinstance(item, dict):
+            value = str(item.get("name") or item.get("key") or "").strip()
+        else:
+            value = ""
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return normalized
+
+
+def build_source_mutation_plan(
+    *,
+    contract: str,
+    source: str = "",
+    action_summary: str = "",
+    target_reference: str = "",
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    normalized_contract = contract.strip()
+    requested_source = source.strip()
+    normalized_summary = " ".join(action_summary.split()).strip()
+    normalized_target_reference = " ".join(target_reference.split()).strip()
+    field_names = _normalize_change_fields(list(fields or []))
+
+    response: dict[str, Any] = {
+        "status": "unavailable",
+        "request": {
+            "contract": normalized_contract,
+            "source": requested_source,
+            "action_summary": normalized_summary,
+            "target_reference": normalized_target_reference,
+            "fields": field_names,
+        },
+        "adapter": None,
+        "operation": None,
+        "requires_approval": False,
+        "approval_scope": None,
+        "approval_context": None,
+        "audit_payload": None,
+        "warnings": [],
+        "next_best_sources": [],
+    }
+
+    if not _is_mutating_contract(normalized_contract):
+        response["status"] = "failed"
+        response["warnings"].append(
+            f"Contract '{normalized_contract or contract}' is not a typed mutation contract."
+        )
+        return response
+
+    inventory = list_source_capability_inventory()
+    adapter_inventory = list_source_adapter_inventory(inventory)
+    adapters = adapter_inventory["adapters"]
+    selected_adapter = _find_adapter(adapters, requested_source) if requested_source else None
+    candidates = _candidate_adapters_for_contract(adapters, normalized_contract)
+    if selected_adapter is None:
+        selected_adapter = candidates[0] if candidates else None
+
+    if selected_adapter is None:
+        response["warnings"].append(
+            f"No typed source adapter currently advertises mutation contract '{normalized_contract}'."
+        )
+        return response
+
+    selected_operation = _operation_for_contract(selected_adapter, normalized_contract)
+    response["adapter"] = {
+        "name": selected_adapter["name"],
+        "provider": selected_adapter["provider"],
+        "source_kind": selected_adapter["source_kind"],
+        "authenticated": selected_adapter["authenticated"],
+        "adapter_state": selected_adapter["adapter_state"],
+        "degraded_reason": selected_adapter.get("degraded_reason"),
+    }
+    response["next_best_sources"] = list(selected_adapter.get("next_best_sources") or [])
+
+    if selected_operation is None:
+        response["warnings"].append(
+            f"Source '{selected_adapter['name']}' does not currently define a mutation route for '{normalized_contract}'."
+        )
+        return response
+
+    response["operation"] = dict(selected_operation)
+    response["requires_approval"] = bool(selected_operation.get("requires_approval"))
+    approval_scope_type = str(selected_operation.get("approval_scope_type") or "connector_mutation").strip()
+    audit_category = str(selected_operation.get("audit_category") or "authenticated_source_mutation").strip()
+    target_kind = _mutation_target_kind(normalized_contract)
+    approval_scope = {
+        "type": approval_scope_type,
+        "target": {
+            "source": str(selected_adapter.get("name") or ""),
+            "provider": str(selected_adapter.get("provider") or ""),
+            "contract": normalized_contract,
+            "target_kind": target_kind,
+            "reference": normalized_target_reference,
+        },
+        "change_scope": {
+            "action_summary": normalized_summary,
+            "field_names": field_names,
+            "field_count": len(field_names),
+        },
+        "runtime_scope": {
+            "runtime_server": str(selected_operation.get("runtime_server") or ""),
+            "tool_name": str(selected_operation.get("tool_name") or ""),
+            "adapter_state": str(selected_adapter.get("adapter_state") or "unknown"),
+            "route_executable": bool(selected_operation.get("executable")),
+        },
+    }
+    approval_context = {
+        "risk_level": "high",
+        "authenticated_source": bool(selected_adapter.get("authenticated")),
+        "execution_boundaries": [
+            "external_mcp",
+            "authenticated_external_source",
+            approval_scope_type,
+        ],
+        "source_systems": [str(selected_adapter.get("provider") or "")],
+        "mutation_contract": normalized_contract,
+        "source_adapter": str(selected_adapter.get("name") or ""),
+    }
+    audit_payload = {
+        "event_type": audit_category,
+        "source": str(selected_adapter.get("name") or ""),
+        "provider": str(selected_adapter.get("provider") or ""),
+        "contract": normalized_contract,
+        "target_kind": target_kind,
+        "target_reference": normalized_target_reference,
+        "field_names": field_names,
+        "runtime_server": str(selected_operation.get("runtime_server") or ""),
+        "tool_name": str(selected_operation.get("tool_name") or ""),
+    }
+    response["approval_scope"] = approval_scope
+    response["approval_context"] = approval_context
+    response["audit_payload"] = audit_payload
+
+    if not bool(selected_operation.get("executable")):
+        response["status"] = "degraded"
+        reason = str(
+            selected_operation.get("reason") or selected_adapter.get("degraded_reason") or "unavailable"
+        ).strip()
+        response["warnings"].append(
+            f"Source '{selected_adapter['name']}' cannot execute '{normalized_contract}' right now ({reason})."
+        )
+        return response
+
+    response["status"] = "approval_required"
+    return response
 
 
 def build_source_review_plan(

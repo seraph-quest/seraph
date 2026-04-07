@@ -60,7 +60,7 @@ This file explains:
 
 ### 4. Presence and reach
 
-- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, runtime route-health visibility for ready/fallback/unavailable states, a shared continuity snapshot for daemon state, deferred bundles, route reachability, pending native notifications, and recent interventions, queued-bundle same-thread continuation when the queue belongs to one session, plus a first actionable cockpit desktop-shell surface for follow-up, dismiss, continue, open-thread, and fallback inspection flows
+- [x] shipped foundations: browser delivery, WebSocket chat, native daemon ingest, a first desktop presence surface built on daemon status, pending native-notification state, a safe test-notification path, desktop-notification fallback, browser-side controls for pending native notifications, runtime route-health visibility for ready/fallback/unavailable states, a shared continuity snapshot for daemon state, deferred bundles, route reachability, pending native notifications, and recent interventions, queued-bundle same-thread continuation when the queue belongs to one session, synthesized continuity health/thread/recovery summaries, plus a first actionable cockpit desktop-shell surface for follow-up, dismiss, continue, open-thread, fallback inspection, and recovery drafting flows
 - [ ] still missing: broader reach channels beyond the hardened browser/native layer, stronger voice/mobile surfaces, and deeper continuity across the expanded transport set
 - owners: Workstream 04, Workstream 06
 

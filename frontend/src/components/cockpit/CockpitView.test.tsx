@@ -649,6 +649,64 @@ describe("CockpitView", () => {
           ],
           queued_insight_count: 1,
           recent_interventions: [],
+          summary: {
+            continuity_health: "degraded",
+            primary_surface: "reach",
+            recommended_focus: "Bundle delivery",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 1,
+            recent_intervention_count: 0,
+            degraded_route_count: 1,
+          },
+          threads: [
+            {
+              id: "thread:session-2",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              thread_source: "session",
+              continuation_mode: "resume_thread",
+              continue_message: "Continue Atlas queued item",
+              item_count: 1,
+              pending_notification_count: 0,
+              queued_insight_count: 1,
+              recent_intervention_count: 0,
+              latest_updated_at: "2026-03-18T12:02:00Z",
+              primary_surface: "bundle_queue",
+              surfaces: ["bundle_queue"],
+              summary: "1 continuity item across bundle queue for Atlas thread.",
+              open_thread_available: true,
+            },
+          ],
+          recovery_actions: [
+            {
+              id: "route:bundle_delivery",
+              kind: "reach_repair",
+              label: "Repair Bundle delivery",
+              detail: "Bundle delivery waiting on browser reconnect",
+              status: "unavailable",
+              surface: "reach",
+              route: "bundle_delivery",
+              repair_hint: "Keep a cockpit tab connected.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "followup:thread:session-2",
+              kind: "thread_follow_up",
+              label: "Continue Atlas thread",
+              detail: "1 continuity item across bundle queue for Atlas thread.",
+              status: "actionable",
+              surface: "bundle_queue",
+              route: null,
+              repair_hint: null,
+              thread_id: "session-2",
+              continue_message: "Continue Atlas queued item",
+              open_thread_available: true,
+            },
+          ],
           reach: {
             route_statuses: [
               {
@@ -939,6 +997,10 @@ describe("CockpitView", () => {
     expect(routeRow).not.toBeNull();
     fireEvent.click(within(routeRow as HTMLElement).getByRole("button", { name: "Open desktop shell for reach: Bundle delivery" }));
     await waitFor(() => expect(screen.getByText("Desktop shell")).toBeInTheDocument());
+    expect(screen.getByText(/continuity degraded · threads 1 · ambient 0/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Draft repair" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Continue" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Open Thread" }).length).toBeGreaterThan(0);
   }, 30000);
 
   it("surfaces evidence shortcuts and keyboard-first triage control", async () => {

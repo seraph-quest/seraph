@@ -122,6 +122,50 @@ interface ObserverReachRouteStatus {
   repair_hint?: string | null;
 }
 
+interface ObserverContinuitySummary {
+  continuity_health: string;
+  primary_surface: string;
+  recommended_focus?: string | null;
+  actionable_thread_count: number;
+  ambient_item_count: number;
+  pending_notification_count: number;
+  queued_insight_count: number;
+  recent_intervention_count: number;
+  degraded_route_count: number;
+}
+
+interface ObserverContinuityThread {
+  id: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  thread_source?: string | null;
+  continuation_mode?: string | null;
+  continue_message?: string | null;
+  item_count: number;
+  pending_notification_count: number;
+  queued_insight_count: number;
+  recent_intervention_count: number;
+  latest_updated_at?: string | null;
+  primary_surface: string;
+  surfaces: string[];
+  summary: string;
+  open_thread_available: boolean;
+}
+
+interface ObserverContinuityRecoveryAction {
+  id: string;
+  kind: string;
+  label: string;
+  detail: string;
+  status: string;
+  surface: string;
+  route?: string | null;
+  repair_hint?: string | null;
+  thread_id?: string | null;
+  continue_message?: string | null;
+  open_thread_available: boolean;
+}
+
 interface ObserverContinuitySnapshot {
   daemon: DaemonPresenceState;
   notifications: Array<{
@@ -160,6 +204,9 @@ interface ObserverContinuitySnapshot {
   reach?: {
     route_statuses?: ObserverReachRouteStatus[];
   };
+  summary?: ObserverContinuitySummary;
+  threads?: ObserverContinuityThread[];
+  recovery_actions?: ObserverContinuityRecoveryAction[];
 }
 
 interface SkillInfo {
@@ -2352,6 +2399,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
   const [desktopRouteStatuses, setDesktopRouteStatuses] = useState<ObserverReachRouteStatus[]>([]);
+  const [continuitySummary, setContinuitySummary] = useState<ObserverContinuitySummary | null>(null);
+  const [continuityThreads, setContinuityThreads] = useState<ObserverContinuityThread[]>([]);
+  const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ObserverContinuityRecoveryAction[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -2580,6 +2630,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
       setRecentInterventions(continuityPayload.recent_interventions ?? []);
       setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
+      setContinuitySummary(continuityPayload.summary ?? null);
+      setContinuityThreads(continuityPayload.threads ?? []);
+      setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
@@ -3292,6 +3345,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       animationState: agentVisual.animationState,
       isAgentBusy,
       pendingApprovalCount: pendingApprovals.length,
+      pendingNotificationCount: continuitySummary?.pending_notification_count ?? desktopNotifications.length,
+      queuedInsightCount: continuitySummary?.queued_insight_count ?? queuedInsights.length,
+      degradedRouteCount: continuitySummary?.degraded_route_count ?? desktopRouteStatuses.filter((route) => route.status !== "ready").length,
+      actionableThreadCount: continuitySummary?.actionable_thread_count ?? continuityThreads.length,
+      continuityHealth: continuitySummary?.continuity_health ?? null,
+      recommendedFocus: continuitySummary?.recommended_focus ?? null,
       recentTraceRole: recentTrace[0]?.role ?? null,
       recentTraceTool: recentTrace.find((message) => message.toolUsed)?.toolUsed ?? null,
       latestResponseRole: latestResponse?.role ?? null,
@@ -3304,11 +3363,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       agentVisual.animationState,
       ambientState,
       connectionStatus,
+      continuitySummary?.actionable_thread_count,
+      continuitySummary?.continuity_health,
+      continuitySummary?.degraded_route_count,
+      continuitySummary?.pending_notification_count,
+      continuitySummary?.queued_insight_count,
+      continuitySummary?.recommended_focus,
+      continuityThreads.length,
+      desktopNotifications.length,
+      desktopRouteStatuses,
       isAgentBusy,
       latestResponse?.role,
       observerState?.data_quality,
       operatorStatus,
       pendingApprovals.length,
+      queuedInsights.length,
       recentInterventions.length,
       recentTrace,
     ],
@@ -7888,6 +7957,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-sublist-item">
                     capture {daemonPresence?.capture_mode ?? "unknown"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
                   </div>
+                  {continuitySummary && (
+                    <>
+                      <div className="cockpit-sublist-item">
+                        continuity {formatContinuityLabel(continuitySummary.continuity_health)} · threads {continuitySummary.actionable_thread_count} · ambient {continuitySummary.ambient_item_count}
+                      </div>
+                      <div className="cockpit-sublist-item">
+                        alerts {continuitySummary.pending_notification_count} · queued {continuitySummary.queued_insight_count} · degraded routes {continuitySummary.degraded_route_count}
+                        {continuitySummary.recommended_focus ? ` · focus ${continuitySummary.recommended_focus}` : ""}
+                      </div>
+                    </>
+                  )}
                   {desktopRouteStatuses.map((route) => (
                     <div key={route.route} className="cockpit-sublist-item">
                       {route.label}: {formatContinuityLabel(route.status)}
@@ -7897,6 +7977,76 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   ))}
                 </div>
                 <div className="cockpit-list">
+                  {continuityRecoveryActions.slice(0, 4).map((action) => (
+                    <div key={action.id} className="cockpit-row">
+                      <div className="cockpit-row-header">
+                        <span className="cockpit-role">{action.label}</span>
+                        <span className="cockpit-row-age">{formatContinuityLabel(action.status)}</span>
+                      </div>
+                      <div className="cockpit-row-body">{action.detail}</div>
+                      <div className="cockpit-row-meta">
+                        {formatContinuityLabel(action.surface)}
+                        {action.repair_hint ? ` · ${action.repair_hint}` : ""}
+                      </div>
+                      <div className="cockpit-feedback-row">
+                        {action.continue_message && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void queueThreadDraft(action.continue_message ?? action.detail, action.thread_id ?? undefined)}
+                          >
+                            Continue
+                          </button>
+                        )}
+                        {action.open_thread_available && action.thread_id && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(action.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
+                        {action.kind === "reach_repair" && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueComposerDraft(`Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`)}
+                          >
+                            Draft repair
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {continuityThreads.slice(0, 3).map((thread) => (
+                    <div key={thread.id} className="cockpit-row">
+                      <div className="cockpit-row-header">
+                        <span className="cockpit-role">{thread.thread_label ?? (thread.thread_id ? `thread ${thread.thread_id.slice(0, 6)}` : "ambient follow-up")}</span>
+                        <span className="cockpit-row-age">{thread.latest_updated_at ? formatAge(thread.latest_updated_at) : formatContinuityLabel(thread.primary_surface)}</span>
+                      </div>
+                      <div className="cockpit-row-body">{thread.summary}</div>
+                      <div className="cockpit-row-meta">
+                        {thread.surfaces.map((surface) => formatContinuityLabel(surface)).join(" · ")}
+                        {thread.continuation_mode ? ` · ${formatContinuityLabel(thread.continuation_mode)}` : ""}
+                      </div>
+                      <div className="cockpit-feedback-row">
+                        {thread.continue_message && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void queueThreadDraft(thread.continue_message ?? thread.summary, thread.thread_id ?? undefined)}
+                          >
+                            Continue
+                          </button>
+                        )}
+                        {thread.open_thread_available && thread.thread_id && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(thread.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                   {desktopNotifications.slice(0, 3).map((notification) => (
                     <div key={notification.id} className="cockpit-row">
                       <div className="cockpit-row-header">

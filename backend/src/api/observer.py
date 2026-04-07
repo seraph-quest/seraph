@@ -126,6 +126,50 @@ class ObserverReachResponse(BaseModel):
     route_statuses: list[dict[str, Any]]
 
 
+class ObserverContinuitySummaryResponse(BaseModel):
+    continuity_health: str
+    primary_surface: str
+    recommended_focus: str | None = None
+    actionable_thread_count: int
+    ambient_item_count: int
+    pending_notification_count: int
+    queued_insight_count: int
+    recent_intervention_count: int
+    degraded_route_count: int
+
+
+class ObserverContinuityThreadResponse(BaseModel):
+    id: str
+    thread_id: str | None = None
+    thread_label: str | None = None
+    thread_source: str = "ambient"
+    continuation_mode: str = "open_thread"
+    continue_message: str | None = None
+    item_count: int
+    pending_notification_count: int
+    queued_insight_count: int
+    recent_intervention_count: int
+    latest_updated_at: str | None = None
+    primary_surface: str
+    surfaces: list[str]
+    summary: str
+    open_thread_available: bool
+
+
+class ObserverContinuityRecoveryActionResponse(BaseModel):
+    id: str
+    kind: str
+    label: str
+    detail: str
+    status: str
+    surface: str
+    route: str | None = None
+    repair_hint: str | None = None
+    thread_id: str | None = None
+    continue_message: str | None = None
+    open_thread_available: bool = False
+
+
 class ObserverContinuityResponse(BaseModel):
     daemon: DaemonStatusResponse
     notifications: list[NativeNotificationResponse]
@@ -133,6 +177,9 @@ class ObserverContinuityResponse(BaseModel):
     queued_insight_count: int
     recent_interventions: list[RecentInterventionResponse]
     reach: ObserverReachResponse
+    summary: ObserverContinuitySummaryResponse
+    threads: list[ObserverContinuityThreadResponse]
+    recovery_actions: list[ObserverContinuityRecoveryActionResponse]
 
 
 class InterventionFeedbackRequest(BaseModel):
@@ -259,6 +306,263 @@ def _thread_label(thread_id: str | None, session_titles: dict[str, str]) -> str 
     return session_titles.get(thread_id)
 
 
+def _continuity_timestamp(value: str | None) -> datetime:
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _continuity_surface_priority(surface: str | None) -> int:
+    if surface == "reach":
+        return 0
+    if surface == "native_notification":
+        return 1
+    if surface == "bundle_queue":
+        return 2
+    if surface == "delivery_failed":
+        return 3
+    return 4
+
+
+def _summarize_thread_surfaces(surfaces: list[str]) -> str:
+    labels = [surface.replace("_", " ") for surface in surfaces]
+    if not labels:
+        return "ambient follow-up"
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def _build_continuity_threads(
+    *,
+    notifications: list[dict[str, Any]],
+    queued_insights: list[dict[str, Any]],
+    recent_interventions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+
+    def ensure_bucket(
+        *,
+        thread_id: str | None,
+        thread_label: str | None,
+        thread_source: str | None,
+        continuation_mode: str | None,
+        continue_message: str | None,
+        created_at: str | None,
+        surface: str,
+    ) -> dict[str, Any]:
+        key = thread_id or "ambient"
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = {
+                "id": f"thread:{key}",
+                "thread_id": thread_id,
+                "thread_label": thread_label,
+                "thread_source": thread_source or "ambient",
+                "continuation_mode": continuation_mode or "open_thread",
+                "continue_message": continue_message,
+                "item_count": 0,
+                "pending_notification_count": 0,
+                "queued_insight_count": 0,
+                "recent_intervention_count": 0,
+                "latest_updated_at": created_at,
+                "primary_surface": surface,
+                "surfaces": [],
+                "open_thread_available": bool(thread_id),
+            }
+            buckets[key] = bucket
+        if thread_label and not bucket.get("thread_label"):
+            bucket["thread_label"] = thread_label
+        if thread_source and bucket.get("thread_source") == "ambient":
+            bucket["thread_source"] = thread_source
+        if continuation_mode and bucket.get("continuation_mode") == "open_thread":
+            bucket["continuation_mode"] = continuation_mode
+        if continue_message and not bucket.get("continue_message"):
+            bucket["continue_message"] = continue_message
+        if thread_id and not bucket.get("thread_id"):
+            bucket["thread_id"] = thread_id
+            bucket["open_thread_available"] = True
+        if created_at and (
+            bucket.get("latest_updated_at") is None
+            or _continuity_timestamp(created_at) > _continuity_timestamp(bucket.get("latest_updated_at"))
+        ):
+            bucket["latest_updated_at"] = created_at
+        if surface not in bucket["surfaces"]:
+            bucket["surfaces"].append(surface)
+        if _continuity_surface_priority(surface) < _continuity_surface_priority(bucket.get("primary_surface")):
+            bucket["primary_surface"] = surface
+        return bucket
+
+    for item in notifications:
+        bucket = ensure_bucket(
+            thread_id=item.get("thread_id") or item.get("session_id"),
+            thread_label=item.get("thread_label"),
+            thread_source=item.get("thread_source"),
+            continuation_mode=item.get("continuation_mode"),
+            continue_message=item.get("resume_message"),
+            created_at=item.get("created_at"),
+            surface="native_notification",
+        )
+        bucket["item_count"] += 1
+        bucket["pending_notification_count"] += 1
+
+    for item in queued_insights:
+        bucket = ensure_bucket(
+            thread_id=item.get("thread_id") or item.get("session_id"),
+            thread_label=item.get("thread_label"),
+            thread_source=item.get("thread_source"),
+            continuation_mode=item.get("continuation_mode"),
+            continue_message=item.get("resume_message"),
+            created_at=item.get("created_at"),
+            surface="bundle_queue",
+        )
+        bucket["item_count"] += 1
+        bucket["queued_insight_count"] += 1
+
+    for item in recent_interventions:
+        bucket = ensure_bucket(
+            thread_id=item.get("thread_id") or item.get("session_id"),
+            thread_label=item.get("thread_label"),
+            thread_source=item.get("thread_source"),
+            continuation_mode=item.get("continuation_mode"),
+            continue_message=item.get("resume_message"),
+            created_at=item.get("updated_at"),
+            surface=str(item.get("continuity_surface") or "browser"),
+        )
+        bucket["item_count"] += 1
+        bucket["recent_intervention_count"] += 1
+
+    threads = list(buckets.values())
+    for bucket in threads:
+        bucket["surfaces"] = sorted(
+            bucket["surfaces"],
+            key=lambda value: (_continuity_surface_priority(value), value),
+        )
+        thread_name = bucket.get("thread_label") or (
+            f"thread {str(bucket['thread_id'])[:6]}" if bucket.get("thread_id") else "ambient follow-up"
+        )
+        bucket["summary"] = (
+            f"{bucket['item_count']} continuity item"
+            f"{'' if bucket['item_count'] == 1 else 's'} across {_summarize_thread_surfaces(bucket['surfaces'])} for {thread_name}."
+        )
+
+    return sorted(
+        threads,
+        key=lambda item: (
+            -int(item.get("pending_notification_count", 0)),
+            -int(item.get("queued_insight_count", 0)),
+            -int(item.get("recent_intervention_count", 0)),
+            -int(item.get("item_count", 0)),
+            -_continuity_timestamp(item.get("latest_updated_at")).timestamp(),
+        ),
+    )
+
+
+def _build_continuity_recovery_actions(
+    *,
+    route_statuses: list[dict[str, Any]],
+    threads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for route in route_statuses:
+        status = str(route.get("status") or "")
+        if status == "ready":
+            continue
+        label = f"Repair {route.get('label') or str(route.get('route') or 'reach route').replace('_', ' ')}"
+        actions.append({
+            "id": f"route:{route.get('route')}",
+            "kind": "reach_repair",
+            "label": label,
+            "detail": str(route.get("summary") or ""),
+            "status": status,
+            "surface": "reach",
+            "route": route.get("route"),
+            "repair_hint": route.get("repair_hint"),
+            "thread_id": None,
+            "continue_message": None,
+            "open_thread_available": False,
+        })
+
+    for thread in threads:
+        thread_name = thread.get("thread_label") or (
+            f"thread {str(thread['thread_id'])[:6]}" if thread.get("thread_id") else "ambient follow-up"
+        )
+        actions.append({
+            "id": f"followup:{thread['id']}",
+            "kind": "thread_follow_up",
+            "label": f"Continue {thread_name}",
+            "detail": thread["summary"],
+            "status": "actionable",
+            "surface": thread.get("primary_surface") or "browser",
+            "route": None,
+            "repair_hint": None,
+            "thread_id": thread.get("thread_id"),
+            "continue_message": thread.get("continue_message"),
+            "open_thread_available": bool(thread.get("thread_id")),
+        })
+
+    return sorted(
+        actions,
+        key=lambda item: (
+            0 if item["kind"] == "reach_repair" else 1,
+            _continuity_surface_priority(item.get("surface")),
+            item["label"],
+        ),
+    )[:8]
+
+
+def _build_continuity_summary(
+    *,
+    notifications: list[dict[str, Any]],
+    queued_insights: list[dict[str, Any]],
+    recent_interventions: list[dict[str, Any]],
+    route_statuses: list[dict[str, Any]],
+    threads: list[dict[str, Any]],
+) -> dict[str, Any]:
+    degraded_routes = [item for item in route_statuses if str(item.get("status") or "") != "ready"]
+    ambient_item_count = sum(
+        int(item.get("item_count", 0))
+        for item in threads
+        if not item.get("thread_id")
+    )
+    continuity_health = "ready"
+    primary_surface = "browser"
+    recommended_focus: str | None = None
+
+    if degraded_routes:
+        top_route = sorted(
+            degraded_routes,
+            key=lambda item: (
+                0 if item.get("status") == "unavailable" else 1,
+                str(item.get("label") or ""),
+            ),
+        )[0]
+        continuity_health = "degraded" if top_route.get("status") == "unavailable" else "attention"
+        primary_surface = "reach"
+        recommended_focus = str(top_route.get("label") or "reach recovery")
+    elif threads:
+        lead_thread = threads[0]
+        continuity_health = "attention"
+        primary_surface = str(lead_thread.get("primary_surface") or "browser")
+        recommended_focus = str(
+            lead_thread.get("thread_label")
+            or (f"thread {str(lead_thread['thread_id'])[:6]}" if lead_thread.get("thread_id") else "ambient follow-up")
+        )
+
+    return {
+        "continuity_health": continuity_health,
+        "primary_surface": primary_surface,
+        "recommended_focus": recommended_focus,
+        "actionable_thread_count": len(threads),
+        "ambient_item_count": ambient_item_count,
+        "pending_notification_count": len(notifications),
+        "queued_insight_count": len(queued_insights),
+        "recent_intervention_count": len(recent_interventions),
+        "degraded_route_count": len(degraded_routes),
+    }
+
+
 def _continuation_mode(thread_id: str | None) -> str:
     return "resume_thread" if thread_id else "open_thread"
 
@@ -335,98 +639,121 @@ async def get_observer_continuity():
 
     reach_payload = _observer_reach_payload()
 
-    return {
-        "daemon": await _daemon_status_payload(),
-        "notifications": [
-            {
-                **item,
-                "thread_id": item.get("thread_id") or item.get("session_id"),
-                "thread_label": _thread_label(
-                    str(item.get("thread_id") or item.get("session_id"))
-                    if item.get("thread_id") or item.get("session_id")
-                    else None,
-                    session_titles,
-                ),
-            }
-            for item in notifications
-        ],
-        "queued_insights": [
-            {
-                "id": item.id,
-                "intervention_id": item.intervention_id,
-                "content_excerpt": item.content[:157] + "..." if len(item.content) > 160 else item.content,
-                "intervention_type": item.intervention_type,
-                "urgency": item.urgency,
-                "reasoning": item.reasoning,
-                "session_id": item.session_id,
-                "thread_id": item.session_id or (
+    notifications_payload = [
+        {
+            **item,
+            "thread_id": item.get("thread_id") or item.get("session_id"),
+            "thread_label": _thread_label(
+                str(item.get("thread_id") or item.get("session_id"))
+                if item.get("thread_id") or item.get("session_id")
+                else None,
+                session_titles,
+            ),
+        }
+        for item in notifications
+    ]
+    queued_insights_payload = [
+        {
+            "id": item.id,
+            "intervention_id": item.intervention_id,
+            "content_excerpt": item.content[:157] + "..." if len(item.content) > 160 else item.content,
+            "intervention_type": item.intervention_type,
+            "urgency": item.urgency,
+            "reasoning": item.reasoning,
+            "session_id": item.session_id,
+            "thread_id": item.session_id or (
+                intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
+                if item.intervention_id
+                else None
+            ),
+            "thread_label": _thread_label(
+                item.session_id or (
                     intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                     if item.intervention_id
                     else None
                 ),
-                "thread_label": _thread_label(
-                    item.session_id or (
-                        intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
-                        if item.intervention_id
-                        else None
-                    ),
-                    session_titles,
-                ) or (
-                    intervention_thread_map.get(item.intervention_id or "", (None, None))[1]
+                session_titles,
+            ) or (
+                intervention_thread_map.get(item.intervention_id or "", (None, None))[1]
+                if item.intervention_id
+                else None
+            ),
+            "thread_source": (
+                "session"
+                if item.session_id
+                else "intervention_session"
+                if item.intervention_id and intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
+                else "ambient"
+            ),
+            "continuation_mode": _continuation_mode(
+                item.session_id or (
+                    intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                     if item.intervention_id
                     else None
-                ),
-                "thread_source": (
-                    "session"
-                    if item.session_id
-                    else "intervention_session"
-                    if item.intervention_id and intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
-                    else "ambient"
-                ),
-                "continuation_mode": _continuation_mode(
-                    item.session_id or (
-                        intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
-                        if item.intervention_id
-                        else None
-                    )
-                ),
-                "resume_message": (
-                    f"Follow up on this deferred guardian item: "
-                    f"{item.content[:157] + '...' if len(item.content) > 160 else item.content}"
-                ),
-                "created_at": item.created_at.isoformat(),
-            }
-            for item in queued_insights
-        ],
+                )
+            ),
+            "resume_message": (
+                f"Follow up on this deferred guardian item: "
+                f"{item.content[:157] + '...' if len(item.content) > 160 else item.content}"
+            ),
+            "created_at": item.created_at.isoformat(),
+        }
+        for item in queued_insights
+    ]
+    recent_interventions_payload = [
+        {
+            "id": item.id,
+            "session_id": item.session_id,
+            "intervention_type": item.intervention_type,
+            "content_excerpt": item.content_excerpt,
+            "policy_action": item.policy_action,
+            "policy_reason": item.policy_reason,
+            "delivery_decision": item.delivery_decision,
+            "latest_outcome": item.latest_outcome,
+            "transport": item.transport,
+            "notification_id": item.notification_id,
+            "feedback_type": item.feedback_type,
+            "thread_id": item.session_id,
+            "thread_label": _thread_label(item.session_id, session_titles),
+            "thread_source": "session" if item.session_id else "ambient",
+            "continuation_mode": _continuation_mode(item.session_id),
+            "resume_message": f"Continue from this guardian intervention: {item.content_excerpt}",
+            "updated_at": item.updated_at.isoformat(),
+            "continuity_surface": _continuity_surface(
+                latest_outcome=item.latest_outcome,
+                transport=item.transport,
+                policy_action=item.policy_action,
+            ),
+        }
+        for item in recent_interventions
+    ]
+    thread_payload = _build_continuity_threads(
+        notifications=notifications_payload,
+        queued_insights=queued_insights_payload,
+        recent_interventions=recent_interventions_payload,
+    )
+    recovery_actions_payload = _build_continuity_recovery_actions(
+        route_statuses=reach_payload["route_statuses"],
+        threads=thread_payload,
+    )
+    summary_payload = _build_continuity_summary(
+        notifications=notifications_payload,
+        queued_insights=queued_insights_payload,
+        recent_interventions=recent_interventions_payload,
+        route_statuses=reach_payload["route_statuses"],
+        threads=thread_payload,
+    )
+
+    return {
+        "daemon": await _daemon_status_payload(),
+        "notifications": notifications_payload,
+        "queued_insights": queued_insights_payload,
         "queued_insight_count": len(queued_insights),
-        "recent_interventions": [
-            {
-                "id": item.id,
-                "session_id": item.session_id,
-                "intervention_type": item.intervention_type,
-                "content_excerpt": item.content_excerpt,
-                "policy_action": item.policy_action,
-                "policy_reason": item.policy_reason,
-                "delivery_decision": item.delivery_decision,
-                "latest_outcome": item.latest_outcome,
-                "transport": item.transport,
-                "notification_id": item.notification_id,
-                "feedback_type": item.feedback_type,
-                "thread_id": item.session_id,
-                "thread_label": _thread_label(item.session_id, session_titles),
-                "thread_source": "session" if item.session_id else "ambient",
-                "continuation_mode": _continuation_mode(item.session_id),
-                "resume_message": f"Continue from this guardian intervention: {item.content_excerpt}",
-                "updated_at": item.updated_at.isoformat(),
-                "continuity_surface": _continuity_surface(
-                    latest_outcome=item.latest_outcome,
-                    transport=item.transport,
-                    policy_action=item.policy_action,
-                ),
-            }
-            for item in recent_interventions
-        ],
+        "recent_interventions": recent_interventions_payload,
         "reach": reach_payload,
+        "summary": summary_payload,
+        "threads": thread_payload,
+        "recovery_actions": recovery_actions_payload,
     }
 
 

@@ -9,6 +9,12 @@ describe("deriveSeraphPresenceState", () => {
       animationState: "idle",
       isAgentBusy: false,
       pendingApprovalCount: 2,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: null,
       recentTraceTool: null,
       latestResponseRole: null,
@@ -28,6 +34,12 @@ describe("deriveSeraphPresenceState", () => {
       animationState: "casting",
       isAgentBusy: true,
       pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: "step",
       recentTraceTool: "write_file",
       latestResponseRole: null,
@@ -47,6 +59,12 @@ describe("deriveSeraphPresenceState", () => {
       animationState: "idle",
       isAgentBusy: false,
       pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: null,
       recentTraceTool: null,
       latestResponseRole: null,
@@ -60,12 +78,43 @@ describe("deriveSeraphPresenceState", () => {
     expect(descriptor.tone).toBe("error");
   });
 
+  it("treats degraded continuity reach as a fault even without data-quality errors", () => {
+    const descriptor = deriveSeraphPresenceState({
+      connectionStatus: "connected",
+      animationState: "idle",
+      isAgentBusy: false,
+      pendingApprovalCount: 0,
+      pendingNotificationCount: 1,
+      queuedInsightCount: 0,
+      degradedRouteCount: 2,
+      actionableThreadCount: 1,
+      continuityHealth: "degraded",
+      recommendedFocus: "Live delivery",
+      recentTraceRole: null,
+      recentTraceTool: null,
+      latestResponseRole: null,
+      ambientState: "idle",
+      dataQuality: "good",
+      recentInterventionCount: 0,
+      operatorStatus: null,
+    });
+
+    expect(descriptor.state).toBe("error");
+    expect(descriptor.detail).toContain("Cross-surface reach");
+  });
+
   it("falls back to idle when linked and quiet", () => {
     const descriptor = deriveSeraphPresenceState({
       connectionStatus: "connected",
       animationState: "idle",
       isAgentBusy: false,
       pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: null,
       recentTraceTool: null,
       latestResponseRole: null,

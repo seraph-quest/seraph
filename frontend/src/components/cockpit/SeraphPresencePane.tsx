@@ -36,8 +36,17 @@ function contextLabel(snapshot: SeraphPresenceSnapshot): string {
 }
 
 function queueLabel(snapshot: SeraphPresenceSnapshot): string {
-  const total = snapshot.pendingApprovalCount + snapshot.recentInterventionCount;
+  const total = snapshot.pendingApprovalCount
+    + snapshot.actionableThreadCount
+    + snapshot.degradedRouteCount;
   return total > 0 ? total.toString().padStart(2, "0") : "CLEAR";
+}
+
+function reachLabel(snapshot: SeraphPresenceSnapshot): string {
+  if (snapshot.degradedRouteCount > 0) {
+    return `WARN ${snapshot.degradedRouteCount}`;
+  }
+  return snapshot.connectionStatus === "connected" ? "READY" : "LINK";
 }
 
 export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPresencePaneProps) {
@@ -55,9 +64,20 @@ export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPrese
         hint:
           snapshot.pendingApprovalCount > 0
             ? `${snapshot.pendingApprovalCount} approval waiting`
-            : snapshot.recentInterventionCount > 0
-              ? `${snapshot.recentInterventionCount} continuity events`
+            : snapshot.actionableThreadCount > 0
+              ? `${snapshot.actionableThreadCount} cross-surface thread${snapshot.actionableThreadCount === 1 ? "" : "s"} waiting`
+              : snapshot.recentInterventionCount > 0
+                ? `${snapshot.recentInterventionCount} continuity events`
               : "clear",
+      },
+      {
+        label: "Reach",
+        value: reachLabel(snapshot),
+        hint: snapshot.degradedRouteCount > 0
+          ? `${snapshot.degradedRouteCount} route${snapshot.degradedRouteCount === 1 ? "" : "s"} need repair`
+          : snapshot.pendingNotificationCount > 0
+            ? `${snapshot.pendingNotificationCount} desktop alert${snapshot.pendingNotificationCount === 1 ? "" : "s"} pending`
+            : "browser and desktop linked",
       },
     ],
     [snapshot],
@@ -73,6 +93,15 @@ export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPrese
         dividerColor={isSelected ? "rgba(141,226,255,0.2)" : "rgba(141,226,255,0.12)"}
         edgeColor={isSelected ? "rgba(141,226,255,0.2)" : "rgba(141,226,255,0.12)"}
       />
+      <div className="cockpit-sublist">
+        <div className="cockpit-sublist-item">
+          follow-through {snapshot.actionableThreadCount} · alerts {snapshot.pendingNotificationCount} · bundled {snapshot.queuedInsightCount}
+        </div>
+        <div className="cockpit-sublist-item">
+          reach {snapshot.degradedRouteCount > 0 ? `${snapshot.degradedRouteCount} degraded` : "ready"}
+          {snapshot.recommendedFocus ? ` · focus ${snapshot.recommendedFocus}` : ""}
+        </div>
+      </div>
     </section>
   );
 }

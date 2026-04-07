@@ -395,12 +395,29 @@ async def test_operator_timeline_projects_routing_metadata(client):
                             "selected_budget_headroom": 1,
                             "selected_budget_preference_score": 2.0,
                             "selected_route_score": 10.5,
+                            "selected_failure_risk_score": 3.5,
+                            "selected_production_readiness": "guarded",
+                            "selected_live_feedback": {
+                                "feedback_state": "recovering",
+                                "recent_failure_count": 1,
+                            },
                             "attempt_order": ["gpt-4o-mini", "gpt-4.1-mini"],
                             "reroute_cause": "primary_timeout",
                             "rerouted_from_unhealthy_primary": False,
                             "rerouted_from_policy_guardrails": True,
                             "guardrail_compliant_targets_present": True,
+                            "route_explanation": "selected openrouter/gpt-4o-mini; readiness=guarded; failure_risk=3.5; rejected=2",
                             "rejected_target_count": 2,
+                            "rejected_target_summaries": [
+                                {
+                                    "model_id": "local-model",
+                                    "source": "local",
+                                    "decision": "skipped",
+                                    "production_readiness": "degraded",
+                                    "failure_risk_score": 4.0,
+                                    "reason_codes": ["task_class_mismatch"],
+                                }
+                            ],
                             "candidate_targets": ["gpt-4o-mini", "gpt-4.1-mini", "local-model"],
                             "simulated_routes": [
                                 {
@@ -439,7 +456,12 @@ async def test_operator_timeline_projects_routing_metadata(client):
     assert routing_item["metadata"]["budget_steering_mode"] == "prefer_lower_budget"
     assert routing_item["metadata"]["selected_budget_preference_score"] == 2.0
     assert routing_item["metadata"]["selected_route_score"] == 10.5
+    assert routing_item["metadata"]["selected_failure_risk_score"] == 3.5
+    assert routing_item["metadata"]["selected_production_readiness"] == "guarded"
+    assert routing_item["metadata"]["selected_live_feedback"]["feedback_state"] == "recovering"
+    assert routing_item["metadata"]["route_explanation"].startswith("selected openrouter/gpt-4o-mini")
     assert routing_item["metadata"]["rejected_target_count"] == 2
+    assert routing_item["metadata"]["rejected_target_summaries"][0]["model_id"] == "local-model"
     assert routing_item["metadata"]["guardrail_compliant_targets_present"] is True
     assert routing_item["metadata"]["simulated_routes"][0]["entry_model"] == "gpt-4o-mini"
 

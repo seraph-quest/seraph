@@ -997,10 +997,16 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["provider_routing_decision_audit"]["completion_budget_steering_mode"] == "prefer_lower_budget"
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_route_score"] >= 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_failure_risk_score"] == 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_production_readiness"] == "ready"
+    assert details_by_name["provider_routing_decision_audit"]["completion_route_explanation"].startswith(
+        "selected openrouter/anthropic/claude-sonnet-4"
+    )
     assert details_by_name["provider_routing_decision_audit"]["completion_simulated_route_count"] == 4
     assert details_by_name["provider_routing_decision_audit"]["completion_first_route_entry"] == (
         "openrouter/anthropic/claude-sonnet-4"
     )
+    assert details_by_name["provider_routing_decision_audit"]["completion_rejected_summary_count"] == 3
     assert details_by_name["provider_routing_decision_audit"]["completion_rejected_models"] == [
         "openai/gpt-4o-mini",
         "openai/gpt-4.1-nano",
@@ -1014,6 +1020,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["provider_routing_decision_audit"]["agent_budget_steering_mode"] == "none"
     assert details_by_name["provider_routing_decision_audit"]["agent_primary_decision"] == "skipped"
+    assert details_by_name["provider_routing_decision_audit"]["agent_primary_feedback_state"] == "cooldown"
+    assert details_by_name["provider_routing_decision_audit"]["agent_primary_failure_risk_score"] > 0.0
     assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
         "agent_primary_reason_codes"
     ]

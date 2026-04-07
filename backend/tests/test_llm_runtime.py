@@ -11,7 +11,9 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    _feedback_snapshot,
     _fallback_targets,
+    _mark_target_failed,
     _reset_target_health,
     build_completion_kwargs,
     build_model_kwargs,
@@ -1044,6 +1046,109 @@ def test_completion_with_fallback_sync_reroutes_away_from_unhealthy_primary(asyn
     assert "unhealthy_cooldown" in primary_candidate["reason_codes"]
 
 
+def test_completion_with_fallback_uses_live_feedback_to_deprioritize_recently_failing_target(async_db):
+    first_success = MagicMock()
+    second_success = MagicMock()
+
+    _reset_target_health()
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "llm_target_cooldown_seconds", 300),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            "openai/gpt-4o-mini=fast;openai/gpt-4.1-nano=fast",
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast"),
+        patch(
+            "litellm.completion",
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("fallback timed out"),
+                first_success,
+                second_success,
+            ],
+        ) as mock_completion,
+    ):
+        first_result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick a healthy fast route"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+        second_result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "use recent provider feedback"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert first_result is first_success
+    assert second_result is second_success
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4.1-nano",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=20)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4.1-nano"
+    assert details["attempt_order"] == ["openai/gpt-4.1-nano", "openai/gpt-4o-mini"]
+    assert details["selected_production_readiness"] == "ready"
+    assert details["rejected_target_summaries"][0]["model_id"] == "openai/gpt-4o-mini"
+    assert details["route_explanation"].startswith("selected openai/gpt-4.1-nano")
+    unstable_candidate = next(
+        candidate
+        for candidate in details["candidate_targets"]
+        if candidate["model_id"] == "openai/gpt-4o-mini"
+    )
+    assert unstable_candidate["feedback_state"] in {"cooldown", "recovering", "unstable"}
+    assert unstable_candidate["failure_risk_score"] > 0
+    assert unstable_candidate["live_feedback"]["last_failure_kind"] == "timeout"
+
+
+def test_feedback_snapshot_expires_stale_failures_from_live_routing_state(async_db):
+    _reset_target_health()
+
+    with patch("src.llm_runtime.monotonic", side_effect=[100.0, 100.0, 100.0 + 901.0]):
+        _mark_target_failed(
+            model_id="openai/gpt-4o-mini",
+            api_base="https://api.openai.test/v1",
+            api_key="test-key",
+            error=RuntimeError("provider timed out"),
+        )
+        _mark_target_failed(
+            model_id="openai/gpt-4o-mini",
+            api_base="https://api.openai.test/v1",
+            api_key="test-key",
+            error=RuntimeError("provider timed out"),
+        )
+        snapshot = _feedback_snapshot(
+            model_id="openai/gpt-4o-mini",
+            api_base="https://api.openai.test/v1",
+            api_key="test-key",
+        )
+
+    assert snapshot["consecutive_failures"] == 0
+    assert snapshot["recent_failure_count"] == 0
+    assert snapshot["failure_risk_score"] == 0.0
+    assert snapshot["production_readiness"] == "ready"
+    assert snapshot["feedback_state"] == "clear"
+    assert snapshot["last_failure_kind"] is None
+    assert snapshot["last_error"] is None
+
+
 def test_completion_with_fallback_sync_logs_primary_success(async_db):
     success_response = MagicMock()
 
@@ -1589,9 +1694,15 @@ def test_completion_with_fallback_logs_routing_decision(async_db):
     assert details["candidate_targets"][1]["matched_policy_intents"] == ["fast", "cheap"]
     assert details["candidate_targets"][1]["policy_score"] == 0.0
     assert details["candidate_targets"][1]["decision"] == "deferred"
+    assert details["candidate_targets"][1]["feedback_state"] == "clear"
+    assert details["candidate_targets"][1]["failure_risk_score"] == 0.0
     assert details["candidate_targets"][2]["model_id"] == "openai/gpt-4.1-nano"
     assert details["candidate_targets"][2]["matched_policy_intents"] == ["cheap"]
     assert details["candidate_targets"][2]["policy_score"] == 0.0
+    assert details["selected_failure_risk_score"] == 0.0
+    assert details["selected_production_readiness"] == "ready"
+    assert details["route_explanation"].startswith("selected openrouter/anthropic/claude-sonnet-4")
+    assert len(details["rejected_target_summaries"]) == 2
 
 
 def test_completion_with_fallback_logs_weighted_policy_scores(async_db):

@@ -2439,8 +2439,12 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
         "completion_attempt_order": completion_decision["details"]["attempt_order"],
         "completion_budget_steering_mode": completion_decision["details"]["budget_steering_mode"],
         "completion_selected_route_score": completion_decision["details"]["selected_route_score"],
+        "completion_selected_failure_risk_score": completion_decision["details"]["selected_failure_risk_score"],
+        "completion_selected_production_readiness": completion_decision["details"]["selected_production_readiness"],
+        "completion_route_explanation": completion_decision["details"]["route_explanation"],
         "completion_simulated_route_count": len(completion_decision["details"]["simulated_routes"]),
         "completion_first_route_entry": completion_decision["details"]["simulated_routes"][0]["entry_model"],
+        "completion_rejected_summary_count": len(completion_decision["details"]["rejected_target_summaries"]),
         "completion_rejected_models": [
             candidate["model_id"]
             for candidate in completion_decision["details"]["rejected_targets"]
@@ -2450,6 +2454,8 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
         "agent_budget_steering_mode": rerouted_agent_decision["details"]["budget_steering_mode"],
         "agent_primary_decision": primary_candidate["decision"],
         "agent_primary_reason_codes": primary_candidate["reason_codes"],
+        "agent_primary_feedback_state": primary_candidate["feedback_state"],
+        "agent_primary_failure_risk_score": primary_candidate["failure_risk_score"],
     }
 
 

@@ -1611,6 +1611,36 @@ interface WorkflowFamilyArtifactOutput {
   sourceLabel: string;
 }
 
+interface WorkflowHistoryArtifactEntry {
+  key: string;
+  filePath: string;
+  createdAt: string;
+  sourceWorkflow: WorkflowRunRecord;
+  scopeLabel: string;
+  summary: string;
+}
+
+interface WorkflowCheckpointHistoryEntry {
+  key: string;
+  createdAt: string;
+  stepId: string;
+  actionLabel: string;
+  sourceWorkflow: WorkflowRunRecord;
+  scopeLabel: string;
+  draft: string;
+}
+
+interface WorkflowLineageEventEntry {
+  key: string;
+  createdAt: string;
+  sourceWorkflow: WorkflowRunRecord;
+  scopeLabel: string;
+  timelineEntry: WorkflowTimelineEntry;
+  failureStep: WorkflowStepRecord | null;
+  checkpointDraft: string | null;
+  outputPath: string | null;
+}
+
 function workflowCheckpointActions(
   workflow: WorkflowRunRecord,
 ): Array<{ stepId: string; draft: string; label: string }> {
@@ -3002,6 +3032,48 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function workflowFamilyRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
     return workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
   }
+  function workflowLineageScopeLabel(base: WorkflowRunRecord, target: WorkflowRunRecord): string {
+    const baseIdentity = base.runIdentity ?? base.id;
+    const targetIdentity = target.runIdentity ?? target.id;
+    if (targetIdentity === baseIdentity) return "current run";
+    const bestContinuation = workflowBestContinuationRun(base);
+    if (bestContinuation && (bestContinuation.runIdentity ?? bestContinuation.id) === targetIdentity) {
+      return "best continuation";
+    }
+    if (base.parentRunIdentity && target.runIdentity === base.parentRunIdentity) {
+      return "parent run";
+    }
+    if (workflowPeerRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "peer branch";
+    }
+    if (workflowChildRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "child branch";
+    }
+    if (workflowAncestorRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "ancestor run";
+    }
+    if (workflowFailureLineage(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "failure lineage";
+    }
+    if (workflowFamilyRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "family branch";
+    }
+    return "related run";
+  }
+  function workflowRelevantHistoryRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    return [
+      resolved,
+      ...workflowFamilyRuns(resolved),
+      ...workflowAncestorRuns(resolved),
+    ].filter((entry) => {
+      const key = entry.runIdentity ?? entry.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).sort(compareWorkflowRunsNewestFirst);
+  }
   function workflowPeerRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
     if (!workflow.parentRunIdentity) return [];
     return (workflowChildrenByParentIdentity.get(workflow.parentRunIdentity) ?? [])
@@ -3216,6 +3288,147 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return outputs
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
       .slice(0, 4);
+  }
+  function workflowHistoryArtifactEntries(workflow: WorkflowRunRecord): WorkflowHistoryArtifactEntry[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    const outputs: WorkflowHistoryArtifactEntry[] = [];
+    workflowRelevantHistoryRuns(resolved).forEach((entry) => {
+      const scopeLabel = workflowLineageScopeLabel(resolved, entry);
+      entry.artifacts.forEach((artifact, index) => {
+        const key = `${artifact.filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath: artifact.filePath,
+          createdAt: artifact.createdAt,
+          sourceWorkflow: entry,
+          scopeLabel,
+          summary: index === 0 ? entry.summary : `${entry.summary} output ${index + 1}`,
+        });
+      });
+      entry.artifactPaths.forEach((filePath, index) => {
+        const key = `${filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath,
+          createdAt: entry.updatedAt,
+          sourceWorkflow: entry,
+          scopeLabel,
+          summary: index === 0 ? entry.summary : `${entry.summary} output ${index + 1}`,
+        });
+      });
+    });
+    return outputs
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 8);
+  }
+  function workflowCheckpointHistoryEntries(workflow: WorkflowRunRecord): WorkflowCheckpointHistoryEntry[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    const entries: WorkflowCheckpointHistoryEntry[] = [];
+    workflowRelevantHistoryRuns(resolved).forEach((entry) => {
+      const scopeLabel = workflowLineageScopeLabel(resolved, entry);
+      workflowCheckpointActions(entry).forEach((action) => {
+        const key = `${entry.runIdentity ?? entry.id}:${action.stepId}:${action.label}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        entries.push({
+          key,
+          createdAt: entry.updatedAt,
+          stepId: action.stepId,
+          actionLabel: action.label,
+          sourceWorkflow: entry,
+          scopeLabel,
+          draft: action.draft,
+        });
+      });
+      if (entry.retryFromStepDraft) {
+        const failedStep = failedWorkflowStep(entry);
+        const stepId = failedStep?.id ?? entry.resumeFromStep ?? "failed_step";
+        const key = `${entry.runIdentity ?? entry.id}:${stepId}:retry-step`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          entries.push({
+            key,
+            createdAt: entry.updatedAt,
+            stepId,
+            actionLabel: "Retry Step",
+            sourceWorkflow: entry,
+            scopeLabel,
+            draft: entry.retryFromStepDraft,
+          });
+        }
+      }
+    });
+    return entries
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 8);
+  }
+  function workflowLineageEventEntries(workflow: WorkflowRunRecord): WorkflowLineageEventEntry[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const entries: WorkflowLineageEventEntry[] = [];
+    workflowRelevantHistoryRuns(resolved).forEach((entry) => {
+      const scopeLabel = workflowLineageScopeLabel(resolved, entry);
+      const checkpointDraftByStep = new Map(
+        workflowCheckpointActions(entry).map((action) => [action.stepId, action.draft]),
+      );
+      (entry.timeline ?? []).forEach((timelineEntry) => {
+        const failedStep = failedWorkflowStep(entry);
+        const timelineStep = timelineEntry.stepId
+          ? entry.stepRecords?.find((record) => record.id === timelineEntry.stepId) ?? null
+          : null;
+        const failureStep = (timelineStep?.status === "failed" ? timelineStep : null) ?? (
+          timelineEntry.kind.includes("failed") || timelineEntry.kind.includes("degraded")
+            ? failedStep
+            : null
+        );
+        const checkpointStepId = timelineEntry.stepId ?? failureStep?.id ?? null;
+        const outputPath = timelineStep?.artifactPaths[0]
+          ?? failureStep?.artifactPaths[0]
+          ?? (timelineEntry.kind.includes("succeeded") || timelineEntry.kind.includes("degraded")
+            ? workflowPrimaryOutputPath(entry)
+            : null);
+        entries.push({
+          key: `${entry.runIdentity ?? entry.id}:${timelineEntry.kind}:${timelineEntry.at}:${timelineEntry.stepId ?? "none"}`,
+          createdAt: timelineEntry.at,
+          sourceWorkflow: entry,
+          scopeLabel,
+          timelineEntry,
+          failureStep,
+          checkpointDraft: checkpointStepId
+            ? checkpointDraftByStep.get(checkpointStepId)
+              ?? ((failedStep?.id ?? entry.resumeFromStep ?? null) === checkpointStepId
+                ? entry.retryFromStepDraft ?? null
+                : null)
+            : null,
+          outputPath,
+        });
+      });
+    });
+    return entries
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 10);
+  }
+  function workflowHistorySummary(workflow: WorkflowRunRecord): string[] {
+    const historyRuns = workflowRelevantHistoryRuns(workflow);
+    const artifactCount = workflowHistoryArtifactEntries(workflow).length;
+    const checkpointHistory = workflowCheckpointHistoryEntries(workflow);
+    const checkpointCount = new Set(checkpointHistory.map((entry) => entry.stepId)).size;
+    const recoveryPathCount = checkpointHistory.length;
+    const lineageEventCount = workflowLineageEventEntries(workflow).length;
+    const familyCount = Math.max(workflowFamilyRuns(workflow).length - 1, 0);
+    const summary: string[] = [];
+    if (familyCount > 0) summary.push(`family ${familyCount + 1}`);
+    if (artifactCount > 0) summary.push(`history ${artifactCount} outputs`);
+    if (checkpointCount > 0) summary.push(`${checkpointCount} checkpoints`);
+    if (recoveryPathCount > checkpointCount) summary.push(`${recoveryPathCount} recovery paths`);
+    if (lineageEventCount > 0) summary.push(`${lineageEventCount} lineage events`);
+    if (historyRuns.length > 1) summary.push(`${historyRuns.length - 1} related runs`);
+    return summary;
   }
   function workflowBranchOriginSummary(workflow: WorkflowRunRecord): string[] {
     const summary: string[] = [];
@@ -5785,9 +5998,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function queueWorkflowOutputComparison(
     currentWorkflow: WorkflowRunRecord | null | undefined,
     relatedWorkflow: WorkflowRunRecord | null | undefined,
+    relatedOutputPathOverride?: string | null,
   ) {
     const currentOutputPath = workflowPrimaryOutputPath(currentWorkflow);
-    const relatedOutputPath = workflowPrimaryOutputPath(relatedWorkflow);
+    const relatedOutputPath = relatedOutputPathOverride ?? workflowPrimaryOutputPath(relatedWorkflow);
     if (!currentOutputPath || !relatedOutputPath) return;
     queueComposerDraft(
       `Compare the workspace files "${currentOutputPath}" and "${relatedOutputPath}". `
@@ -6252,6 +6466,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     const selectedWorkflowLatestBranch = selectedWorkflow ? workflowLatestBranchRun(selectedWorkflow) : null;
     const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
     const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
+    const selectedWorkflowHistorySummary = selectedWorkflow ? workflowHistorySummary(selectedWorkflow) : [];
     const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
     const selectedWorkflowCheckpointDraftByStep = new Map(
       selectedWorkflowCheckpointActions.map((action) => [action.stepId, action.draft]),
@@ -6561,6 +6776,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <div className="cockpit-chip-row">
             {workflowBranchDebugSummary(selectedWorkflow).map((detail) => (
               <span key={`${selectedWorkflow.id}:branch-debug:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflowHistorySummary.length > 0 && (
+          <div className="cockpit-chip-row">
+            {selectedWorkflowHistorySummary.map((detail) => (
+              <span key={`${selectedWorkflow.id}:history:${detail}`} className="cockpit-chip">
                 {detail}
               </span>
             ))}
@@ -6940,7 +7164,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <button
                       className="cockpit-feedback-button"
                       aria-label={`Compare family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
-                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, output.sourceWorkflow)}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, output.sourceWorkflow, output.filePath)}
                     >
                       Compare
                     </button>
@@ -7161,6 +7385,171 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             ))}
           </div>
         )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && (() => {
+          const artifactHistory = workflowHistoryArtifactEntries(selectedWorkflow);
+          const checkpointHistory = workflowCheckpointHistoryEntries(selectedWorkflow);
+          const lineageEvents = workflowLineageEventEntries(selectedWorkflow);
+          const selectedWorkflowOutputPath = workflowPrimaryOutputPath(selectedWorkflow);
+          if (artifactHistory.length === 0 && checkpointHistory.length === 0 && lineageEvents.length === 0) {
+            return null;
+          }
+          return (
+            <div className="cockpit-inspector-stack">
+              {artifactHistory.map((output, index) => (
+                <div key={`${selectedWorkflow.id}:artifact-history:${output.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "output history" : "history output"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      output.filePath,
+                      output.scopeLabel,
+                      output.sourceWorkflow.workflowName,
+                      output.summary,
+                      formatAge(output.createdAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open ${output.scopeLabel} for output history ${output.filePath}`}
+                    onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue ${output.scopeLabel} for output history ${output.filePath}`}
+                      onClick={() => continueWorkflowRun(output.sourceWorkflow)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use ${output.scopeLabel} for output history ${output.filePath}`}
+                    onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
+                  >
+                    Use Output
+                  </button>
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(output.sourceWorkflow) && selectedWorkflowOutputPath !== output.filePath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare ${output.scopeLabel} for output history ${output.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, output.sourceWorkflow, output.filePath)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {workflowOwnFailureContext(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use failure from ${output.scopeLabel} for output history ${output.filePath}`}
+                      onClick={() => queueWorkflowStepContext(output.sourceWorkflow, failedWorkflowStep(output.sourceWorkflow)!)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
+                </div>
+              ))}
+              {checkpointHistory.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:checkpoint-history:${entry.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "checkpoint history" : "checkpoint branch"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.actionLabel,
+                      entry.stepId,
+                      entry.scopeLabel,
+                      entry.sourceWorkflow.workflowName,
+                      entry.sourceWorkflow.summary,
+                      formatAge(entry.createdAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+                    onClick={() => inspectWorkflowRun(entry.sourceWorkflow)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(entry.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+                      onClick={() => continueWorkflowRun(entry.sourceWorkflow)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`${entry.actionLabel} from ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+                    onClick={() => queueComposerDraft(entry.draft)}
+                  >
+                    {entry.actionLabel}
+                  </button>
+                </div>
+              ))}
+              {lineageEvents.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:lineage-event:${entry.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "lineage event" : "history event"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.timelineEntry.kind.replace(/_/g, " "),
+                      entry.scopeLabel,
+                      entry.sourceWorkflow.workflowName,
+                      entry.timelineEntry.summary,
+                      entry.timelineEntry.stepId,
+                      entry.timelineEntry.durationMs ? `${entry.timelineEntry.durationMs}ms` : null,
+                      formatAge(entry.createdAt),
+                    ].filter(Boolean).join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open ${entry.scopeLabel} for lineage event ${entry.timelineEntry.kind}`}
+                    onClick={() => inspectWorkflowRun(entry.sourceWorkflow)}
+                  >
+                    Open
+                  </button>
+                  {entry.outputPath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use output from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+                      onClick={() => queueComposerDraft(`Use the workspace file "${entry.outputPath}" as context for the next action.`)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {entry.failureStep && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use failure from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+                      onClick={() => queueWorkflowStepContext(entry.sourceWorkflow, entry.failureStep!)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
+                  {entry.checkpointDraft && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Draft retry from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+                      onClick={() => queueComposerDraft(entry.checkpointDraft ?? "")}
+                    >
+                      Draft Retry
+                    </button>
+                  )}
+                  {entry.failureStep?.recoveryActions?.length ? (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Repair ${entry.scopeLabel} lineage event ${entry.failureStep.id}`}
+                      onClick={() => void runCapabilityActions(readActionList(entry.failureStep?.recoveryActions), `${entry.sourceWorkflow.workflowName} ${entry.failureStep?.id}`)}
+                    >
+                      Repair
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
         {selectedInspector.kind === "operator" && (
           <div className="cockpit-feedback-row">
             {(selectedInspector.entity.entityType === "workflow_definition"
@@ -8339,6 +8728,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         {workflowBranchDebugSummary(workflow).length > 0 ? (
                           <div className="cockpit-row-meta">
                             {workflowBranchDebugSummary(workflow).join(" · ")}
+                          </div>
+                        ) : null}
+                        {workflowHistorySummary(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowHistorySummary(workflow).join(" · ")}
                           </div>
                         ) : null}
                       </button>

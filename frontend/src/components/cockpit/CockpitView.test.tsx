@@ -659,6 +659,51 @@ describe("CockpitView", () => {
             queued_insight_count: 1,
             recent_intervention_count: 0,
             degraded_route_count: 1,
+            degraded_source_adapter_count: 1,
+            attention_family_count: 1,
+          },
+          imported_reach: {
+            summary: {
+              family_count: 1,
+              active_family_count: 1,
+              attention_family_count: 1,
+              approval_family_count: 0,
+            },
+            families: [
+              {
+                type: "messaging_connectors",
+                label: "messaging",
+                total: 1,
+                installed: 1,
+                ready: 0,
+                attention: 1,
+                approval: 0,
+                packages: ["Seraph Relay Pack"],
+              },
+            ],
+          },
+          source_adapters: {
+            summary: {
+              adapter_count: 1,
+              ready_adapter_count: 0,
+              degraded_adapter_count: 1,
+              authenticated_adapter_count: 1,
+              authenticated_ready_adapter_count: 0,
+              authenticated_degraded_adapter_count: 1,
+            },
+            adapters: [
+              {
+                name: "github-managed",
+                provider: "github",
+                source_kind: "managed_connector",
+                authenticated: true,
+                runtime_state: "requires_runtime",
+                adapter_state: "degraded",
+                contracts: ["work_items.read", "code_activity.read"],
+                degraded_reason: "runtime_adapter_missing",
+                next_best_sources: [{ name: "web_search", reason: "fallback", description: "Use public context." }],
+              },
+            ],
           },
           threads: [
             {
@@ -705,6 +750,32 @@ describe("CockpitView", () => {
               thread_id: "session-2",
               continue_message: "Continue Atlas queued item",
               open_thread_available: true,
+            },
+            {
+              id: "source:github-managed",
+              kind: "source_adapter_repair",
+              label: "Restore source adapter github-managed",
+              detail: "github adapter is degraded (runtime_adapter_missing).",
+              status: "degraded",
+              surface: "source_adapter",
+              route: null,
+              repair_hint: "Next best: web_search.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "imported:messaging_connectors",
+              kind: "imported_reach_attention",
+              label: "Review imported messaging",
+              detail: "1 imported contribution needs attention across 1 package.",
+              status: "attention",
+              surface: "imported_reach",
+              route: null,
+              repair_hint: "Inspect Seraph Relay Pack in the operator surface.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
             },
           ],
           reach: {
@@ -998,9 +1069,27 @@ describe("CockpitView", () => {
     fireEvent.click(within(routeRow as HTMLElement).getByRole("button", { name: "Open desktop shell for reach: Bundle delivery" }));
     await waitFor(() => expect(screen.getByText("Desktop shell")).toBeInTheDocument());
     expect(screen.getByText(/continuity degraded · threads 1 · ambient 0/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Draft repair" })).toBeInTheDocument();
+    expect(screen.getByText(/typed adapters 0\/1 ready · authenticated 0\/1/i)).toBeInTheDocument();
+    expect(screen.getByText(/imported reach 1\/1 active · 1 attention/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Draft repair" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Continue" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Open Thread" }).length).toBeGreaterThan(0);
+
+    const sourceRow = within(triage).getByText("reach: Restore source adapter github-managed").closest(".cockpit-operator-row--entry");
+    expect(sourceRow).not.toBeNull();
+    expect(within(sourceRow as HTMLElement).getByRole("button", { name: "Draft repair for reach: Restore source adapter github-managed" })).toBeInTheDocument();
+    expect(within(sourceRow as HTMLElement).getByRole("button", { name: "Open operator surface for reach: Restore source adapter github-managed" })).toBeInTheDocument();
+    fireEvent.click(within(sourceRow as HTMLElement).getByRole("button", { name: "Draft repair for reach: Restore source adapter github-managed" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review restore source adapter github-managed/i),
+      ).toBeInTheDocument(),
+    );
+
+    const importedRow = within(triage).getByText("reach: Review imported messaging").closest(".cockpit-operator-row--entry");
+    expect(importedRow).not.toBeNull();
+    fireEvent.click(within(importedRow as HTMLElement).getByRole("button", { name: "Open operator surface for reach: Review imported messaging" }));
+    await waitFor(() => expect(screen.getByText("Operator terminal")).toBeInTheDocument());
   }, 30000);
 
   it("surfaces evidence shortcuts and keyboard-first triage control", async () => {

@@ -18,6 +18,8 @@ export interface SeraphPresenceSnapshot {
   pendingNotificationCount: number;
   queuedInsightCount: number;
   degradedRouteCount: number;
+  degradedSourceAdapterCount: number;
+  attentionImportedFamilyCount: number;
   actionableThreadCount: number;
   continuityHealth?: string | null;
   recommendedFocus?: string | null;
@@ -77,7 +79,7 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
       state: "error",
       label: "Degraded",
       detail: snapshot.continuityHealth === "degraded"
-        ? "Cross-surface reach or continuity needs operator repair."
+        ? "Cross-surface reach, imported capability surfaces, or continuity needs operator repair."
         : "Seraph is running with a degraded seam or recent execution failure.",
       tone: "error",
       cadenceMs: 520,
@@ -128,6 +130,8 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
     snapshot.actionableThreadCount > 0
     || snapshot.pendingNotificationCount > 0
     || snapshot.queuedInsightCount > 0
+    || snapshot.degradedSourceAdapterCount > 0
+    || snapshot.attentionImportedFamilyCount > 0
     || snapshot.latestResponseRole === "proactive"
     || snapshot.ambientState === "has_insight"
     || snapshot.recentInterventionCount > 0

@@ -4841,7 +4841,58 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             session_id="continuity-session",
         )
 
-        with patch("src.api.observer.context_manager", mgr):
+        with (
+            patch("src.api.observer.context_manager", mgr),
+            patch(
+                "src.api.observer._observer_imported_reach_payload",
+                return_value={
+                    "summary": {
+                        "family_count": 1,
+                        "active_family_count": 1,
+                        "attention_family_count": 1,
+                        "approval_family_count": 0,
+                    },
+                    "families": [
+                        {
+                            "type": "messaging_connectors",
+                            "label": "messaging",
+                            "total": 1,
+                            "installed": 1,
+                            "ready": 0,
+                            "attention": 1,
+                            "approval": 0,
+                            "packages": ["Seraph Relay Pack"],
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer._observer_source_adapter_payload",
+                return_value={
+                    "summary": {
+                        "adapter_count": 1,
+                        "ready_adapter_count": 0,
+                        "degraded_adapter_count": 1,
+                        "authenticated_adapter_count": 1,
+                        "authenticated_ready_adapter_count": 0,
+                        "authenticated_degraded_adapter_count": 1,
+                    },
+                    "adapters": [
+                        {
+                            "name": "github-managed",
+                            "provider": "github",
+                            "source_kind": "managed_connector",
+                            "authenticated": True,
+                            "runtime_state": "requires_runtime",
+                            "adapter_state": "degraded",
+                            "contracts": ["work_items.read", "code_activity.read"],
+                            "degraded_reason": "runtime_adapter_missing",
+                            "next_best_sources": [{"name": "web_search", "reason": "fallback", "description": "Use public context."}],
+                        }
+                    ],
+                },
+            ),
+        ):
             continuity = await get_observer_continuity()
 
         queued_ids = [item.id for item in await insight_queue.peek_all()]
@@ -4871,6 +4922,10 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         "recent_surfaces": sorted(surfaces),
         "native_surface_present": "native_notification" in surfaces,
         "bundle_surface_present": "bundle_queue" in surfaces,
+        "degraded_source_adapter_count": continuity["summary"]["degraded_source_adapter_count"],
+        "attention_family_count": continuity["summary"]["attention_family_count"],
+        "source_adapter_recovery_present": any(item["kind"] == "source_adapter_repair" for item in continuity["recovery_actions"]),
+        "imported_reach_recovery_present": any(item["kind"] == "imported_reach_attention" for item in continuity["recovery_actions"]),
     }
 
 

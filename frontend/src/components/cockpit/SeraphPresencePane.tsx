@@ -38,13 +38,16 @@ function contextLabel(snapshot: SeraphPresenceSnapshot): string {
 function queueLabel(snapshot: SeraphPresenceSnapshot): string {
   const total = snapshot.pendingApprovalCount
     + snapshot.actionableThreadCount
-    + snapshot.degradedRouteCount;
+    + snapshot.degradedRouteCount
+    + snapshot.degradedSourceAdapterCount
+    + snapshot.attentionImportedFamilyCount;
   return total > 0 ? total.toString().padStart(2, "0") : "CLEAR";
 }
 
 function reachLabel(snapshot: SeraphPresenceSnapshot): string {
-  if (snapshot.degradedRouteCount > 0) {
-    return `WARN ${snapshot.degradedRouteCount}`;
+  const issues = snapshot.degradedRouteCount + snapshot.degradedSourceAdapterCount + snapshot.attentionImportedFamilyCount;
+  if (issues > 0) {
+    return `WARN ${issues}`;
   }
   return snapshot.connectionStatus === "connected" ? "READY" : "LINK";
 }
@@ -73,8 +76,18 @@ export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPrese
       {
         label: "Reach",
         value: reachLabel(snapshot),
-        hint: snapshot.degradedRouteCount > 0
-          ? `${snapshot.degradedRouteCount} route${snapshot.degradedRouteCount === 1 ? "" : "s"} need repair`
+        hint: snapshot.degradedRouteCount > 0 || snapshot.degradedSourceAdapterCount > 0 || snapshot.attentionImportedFamilyCount > 0
+          ? [
+            snapshot.degradedRouteCount > 0
+              ? `${snapshot.degradedRouteCount} route${snapshot.degradedRouteCount === 1 ? "" : "s"} need repair`
+              : null,
+            snapshot.degradedSourceAdapterCount > 0
+              ? `${snapshot.degradedSourceAdapterCount} adapter${snapshot.degradedSourceAdapterCount === 1 ? "" : "s"} degraded`
+              : null,
+            snapshot.attentionImportedFamilyCount > 0
+              ? `${snapshot.attentionImportedFamilyCount} imported famil${snapshot.attentionImportedFamilyCount === 1 ? "y" : "ies"} need attention`
+              : null,
+          ].filter(Boolean).join(" · ")
           : snapshot.pendingNotificationCount > 0
             ? `${snapshot.pendingNotificationCount} desktop alert${snapshot.pendingNotificationCount === 1 ? "" : "s"} pending`
             : "browser and desktop linked",
@@ -98,7 +111,9 @@ export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPrese
           follow-through {snapshot.actionableThreadCount} · alerts {snapshot.pendingNotificationCount} · bundled {snapshot.queuedInsightCount}
         </div>
         <div className="cockpit-sublist-item">
-          reach {snapshot.degradedRouteCount > 0 ? `${snapshot.degradedRouteCount} degraded` : "ready"}
+          reach {snapshot.degradedRouteCount > 0 ? `${snapshot.degradedRouteCount} degraded routes` : "ready"}
+          {snapshot.degradedSourceAdapterCount > 0 ? ` · ${snapshot.degradedSourceAdapterCount} adapters degraded` : ""}
+          {snapshot.attentionImportedFamilyCount > 0 ? ` · ${snapshot.attentionImportedFamilyCount} imported attention` : ""}
           {snapshot.recommendedFocus ? ` · focus ${snapshot.recommendedFocus}` : ""}
         </div>
       </div>

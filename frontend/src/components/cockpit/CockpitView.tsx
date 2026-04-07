@@ -567,10 +567,28 @@ interface ExtensionConnectorSummary {
   states: Record<string, number>;
 }
 
+interface ExtensionCompatibilityInfo {
+  seraph: string;
+  current_version?: string | null;
+  compatible?: boolean;
+}
+
+interface ExtensionDiagnosticsSummary {
+  issue_count: number;
+  error_issue_count: number;
+  warning_issue_count: number;
+  load_error_count: number;
+  degraded_contribution_count: number;
+  degraded_connector_count: number;
+  state_counts: Record<string, number>;
+  highlighted_messages: string[];
+}
+
 interface ExtensionPackageInfo {
   id: string;
   display_name: string;
   version?: string | null;
+  version_line?: string | null;
   kind: string;
   trust: string;
   source: string;
@@ -578,8 +596,9 @@ interface ExtensionPackageInfo {
   status: string;
   summary?: string | null;
   description?: string | null;
-  compatibility?: { seraph: string } | null;
+  compatibility?: ExtensionCompatibilityInfo | null;
   publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
   issues: ExtensionIssueInfo[];
   load_errors: ExtensionLoadErrorInfo[];
   toggle_targets: ExtensionToggleTargetInfo[];
@@ -619,6 +638,9 @@ interface ExtensionPathPreview {
   extension_id: string;
   display_name: string;
   version?: string | null;
+  version_line?: string | null;
+  compatibility?: ExtensionCompatibilityInfo | null;
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
   ok: boolean;
   results: Array<{ issues?: unknown[] }>;
   load_errors?: Array<Record<string, unknown>>;
@@ -654,12 +676,16 @@ interface CatalogItemInfo {
   contribution_types?: string[];
   trust?: string;
   version?: string | null;
+  version_line?: string | null;
   installed_version?: string | null;
   update_available?: boolean;
+  compatibility?: ExtensionCompatibilityInfo | null;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
   status?: string;
   doctor_ok?: boolean;
   issues?: unknown[];
   load_errors?: unknown[];
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
   recommended_actions?: CapabilityAction[];
 }
 
@@ -919,6 +945,58 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
 }
 
+function formatExtensionCompatibilityLabel(value: ExtensionCompatibilityInfo | null | undefined): string | null {
+  if (!value) return null;
+  const requirement = value.seraph.trim();
+  const current = value.current_version?.trim();
+  const status = value.compatible === false ? "incompatible" : value.compatible === true ? "compatible" : null;
+  return [status, requirement ? `Seraph ${requirement}` : null, current ? `current ${current}` : null]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function formatExtensionDiagnosticsSummary(value: ExtensionDiagnosticsSummary | null | undefined): string | null {
+  if (!value) return null;
+  const parts = [
+    value.issue_count > 0 ? `${value.issue_count} doctor ${value.issue_count === 1 ? "issue" : "issues"}` : null,
+    value.load_error_count > 0 ? `${value.load_error_count} load ${value.load_error_count === 1 ? "error" : "errors"}` : null,
+    value.degraded_contribution_count > 0
+      ? `${value.degraded_contribution_count} degraded ${value.degraded_contribution_count === 1 ? "surface" : "surfaces"}`
+      : null,
+    value.degraded_connector_count > 0
+      ? `${value.degraded_connector_count} degraded ${value.degraded_connector_count === 1 ? "connector" : "connectors"}`
+      : null,
+  ].filter(Boolean);
+  if (parts.length === 0) {
+    if ((value.state_counts.catalog ?? 0) > 0) return "catalog only · no doctor or load errors";
+    return "ready · no doctor or load errors";
+  }
+  return parts.join(" · ");
+}
+
+function formatExtensionPublisherLabel(
+  value: { name: string; homepage?: string | null; support?: string | null } | null | undefined,
+): string | null {
+  if (!value?.name?.trim()) return null;
+  return `publisher ${value.name.trim()}`;
+}
+
+function formatLifecyclePlanSummary(preview: ExtensionPathPreview | null | undefined): string | null {
+  if (!preview) return null;
+  const lifecyclePlan = preview.lifecycle_plan;
+  if (!lifecyclePlan) return null;
+  const currentVersion = lifecyclePlan.current_version?.trim();
+  const candidateVersion = lifecyclePlan.candidate_version?.trim() ?? preview.version?.trim();
+  const relation = lifecyclePlan.version_relation?.trim();
+  const parts =
+    lifecyclePlan.recommended_action === "update"
+      ? [lifecyclePlan.mode.replace(/_/g, " "), currentVersion ? `${currentVersion} -> ${candidateVersion ?? "candidate"}` : candidateVersion ?? null, relation]
+      : lifecyclePlan.recommended_action === "none"
+        ? ["up to date", candidateVersion ?? currentVersion ?? null]
+        : [lifecyclePlan.mode.replace(/_/g, " "), candidateVersion ?? null, relation];
+  return parts.filter(Boolean).join(" · ");
+}
+
 const SUPPORTED_CAPABILITY_ACTION_TYPES = new Set<CapabilityAction["type"]>([
   "enable_extension",
   "toggle_skill",
@@ -979,6 +1057,25 @@ function summarizeMissingPermissions(summary: ExtensionPermissionSummary | null 
     parts.push(`${summary.missing.execution_boundaries.length} ${summary.missing.execution_boundaries.length === 1 ? "boundary" : "boundaries"}`);
   }
   return parts;
+}
+
+function formatExtensionGovernanceSummary(extensionPackage: ExtensionPackageInfo): string | null {
+  const parts: string[] = [];
+  const missingPermissions = summarizeMissingPermissions(extensionPackage.permission_summary);
+  if (missingPermissions.length) {
+    parts.push(`missing ${missingPermissions.join(", ")}`);
+  }
+  if (extensionPackage.approval_profile?.requires_lifecycle_approval) {
+    parts.push("lifecycle approval");
+  }
+  if (extensionPackage.approval_profile?.requires_runtime_approval) {
+    parts.push("runtime approval");
+  }
+  const degradedConnectors = extensionPackage.diagnostics_summary?.degraded_connector_count ?? 0;
+  if (degradedConnectors > 0) {
+    parts.push(`${degradedConnectors} degraded ${degradedConnectors === 1 ? "connector" : "connectors"}`);
+  }
+  return parts.length ? parts.join(" · ") : null;
 }
 
 function isContributionActive(contribution: ExtensionContributionInfo): boolean {
@@ -1188,6 +1285,40 @@ function normalizeExtensionConnectorSummary(value: unknown): ExtensionConnectorS
   };
 }
 
+function normalizeExtensionCompatibility(value: unknown): ExtensionCompatibilityInfo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.seraph !== "string") return null;
+  return {
+    seraph: record.seraph,
+    current_version: typeof record.current_version === "string" ? record.current_version : null,
+    compatible: typeof record.compatible === "boolean" ? record.compatible : undefined,
+  };
+}
+
+function normalizeExtensionDiagnosticsSummary(value: unknown): ExtensionDiagnosticsSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    issue_count: typeof record.issue_count === "number" ? record.issue_count : 0,
+    error_issue_count: typeof record.error_issue_count === "number" ? record.error_issue_count : 0,
+    warning_issue_count: typeof record.warning_issue_count === "number" ? record.warning_issue_count : 0,
+    load_error_count: typeof record.load_error_count === "number" ? record.load_error_count : 0,
+    degraded_contribution_count: typeof record.degraded_contribution_count === "number" ? record.degraded_contribution_count : 0,
+    degraded_connector_count: typeof record.degraded_connector_count === "number" ? record.degraded_connector_count : 0,
+    state_counts:
+      record.state_counts && typeof record.state_counts === "object" && !Array.isArray(record.state_counts)
+        ? (Object.fromEntries(
+          Object.entries(record.state_counts as Record<string, unknown>)
+            .filter(([, count]) => typeof count === "number"),
+        ) as Record<string, number>)
+        : {},
+    highlighted_messages: Array.isArray(record.highlighted_messages)
+      ? record.highlighted_messages.filter((entry): entry is string => typeof entry === "string")
+      : [],
+  };
+}
+
 function normalizeExtensionContribution(value: Record<string, unknown>): ExtensionContributionInfo | null {
   if (typeof value.type !== "string" || typeof value.reference !== "string") {
     return null;
@@ -1291,6 +1422,7 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
     id: value.id,
     display_name: value.display_name,
     version: typeof value.version === "string" ? value.version : null,
+    version_line: typeof value.version_line === "string" ? value.version_line : null,
     kind: value.kind,
     trust: value.trust,
     source: value.source,
@@ -1298,10 +1430,7 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
     status: value.status,
     summary: typeof value.summary === "string" ? value.summary : null,
     description: typeof value.description === "string" ? value.description : null,
-    compatibility:
-      value.compatibility && typeof value.compatibility === "object" && !Array.isArray(value.compatibility)
-        ? { seraph: String((value.compatibility as Record<string, unknown>).seraph ?? "") }
-        : null,
+    compatibility: normalizeExtensionCompatibility(value.compatibility),
     publisher:
       value.publisher && typeof value.publisher === "object" && !Array.isArray(value.publisher)
         ? {
@@ -1316,6 +1445,7 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
               : null,
         }
         : null,
+    diagnostics_summary: normalizeExtensionDiagnosticsSummary(value.diagnostics_summary),
     issues,
     load_errors: loadErrors,
     toggle_targets: toggleTargets,
@@ -1503,6 +1633,29 @@ function buildExtensionManifestEntity(extension: ExtensionPackageInfo): Operator
       contributions: extension.contributions,
     },
   };
+}
+
+function buildExtensionPackageReviewDraft(
+  extension: ExtensionPackageInfo,
+  catalogItem: CatalogItemInfo | null = null,
+): string {
+  const lines = [
+    `Review extension package "${extension.display_name}" and recommend the next lifecycle action.`,
+    extension.version ? `Installed version: ${extension.version}.` : null,
+    catalogItem?.update_available && catalogItem.version
+      ? `Catalog candidate: ${catalogItem.version}${catalogItem.installed_version ? ` (currently ${catalogItem.installed_version})` : ""}.`
+      : null,
+    formatExtensionCompatibilityLabel(extension.compatibility)
+      ? `Compatibility: ${formatExtensionCompatibilityLabel(extension.compatibility)}.`
+      : null,
+    formatExtensionDiagnosticsSummary(extension.diagnostics_summary)
+      ? `Diagnostics: ${formatExtensionDiagnosticsSummary(extension.diagnostics_summary)}.`
+      : null,
+    formatExtensionGovernanceSummary(extension)
+      ? `Governance: ${formatExtensionGovernanceSummary(extension)}.`
+      : null,
+  ].filter(Boolean);
+  return lines.join(" ");
 }
 
 function buildExtensionStudioDraft(entity: OperatorEntity): string {
@@ -4700,6 +4853,65 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     operatorMacros,
     paletteQuery,
   ]);
+  const catalogExtensionItems = useMemo(
+    () => catalogItems.filter((item) => item.type === "extension_pack"),
+    [catalogItems],
+  );
+  const catalogExtensionItemsById = useMemo(
+    () => new Map(
+      catalogExtensionItems.map((item) => [item.catalog_id ?? item.name, item] as const),
+    ),
+    [catalogExtensionItems],
+  );
+  const installableCatalogItems = useMemo(
+    () => catalogItems.filter((item) => !item.installed || item.update_available),
+    [catalogItems],
+  );
+  const extensionPackagesNeedingAttention = useMemo(
+    () => extensionPackages.filter((extensionPackage) => {
+      const catalogItem = catalogExtensionItemsById.get(extensionPackage.id) ?? null;
+      return (
+        extensionPackage.status !== "ready"
+        || Boolean(catalogItem?.update_available)
+        || Boolean(formatExtensionGovernanceSummary(extensionPackage))
+      );
+    }),
+    [catalogExtensionItemsById, extensionPackages],
+  );
+  const extensionHealthSummary = useMemo(() => {
+    const degraded = extensionPackages.filter((item) => item.status !== "ready").length;
+    const updateReady = extensionPackages.filter((item) => {
+      const catalogItem = catalogExtensionItemsById.get(item.id);
+      return Boolean(catalogItem?.update_available);
+    }).length;
+    const approvalGated = extensionPackages.filter((item) => item.approval_profile?.requires_lifecycle_approval).length;
+    const attention = extensionPackagesNeedingAttention.length;
+    return [
+      `${extensionPackages.length} installed`,
+      degraded > 0 ? `${degraded} degraded` : null,
+      updateReady > 0 ? `${updateReady} updates` : null,
+      approvalGated > 0 ? `${approvalGated} approval gated` : null,
+      attention > 0 ? `${attention} attention` : null,
+    ].filter(Boolean).join(" · ");
+  }, [catalogExtensionItemsById, extensionPackages, extensionPackagesNeedingAttention.length]);
+  const installableCatalogSummary = useMemo(() => {
+    const extensionItems = installableCatalogItems.filter((item) => item.type === "extension_pack");
+    const updateCount = installableCatalogItems.filter((item) => item.installed && item.update_available).length;
+    const compatibleCount = extensionItems.filter((item) => item.compatibility?.compatible !== false).length;
+    const reviewNeeded = extensionItems.filter((item) =>
+      item.status && item.status !== "ready"
+      || item.compatibility?.compatible === false
+      || (item.diagnostics_summary?.issue_count ?? 0) > 0
+      || (item.diagnostics_summary?.load_error_count ?? 0) > 0,
+    ).length;
+    return [
+      `${installableCatalogItems.length} available`,
+      updateCount > 0 ? `${updateCount} updates` : null,
+      extensionItems.length > 0 ? `${extensionItems.length} extension packs` : null,
+      compatibleCount > 0 ? `${compatibleCount} compatible` : null,
+      reviewNeeded > 0 ? `${reviewNeeded} review` : null,
+    ].filter(Boolean).join(" · ");
+  }, [installableCatalogItems]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     if (workflow.pendingApprovalIds?.length) {
@@ -10216,20 +10428,85 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
                   <div className="cockpit-operator-section">
                     <div className="cockpit-operator-row">
-                      <span className="cockpit-key">installable now</span>
-                      <span className="cockpit-operator-link">
-                        {
-                          catalogItems.filter((item) =>
-                            (!item.installed || item.update_available)
-                            && (item.type !== "extension_pack" || !item.status || item.status === "ready"),
-                          ).length
-                        } missing
-                      </span>
+                      <span className="cockpit-key">extension health</span>
+                      <button
+                        type="button"
+                        className="cockpit-operator-link"
+                        onClick={() => setStudioOpen(true)}
+                      >
+                        studio
+                      </button>
                     </div>
-                    {catalogItems.filter((item) =>
-                      (!item.installed || item.update_available)
-                      && (item.type !== "extension_pack" || !item.status || item.status === "ready"),
-                    ).map((item) => (
+                    <div className="cockpit-sublist-item">{extensionHealthSummary}</div>
+                    {extensionPackagesNeedingAttention.slice(0, 6).map((extensionPackage) => {
+                      const catalogItem = catalogExtensionItemsById.get(extensionPackage.id) ?? null;
+                      return (
+                        <div key={extensionPackage.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                          <button
+                            type="button"
+                            className="cockpit-operator-details cockpit-operator-details--button"
+                            onClick={() =>
+                              setSelectedInspector({
+                                kind: "operator",
+                                entity: buildExtensionManifestEntity(extensionPackage),
+                              })
+                            }
+                          >
+                            <div className="cockpit-value">{extensionPackage.display_name}</div>
+                            <div className="cockpit-operator-note">
+                              {[
+                                extensionPackage.version ?? null,
+                                catalogItem?.update_available && catalogItem.version
+                                  ? `${catalogItem.installed_version ?? extensionPackage.version ?? "installed"} -> ${catalogItem.version}`
+                                  : null,
+                                formatExtensionCompatibilityLabel(extensionPackage.compatibility),
+                                formatExtensionDiagnosticsSummary(extensionPackage.diagnostics_summary),
+                                formatExtensionGovernanceSummary(extensionPackage),
+                                formatExtensionPublisherLabel(extensionPackage.publisher),
+                              ].filter(Boolean).join(" · ")}
+                            </div>
+                          </button>
+                          <div className="cockpit-operator-actions">
+                            {catalogItem?.update_available ? (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                onClick={() => void installCatalogItem(catalogItem)}
+                              >
+                                update
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${extensionPackage.id}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => queueComposerDraft(buildExtensionPackageReviewDraft(extensionPackage, catalogItem))}
+                            >
+                              draft
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {extensionPackagesNeedingAttention.length === 0 && (
+                      <div className="cockpit-empty">Installed extension packages are healthy.</div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">installable now</span>
+                      <span className="cockpit-operator-link">{installableCatalogSummary}</span>
+                    </div>
+                    {installableCatalogItems.map((item) => (
                       <div key={item.catalog_id ?? `${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
@@ -10255,12 +10532,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                   contribution_types: item.contribution_types ?? [],
                                   trust: item.trust ?? "",
                                   version: item.version ?? "",
+                                  version_line: item.version_line ?? "",
                                   installed_version: item.installed_version ?? "",
                                   update_available: item.update_available ?? false,
+                                  compatibility: item.compatibility ?? null,
+                                  publisher: item.publisher ?? null,
                                   status: item.status ?? "ready",
                                   doctor_ok: item.doctor_ok ?? true,
                                   issues: item.issues ?? [],
                                   load_errors: item.load_errors ?? [],
+                                  diagnostics_summary: item.diagnostics_summary ?? null,
                                 },
                               },
                             })
@@ -10268,6 +10549,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         >
                           <div className="cockpit-value">{item.name}</div>
                           <div className="cockpit-operator-note">{item.description}</div>
+                          {item.type === "extension_pack" ? (
+                            <div className="cockpit-operator-note">
+                              {[
+                                item.installed && item.update_available
+                                  ? `${item.installed_version ?? "installed"} -> ${item.version ?? "candidate"}`
+                                  : item.version ?? null,
+                                formatExtensionPublisherLabel(item.publisher),
+                                item.trust ? `trust ${item.trust}` : null,
+                                formatExtensionCompatibilityLabel(item.compatibility),
+                                formatExtensionDiagnosticsSummary(item.diagnostics_summary),
+                              ].filter(Boolean).join(" · ")}
+                            </div>
+                          ) : null}
                         </button>
                         <div className="cockpit-operator-actions">
                           <button
@@ -10277,6 +10571,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           >
                             {item.installed && item.update_available ? "update" : "install"}
                           </button>
+                          {item.type === "extension_pack" && item.installed ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${item.catalog_id ?? item.name}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                          ) : null}
                           {item.recommended_actions?.length ? (
                             <button
                               type="button"
@@ -10700,6 +11005,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   {studioPackageStatus ? (
                     <div className="cockpit-sublist-item">{studioPackageStatus}</div>
                   ) : null}
+                  {studioPackagePreview ? (
+                    <>
+                      <div className="cockpit-sublist-item">
+                        {formatLifecyclePlanSummary(studioPackagePreview)
+                          ?? `${studioPackagePreview.display_name} · ${studioPackagePreview.version ?? "unknown version"}`}
+                      </div>
+                      {formatExtensionCompatibilityLabel(studioPackagePreview.compatibility) ? (
+                        <div className="cockpit-sublist-item">
+                          {formatExtensionCompatibilityLabel(studioPackagePreview.compatibility)}
+                        </div>
+                      ) : null}
+                      {formatExtensionDiagnosticsSummary(studioPackagePreview.diagnostics_summary) ? (
+                        <div className="cockpit-sublist-item">
+                          {formatExtensionDiagnosticsSummary(studioPackagePreview.diagnostics_summary)}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
                 </div>
                 {studioSidebarSections.packages.map((group) => (
                   <div key={group.extension.id} className="cockpit-studio-sidebar-group">
@@ -10871,6 +11194,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <div className="cockpit-key">package state</div>
                         <div className="cockpit-value">
                           {selectedExtensionPackage.status}
+                          {selectedExtensionPackage.version ? ` · ${selectedExtensionPackage.version}` : ""}
+                          {selectedExtensionPackage.version_line ? ` · line ${selectedExtensionPackage.version_line}` : ""}
                           {selectedExtensionPackage.enabled_scope !== "none"
                             ? ` · ${selectedExtensionPackage.enabled === false ? "disabled" : "enabled"}`
                             : ""}
@@ -10879,6 +11204,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             : ""}
                           {selectedExtensionPackage.passive_contribution_types.length
                             ? ` · passive ${selectedExtensionPackage.passive_contribution_types.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.compatibility ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">compatibility</div>
+                        <div className="cockpit-value">
+                          {formatExtensionCompatibilityLabel(selectedExtensionPackage.compatibility)}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.diagnostics_summary ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">diagnostics</div>
+                        <div className="cockpit-value">
+                          {formatExtensionDiagnosticsSummary(selectedExtensionPackage.diagnostics_summary)}
+                          {selectedExtensionPackage.diagnostics_summary.highlighted_messages.length
+                            ? ` · ${selectedExtensionPackage.diagnostics_summary.highlighted_messages.join(" · ")}`
                             : ""}
                         </div>
                       </div>

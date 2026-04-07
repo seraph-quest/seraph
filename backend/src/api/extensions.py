@@ -730,6 +730,33 @@ async def list_extension_packages():
     return list_extensions()
 
 
+@router.get("/extensions/diagnostics")
+async def get_extension_diagnostics():
+    payload = list_extensions()
+    extensions = payload.get("extensions", []) if isinstance(payload, dict) else []
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    return {
+        "summary": summary,
+        "extensions": [
+            {
+                "id": item.get("id"),
+                "display_name": item.get("display_name"),
+                "version": item.get("version"),
+                "version_line": item.get("version_line"),
+                "location": item.get("location"),
+                "status": item.get("status"),
+                "compatibility": item.get("compatibility"),
+                "diagnostics_summary": item.get("diagnostics_summary"),
+                "connector_summary": item.get("connector_summary"),
+                "permission_summary": item.get("permission_summary"),
+                "approval_profile": item.get("approval_profile"),
+            }
+            for item in extensions
+            if isinstance(item, dict)
+        ],
+    }
+
+
 @router.get("/extensions/channel-routing")
 async def get_channel_routing():
     state_payload = load_extension_state_payload()

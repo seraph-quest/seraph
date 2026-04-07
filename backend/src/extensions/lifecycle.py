@@ -45,6 +45,7 @@ from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
     ExtensionRegistry,
+    _current_seraph_version,
     bundled_manifest_root,
     default_manifest_roots_for_workspace,
 )
@@ -189,6 +190,105 @@ def _version_relation(candidate_version: str, current_version: str | None) -> st
     if candidate < current:
         return "downgrade"
     return "same"
+
+
+def _version_line(version: str | None) -> str | None:
+    if not version:
+        return None
+    try:
+        parsed = Version(version)
+    except Exception:
+        return None
+    return f"{parsed.major}.{parsed.minor}"
+
+
+def _compatibility_payload(manifest: ExtensionManifest | None) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+    current_version = _current_seraph_version()
+    compatible = manifest.is_compatible_with(current_version)
+    return {
+        "seraph": manifest.compatibility.seraph,
+        "current_version": current_version,
+        "compatible": compatible,
+    }
+
+
+def _diagnostics_summary(
+    *,
+    issues: list[dict[str, Any]],
+    load_errors: list[dict[str, Any]],
+    contributions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    issue_count = len(issues)
+    error_issue_count = sum(1 for issue in issues if str(issue.get("severity") or "").lower() == "error")
+    warning_issue_count = sum(1 for issue in issues if str(issue.get("severity") or "").lower() == "warning")
+    load_error_count = len(load_errors)
+    degraded_contribution_count = 0
+    degraded_connector_count = 0
+    state_counts: dict[str, int] = {}
+    highlighted_messages: list[str] = []
+    non_degraded_states = {
+        "ready",
+        "connected",
+        "loaded",
+        "enabled",
+        "disabled",
+        "planned",
+        "overridden",
+        "catalog",
+    }
+
+    for contribution in contributions:
+        raw_state = str(
+            contribution.get("status")
+            or (
+                contribution.get("health", {}).get("state")
+                if isinstance(contribution.get("health"), dict)
+                else ""
+            )
+            or "unknown"
+        ).strip().lower()
+        state = raw_state or "unknown"
+        state_counts[state] = state_counts.get(state, 0) + 1
+        if state not in non_degraded_states:
+            degraded_contribution_count += 1
+            if str(contribution.get("type") or "") in _CONNECTOR_CONTRIBUTION_TYPES:
+                degraded_connector_count += 1
+        if len(highlighted_messages) >= 3:
+            continue
+        health = contribution.get("health")
+        summary = (
+            str(health.get("summary") or "").strip()
+            if isinstance(health, dict)
+            else ""
+        )
+        if summary and summary not in highlighted_messages:
+            highlighted_messages.append(summary)
+
+    for issue in issues:
+        if len(highlighted_messages) >= 3:
+            break
+        message = str(issue.get("message") or "").strip()
+        if message and message not in highlighted_messages:
+            highlighted_messages.append(message)
+    for error in load_errors:
+        if len(highlighted_messages) >= 3:
+            break
+        message = str(error.get("message") or "").strip()
+        if message and message not in highlighted_messages:
+            highlighted_messages.append(message)
+
+    return {
+        "issue_count": issue_count,
+        "error_issue_count": error_issue_count,
+        "warning_issue_count": warning_issue_count,
+        "load_error_count": load_error_count,
+        "degraded_contribution_count": degraded_contribution_count,
+        "degraded_connector_count": degraded_connector_count,
+        "state_counts": state_counts,
+        "highlighted_messages": highlighted_messages,
+    }
 
 
 def _extension_lifecycle_plan(
@@ -1835,10 +1935,17 @@ def _extension_payload(
     passive_types = _passive_contribution_types(extension)
     configurable_types = _configurable_connector_types(extension)
     connector_summary = _connector_summary(contributions)
+    compatibility = _compatibility_payload(extension.manifest)
+    diagnostics_summary = _diagnostics_summary(
+        issues=issues,
+        load_errors=extension_load_errors,
+        contributions=contributions,
+    )
     return {
         "id": extension.id,
         "display_name": extension.display_name,
         "version": extension.manifest.version if extension.manifest is not None else None,
+        "version_line": _version_line(extension.manifest.version if extension.manifest is not None else None),
         "kind": extension.kind,
         "trust": extension.trust,
         "source": extension.source,
@@ -1848,11 +1955,7 @@ def _extension_payload(
         "manifest_path": extension.manifest_path,
         "summary": extension.manifest.summary if extension.manifest is not None else None,
         "description": extension.manifest.description if extension.manifest is not None else None,
-        "compatibility": (
-            {"seraph": extension.manifest.compatibility.seraph}
-            if extension.manifest is not None
-            else None
-        ),
+        "compatibility": compatibility,
         "publisher": (
             {
                 "name": extension.manifest.publisher.name,
@@ -1875,6 +1978,7 @@ def _extension_payload(
         "issues": issues,
         "load_errors": extension_load_errors,
         "status": "ready" if not issues and not extension_load_errors else "degraded",
+        "diagnostics_summary": diagnostics_summary,
         "toggle_targets": toggles,
         "toggleable_contribution_types": toggleable_types,
         "passive_contribution_types": passive_types,
@@ -1933,6 +2037,12 @@ def list_extensions() -> dict[str, Any]:
             "degraded": sum(1 for extension in extensions if extension["status"] == "degraded"),
             "bundled": sum(1 for extension in extensions if extension["location"] == "bundled"),
             "workspace": sum(1 for extension in extensions if extension["location"] == "workspace"),
+            "issue_count": sum(int(extension.get("diagnostics_summary", {}).get("issue_count") or 0) for extension in extensions),
+            "load_error_count": sum(int(extension.get("diagnostics_summary", {}).get("load_error_count") or 0) for extension in extensions),
+            "degraded_connector_count": sum(
+                int(extension.get("diagnostics_summary", {}).get("degraded_connector_count") or 0)
+                for extension in extensions
+            ),
         },
     }
 
@@ -2263,6 +2373,8 @@ def validate_extension_path(path: str) -> dict[str, Any]:
         "extension_id": manifest.id,
         "display_name": manifest.display_name,
         "version": manifest.version,
+        "version_line": _version_line(manifest.version),
+        "compatibility": _compatibility_payload(manifest),
         "lifecycle_plan": _extension_lifecycle_plan(
             manifest,
             existing,
@@ -2287,6 +2399,18 @@ def validate_extension_path(path: str) -> dict[str, Any]:
             }
             for result in report.results
         ],
+        "diagnostics_summary": _diagnostics_summary(
+            issues=[
+                asdict(issue)
+                for result in report.results
+                for issue in result.issues
+            ],
+            load_errors=[_serialize_load_error(error) for error in report.load_errors],
+            contributions=[
+                _contribution_payload(extension, contribution, indexes=_contribution_indexes(state_by_id={}), state_entry={})
+                for contribution in (extension.contributions if extension is not None else [])
+            ],
+        ),
     }
 
 

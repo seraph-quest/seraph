@@ -2938,10 +2938,11 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     expect(await screen.findByText("browser providers")).toBeInTheDocument();
-    expect(screen.getByText("extension boundaries")).toBeInTheDocument();
-    expect(screen.getByText("Browser Ops Pack")).toBeInTheDocument();
-    expect(screen.getByText(/lifecycle approval network/)).toBeInTheDocument();
     const operatorPane = screen.getByText("Operator terminal").closest("section");
+    expect(within(operatorPane as HTMLElement).getByText("browser providers")).toBeInTheDocument();
+    expect(within(operatorPane as HTMLElement).getAllByText("extension boundaries").length).toBeGreaterThan(0);
+    expect(within(operatorPane as HTMLElement).getAllByText("Browser Ops Pack").length).toBeGreaterThan(0);
+    expect(within(operatorPane as HTMLElement).getAllByText(/lifecycle approval network/).length).toBeGreaterThan(0);
     expect(operatorPane?.textContent ?? "").toContain("imported reach");
     expect(operatorPane?.textContent ?? "").toContain("1 active");
     expect(operatorPane?.textContent ?? "").toContain("3 installed");
@@ -4963,9 +4964,12 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const evidence = await screen.findByLabelText("Evidence shortcuts");
-    expect(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/branch-review.md" })).toBeInTheDocument();
+    const draftArtifactButton = await within(evidence).findByRole("button", {
+      name: "Draft next step for artifact: notes/branch-review.md",
+    });
+    expect(draftArtifactButton).toBeInTheDocument();
 
-    fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/branch-review.md" }));
+    fireEvent.click(draftArtifactButton);
     await waitFor(() =>
       expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/branch-review\.md"\./)).toBeInTheDocument(),
     );
@@ -4973,7 +4977,7 @@ describe("CockpitView", () => {
     expect(screen.getByDisplayValue(/notes\/peer-review\.md/)).toBeInTheDocument();
     expect(screen.getByDisplayValue(/notes\/root-review\.md/)).toBeInTheDocument();
 
-    fireEvent.click(within(evidence).getByRole("button", { name: "Inspect artifact: notes/branch-review.md" }));
+    fireEvent.click(await within(evidence).findByRole("button", { name: "Inspect artifact: notes/branch-review.md" }));
 
     const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
     expect(within(inspector).getByRole("button", { name: "Open Source Run" })).toBeInTheDocument();
@@ -7208,8 +7212,24 @@ describe("CockpitView", () => {
           extension_id: "seraph.test-installable",
           display_name: "Test Installable",
           version: "2026.4.01",
+          version_line: "2026.4",
+          compatibility: {
+            seraph: ">=2026.3.19",
+            current_version: "2026.3.19",
+            compatible: true,
+          },
           ok: true,
           results: [],
+          diagnostics_summary: {
+            issue_count: 0,
+            error_issue_count: 0,
+            warning_issue_count: 0,
+            load_error_count: 0,
+            degraded_contribution_count: 0,
+            degraded_connector_count: 0,
+            state_counts: { ready: 1 },
+            highlighted_messages: [],
+          },
           lifecycle_plan: {
             mode: "update_workspace",
             recommended_action: "update",
@@ -7297,6 +7317,9 @@ describe("CockpitView", () => {
     fireEvent.click(within(studio).getByRole("button", { name: "Validate path" }));
 
     await waitFor(() => expect(within(studio).getByRole("button", { name: "Update package" })).toBeInTheDocument());
+    expect(within(studio).getByText("update workspace · 2026.3.21 -> 2026.4.01 · upgrade")).toBeInTheDocument();
+    expect(within(studio).getByText("compatible · Seraph >=2026.3.19 · current 2026.3.19")).toBeInTheDocument();
+    expect(within(studio).getByText("ready · no doctor or load errors")).toBeInTheDocument();
     fireEvent.click(within(studio).getByRole("button", { name: "Update package" }));
 
     await waitFor(() => {
@@ -7307,6 +7330,187 @@ describe("CockpitView", () => {
       const body = JSON.parse(String((updateCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as { path?: string };
       expect(body.path).toBe("/tmp/extensions/test-installable");
     });
+  }, 15000);
+
+  it("surfaces extension ecosystem health and catalog governance signals in the operator surface", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { total_items: 0, visible_groups: 0 } }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [{
+            name: "Research Pack",
+            catalog_id: "seraph.research-pack",
+            type: "extension_pack",
+            description: "Workspace research routines.",
+            category: "capability-pack",
+            bundled: true,
+            installed: true,
+            trust: "workspace",
+            version: "2026.4.11",
+            version_line: "2026.4",
+            installed_version: "2026.4.03",
+            update_available: true,
+            compatibility: {
+              seraph: ">=2026.4.01",
+              current_version: "2026.4.07",
+              compatible: true,
+            },
+            publisher: { name: "Workspace", homepage: null, support: null },
+            diagnostics_summary: {
+              issue_count: 0,
+              error_issue_count: 0,
+              warning_issue_count: 0,
+              load_error_count: 0,
+              degraded_contribution_count: 0,
+              degraded_connector_count: 0,
+              state_counts: { ready: 3 },
+              highlighted_messages: [],
+            },
+            recommended_actions: [],
+          }],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.research-pack",
+            display_name: "Research Pack",
+            version: "2026.4.03",
+            version_line: "2026.4",
+            kind: "capability-pack",
+            trust: "workspace",
+            source: "manifest",
+            location: "workspace",
+            status: "degraded",
+            summary: "Workspace research routines.",
+            description: "Workspace research routines.",
+            compatibility: {
+              seraph: ">=2026.4.01",
+              current_version: "2026.4.07",
+              compatible: true,
+            },
+            publisher: { name: "Workspace", homepage: null, support: null },
+            diagnostics_summary: {
+              issue_count: 1,
+              error_issue_count: 0,
+              warning_issue_count: 1,
+              load_error_count: 0,
+              degraded_contribution_count: 1,
+              degraded_connector_count: 1,
+              state_counts: { degraded: 1, ready: 2 },
+              highlighted_messages: ["GitHub adapter needs reconnect"],
+            },
+            issues: [{ severity: "warning", message: "GitHub adapter needs reconnect" }],
+            load_errors: [],
+            toggle_targets: [],
+            toggleable_contribution_types: ["managed_connectors"],
+            passive_contribution_types: ["runbooks"],
+            enable_supported: true,
+            disable_supported: true,
+            removable: true,
+            enabled_scope: "toggleable_contributions",
+            configurable: true,
+            metadata_supported: true,
+            config_scope: "workspace_metadata",
+            enabled: true,
+            config: {},
+            permission_summary: {
+              status: "missing",
+              ok: false,
+              required: { tools: ["write_file"], execution_boundaries: ["workspace_write"], network: false },
+              missing: { tools: ["write_file"], execution_boundaries: ["workspace_write"], network: false },
+              risk_level: "high",
+            },
+            approval_profile: {
+              requires_runtime_approval: false,
+              requires_lifecycle_approval: true,
+              risk_level: "high",
+              runtime_behavior: "approval",
+              lifecycle_boundaries: ["workspace_write"],
+            },
+            connector_summary: { total: 1, ready: 0, states: { degraded: 1 } },
+            contributions: [],
+            studio_files: [{
+              key: "seraph.research-pack:manifest",
+              role: "manifest",
+              reference: "manifest.yaml",
+              resolved_path: "/tmp/workspace/extensions/research-pack/manifest.yaml",
+              label: "manifest.yaml",
+              display_type: "manifest",
+              format: "yaml",
+              editable: true,
+              save_supported: true,
+              validation_supported: true,
+              loaded: true,
+              name: "Research Pack",
+            }],
+          }],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("extension health")).toBeInTheDocument());
+    expect(screen.getByText("1 installed · 1 degraded · 1 updates · 1 approval gated · 1 attention")).toBeInTheDocument();
+    expect(screen.getByText("1 available · 1 updates · 1 extension packs · 1 compatible")).toBeInTheDocument();
+
+    const healthSection = screen.getByText("extension health").closest(".cockpit-operator-section");
+    expect(healthSection).not.toBeNull();
+    const healthRow = within(healthSection as HTMLElement).getByText("Research Pack").closest(".cockpit-operator-row");
+    expect(healthRow).not.toBeNull();
+    expect(within(healthRow as HTMLElement).getByRole("button", { name: "update" })).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByRole("button", { name: "studio" })).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByRole("button", { name: "draft" })).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/publisher Workspace/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/lifecycle approval/)).toBeInTheDocument();
   }, 15000);
 
   it("surfaces approval-required update responses in extension studio", async () => {

@@ -788,6 +788,9 @@ async def test_list_extensions_includes_bundled_core_capabilities(client, extens
     assert bundled["location"] == "bundled"
     assert bundled["removable"] is False
     assert bundled["enable_supported"] is True
+    assert bundled["version_line"] == ".".join(str(bundled["version"]).split(".")[:2])
+    assert bundled["compatibility"]["compatible"] is True
+    assert bundled["diagnostics_summary"]["issue_count"] == 0
     managed = next(item for item in payload["extensions"] if item["id"] == "seraph.core-managed-connectors")
     assert managed["location"] == "bundled"
     assert managed["enable_supported"] is True
@@ -805,6 +808,10 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
     assert payload["extension_id"] == "seraph.test-installable"
     assert payload["ok"] is True
     assert isinstance(payload["package_digest"], str)
+    assert payload["version_line"] == "2026.3"
+    assert payload["compatibility"]["compatible"] is True
+    assert payload["diagnostics_summary"]["issue_count"] == 0
+    assert payload["diagnostics_summary"]["load_error_count"] == 0
     assert payload["permissions"]["tools"] == ["read_file"]
     assert payload["permission_summary"]["required"]["tools"] == ["read_file"]
     assert payload["approval_profile"]["requires_lifecycle_approval"] is False
@@ -812,6 +819,24 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
     assert log_event.await_args.kwargs["integration_type"] == "extension"
     assert log_event.await_args.kwargs["outcome"] == "succeeded"
     assert log_event.await_args.kwargs["details"]["status"] == "validated"
+
+
+@pytest.mark.asyncio
+async def test_extensions_diagnostics_endpoint_summarizes_package_health(client, extension_runtime):
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file"), SimpleNamespace(name="web_search"), SimpleNamespace(name="write_file"), SimpleNamespace(name="http_request")], ["web-briefing"], "approval"),
+    ):
+        response = await client.get("/api/extensions/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total"] >= 1
+    core = next(item for item in payload["extensions"] if item["id"] == "seraph.core-capabilities")
+    assert core["compatibility"]["compatible"] is True
+    assert core["diagnostics_summary"]["issue_count"] == 0
+    assert "permission_summary" in core
+    assert "connector_summary" in core
 
 
 @pytest.mark.asyncio

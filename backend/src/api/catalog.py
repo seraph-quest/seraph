@@ -16,7 +16,14 @@ import yaml
 
 from config.settings import settings
 from src.extensions.doctor import doctor_snapshot
-from src.extensions.lifecycle import install_extension_path, update_extension_path, validate_extension_path
+from src.extensions.lifecycle import (
+    _compatibility_payload,
+    _diagnostics_summary,
+    _version_line,
+    install_extension_path,
+    update_extension_path,
+    validate_extension_path,
+)
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import (
     ExtensionRecord,
@@ -140,6 +147,15 @@ def _extension_catalog_entry(
         )
     ]
     status = "ready" if not issues and not related_load_errors else "degraded"
+    contributions = [
+        {"type": contribution.contribution_type, "status": "catalog"}
+        for contribution in extension.contributions
+    ]
+    diagnostics_summary = _diagnostics_summary(
+        issues=issues,
+        load_errors=related_load_errors,
+        contributions=contributions,
+    )
     return {
         "name": extension.display_name,
         "catalog_id": extension.id,
@@ -157,12 +173,18 @@ def _extension_catalog_entry(
         "bundled": True,
         "extension_id": extension.id,
         "version": catalog_version,
+        "version_line": _version_line(catalog_version),
         "installed_version": installed_version,
         "update_available": update_available,
+        "compatibility": _compatibility_payload(extension.manifest),
         "publisher": (
-            extension.manifest.publisher.name
+            {
+                "name": extension.manifest.publisher.name,
+                "homepage": extension.manifest.publisher.homepage,
+                "support": extension.manifest.publisher.support,
+            }
             if extension.manifest is not None
-            else ""
+            else None
         ),
         "trust": extension.trust,
         "contribution_types": contribution_types,
@@ -171,6 +193,7 @@ def _extension_catalog_entry(
         "doctor_ok": status == "ready",
         "issues": issues,
         "load_errors": related_load_errors,
+        "diagnostics_summary": diagnostics_summary,
     }
 
 

@@ -214,6 +214,11 @@ class TestCatalogAPI:
         assert session_memory["name"] == "Hermes Session Memory"
         assert session_memory["bundled"] is True
         assert "skills" in session_memory["contribution_types"]
+        assert session_memory["version_line"] == "2026.3"
+        assert session_memory["compatibility"]["compatible"] is True
+        assert session_memory["diagnostics_summary"]["issue_count"] == 0
+        assert isinstance(session_memory["publisher"], dict)
+        assert session_memory["publisher"]["name"]
         browserbase = next(item for item in items if item.get("catalog_id") == "seraph.hermes-browserbase")
         assert browserbase["name"] == "Hermes Browserbase"
         assert "browser_providers" in browserbase["contribution_types"]

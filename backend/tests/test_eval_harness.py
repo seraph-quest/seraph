@@ -471,6 +471,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["cross_surface_continuity_behavior"]["attention_family_count"] == 1
     assert details_by_name["cross_surface_continuity_behavior"]["source_adapter_recovery_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["imported_reach_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_imported_reach_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_imported_reach_recovery_present"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"

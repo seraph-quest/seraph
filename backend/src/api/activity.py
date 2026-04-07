@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from src.agent.session import session_manager
-from src.api.observer import _continuity_surface
+from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
 from src.api.workflows import (
     _list_workflow_runs,
     workflow_surface_continue_message,
@@ -33,7 +33,8 @@ def _parse_iso(value: str | datetime | None) -> datetime:
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return datetime.min.replace(tzinfo=timezone.utc)
 
@@ -54,6 +55,84 @@ def _thread_label(session_titles: dict[str, str], thread_id: str | None) -> str 
     if not thread_id:
         return None
     return session_titles.get(thread_id)
+
+
+def _continuity_activity_timestamp(snapshot: dict[str, Any]) -> str:
+    daemon = snapshot.get("daemon") if isinstance(snapshot, dict) else {}
+    if isinstance(daemon, dict):
+        last_post = daemon.get("last_post")
+        if isinstance(last_post, (int, float)):
+            return datetime.fromtimestamp(float(last_post), tz=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _continuity_activity_items(
+    snapshot: dict[str, Any],
+    *,
+    cutoff: datetime,
+    session_id: str | None,
+    session_titles: dict[str, str],
+) -> list[dict[str, Any]]:
+    recovery_actions = snapshot.get("recovery_actions")
+    if not isinstance(recovery_actions, list):
+        return []
+    updated_at = _continuity_activity_timestamp(snapshot)
+    if _parse_iso(updated_at) < cutoff:
+        return []
+    items: list[dict[str, Any]] = []
+    for action in recovery_actions:
+        if not isinstance(action, dict):
+            continue
+        thread_id = action.get("thread_id") if isinstance(action.get("thread_id"), str) else None
+        if session_id and thread_id not in {None, session_id}:
+            continue
+        items.append({
+            "id": f"continuity:{action.get('id') or len(items)}",
+            "kind": "reach_recovery",
+            "category": "system",
+            "title": str(action.get("label") or "Reach recovery"),
+            "summary": str(action.get("detail") or "Inspect live continuity recovery."),
+            "status": str(action.get("status") or "attention"),
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "thread_id": thread_id,
+            "thread_label": _thread_label(session_titles, thread_id),
+            "continue_message": action.get("continue_message"),
+            "replay_draft": None,
+            "replay_allowed": False,
+            "replay_block_reason": None,
+            "recommended_actions": [],
+            "source": "continuity",
+            "model": None,
+            "provider": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "cost_usd": None,
+            "duration_ms": None,
+            "metadata": {
+                "surface": action.get("surface"),
+                "kind": action.get("kind"),
+                "route": action.get("route"),
+                "repair_hint": action.get("repair_hint"),
+                "open_thread_available": bool(action.get("open_thread_available")),
+                "continuity_health": (
+                    snapshot.get("summary", {}).get("continuity_health")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "primary_surface": (
+                    snapshot.get("summary", {}).get("primary_surface")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "recommended_focus": (
+                    snapshot.get("summary", {}).get("recommended_focus")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+            },
+        })
+    return items
 
 
 def _category_for_kind(kind: str) -> str:
@@ -208,6 +287,8 @@ def _group_key_for_item(item: dict[str, Any]) -> str:
         return f"workflow:{item['id']}"
     if item["kind"] == "approval":
         return f"approval:{item['id']}"
+    if item["kind"] == "reach_recovery":
+        return f"continuity:{item['id']}"
     if item["kind"] == "extension":
         metadata = item.get("metadata")
         extension_id = metadata.get("extension_id") if isinstance(metadata, dict) and isinstance(metadata.get("extension_id"), str) else item["id"]
@@ -406,7 +487,7 @@ async def get_activity_ledger(
     intervention_scan_limit = max(limit * 4, 200)
     audit_scan_limit = 1000
     llm_scan_limit = 1000
-    workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, audit_events, llm_calls = await asyncio.gather(
+    workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, audit_events, llm_calls, continuity_snapshot = await asyncio.gather(
         _list_workflow_runs(limit=workflow_scan_limit, session_id=session_id),
         approval_repository.list_pending(session_id=session_id, limit=approval_scan_limit),
         native_notification_queue.list(),
@@ -414,6 +495,7 @@ async def get_activity_ledger(
         guardian_feedback_repository.list_recent(limit=intervention_scan_limit, session_id=session_id),
         audit_repository.list_events(limit=audit_scan_limit, session_id=session_id, since=cutoff),
         asyncio.to_thread(list_recent_llm_calls, limit=llm_scan_limit, session_id=session_id, since=cutoff),
+        build_observer_continuity_snapshot(),
     )
 
     items: list[dict[str, Any]] = []
@@ -640,6 +722,15 @@ async def get_activity_ledger(
                 "intervention_id": intervention.id,
             },
         })
+
+    items.extend(
+        _continuity_activity_items(
+            continuity_snapshot,
+            cutoff=cutoff,
+            session_id=session_id,
+            session_titles=session_titles,
+        )
+    )
 
     request_summaries: dict[str, str] = {}
     request_metadata: dict[str, dict[str, Any]] = {}

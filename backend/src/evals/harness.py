@@ -4766,6 +4766,8 @@ async def _eval_cross_surface_notification_controls_behavior() -> dict[str, Any]
 
 async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
+    from src.api.activity import get_activity_ledger
+    from src.api.operator import get_operator_timeline
 
     async with _patched_async_db(
         "src.agent.session.get_session",
@@ -4892,8 +4894,17 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
                     ],
                 },
             ),
+            patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
+            patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
+            patch("src.api.operator.audit_repository.list_events", AsyncMock(return_value=[])),
+            patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+            patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+            patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+            patch("src.api.activity.list_recent_llm_calls", return_value=[]),
         ):
             continuity = await get_observer_continuity()
+            operator_timeline = await get_operator_timeline(limit=20, session_id=None)
+            activity_ledger = await get_activity_ledger(limit=40, session_id=None, window_hours=24)
 
         queued_ids = [item.id for item in await insight_queue.peek_all()]
         if queued_ids:
@@ -4905,6 +4916,8 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     notification = continuity["notifications"][0]
     queued_item = continuity["queued_insights"][0]
     recent_item = continuity["recent_interventions"][0]
+    operator_items = operator_timeline["items"]
+    activity_items = activity_ledger["items"]
     return {
         "daemon_pending_notifications": continuity["daemon"]["pending_notification_count"],
         "notification_count": len(continuity["notifications"]),
@@ -4926,6 +4939,22 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         "attention_family_count": continuity["summary"]["attention_family_count"],
         "source_adapter_recovery_present": any(item["kind"] == "source_adapter_repair" for item in continuity["recovery_actions"]),
         "imported_reach_recovery_present": any(item["kind"] == "imported_reach_attention" for item in continuity["recovery_actions"]),
+        "operator_source_adapter_recovery_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "source_adapter_repair"
+            for item in operator_items
+        ),
+        "operator_imported_reach_recovery_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "imported_reach_attention"
+            for item in operator_items
+        ),
+        "activity_source_adapter_recovery_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "source_adapter_repair"
+            for item in activity_items
+        ),
+        "activity_imported_reach_recovery_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "imported_reach_attention"
+            for item in activity_items
+        ),
     }
 
 

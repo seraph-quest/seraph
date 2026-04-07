@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
@@ -67,6 +68,10 @@ _BUILTIN_CHANNEL_ADAPTERS = (
 )
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
 _NEW_SECRET_CONFIG_SENTINEL = "__SERAPH_NEW_SECRET_VALUE__"
+
+
+def _content_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _lifecycle_fallback_preview(preview: dict[str, Any]) -> dict[str, Any]:
@@ -443,6 +448,104 @@ def _configure_request_approval_context(
     }
 
 
+def _source_save_request_approval_context(
+    source_preview: dict[str, Any],
+    *,
+    content: str,
+) -> dict[str, Any] | None:
+    extension = source_preview.get("extension")
+    approval_profile = extension.get("approval_profile") if isinstance(extension, dict) else None
+    if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
+        return None
+
+    reference = str(source_preview.get("reference") or "").strip()
+    current_content = str(source_preview.get("content") or "")
+    requested_hash = _content_hash(content)
+    current_hash = _content_hash(current_content)
+    if requested_hash == current_hash:
+        return None
+
+    validation = source_preview.get("validation")
+    valid = validation.get("valid") if isinstance(validation, dict) else None
+    return {
+        "target_reference": reference,
+        "current_content_hash": current_hash,
+        "requested_content_hash": requested_hash,
+        "current_line_count": len(current_content.splitlines()),
+        "requested_line_count": len(content.splitlines()),
+        "draft_valid": bool(valid) if valid is not None else None,
+    }
+
+
+def _approval_scope_summary(
+    preview: dict[str, Any],
+    *,
+    action: str,
+    lifecycle_boundaries: list[str],
+    fingerprint_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    scope = {
+        "action": action,
+        "extension_id": str(preview.get("id") or preview.get("extension_id") or ""),
+        "package_digest": preview.get("package_digest"),
+        "lifecycle_boundaries": lifecycle_boundaries,
+        "target": {
+            "type": str(preview.get("target_type") or ""),
+            "name": str(preview.get("target_name") or ""),
+            "reference": str(preview.get("target_reference") or preview.get("reference") or ""),
+        },
+    }
+    if not isinstance(fingerprint_context, dict):
+        return scope
+
+    requested_config = fingerprint_context.get("requested_config")
+    if isinstance(requested_config, dict) and requested_config:
+        current_config = (
+            fingerprint_context.get("current_config")
+            if isinstance(fingerprint_context.get("current_config"), dict)
+            else {}
+        )
+        changed_types: list[str] = []
+        changed_target_count = 0
+        for config_type, requested_targets in requested_config.items():
+            if not isinstance(requested_targets, dict):
+                continue
+            current_targets = current_config.get(config_type)
+            changed_targets = [
+                target_name
+                for target_name, requested_payload in requested_targets.items()
+                if requested_payload
+                != (
+                    current_targets.get(target_name)
+                    if isinstance(current_targets, dict)
+                    else None
+                )
+            ]
+            if changed_targets:
+                changed_types.append(str(config_type))
+                changed_target_count += len(changed_targets)
+        scope["config_scope"] = {
+            "config_types": sorted(changed_types),
+            "changed_target_count": changed_target_count,
+        }
+
+    requested_content_hash = fingerprint_context.get("requested_content_hash")
+    if isinstance(requested_content_hash, str) and requested_content_hash.strip():
+        scope["source_scope"] = {
+            "reference": str(
+                fingerprint_context.get("target_reference")
+                or scope["target"].get("reference")
+                or ""
+            ),
+            "current_content_hash": fingerprint_context.get("current_content_hash"),
+            "requested_content_hash": requested_content_hash,
+            "current_line_count": fingerprint_context.get("current_line_count"),
+            "requested_line_count": fingerprint_context.get("requested_line_count"),
+            "draft_valid": fingerprint_context.get("draft_valid"),
+        }
+    return scope
+
+
 async def _require_extension_lifecycle_approval(
     action: str,
     preview: dict[str, Any],
@@ -531,6 +634,12 @@ async def _require_extension_lifecycle_approval(
         f"{summary} with access to "
         f"{', '.join(lifecycle_boundaries) or 'high-risk capabilities'}"
     )
+    approval_scope = _approval_scope_summary(
+        preview,
+        action=action,
+        lifecycle_boundaries=lifecycle_boundaries,
+        fingerprint_context=fingerprint_context,
+    )
     details = {
         "extension_id": extension_id,
         "extension_display_name": display_name,
@@ -542,6 +651,7 @@ async def _require_extension_lifecycle_approval(
         "package_digest": preview.get("package_digest"),
         "permissions": preview.get("permissions"),
         "approval_profile": approval_profile,
+        "approval_scope": approval_scope,
     }
     if isinstance(fingerprint_context, dict):
         details.update(fingerprint_context)
@@ -564,6 +674,7 @@ async def _require_extension_lifecycle_approval(
                 f"{summary}\n\n"
                 "Approve it first, then retry the extension action."
             ),
+            "approval_scope": approval_scope,
         },
     )
 
@@ -951,6 +1062,10 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
         source_preview = get_extension_source(extension_id, req.reference)
         preview = source_preview.get("extension") if isinstance(source_preview, dict) else None
         if isinstance(preview, dict):
+            approval_context = _source_save_request_approval_context(
+                source_preview,
+                content=req.content,
+            )
             await _require_extension_lifecycle_approval(
                 "save_source",
                 {
@@ -959,6 +1074,8 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
                     "target_name": req.reference,
                     "target_type": "source_file",
                 },
+                fingerprint_context=approval_context,
+                summary_suffix="for requested source changes",
             )
         payload = save_extension_source(extension_id, req.reference, req.content)
     except KeyError as exc:

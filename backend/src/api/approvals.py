@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 import json
 
 from src.approval.repository import approval_repository
+from src.approval.surfaces import approval_surface_metadata
 from src.agent.session import session_manager
 from src.audit.repository import audit_repository
 from src.tools.policy import get_current_tool_policy_mode
@@ -23,9 +24,7 @@ async def list_pending_approvals(
     }
     items = []
     for approval in approvals:
-        approval_profile = approval.get("approval_profile")
-        if not isinstance(approval_profile, dict):
-            approval_profile = {}
+        approval_metadata = approval_surface_metadata(approval)
         items.append(
             {
                 **approval,
@@ -39,8 +38,11 @@ async def list_pending_approvals(
                 "extension_display_name": approval.get("extension_display_name"),
                 "extension_action": approval.get("action"),
                 "package_path": approval.get("package_path"),
-                "lifecycle_boundaries": approval_profile.get("lifecycle_boundaries"),
+                "lifecycle_boundaries": approval_metadata["lifecycle_boundaries"],
                 "permissions": approval.get("permissions"),
+                "requires_lifecycle_approval": approval_metadata["requires_lifecycle_approval"],
+                "approval_scope": approval_metadata["approval_scope"],
+                "approval_context": approval_metadata["approval_context"],
             }
         )
     return items

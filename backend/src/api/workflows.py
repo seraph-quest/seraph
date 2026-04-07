@@ -365,6 +365,116 @@ def _workflow_current_approval_context(
     return normalized
 
 
+def _approval_context_surface_summary(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    summary = {
+        "workflow_name": str(value.get("workflow_name") or ""),
+        "risk_level": str(value.get("risk_level") or "unknown"),
+        "execution_boundaries": _normalize_string_list(value.get("execution_boundaries")),
+        "accepts_secret_refs": bool(value.get("accepts_secret_refs", False)),
+        "step_tools": _normalize_string_list(value.get("step_tools")),
+        "authenticated_source": bool(value.get("authenticated_source", False)),
+        "source_systems": _normalize_source_systems(value.get("source_systems")),
+        "delegated_specialists": _normalize_string_list(value.get("delegated_specialists")),
+        "delegated_tool_names": _normalize_string_list(value.get("delegated_tool_names")),
+        "delegation_target_unresolved": bool(value.get("delegation_target_unresolved", False)),
+    }
+    return summary
+
+
+def _approval_context_changed_fields(
+    *,
+    recorded: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+) -> list[str]:
+    if not isinstance(recorded, dict) or not isinstance(current, dict):
+        return []
+    changed_fields: list[str] = []
+    for field_name in (
+        "risk_level",
+        "execution_boundaries",
+        "accepts_secret_refs",
+        "step_tools",
+        "authenticated_source",
+        "source_systems",
+        "delegated_specialists",
+        "delegated_tool_names",
+        "delegation_target_unresolved",
+    ):
+        if recorded.get(field_name) != current.get(field_name):
+            changed_fields.append(field_name)
+    return changed_fields
+
+
+def _workflow_trust_boundary_payload(
+    *,
+    workflow_name: str,
+    recorded_approval_context: dict[str, Any] | None,
+    current_approval_context: dict[str, Any] | None,
+    approval_context_mismatch: bool,
+    approval_context_missing_for_protected_surface: bool,
+) -> dict[str, Any]:
+    if approval_context_mismatch:
+        return {
+            "status": "changed",
+            "blocked": True,
+            "reason": "approval_context_changed",
+            "message": (
+                f"Workflow '{workflow_name}' changed its trust boundary after this run. "
+                "Start a fresh run instead of replaying or resuming."
+            ),
+            "requires_fresh_run": True,
+            "changed_fields": _approval_context_changed_fields(
+                recorded=recorded_approval_context,
+                current=current_approval_context,
+            ),
+            "recorded": _approval_context_surface_summary(recorded_approval_context),
+            "current": _approval_context_surface_summary(current_approval_context),
+        }
+    if approval_context_missing_for_protected_surface:
+        return {
+            "status": "missing",
+            "blocked": True,
+            "reason": "approval_context_missing",
+            "message": (
+                f"Workflow '{workflow_name}' predates trust-boundary tracking for its current privileged surface. "
+                "Start a fresh run instead of replaying or resuming."
+            ),
+            "requires_fresh_run": True,
+            "changed_fields": [],
+            "recorded": None,
+            "current": _approval_context_surface_summary(current_approval_context),
+        }
+    return {
+        "status": "stable",
+        "blocked": False,
+        "reason": None,
+        "message": None,
+        "requires_fresh_run": False,
+        "changed_fields": [],
+        "recorded": _approval_context_surface_summary(recorded_approval_context),
+        "current": _approval_context_surface_summary(current_approval_context),
+    }
+
+
+def _workflow_recovery_message(
+    *,
+    workflow_name: str,
+    trust_boundary: dict[str, Any],
+    pending_approval_count: int,
+    availability: str,
+) -> str | None:
+    if bool(trust_boundary.get("blocked")):
+        message = trust_boundary.get("message")
+        return str(message) if isinstance(message, str) and message.strip() else None
+    if pending_approval_count > 0:
+        return f"Review pending approval(s) for workflow '{workflow_name}' before replaying."
+    if availability != "ready":
+        return f"Repair workflow '{workflow_name}' before replaying."
+    return None
+
+
 def _workflow_runtime_approval_contexts() -> dict[str, dict[str, Any]]:
     base_tools, active_skill_names, _mcp_mode = get_base_tools_and_active_skills()
     runtime_contexts: dict[str, dict[str, Any]] = {}
@@ -894,6 +1004,7 @@ def workflow_surface_resume_metadata(run: dict[str, Any]) -> dict[str, Any]:
         "resume_checkpoint_label": None if blocked else run.get("resume_checkpoint_label"),
         "checkpoint_candidates": [] if blocked else checkpoint_candidates,
         "resume_plan": None if blocked else run.get("resume_plan"),
+        "trust_boundary": run.get("trust_boundary"),
     }
 
 
@@ -1251,6 +1362,13 @@ async def _list_workflow_runs(
             recorded_approval_context is None
             and approval_context_requires_tracked_lineage(current_approval_context)
         )
+        trust_boundary = _workflow_trust_boundary_payload(
+            workflow_name=str(run["workflow_name"]),
+            recorded_approval_context=recorded_approval_context,
+            current_approval_context=current_approval_context,
+            approval_context_mismatch=approval_context_mismatch,
+            approval_context_missing_for_protected_surface=approval_context_missing_for_protected_surface,
+        )
 
         run.update({
             "status": "failed" if event.get("event_type") == "tool_failed" else "succeeded",
@@ -1301,6 +1419,7 @@ async def _list_workflow_runs(
             "recorded_approval_context": recorded_approval_context,
             "current_approval_context": current_approval_context,
             "approval_context_mismatch": approval_context_mismatch,
+            "trust_boundary": trust_boundary,
             "risk_level": (
                 str(effective_approval_context.get("risk_level"))
                 if effective_approval_context is not None
@@ -1432,22 +1551,11 @@ async def _list_workflow_runs(
                 approvals=approvals,
                 continued_error_steps=list(run.get("continued_error_steps", [])),
             ) if resume_surface_allowed else None,
-            "approval_recovery_message": (
-                f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
-                if bool(run.get("approval_context_mismatch"))
-                else (
-                    f"Workflow '{run['workflow_name']}' predates trust-boundary tracking for its current privileged surface. Start a fresh run instead of replaying or resuming."
-                    if approval_context_missing_for_protected_surface
-                    else (
-                        f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
-                        if len(approvals) > 0
-                        else (
-                            f"Repair workflow '{run['workflow_name']}' before replaying."
-                            if str(run["availability"]) != "ready"
-                            else None
-                        )
-                    )
-                )
+            "approval_recovery_message": _workflow_recovery_message(
+                workflow_name=str(run["workflow_name"]),
+                trust_boundary=trust_boundary,
+                pending_approval_count=len(approvals),
+                availability=str(run["availability"]),
             ),
             "thread_continue_message": (
                 approvals[0].get("resume_message")
@@ -1507,11 +1615,19 @@ async def _list_workflow_runs(
                 recorded_approval_context is None
                 and approval_context_requires_tracked_lineage(current_approval_context)
             )
+            trust_boundary = _workflow_trust_boundary_payload(
+                workflow_name=str(run["workflow_name"]),
+                recorded_approval_context=recorded_approval_context,
+                current_approval_context=current_approval_context,
+                approval_context_mismatch=approval_context_mismatch,
+                approval_context_missing_for_protected_surface=approval_context_missing_for_protected_surface,
+            )
             run.update({
                 "approval_context": effective_approval_context,
                 "recorded_approval_context": recorded_approval_context,
                 "current_approval_context": current_approval_context,
                 "approval_context_mismatch": approval_context_mismatch,
+                "trust_boundary": trust_boundary,
                 "checkpoint_context_available": bool(run.get("checkpoint_context_available")),
                 "risk_level": (
                     str(effective_approval_context.get("risk_level"))
@@ -1650,22 +1766,11 @@ async def _list_workflow_runs(
                     approvals=approvals,
                     continued_error_steps=list(run.get("continued_error_steps", [])),
                 ) if resume_surface_allowed else None,
-                "approval_recovery_message": (
-                    f"Workflow '{run['workflow_name']}' changed its trust boundary after this run. Start a fresh run instead of replaying or resuming."
-                    if bool(run.get("approval_context_mismatch"))
-                    else (
-                        f"Workflow '{run['workflow_name']}' predates trust-boundary tracking for its current privileged surface. Start a fresh run instead of replaying or resuming."
-                        if approval_context_missing_for_protected_surface
-                        else (
-                            f"Review pending approval(s) for workflow '{run['workflow_name']}' before replaying."
-                            if len(approvals) > 0
-                            else (
-                                f"Repair workflow '{run['workflow_name']}' before replaying."
-                                if str(run["availability"]) != "ready"
-                                else None
-                            )
-                        )
-                    )
+                "approval_recovery_message": _workflow_recovery_message(
+                    workflow_name=str(run["workflow_name"]),
+                    trust_boundary=trust_boundary,
+                    pending_approval_count=len(approvals),
+                    availability=str(run["availability"]),
                 ),
                 "thread_continue_message": (
                     approvals[0].get("resume_message")

@@ -6344,6 +6344,101 @@ async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_approval_explainability_surface_behavior() -> dict[str, Any]:
+    from src.api.activity import get_activity_ledger
+    from src.api.approvals import list_pending_approvals
+    from src.api.operator import get_operator_timeline
+
+    created_at = datetime.now(timezone.utc) - timedelta(minutes=4)
+    approval = {
+        "id": "approval-1",
+        "session_id": "thread-1",
+        "thread_id": "thread-1",
+        "thread_label": "Research thread",
+        "tool_name": "extension_source_save",
+        "risk_level": "high",
+        "summary": "Approve workflow source save for write-note.",
+        "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        "resume_message": "Resume after reviewing the requested source change.",
+        "extension_id": "seraph.test-installable",
+        "extension_display_name": "Test Installable",
+        "action": "source_save",
+        "package_path": "/tmp/extensions/test-installable",
+        "permissions": {"tool_names": ["write_file"]},
+        "approval_profile": {
+            "requires_lifecycle_approval": True,
+            "lifecycle_boundaries": ["workspace_write"],
+        },
+        "approval_scope": {
+            "action": "source_save",
+            "target": {
+                "type": "workflow_source",
+                "name": "write-note",
+                "reference": "workflows/write-note.md",
+            },
+            "source_scope": {
+                "reference": "workflows/write-note.md",
+                "requested_content_hash": "requested-hash",
+                "current_content_hash": "current-hash",
+            },
+        },
+        "approval_context": {
+            "risk_level": "high",
+            "execution_boundaries": ["workspace_write"],
+        },
+    }
+
+    with (
+        patch(
+            "src.api.approvals.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+        patch("src.api.approvals.approval_repository.list_pending", return_value=[approval]),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+        patch("src.api.operator._list_workflow_runs", return_value=[]),
+        patch("src.api.operator.approval_repository.list_pending", return_value=[approval]),
+        patch("src.api.operator.native_notification_queue.list", return_value=[]),
+        patch("src.api.operator.insight_queue.peek_all", return_value=[]),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", return_value=[]),
+        patch("src.api.operator.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            return_value=[{"id": "thread-1", "title": "Research thread"}],
+        ),
+        patch("src.api.activity._list_workflow_runs", return_value=[]),
+        patch("src.api.activity.approval_repository.list_pending", return_value=[approval]),
+        patch("src.api.activity.native_notification_queue.list", return_value=[]),
+        patch("src.api.activity.insight_queue.peek_all", return_value=[]),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", return_value=[]),
+        patch("src.api.activity.audit_repository.list_events", return_value=[]),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+    ):
+        pending_payload = await list_pending_approvals(session_id="thread-1", limit=10)
+        operator_payload = await get_operator_timeline(limit=10, session_id="thread-1")
+        activity_payload = await get_activity_ledger(limit=10, session_id="thread-1", window_hours=24)
+
+    pending_item = pending_payload[0]
+    operator_item = next(item for item in operator_payload["items"] if item["kind"] == "approval")
+    activity_item = next(item for item in activity_payload["items"] if item["kind"] == "approval")
+
+    return {
+        "pending_requires_lifecycle_approval": pending_item["requires_lifecycle_approval"],
+        "pending_scope_target_reference": pending_item["approval_scope"]["target"]["reference"],
+        "pending_context_boundary_count": len(pending_item["approval_context"]["execution_boundaries"]),
+        "operator_scope_target_reference": operator_item["metadata"]["approval_scope"]["target"]["reference"],
+        "operator_extension_action": operator_item["metadata"]["extension_action"],
+        "operator_context_boundary_count": len(
+            operator_item["metadata"]["approval_context"]["execution_boundaries"]
+        ),
+        "activity_scope_target_reference": activity_item["metadata"]["approval_scope"]["target"]["reference"],
+        "activity_extension_action": activity_item["metadata"]["extension_action"],
+        "activity_lifecycle_boundary_count": len(activity_item["metadata"]["lifecycle_boundaries"]),
+    }
+
+
 async def _eval_source_adapter_evidence_behavior() -> dict[str, Any]:
     import tempfile
 
@@ -7800,6 +7895,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Operator and activity workflow surfaces fail closed when trust-boundary drift blocks replay or resume, instead of advertising stale continuation controls.",
         runner=_eval_workflow_boundary_blocked_surface_behavior,
+    ),
+    EvalScenario(
+        name="approval_explainability_surface_behavior",
+        category="behavior",
+        description="Pending approval surfaces keep lifecycle scope, mutation target, and trust-context metadata visible across approval, operator, and activity APIs.",
+        runner=_eval_approval_explainability_surface_behavior,
     ),
     EvalScenario(
         name="source_adapter_evidence_behavior",

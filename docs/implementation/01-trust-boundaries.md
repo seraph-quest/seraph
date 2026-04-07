@@ -357,6 +357,32 @@
   - the real issue here was not backend resume enforcement, which was already fail-closed, but surface drift: blocked runs still looked resumable because branch metadata was generated before the trust-boundary stop was applied consistently across the serialized run shape
   - fixed by moving the trust-boundary decision up into the run projection itself and pinning both mismatch and legacy-missing-context cases in the workflow suite
 
+### `authenticated-mutation-and-boundary-explainability-v1`
+
+- status: complete on `feat/execution-hardening-batch-al-v1`, intended for the next Batch AL PR for `#342`
+- root cause addressed:
+  - high-risk extension mutation approvals now fingerprint requested config or source changes correctly, but operator-facing approval surfaces still exposed only a thin pending-approval shell instead of the exact target, lifecycle boundary, or trust context being approved
+  - sync runtime audit helpers also tried to persist through `asyncio.run(...)` when no event loop was active, which made aiosqlite worker threads race a closed loop in CI and turned a real runtime-audit best-effort path into a backend test failure
+  - workflow run projection already computed structured trust-boundary payloads, but downstream operator and activity surfaces only partially surfaced that structure and older tests still did not pin the new metadata shape
+- scope:
+  - high-risk extension configure approvals now bind to materially changed config targets only, and high-risk source-save approvals now bind to the exact requested content hash plus current content hash instead of only package drift
+  - pending approval surfaces across `/api/approvals/pending`, `/api/operator/timeline`, and `/api/activity/ledger` now carry structured `approval_scope`, lifecycle-approval state, extension action/package metadata, and approval-context trust data instead of flattening everything into just `tool_name` and `risk_level`
+  - workflow run surfaces now expose a structured `trust_boundary` payload through workflow, operator, and activity APIs so boundary drift is legible as first-class metadata rather than only an implicit replay block reason
+  - sync runtime-audit helpers now fail soft when no event loop is active and use tracked background tasks when a loop exists, so audit persistence no longer destabilizes sync helper paths like context-window summarization
+  - deterministic regression coverage now pins the scoped extension approval payloads, the workflow/operator/activity trust-boundary surface, the approval explainability surface, and the no-loop runtime-audit path
+- validation:
+  - `python3 -m py_compile backend/src/approval/surfaces.py backend/src/api/approvals.py backend/src/api/activity.py backend/src/api/operator.py backend/src/api/extensions.py backend/src/api/workflows.py backend/src/audit/runtime.py backend/src/evals/harness.py backend/tests/test_approvals_api.py backend/tests/test_activity_api.py backend/tests/test_context_window.py backend/tests/test_eval_harness.py backend/tests/test_extensions_api.py backend/tests/test_operator_api.py backend/tests/test_workflows.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_context_window.py tests/test_approvals_api.py -q`
+  - `cd backend && .venv/bin/python -m pytest tests/test_extensions_api.py -q -k "source_save or wave2_contribution_surfaces"`
+  - `cd backend && .venv/bin/python -m pytest tests/test_workflows.py tests/test_operator_api.py tests/test_activity_api.py -q -k "approval_context_changed or approval_context_missing or boundary_is_blocked or aggregates_llm_calls_budget_and_threaded_actions or aggregates_threaded_workflows_notifications_and_repairs"`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "approval_explainability_surface_behavior or workflow_boundary_blocked_surface_behavior or context_window_summary_audit or test_main_lists_available_scenarios"`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - the first extension-approval explainability pass over-reported unchanged redacted config groups, which would have made the new `approval_scope` surface less truthful than the actual fingerprinted boundary
+  - the first targeted proof for source-save scoping also reused a packaged MCP source file path and picked up unrelated draft-validation behavior, so the regression was moved to a multi-workflow high-risk package where the approval contract itself was the only variable
+  - the live CI review also surfaced a separate real backend failure: sync runtime-audit helpers were creating closed-loop teardown noise through `asyncio.run(...)`; the fix now skips persisted runtime audit when no loop exists instead of pretending the path is safe
+
 ### `planner-secret-surface-isolation-v1`
 
 - status: complete on `develop` via PR `#245`

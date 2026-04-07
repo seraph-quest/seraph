@@ -104,6 +104,32 @@ async def test_operator_timeline_aggregates_threaded_workflows_notifications_and
                         "thread_label": "Session 1",
                         "resume_message": "Resume after approval.",
                         "risk_level": "medium",
+                        "extension_id": "seraph.test-installable",
+                        "extension_display_name": "Test Installable",
+                        "action": "source_save",
+                        "package_path": "/tmp/extensions/test-installable",
+                        "permissions": {"tool_names": ["write_file"]},
+                        "approval_profile": {
+                            "requires_lifecycle_approval": True,
+                            "lifecycle_boundaries": ["workspace_write"],
+                        },
+                        "approval_scope": {
+                            "action": "source_save",
+                            "target": {
+                                "type": "workflow_source",
+                                "name": "write-note",
+                                "reference": "workflows/write-note.md",
+                            },
+                            "source_scope": {
+                                "reference": "workflows/write-note.md",
+                                "requested_content_hash": "requested-hash",
+                                "current_content_hash": "current-hash",
+                            },
+                        },
+                        "approval_context": {
+                            "risk_level": "medium",
+                            "execution_boundaries": ["workspace_write"],
+                        },
                     }
                 ]
             ),
@@ -176,6 +202,14 @@ async def test_operator_timeline_aggregates_threaded_workflows_notifications_and
 
     approval_item = next(item for item in payload["items"] if item["kind"] == "approval")
     assert approval_item["continue_message"] == "Resume after approval."
+    assert approval_item["metadata"]["approval_id"] == "approval-1"
+    assert approval_item["metadata"]["extension_id"] == "seraph.test-installable"
+    assert approval_item["metadata"]["extension_action"] == "source_save"
+    assert approval_item["metadata"]["lifecycle_boundaries"] == ["workspace_write"]
+    assert approval_item["metadata"]["approval_scope"]["target"]["reference"] == "workflows/write-note.md"
+    assert (
+        approval_item["metadata"]["approval_context"]["execution_boundaries"] == ["workspace_write"]
+    )
 
     notification_item = next(item for item in payload["items"] if item["kind"] == "notification")
     assert notification_item["continue_message"] == "Continue from native notification."
@@ -569,6 +603,16 @@ async def test_operator_timeline_hides_stale_resume_surface_when_workflow_bounda
                         "replay_recommended_actions": [
                             {"type": "set_tool_policy", "label": "Allow write_file", "mode": "full"}
                         ],
+                        "trust_boundary": {
+                            "status": "changed",
+                            "blocked": True,
+                            "reason": "approval_context_changed",
+                            "message": (
+                                "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+                                "Start a fresh run instead of replaying or resuming."
+                            ),
+                            "changed_fields": ["authenticated_source", "source_systems"],
+                        },
                         "risk_level": "medium",
                         "execution_boundaries": ["authenticated_external_source", "workspace_write"],
                         "pending_approval_count": 0,
@@ -628,3 +672,5 @@ async def test_operator_timeline_hides_stale_resume_surface_when_workflow_bounda
     assert workflow_item["metadata"]["resume_checkpoint_label"] is None
     assert workflow_item["metadata"]["checkpoint_candidates"] == []
     assert workflow_item["metadata"]["resume_plan"] is None
+    assert workflow_item["metadata"]["trust_boundary"]["status"] == "changed"
+    assert workflow_item["metadata"]["trust_boundary"]["reason"] == "approval_context_changed"

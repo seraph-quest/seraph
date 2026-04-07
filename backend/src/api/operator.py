@@ -17,6 +17,7 @@ from src.api.workflows import (
     workflow_surface_resume_metadata,
 )
 from src.approval.repository import approval_repository
+from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
 from src.observer.insight_queue import insight_queue
@@ -169,11 +170,13 @@ async def get_operator_timeline(
                 "root_run_identity": run.get("root_run_identity"),
                 "resume_plan": workflow_surface["resume_plan"],
                 "availability": run.get("availability"),
+                "trust_boundary": workflow_surface["trust_boundary"],
             },
         })
 
     for approval in pending_approvals:
         approval_session_id = approval.get("session_id")
+        approval_metadata = approval_surface_metadata(approval)
         items.append({
             "id": f"approval:{approval['id']}",
             "kind": "approval",
@@ -193,10 +196,7 @@ async def get_operator_timeline(
             "replay_block_reason": "pending_approval",
             "recommended_actions": [],
             "source": "approval",
-            "metadata": {
-                "risk_level": approval.get("risk_level"),
-                "tool_name": approval.get("tool_name"),
-            },
+            "metadata": approval_metadata,
         })
 
     for notification in notifications:

@@ -45,6 +45,7 @@
 - [x] first adapter-backed source-evidence runtime that turns typed public-web contracts into normalized evidence bundles, exposes degraded managed-connector truth instead of implied access, and gives Seraph one reusable `collect_source_evidence` path for public discovery, explicit pages, and existing browser-session snapshots
 - [x] first connector-backed authenticated source-read bridge that binds a managed connector to a live MCP runtime when the connector is enabled and configured, so typed source contracts can execute normalized `repository.read`, `work_items.read`, and `code_activity.read` evidence reads instead of staying permanently degraded
 - [x] reusable connector-first source review planning and bundled source-review routines, so daily review, progress review, and goal-alignment review can compose provider-neutral mixed-source plans with explicit degraded-step truth instead of spawning bespoke provider pipelines
+- [x] backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting long-tail runtime skew dominate workflow delivery
 
 ## Working On Now
 
@@ -75,6 +76,7 @@
 - [x] `adapter-backed-authenticated-source-operations-v1` now ships source-adapter inventory, normalized evidence bundles, executable public-web read contracts, explicit degraded managed-connector semantics, and one reusable `collect_source_evidence` tool/API path instead of leaving source routines to stitch raw surface metadata together
 - [x] `adapter-backed-authenticated-source-operations-v3` now ships reusable `plan_source_review` planning, bundled daily/progress/goal-alignment source-review starter packs and runbooks, explicit mixed-source review fallback truth, and backend CI sharding for the growing test surface
 - [x] `artifact-lineage-and-follow-on-control-v1` now ships verified artifact source-run provenance with explicit unresolved-state fallback, related family outputs, richer follow-on workflow rows, and artifact-specific planning shortcuts instead of leaving typed artifact chaining buried inside workflow-only inspector actions
+- [x] `artifact-lineage-and-long-running-control-v2` now ships artifact source-run open/continue plus source-failure and related-output comparison shortcuts across evidence, outputs, and inspector panes, while the backend CI surface now uses weighted shard assignment and ten backend shards to keep the growing test matrix stable
 
 ## Review Follow-Up
 

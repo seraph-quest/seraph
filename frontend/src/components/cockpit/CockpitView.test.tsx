@@ -1262,7 +1262,17 @@ describe("CockpitView", () => {
               updated_at: "2026-03-18T12:04:00Z",
               summary: "workflow_web_brief_to_file failed at write_file",
               step_tools: ["web_search", "write_file"],
-              step_records: [],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/brief.md"],
+                  error_summary: "write_file blocked by approval",
+                },
+              ],
               artifact_paths: ["notes/brief.md"],
               continued_error_steps: ["write_file"],
               risk_level: "medium",
@@ -1287,7 +1297,7 @@ describe("CockpitView", () => {
               summary: "workflow_web_brief_to_file branch running",
               step_tools: ["write_file"],
               step_records: [],
-              artifact_paths: ["notes/brief.md"],
+              artifact_paths: ["notes/branch-brief.md"],
               continued_error_steps: [],
               risk_level: "medium",
               pending_approval_count: 0,
@@ -1350,11 +1360,35 @@ describe("CockpitView", () => {
 
     fireEvent.keyDown(window, { key: "W", shiftKey: true });
     await waitFor(() =>
-      expect(screen.getByText("workflow_web_brief_to_file failed at write_file")).toBeInTheDocument(),
+      expect(screen.getAllByText("workflow_web_brief_to_file failed at write_file").length).toBeGreaterThan(0),
     );
 
     fireEvent.keyDown(window, { key: "M", shiftKey: true });
     await waitFor(() => expect(screen.getByRole("button", { name: "Open Source Run" })).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "S", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file failed at write_file"),
+    );
+
+    fireEvent.keyDown(window, { key: "D", shiftKey: true });
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas workflow")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "Q", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "X", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/brief.md" and "notes/branch-brief.md". Summarize the key differences, what changed between these artifact outputs, and which file is the better base for the next step.',
+        ),
+      ).toBeInTheDocument(),
+    );
 
     fireEvent.keyDown(window, { key: "U", shiftKey: true });
     await waitFor(() =>
@@ -4181,6 +4215,9 @@ describe("CockpitView", () => {
     expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for best continuation resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue workflow for family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from family output notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for family output notes/branch-review.md resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
@@ -4218,6 +4255,11 @@ describe("CockpitView", () => {
           'Compare the workspace files "notes/root-review.md" and "notes/branch-review.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
         ),
       ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Continue workflow for family output notes/branch-review.md from resume-c" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue child branch from the review checkpoint.")).toBeInTheDocument(),
     );
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
@@ -4752,11 +4794,15 @@ describe("CockpitView", () => {
     expect(within(inspector).getByRole("button", { name: "Continue Source Run" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use Source Failure" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare Related Output" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from artifact source notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry step for artifact source notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for artifact source notes/branch-review.md resume-review" })).toBeInTheDocument();
     expect(within(inspector).getByText("source run")).toBeInTheDocument();
     expect(within(inspector).getByText("follow-on")).toBeInTheDocument();
     expect(within(inspector).getAllByText("related output").length).toBeGreaterThan(0);
     expect(within(inspector).getByRole("button", { name: "Run summarize-file from artifact notes/branch-review.md" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Compare related output notes/peer-review.md with artifact notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue related output run notes/peer-review.md" })).toBeInTheDocument();
 
     fireEvent.click(within(inspector).getByRole("button", { name: "Use Source Failure" }));
     await waitFor(() =>
@@ -5074,6 +5120,9 @@ describe("CockpitView", () => {
     expect(within(inspector).queryByRole("button", { name: "Use Source Failure" })).not.toBeInTheDocument();
     expect(within(inspector).getByText("source ambiguous (2 candidates)")).toBeInTheDocument();
     expect(within(inspector).getByText("unresolved · 2 recent runs wrote notes/shared.md")).toBeInTheDocument();
+    expect(within(inspector).getByText("candidate source")).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Open candidate source run write-summary for artifact notes/shared.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use candidate failure update-summary for artifact notes/shared.md" })).toBeInTheDocument();
   }, 15000);
 
   it("surfaces workflow approval, artifact, and trace density inside the inspector", async () => {

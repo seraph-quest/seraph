@@ -3153,6 +3153,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     return null;
   }
+  function workflowOwnFailureContext(
+    workflow: WorkflowRunRecord | null | undefined,
+  ): { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null {
+    if (!workflow) return null;
+    const resolved = resolveWorkflowRun(workflow);
+    const step = failedWorkflowStep(resolved);
+    return step ? { workflow: resolved, step } : null;
+  }
   function workflowComparisonSummary(base: WorkflowRunRecord, target: WorkflowRunRecord): string[] {
     const summary: string[] = [];
     const baseUpdated = workflowUpdatedAtMs(base);
@@ -3933,6 +3941,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "m") {
         event.preventDefault();
         inspectPrimaryArtifactEntry();
+      } else if (key === "s") {
+        event.preventDefault();
+        openPrimaryArtifactSourceRun();
+      } else if (key === "d") {
+        event.preventDefault();
+        continuePrimaryArtifactSourceRun();
+      } else if (key === "q") {
+        event.preventDefault();
+        queuePrimaryArtifactSourceFailure();
+      } else if (key === "x") {
+        event.preventDefault();
+        queuePrimaryArtifactRelatedOutputComparison();
       } else if (key === "j") {
         event.preventDefault();
         queueArtifactFollowOnPlan(primaryArtifactShortcutTarget());
@@ -3959,7 +3979,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     inspectWorkflowBestContinuation,
     inspectPrimaryWorkflowEntry,
     continueWorkflowBestContinuation,
+    continuePrimaryArtifactSourceRun,
+    openPrimaryArtifactSourceRun,
     queueArtifactFollowOnPlan,
+    queuePrimaryArtifactRelatedOutputComparison,
+    queuePrimaryArtifactSourceFailure,
     queueArtifactTopFollowOnWorkflowDraft,
     queueWorkflowBestContinuationComparison,
     queueWorkflowFamilyPlan,
@@ -5611,6 +5635,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return workflowFamilyArtifactOutputs(sourceWorkflow).filter((output) => output.filePath !== artifact.filePath);
   }
 
+  function artifactPrimaryRelatedOutput(
+    artifact: ArtifactRecord | null | undefined,
+  ): WorkflowFamilyArtifactOutput | null {
+    return artifactRelatedFamilyOutputs(artifact)[0] ?? null;
+  }
+
+  function artifactLatestFailureContext(
+    artifact: ArtifactRecord | null | undefined,
+  ): { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null {
+    return workflowOwnFailureContext(artifactSourceWorkflow(artifact));
+  }
+
+  function artifactLineageCandidateRuns(
+    artifact: ArtifactRecord | null | undefined,
+  ): WorkflowRunRecord[] {
+    const lineage = resolveArtifactLineage(artifact);
+    if (!lineage.ambiguous) return [];
+    return lineage.candidateWorkflows.slice(0, 4);
+  }
+
   function artifactInspectorSummary(artifact: ArtifactRecord | null | undefined): string[] {
     if (!artifact) return [];
     const lineage = resolveArtifactLineage(artifact);
@@ -5704,6 +5748,32 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       return selectedInspector.artifact;
     }
     return primaryEvidenceEntry?.artifact ?? artifacts[0] ?? null;
+  }
+
+  function openPrimaryArtifactSourceRun() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    inspectWorkflowRun(artifactSourceWorkflow(artifact));
+  }
+
+  function continuePrimaryArtifactSourceRun() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    continueWorkflowRun(artifactSourceWorkflow(artifact));
+  }
+
+  function queuePrimaryArtifactSourceFailure() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    const sourceFailure = artifactLatestFailureContext(artifact);
+    if (!sourceFailure) return;
+    queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step);
+  }
+
+  function queuePrimaryArtifactRelatedOutputComparison() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    queueArtifactOutputComparison(artifact, artifactPrimaryRelatedOutput(artifact)?.filePath);
   }
 
   function inspectPrimaryArtifactEntry() {
@@ -6841,6 +6911,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Open Run
                   </button>
+                  {workflowCanContinue(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue workflow for family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                      onClick={() => continueWorkflowRun(output.sourceWorkflow)}
+                    >
+                      Continue
+                    </button>
+                  )}
                   <button
                     className="cockpit-feedback-button"
                     aria-label={`Use family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
@@ -6848,6 +6927,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Use Output
                   </button>
+                  {workflowOwnFailureContext(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use family output failure from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                      onClick={() => queueWorkflowStepContext(output.sourceWorkflow, failedWorkflowStep(output.sourceWorkflow)!)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
                   {selectedWorkflowOutputPath && (
                     <button
                       className="cockpit-feedback-button"
@@ -6856,6 +6944,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     >
                       Compare
                     </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    output.sourceWorkflow,
+                    `family output ${output.filePath}`,
+                    `${selectedWorkflow.id}:family-output-controls:${output.key}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    output.sourceWorkflow,
+                    `family output ${output.filePath}`,
+                    `${selectedWorkflow.id}:family-output-controls:${output.key}`,
                   )}
                 </div>
               ))}
@@ -7137,9 +7235,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           const artifact = selectedInspector.artifact;
           const lineage = resolveArtifactLineage(artifact);
           const sourceWorkflow = lineage.sourceWorkflow;
-          const sourceFailure = workflowLatestFailureContext(sourceWorkflow);
+          const sourceFailure = artifactLatestFailureContext(artifact);
           const relatedOutputs = artifactRelatedFamilyOutputs(artifact).slice(0, 3);
           const primaryRelatedOutput = relatedOutputs[0] ?? null;
+          const candidateRuns = artifactLineageCandidateRuns(artifact);
           const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 3);
           return (
             <>
@@ -7274,8 +7373,47 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           Compare
                         </button>
                       )}
+                      {renderWorkflowCheckpointControls(
+                        sourceWorkflow,
+                        `artifact source ${artifact.filePath}`,
+                        `${artifact.id}:source-run`,
+                      )}
+                      {renderWorkflowRecoveryControls(
+                        sourceWorkflow,
+                        `artifact source ${artifact.filePath}`,
+                        `${artifact.id}:source-run`,
+                      )}
                     </div>
                   )}
+                  {!sourceWorkflow && candidateRuns.map((candidate, index) => (
+                    <div key={`${artifact.id}:candidate-source:${candidate.runIdentity ?? candidate.id}`} className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">{index === 0 ? "candidate source" : "candidate branch"}</div>
+                      <div className="cockpit-value">
+                        {[
+                          candidate.workflowName,
+                          candidate.summary,
+                          workflowSupervisionLabel(candidate),
+                          formatAge(candidate.updatedAt),
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Open candidate source run ${candidate.workflowName} for artifact ${artifact.filePath}`}
+                        onClick={() => inspectWorkflowRun(candidate)}
+                      >
+                        Open
+                      </button>
+                      {workflowOwnFailureContext(candidate) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Use candidate failure ${candidate.workflowName} for artifact ${artifact.filePath}`}
+                          onClick={() => queueWorkflowStepContext(candidate, failedWorkflowStep(candidate)!)}
+                        >
+                          Use Failure
+                        </button>
+                      )}
+                    </div>
+                  ))}
                   {compatibleWorkflows.map((workflow) => (
                     <div key={`${artifact.id}:follow-on:${workflow.name}`} className="cockpit-inspector-stack-row">
                       <div className="cockpit-key">follow-on</div>
@@ -7320,6 +7458,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       >
                         Open Run
                       </button>
+                      {workflowCanContinue(output.sourceWorkflow) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Continue related output run ${output.filePath}`}
+                          onClick={() => continueWorkflowRun(output.sourceWorkflow)}
+                        >
+                          Continue
+                        </button>
+                      )}
                       <button
                         className="cockpit-feedback-button"
                         aria-label={`Use related output ${output.filePath}`}
@@ -7327,6 +7474,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       >
                         Use Output
                       </button>
+                      {workflowOwnFailureContext(output.sourceWorkflow) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Use related output failure ${output.filePath}`}
+                          onClick={() => queueWorkflowStepContext(output.sourceWorkflow, failedWorkflowStep(output.sourceWorkflow)!)}
+                        >
+                          Use Failure
+                        </button>
+                      )}
                       <button
                         className="cockpit-feedback-button"
                         aria-label={`Compare related output ${output.filePath} with artifact ${artifact.filePath}`}
@@ -7648,6 +7804,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     {artifacts.map((artifact) => {
                       const lineage = resolveArtifactLineage(artifact);
                       const sourceWorkflow = lineage.sourceWorkflow;
+                      const sourceFailure = artifactLatestFailureContext(artifact);
+                      const primaryRelatedOutput = artifactPrimaryRelatedOutput(artifact);
                       const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 1);
                       return (
                         <div key={artifact.id} className="cockpit-row">
@@ -7668,6 +7826,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               {artifact.source}
                               {sourceWorkflow ? ` · ${sourceWorkflow.workflowName} · ${workflowSupervisionLabel(sourceWorkflow)}` : ""}
                               {lineage.ambiguous ? ` · source ambiguous` : !sourceWorkflow ? ` · source unresolved` : ""}
+                              {sourceFailure ? ` · failure context ready` : ""}
+                              {primaryRelatedOutput ? ` · related ${primaryRelatedOutput.filePath}` : ""}
                               {compatibleWorkflows.length > 0 ? ` · ${compatibleWorkflows.length} follow-on ready` : ""}
                             </div>
                           </button>
@@ -7694,6 +7854,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 onClick={() => inspectWorkflowRun(sourceWorkflow)}
                               >
                                 Open Source
+                              </button>
+                            )}
+                            {sourceWorkflow && workflowCanContinue(sourceWorkflow) && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => continueWorkflowRun(sourceWorkflow)}
+                              >
+                                Continue Source
+                              </button>
+                            )}
+                            {sourceFailure && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step)}
+                              >
+                                Use Source Failure
+                              </button>
+                            )}
+                            {primaryRelatedOutput && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueArtifactOutputComparison(artifact, primaryRelatedOutput.filePath)}
+                              >
+                                Compare Related
                               </button>
                             )}
                             {compatibleWorkflows.map((workflow) => (
@@ -8892,7 +9076,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
                     </div>
                   </div>
 

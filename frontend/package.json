@@ -7,9 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test": "NODE_OPTIONS=--experimental-require-module vitest run",
+    "test:watch": "NODE_OPTIONS=--experimental-require-module vitest",
+    "test:coverage": "NODE_OPTIONS=--experimental-require-module vitest run --coverage"
   },
   "dependencies": {
     "motion": "^12.38.0",

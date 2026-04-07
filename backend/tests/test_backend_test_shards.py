@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from scripts.backend_test_shards import TestFile, assign_test_shards, discover_test_files, shard_for_index
+from scripts.backend_test_shards import (
+    TestFile,
+    assign_test_shards,
+    discover_test_files,
+    hinted_test_weight,
+    shard_for_index,
+)
 
 
 def test_assign_test_shards_is_total_and_disjoint():
@@ -28,6 +34,32 @@ def test_discover_test_files_only_returns_pytest_files(tmp_path: Path):
     discovered = discover_test_files(root)
 
     assert [item.path for item in discovered] == ["tests/test_alpha.py"]
+
+
+def test_hinted_test_weight_can_raise_runtime_heavy_files_above_size_weight():
+    assert hinted_test_weight("tests/test_eval_harness.py", 90_000) == 240_000
+    assert hinted_test_weight("tests/test_small.py", 1_200) == 1_200
+
+
+def test_assign_test_shards_separates_runtime_heavy_files_when_possible():
+    files = [
+        TestFile(path="tests/test_eval_harness.py", weight=hinted_test_weight("tests/test_eval_harness.py", 90_000)),
+        TestFile(path="tests/test_llm_runtime.py", weight=hinted_test_weight("tests/test_llm_runtime.py", 96_000)),
+        TestFile(path="tests/test_workflows.py", weight=hinted_test_weight("tests/test_workflows.py", 194_000)),
+        TestFile(path="tests/test_alpha.py", weight=5_000),
+        TestFile(path="tests/test_beta.py", weight=4_500),
+        TestFile(path="tests/test_gamma.py", weight=4_000),
+    ]
+
+    shards = assign_test_shards(files, 3)
+    shard_by_file = {
+        path: index
+        for index, shard in enumerate(shards)
+        for path in shard
+    }
+
+    assert shard_by_file["tests/test_eval_harness.py"] != shard_by_file["tests/test_llm_runtime.py"]
+    assert shard_by_file["tests/test_workflows.py"] != shard_by_file["tests/test_eval_harness.py"]
 
 
 def test_shard_for_index_rejects_out_of_range(tmp_path: Path):

@@ -135,6 +135,11 @@ def test_bundled_core_capabilities_load_through_runtime_manifest_roots(tmp_path:
     assert bundled_skill.source == "manifest"
     assert bundled_skill.extension_id == "seraph.core-capabilities"
 
+    source_daily_skill = skill_manager.get_skill("source-daily-review")
+    assert source_daily_skill is not None
+    assert source_daily_skill.source == "manifest"
+    assert source_daily_skill.extension_id == "seraph.core-capabilities"
+
     bundled_workflow = workflow_manager.get_workflow("web-brief-to-file")
     assert bundled_workflow is not None
     assert bundled_workflow.source == "manifest"
@@ -145,10 +150,20 @@ def test_bundled_core_capabilities_load_through_runtime_manifest_roots(tmp_path:
     assert bundled_runbook.source == "manifest"
     assert bundled_runbook.extension_id == "seraph.core-capabilities"
 
+    source_daily_runbook = runbook_manager.get_runbook("runbook:source-daily-review")
+    assert source_daily_runbook is not None
+    assert source_daily_runbook.source == "manifest"
+    assert source_daily_runbook.extension_id == "seraph.core-capabilities"
+
     bundled_pack = starter_pack_manager.get_pack("research-briefing")
     assert bundled_pack is not None
     assert bundled_pack.source == "manifest"
     assert bundled_pack.extension_id == "seraph.core-capabilities"
+
+    source_daily_pack = starter_pack_manager.get_pack("source-daily-review")
+    assert source_daily_pack is not None
+    assert source_daily_pack.source == "manifest"
+    assert source_daily_pack.extension_id == "seraph.core-capabilities"
 
 
 def test_workspace_manifest_packages_override_bundled_core_capabilities(tmp_path: Path):

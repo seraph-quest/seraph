@@ -62,6 +62,7 @@ _SPECIALIST_DEFAULT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "browser_session",
         "source_capabilities",
         "collect_source_evidence",
+        "plan_source_review",
     ),
     "file_worker": ("read_file", "write_file", "fill_template", "execute_code"),
 }

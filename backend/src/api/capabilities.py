@@ -26,7 +26,11 @@ from src.db.models import UserProfile
 from src.extensions.lifecycle import get_extension
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
 from src.extensions.source_capabilities import list_source_capability_inventory
-from src.extensions.source_operations import collect_source_evidence_bundle, list_source_adapter_inventory
+from src.extensions.source_operations import (
+    build_source_review_plan,
+    collect_source_evidence_bundle,
+    list_source_adapter_inventory,
+)
 from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
@@ -111,6 +115,15 @@ class SourceEvidenceRequest(BaseModel):
     max_results: int = 5
 
 
+class SourceReviewPlanRequest(BaseModel):
+    intent: str
+    focus: str = ""
+    goal_context: str = ""
+    time_window: str = ""
+    source: str = ""
+    url: str = ""
+
+
 class WorkflowDraftRequest(BaseModel):
     content: str
 
@@ -126,6 +139,18 @@ async def source_evidence(req: SourceEvidenceRequest):
         session_id=req.session_id,
         owner_session_id=req.owner_session_id,
         max_results=req.max_results,
+    )
+
+
+@router.post("/capabilities/source-review-plan")
+async def source_review_plan(req: SourceReviewPlanRequest):
+    return build_source_review_plan(
+        intent=req.intent,
+        focus=req.focus,
+        goal_context=req.goal_context,
+        time_window=req.time_window,
+        source=req.source,
+        url=req.url,
     )
 
 

@@ -751,6 +751,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["source_adapter_evidence_behavior"]["github_runtime_server"] == "github"
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_total"] >= 4
     assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_ready"] >= 3
+    assert details_by_name["source_review_routine_behavior"]["daily_plan_status"] == "ready"
+    assert details_by_name["source_review_routine_behavior"]["daily_ready_step_count"] >= 4
+    assert details_by_name["source_review_routine_behavior"]["daily_work_items_source"] == "github-managed"
+    assert details_by_name["source_review_routine_behavior"]["daily_code_activity_source"] == "github-managed"
+    assert details_by_name["source_review_routine_behavior"]["daily_context_source"] == "web_search"
+    assert details_by_name["source_review_routine_behavior"]["daily_explicit_page_source"] == "browse_webpage"
+    assert details_by_name["source_review_routine_behavior"]["goal_plan_status"] == "ready"
+    assert details_by_name["source_review_routine_behavior"]["goal_runbook"] == "runbook:source-goal-alignment"
+    assert details_by_name["source_review_routine_behavior"]["goal_starter_pack"] == "source-goal-alignment"
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]

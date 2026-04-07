@@ -7,7 +7,9 @@ from src.app import create_app
 from src.observer.context import CurrentContext
 from src.browser.sessions import browser_session_runtime
 from src.api.capabilities import _build_capability_overview
+from src.extensions.source_operations import build_source_review_plan
 from src.tools.source_evidence_tool import collect_source_evidence
+from src.tools.source_review_tool import plan_source_review
 
 
 class FakeMCPTool:
@@ -334,6 +336,206 @@ async def test_source_evidence_endpoint_collects_github_work_items_via_bound_run
     assert payload["items"][0]["kind"] == "work_item"
     assert payload["items"][0]["location"] == "https://github.com/seraph-quest/seraph/issues/41"
     assert payload["items"][0]["metadata"]["runtime_server"] == "github"
+
+
+def test_build_source_review_plan_prefers_ready_authenticated_adapters(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "github",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 3,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "extension",
+        }
+    ]
+    state_payload = {
+        "extensions": {
+            "seraph.core-managed-connectors": {
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "inst_123",
+                        }
+                    }
+                },
+                "connector_state": {
+                    "connectors/managed/github.yaml": {
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+    }
+    server_tools = [
+        FakeMCPTool("search_repositories", [{"id": 1, "full_name": "seraph-quest/seraph"}]),
+        FakeMCPTool("search_issues", [{"id": 2, "title": "Fix source adapter", "html_url": "https://example.com/issues/2"}]),
+        FakeMCPTool("search_pull_requests", [{"id": 3, "title": "Improve adapters", "html_url": "https://example.com/pulls/3"}]),
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.load_extension_state_payload", return_value=state_payload),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=server_tools),
+    ):
+        plan = build_source_review_plan(
+            intent="daily_review",
+            focus="adapter-backed source operations",
+            time_window="today",
+        )
+
+    assert plan["status"] == "ready"
+    assert plan["recommended_runbooks"] == ["runbook:source-daily-review"]
+    steps_by_id = {step["id"]: step for step in plan["steps"]}
+    assert steps_by_id["work_items"]["source"] == "github-managed"
+    assert steps_by_id["code_activity"]["source"] == "github-managed"
+    assert steps_by_id["context"]["source"] == "web_search"
+
+
+def test_build_source_review_plan_reports_degraded_adapters_with_next_best_sources(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "raw-github-mcp",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": False,
+            "tool_count": 3,
+            "status": "auth_required",
+            "auth_hint": "Set a bearer token.",
+            "has_headers": True,
+            "source": "manual",
+        }
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[]),
+    ):
+        plan = build_source_review_plan(
+            intent="goal_alignment",
+            focus="adapter-backed source operations",
+            goal_context="Move authenticated source routines forward",
+            time_window="this week",
+            source="github-managed",
+        )
+
+    steps_by_id = {step["id"]: step for step in plan["steps"]}
+    assert plan["status"] == "partial"
+    assert steps_by_id["work_items"]["status"] == "degraded"
+    assert steps_by_id["work_items"]["degraded_reason"] == "requires_config"
+    assert steps_by_id["work_items"]["next_best_sources"][0]["name"] == "raw-github-mcp"
+    assert "does not advertise" not in "\n".join(plan["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_source_review_plan_endpoint_returns_structured_steps(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    mcp_entries = [
+        {
+            "name": "github",
+            "url": "https://example.com/mcp",
+            "enabled": True,
+            "connected": True,
+            "tool_count": 3,
+            "status": "connected",
+            "auth_hint": "Token configured.",
+            "has_headers": True,
+            "source": "extension",
+        }
+    ]
+    state_payload = {
+        "extensions": {
+            "seraph.core-managed-connectors": {
+                "config": {
+                    "managed_connectors": {
+                        "github-managed": {
+                            "installation_id": "inst_123",
+                        }
+                    }
+                },
+                "connector_state": {
+                    "connectors/managed/github.yaml": {
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+    }
+    server_tools = [
+        FakeMCPTool("search_repositories", [{"id": 1, "full_name": "seraph-quest/seraph"}]),
+        FakeMCPTool("search_issues", [{"id": 2, "title": "Fix source adapter", "html_url": "https://example.com/issues/2"}]),
+        FakeMCPTool("search_pull_requests", [{"id": 3, "title": "Improve adapters", "html_url": "https://example.com/pulls/3"}]),
+    ]
+
+    with (
+        patch("src.extensions.source_capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch("src.extensions.source_capabilities.load_extension_state_payload", return_value=state_payload),
+        patch("src.extensions.source_capabilities.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_config", return_value=mcp_entries),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=server_tools),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-review-plan",
+                json={
+                    "intent": "daily_review",
+                    "focus": "adapter-backed source operations",
+                    "time_window": "today",
+                    "url": "https://example.com/status",
+                },
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["steps"][-1]["contract"] == "webpage.read"
+    assert payload["steps"][-1]["source"] == "browse_webpage"
+
+
+def test_plan_source_review_tool_renders_structured_plan():
+    plan = {
+        "status": "partial",
+        "intent": "daily_review",
+        "title": "Daily Source Review",
+        "description": "Review what moved.",
+        "summary": {"step_count": 3, "ready_step_count": 2, "degraded_step_count": 1, "unavailable_step_count": 0},
+        "recommended_runbooks": ["runbook:source-daily-review"],
+        "recommended_starter_packs": ["source-daily-review"],
+        "warnings": ["github-managed is degraded"],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "source": "github-managed",
+                "status": "degraded",
+                "purpose": "Gather work items.",
+                "suggested_input": "recent work items for adapter work during today",
+                "query_guidance": "Name the project and window.",
+                "degraded_reason": "requires_config",
+                "next_best_sources": [{"name": "raw-github-mcp", "description": "Only raw MCP is visible."}],
+            }
+        ],
+    }
+
+    with patch("src.tools.source_review_tool.build_source_review_plan", return_value=plan):
+        result = plan_source_review.forward(intent="daily_review", focus="adapter work", time_window="today")
+
+    assert "status: partial" in result
+    assert "recommended_runbooks:" in result
+    assert "runbook:source-daily-review" in result
+    assert "raw-github-mcp" in result
 
 
 def test_collect_source_evidence_tool_renders_structured_summary():

@@ -43,6 +43,7 @@
 - [x] provider-neutral source capability inventory that exposes typed public-web tools, managed authenticated connectors, explicit raw-MCP gaps, and one reusable source-evidence review skill instead of forcing provider-specific workflow glue
 - [x] first adapter-backed source-evidence runtime that turns typed public-web contracts into normalized evidence bundles, exposes degraded managed-connector truth instead of implied access, and gives Seraph one reusable `collect_source_evidence` path for public discovery, explicit pages, and existing browser-session snapshots
 - [x] first connector-backed authenticated source-read bridge that binds a managed connector to a live MCP runtime when the connector is enabled and configured, so typed source contracts can execute normalized `repository.read`, `work_items.read`, and `code_activity.read` evidence reads instead of staying permanently degraded
+- [x] reusable connector-first source review planning and bundled source-review routines, so daily review, progress review, and goal-alignment review can compose provider-neutral mixed-source plans with explicit degraded-step truth instead of spawning bespoke provider pipelines
 
 ## Working On Now
 
@@ -71,6 +72,7 @@
 - [x] `workflow-autonomy-supervision-and-artifact-control-v1` now ships reusable checkpoint-backed workflow recovery, truthful unsupported-checkpoint fallback in the runs API, declared-type artifact handoff in the cockpit, and operator-visible branch-family supervision instead of generic retry-only copy
 - [x] `adapter-first-capability-contracts-v1` now ships provider-neutral source contracts, managed-connector inventory, explicit raw-MCP disclosure, and one reusable source-evidence review skill instead of forcing provider-specific reporting glue
 - [x] `adapter-backed-authenticated-source-operations-v1` now ships source-adapter inventory, normalized evidence bundles, executable public-web read contracts, explicit degraded managed-connector semantics, and one reusable `collect_source_evidence` tool/API path instead of leaving source routines to stitch raw surface metadata together
+- [x] `adapter-backed-authenticated-source-operations-v3` now ships reusable `plan_source_review` planning, bundled daily/progress/goal-alignment source-review starter packs and runbooks, explicit mixed-source review fallback truth, and backend CI sharding for the growing test surface
 
 ## Review Follow-Up
 
@@ -91,6 +93,11 @@
 - local review finding fixed while landing `adapter-backed-authenticated-source-operations-v2`:
   - the first authenticated adapter grading treated an unimplemented write route as if it invalidated the whole authenticated read adapter, which would have kept GitHub degraded even when every read contract was executable
   - fixed by grading managed-connector readiness against executable read coverage while still exposing unbound write routes as non-executable operations
+- local review finding fixed while landing `adapter-backed-authenticated-source-operations-v3`:
+  - the first source-review planner over-warned whenever a preferred typed source could not satisfy every contract in a mixed-source routine, which would have made valid connector-first review plans look broken
+  - fixed by treating the preferred source as a contract-scoped preference and falling back silently to the next ready typed adapter for the contracts it does not advertise
+- review pass:
+  - targeted review of source-review planner truthfulness, bundled source-review routine loading, eval coverage, and backend CI timeout handling found no remaining material issues after the preferred-source warning fix and shard-script regression coverage
 
 ## Still To Do On `develop`
 

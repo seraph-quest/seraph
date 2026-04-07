@@ -1,5 +1,5 @@
 id: seraph.core-capabilities
-version: 2026.3.21
+version: 2026.4.6
 display_name: Core Capabilities
 kind: capability-pack
 compatibility:
@@ -18,6 +18,7 @@ permissions:
     - get_goal_progress
     - get_goals
     - http_request
+    - plan_source_review
     - read_file
     - source_capabilities
     - view_soul
@@ -32,7 +33,10 @@ contributes:
     - skills/goal-reflection.md
     - skills/moltbook.md
     - skills/morning-intention.md
+    - skills/source-daily-review.md
     - skills/source-evidence-review.md
+    - skills/source-goal-alignment.md
+    - skills/source-progress-review.md
     - skills/web-briefing.md
     - skills/weekly-planner.md
   workflows:
@@ -41,10 +45,16 @@ contributes:
   runbooks:
     - runbooks/daily-operator-rhythm.yaml
     - runbooks/research-briefing.yaml
+    - runbooks/source-daily-review.yaml
     - runbooks/source-evidence-review.yaml
+    - runbooks/source-goal-alignment.yaml
+    - runbooks/source-progress-review.yaml
     - runbooks/weekly-alignment.yaml
   starter_packs:
     - starter-packs/daily-operator-rhythm.json
     - starter-packs/research-briefing.json
+    - starter-packs/source-daily-review.json
     - starter-packs/source-evidence-review.json
+    - starter-packs/source-goal-alignment.json
+    - starter-packs/source-progress-review.json
     - starter-packs/weekly-alignment.json

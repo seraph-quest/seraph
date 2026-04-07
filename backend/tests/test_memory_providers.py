@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -386,6 +387,107 @@ async def test_plan_memory_retrieval_combines_retrieval_and_user_model_provider_
     assert "Provider recall for atlas launch" in retrieval.semantic_context
     assert "Alice owns Atlas launch communications." in retrieval.semantic_context
     assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["retrieval", "user_model"]
+
+
+@pytest.mark.asyncio
+async def test_plan_memory_retrieval_suppresses_stale_provider_retrieval_hits(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("retrieval",))
+    stale_created_at = datetime.now(timezone.utc) - timedelta(days=220)
+    adapter = FakeMemoryProviderAdapter(capabilities=("retrieval",))
+
+    async def stale_only_retrieve(*, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+        return MemoryProviderRetrievalResult(
+            hits=(
+                MemoryProviderHit(
+                    text="Atlas launch status is unchanged from last year.",
+                    score=0.62,
+                    provider_name="graph-memory",
+                    bucket="project",
+                    created_at=stale_created_at,
+                ),
+            ),
+            summary="Provider-assisted retrieval available.",
+        )
+
+    adapter.retrieve = stale_only_retrieve
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep canonical memory first", {"goal": ("Keep canonical memory first",)}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.retrieve_hybrid_memory",
+                return_value=HybridMemoryRetrievalResult(
+                    context="- [project] Atlas launch",
+                    buckets={"project": ("Atlas launch",)},
+                    degraded=False,
+                    hits=(),
+                ),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="atlas launch status", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    assert retrieval.lane == "hybrid"
+    assert "Atlas launch status is unchanged from last year." not in retrieval.semantic_context
+    assert retrieval.provider_diagnostics[0]["attempted_capabilities"] == ["retrieval"]
+    assert retrieval.provider_diagnostics[0]["capabilities_used"] == []
+    assert retrieval.provider_diagnostics[0]["stale_hit_count"] == 1
+    assert retrieval.provider_diagnostics[0]["stale_bucket_counts"]["project"] == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_memory_retrieval_suppresses_stale_provider_user_model_hits(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("user_model",))
+    stale_created_at = datetime.now(timezone.utc) - timedelta(days=180)
+    fresh_created_at = datetime.now(timezone.utc) - timedelta(days=4)
+    adapter = FakeMemoryProviderAdapter(
+        capabilities=("user_model",),
+        model_hits=(
+            MemoryProviderHit(
+                text="Atlas launch remains the live project anchor.",
+                score=0.71,
+                provider_name="graph-memory",
+                bucket="project",
+                created_at=fresh_created_at,
+            ),
+            MemoryProviderHit(
+                text="Alice owns Atlas launch communications.",
+                score=0.83,
+                provider_name="graph-memory",
+                bucket="collaborator",
+                created_at=stale_created_at,
+            ),
+        ),
+    )
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep Atlas moving", {"goal": ("Keep Atlas moving",)}),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    assert retrieval.lane == "structured_plus_provider_model"
+    assert "Atlas launch remains the live project anchor." in retrieval.semantic_context
+    assert "Alice owns Atlas launch communications." not in retrieval.semantic_context
+    assert retrieval.provider_diagnostics[0]["attempted_capabilities"] == ["user_model"]
+    assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["user_model"]
+    assert retrieval.provider_diagnostics[0]["stale_hit_count"] == 1
+    assert retrieval.provider_diagnostics[0]["stale_bucket_counts"]["collaborator"] == 1
 
 
 @pytest.mark.asyncio

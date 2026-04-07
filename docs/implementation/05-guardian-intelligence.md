@@ -32,7 +32,7 @@
 - [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, and lowers receptivity further when negative intervention trends line up with that conflicting execution evidence
 - [x] guardian state now also prioritizes live-project cross-thread continuity from recent sessions, carries matching recent-thread commitments into `next_up` and dominant-thread synthesis, and surfaces explicit follow-through risk when open project commitments and recent execution setbacks line up on the same live project
 - [x] guardian world-model synthesis now also ranks competing projects from observer, recent-session, memory, and execution evidence, prefers stronger cross-source project anchors over passive list order, preserves richer canonical project labels, and surfaces explicit ambiguity or drift risks when project evidence stays split
-- [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
+- [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, provider-backed user/project modeling augmentation, capability-state governance, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
 
 ## Working On Now
 
@@ -47,7 +47,7 @@
 - [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new negative-trend-plus-execution follow-through gating, the new cross-thread commitment carryover pass, and the first multi-project arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
-- [ ] deeper memory-provider use beyond the shipped additive retrieval and inventory layer, especially provider-backed user modeling, consolidation support, and stronger quality diagnostics
+- [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, and inventory/governance layer, especially consolidation support, long-horizon quality diagnostics, and writeback proof
 
 ## Memory Upgrade Program Record
 

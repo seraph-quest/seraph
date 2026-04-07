@@ -92,6 +92,14 @@ def _prefer_episodic_lane(query: str) -> bool:
     return any(cue in normalized for cue in _EPISODIC_CUES)
 
 
+def _provider_uses_user_model(diagnostics: tuple[dict[str, object], ...]) -> bool:
+    for item in diagnostics:
+        capabilities_used = item.get("capabilities_used")
+        if isinstance(capabilities_used, list) and "user_model" in capabilities_used:
+            return True
+    return False
+
+
 def _memory_context_text(kind_name: str, memory) -> str:
     if kind_name == MemoryKind.procedural.value:
         return (memory.content or memory.summary or "").strip()
@@ -204,14 +212,20 @@ async def plan_memory_retrieval(
         active_projects=active_projects,
     )
     normalized_query = query.strip()
+    provider_retrieval = await retrieve_additive_memory_provider_context(
+        query=normalized_query,
+        active_projects=active_projects,
+        limit=3,
+        include_user_model=bool(active_projects),
+    )
     if not normalized_query:
         return MemoryRetrievalPlanResult(
-            semantic_context=structured_context,
+            semantic_context=_merge_contexts(structured_context, provider_retrieval.context),
             episodic_context="",
-            memory_buckets=structured_buckets,
+            memory_buckets=_merge_buckets(structured_buckets, provider_retrieval.buckets),
             degraded=False,
-            lane="structured_only",
-            provider_diagnostics=(),
+            lane="structured_plus_provider_model" if _provider_uses_user_model(provider_retrieval.diagnostics) else "structured_only",
+            provider_diagnostics=provider_retrieval.diagnostics,
         )
 
     hybrid = await retrieve_hybrid_memory(
@@ -229,14 +243,9 @@ async def plan_memory_retrieval(
         episodic_hits,
         limit=4 if _prefer_episodic_lane(normalized_query) else 2,
     )
-    provider_retrieval = await retrieve_additive_memory_provider_context(
-        query=normalized_query,
-        active_projects=active_projects,
-        limit=3,
-    )
     lane = "episodic" if _prefer_episodic_lane(normalized_query) else "hybrid"
     if provider_retrieval.context:
-        lane = f"{lane}_plus_provider"
+        lane = f"{lane}_plus_provider_model" if _provider_uses_user_model(provider_retrieval.diagnostics) else f"{lane}_plus_provider"
 
     return MemoryRetrievalPlanResult(
         semantic_context=_merge_contexts(structured_context, semantic_context, provider_retrieval.context),

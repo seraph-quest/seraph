@@ -459,6 +459,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["includes_execution_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["continuity_thread_matches_live_project"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_follow_through_risk"] is True
+    assert details_by_name["guardian_world_model_behavior"]["project_ranking_diagnostics_count"] >= 1
+    assert details_by_name["guardian_world_model_behavior"]["includes_project_ranking_diagnostics"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_learning_diagnostics"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True
@@ -477,16 +480,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_judgment_behavior"]["dominant_thread_prefers_hermes"] is True
     assert details_by_name["guardian_judgment_behavior"]["project_state_includes_hermes_execution"] is True
     assert details_by_name["guardian_judgment_behavior"]["includes_project_anchor_drift"] is True
+    assert details_by_name["guardian_judgment_behavior"]["project_ranking_diagnostics_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["stale_signal_arbitration_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["includes_ranked_project_diagnostics"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_stale_signal_arbitration"] is True
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3
     assert details_by_name["guardian_long_horizon_learning_behavior"]["scheduled_negative_days"] == 2
-    assert details_by_name["guardian_long_horizon_learning_behavior"]["intervention_receptivity"] == "medium"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["intervention_receptivity"] == "low"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["learning_diagnostics_count"] >= 2
     assert details_by_name["guardian_long_horizon_learning_behavior"]["has_goal_alignment_signal"] is True
     assert details_by_name["guardian_long_horizon_learning_behavior"]["has_unstable_review_signal"] is True
     assert details_by_name["guardian_long_horizon_learning_behavior"]["has_routine_watchpoint"] is True
     assert details_by_name["guardian_long_horizon_learning_behavior"]["has_collaborator_watchpoint"] is True
     assert details_by_name["guardian_long_horizon_learning_behavior"]["has_multi_day_risk"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_learning_scope_diagnostic"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_learning_spread_diagnostic"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
     assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"

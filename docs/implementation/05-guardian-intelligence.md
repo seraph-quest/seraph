@@ -1112,6 +1112,43 @@ This section records the internal Batch C slices on the feature branch before th
   - local CI follow-up:
     - fixed the live `develop` backend failure by updating `backend/tests/test_capabilities_api.py` to the current extension-pack payload shape; the failing shard was asserting the pre-AJ catalog contract and then cancelling sibling backend shards through fail-fast
 
+## Batch AQ Branch Review Log
+
+### `guardian-judgment-and-long-horizon-learning-quality-v4`
+
+- status: complete on `feat/guardian-judgment-batch-aq-v1`, pending inclusion in the aggregate Batch AQ PR
+- scope:
+  - extended `backend/src/guardian/world_model.py` so guardian state now ranks competing project context explicitly, exposes inspectable project-ranking diagnostics, and surfaces conservative stale-signal arbitration when recent execution/support evidence stays split across nearby anchors
+  - extended `backend/src/guardian/state.py` so guardian state now carries inspectable learning diagnostics summarizing the dominant live-learning scope, observed outcome spread, long-horizon day spread, and any procedural-memory overrides
+  - strengthened the guardian runtime eval details in `backend/src/evals/harness.py` so the world-model, judgment, and long-horizon scenarios expose the new ranking, stale-signal, and learning-diagnostic contracts directly
+  - folded the pre-batch backend CI repairs into the same branch by hardening observer continuity timestamp serialization and isolating the threaded operator runtime eval from unrelated continuity rows
+  - added targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_observer_api.py`
+- validation:
+  - `python3 -m py_compile backend/src/api/observer.py backend/src/evals/harness.py backend/src/guardian/state.py backend/src/guardian/world_model.py backend/tests/test_eval_harness.py backend/tests/test_guardian_state.py backend/tests/test_observer_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_observer_api.py -q -k "partial_namespace_items"`
+    - result: `1 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -k "prompt_block_exposes_confidence or project_anchor_ambiguity or ranks_anchor_context or learning_diagnostics"`
+    - result: `4 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "test_main_lists_available_scenarios or test_run_runtime_evals_passes_group_1"`
+    - result: `2 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+    - result: passed
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_long_horizon_learning_behavior --indent 0`
+    - result: passed
+  - broad `tests/test_eval_harness.py` runtime-detail selection and broader guardian subsets still stalled in this environment, so they are intentionally not claimed here
+- subagent review:
+  - reviewer: `Peirce` (`019d6892-49a9-7f73-a231-1c24e90da129`)
+  - findings:
+    - the first stale-signal arbitration pass classified supporting context, execution pressure, and recent threads against the live observer project while phrasing the diagnostics as if they were classified against the preferred project anchor, which could produce self-contradictory arbitration output
+    - the observer continuity hardening only protected a subset of optional namespace attributes; recent intervention payloads still crashed or failed response validation when older items omitted several string fields
+  - fixed before the slice stayed marked complete:
+    - recomputed the stale-signal arbitration inputs in `backend/src/guardian/world_model.py` against the preferred anchor used by the arbitration layer, while leaving live-project conflict checks intact for judgment-risk scoring
+    - finished the observer continuity fail-soft conversion in `backend/src/api/observer.py` so partial intervention rows normalize missing string fields safely and still satisfy the response contract
+  - additional local fixes already folded into the slice:
+    - widened the competing-anchor arbitration threshold in `backend/src/guardian/world_model.py` so near-split project evidence now surfaces conservative arbitration instead of looking falsely settled
+    - corrected the new guardian-learning regression to use the real feedback repository API and durable timestamps instead of an over-simplified fixture shape
+    - aligned the long-horizon eval detail expectation in `backend/tests/test_eval_harness.py` with the shipped stronger receptivity downgrade (`low`) once multi-day negative trends and contradictory support line up
+
 ## Non-Goals
 
 - marketing “guardian intelligence” before the learning loop is real

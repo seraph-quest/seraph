@@ -1,4 +1,6 @@
 import time
+import types
+from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -649,6 +651,74 @@ class TestObserverAPI:
             and item["label"] == "Review imported messaging"
             for item in payload["recovery_actions"]
         )
+
+    @pytest.mark.asyncio
+    async def test_observer_continuity_tolerates_partial_namespace_items(self, client):
+        await native_notification_queue.clear()
+        created_at = datetime(2026, 4, 8, 12, 0, tzinfo=timezone.utc)
+        created_at_iso = created_at.isoformat()
+        with (
+            patch(
+                "src.observer.native_notification_queue.native_notification_queue.list",
+                AsyncMock(
+                    return_value=[
+                        types.SimpleNamespace(
+                            id="notification-1",
+                            intervention_id="intervention-1",
+                            title="Seraph alert",
+                            body="Pick up the saved brief draft.",
+                            session_id="thread-1",
+                            resume_message="Continue from native notification.",
+                            created_at=created_at_iso,
+                            intervention_type="advisory",
+                            urgency=3,
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.observer.insight_queue.insight_queue.peek_all",
+                AsyncMock(
+                    return_value=[
+                        types.SimpleNamespace(
+                            id="queued-1",
+                            intervention_id="intervention-1",
+                            intervention_type="advisory",
+                            content="Bundle the research notes for later.",
+                            urgency=2,
+                            reasoning="available_capacity",
+                            created_at=created_at_iso,
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.list_recent",
+                AsyncMock(
+                    return_value=[
+                        types.SimpleNamespace(
+                            id="intervention-1",
+                            intervention_type="advisory",
+                            updated_at=created_at,
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(return_value=[{"id": "thread-1", "title": "Research thread"}]),
+            ),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["queued_insights"][0]["thread_id"] is None
+        assert payload["recent_interventions"][0]["thread_id"] is None
+        assert payload["recent_interventions"][0]["content_excerpt"] == ""
+        assert payload["recent_interventions"][0]["policy_action"] == ""
+        assert payload["recent_interventions"][0]["latest_outcome"] == ""
+        assert payload["recent_interventions"][0]["resume_message"] == "Continue from this guardian intervention."
 
     @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):

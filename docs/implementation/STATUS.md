@@ -218,8 +218,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Guardian intelligence
 
-- [ ] stronger learning and feedback loops beyond the current evidence-weighted delivery/channel/timing/blocked-state/suppression layer, the new multi-day and scheduled-outcome watchpoint pass, and the first live-versus-durable procedural arbitration pass
-- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer, the new goal-alignment plus routine/collaborator watchpoint pass, the first additive provider-backed user/project augmentation pass, and the first focus-provenance plus contradiction-aware confidence pass
+- [ ] stronger learning and feedback loops beyond the current evidence-weighted delivery/channel/timing/blocked-state/suppression layer, the new multi-day and scheduled-outcome watchpoint pass, the first live-versus-durable procedural arbitration pass, and the new inspectable learning-diagnostics layer
+- [ ] deeper guardian world modeling, learning loops, and stronger intervention quality beyond the new project/routine/collaborator/obligation-aware world-model layer, the new explicit project-ranking diagnostics, stale-signal arbitration pass, the first goal-alignment plus routine/collaborator watchpoint pass, the first additive provider-backed user/project augmentation pass, and the first focus-provenance plus contradiction-aware confidence pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 
 ### Interface and presence
@@ -238,7 +238,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
 - [x] Execution hardening now also covers scoped extension mutation approvals, connector-backed authenticated mutation planning plus executable bounded adapter actions, explicit trust-boundary payloads across workflow/operator/activity surfaces, operator-visible approval scope metadata, and heavier CI stabilization for long-tail backend/frontend suites instead of only replay blocking plus generic pending-approval rows.
-- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser step-level workflow/operator debugging beyond the new triage and evidence-control layer, stronger intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, and production-grade hardening for the broadened reach surface.
+- [ ] The biggest gaps against the reference systems are now deeper execution hardening, denser step-level workflow/operator debugging beyond the new triage and evidence-control layer, stronger intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, the new project-ranking and stale-signal arbitration diagnostics, and production-grade hardening for the broadened reach surface.
 - [ ] The next major step is to harden and generalize the imported capability surface around atomic capability contracts, broader authenticated adapter operations, and stronger execution boundaries without losing the existing guardian trust and memory foundations.
 
 ## Workstream View

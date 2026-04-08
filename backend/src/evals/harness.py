@@ -4646,6 +4646,8 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "focus_source": state.world_model.focus_source,
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
+            "project_ranking_diagnostics_count": len(state.world_model.project_ranking_diagnostics),
+            "stale_signal_arbitration_count": len(state.world_model.stale_signal_arbitration),
             "active_blockers": list(state.world_model.active_blockers),
             "next_up": list(state.world_model.next_up),
             "dominant_thread": state.world_model.dominant_thread,
@@ -4674,6 +4676,10 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
                 "follow-through risk" in item
                 for item in state.world_model.judgment_risks
             ),
+            "includes_project_ranking_diagnostics": any(
+                "Investor brief: score=" in item
+                for item in state.world_model.project_ranking_diagnostics
+            ),
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
             "agent_instructions_include_projects": "Active projects:" in instructions,
@@ -4681,6 +4687,7 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "agent_instructions_include_next_up": "Next up:" in instructions,
             "agent_instructions_include_dominant_thread": "Dominant thread:" in instructions,
             "agent_instructions_include_memory_signals": "Memory signals:" in instructions,
+            "agent_instructions_include_learning_diagnostics": "Learning diagnostics:" in instructions,
             "strategist_instructions_include_receptivity": (
                 "Intervention receptivity: low" in strategist_agent.instructions
             ),
@@ -4789,6 +4796,8 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "world_model_confidence": state.confidence.world_model,
         "focus_source": state.world_model.focus_source,
         "judgment_risk_count": len(state.world_model.judgment_risks),
+        "project_ranking_diagnostics_count": len(state.world_model.project_ranking_diagnostics),
+        "stale_signal_arbitration_count": len(state.world_model.stale_signal_arbitration),
         "includes_project_mismatch": any(
             "does not match recalled project context" in item
             for item in state.world_model.judgment_risks
@@ -4813,6 +4822,14 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "includes_project_anchor_drift": any(
             "drifting toward 'Hermes migration' instead of 'Atlas'" in item
             for item in state.world_model.judgment_risks
+        ),
+        "includes_ranked_project_diagnostics": any(
+            "Hermes migration: score=" in item
+            for item in state.world_model.project_ranking_diagnostics
+        ),
+        "includes_stale_signal_arbitration": any(
+            "Observer project 'Atlas' is being overruled" in item
+            for item in state.world_model.stale_signal_arbitration
         ),
         "decision_action": decision.action.value,
         "decision_reason": decision.reason,
@@ -4941,6 +4958,7 @@ async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
         "multi_day_negative_days": signal.multi_day_negative_days,
         "scheduled_negative_days": signal.scheduled_negative_days,
         "intervention_receptivity": state.world_model.intervention_receptivity,
+        "learning_diagnostics_count": len(state.learning_diagnostics),
         "has_goal_alignment_signal": any(
             "aligns with project anchor 'Investor brief'" in item
             for item in state.world_model.goal_alignment_signals
@@ -4960,6 +4978,14 @@ async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
         "has_multi_day_risk": any(
             "Multi-day intervention outcomes have skewed negative" in item
             for item in state.world_model.judgment_risks
+        ),
+        "has_learning_scope_diagnostic": any(
+            "Live learning is currently anchored" in item
+            for item in state.learning_diagnostics
+        ),
+        "has_learning_spread_diagnostic": any(
+            "Long-horizon spread:" in item
+            for item in state.learning_diagnostics
         ),
     }
 
@@ -6199,6 +6225,17 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
                     "created_at": "2026-03-18T12:02:00Z",
                 }
             ],
+        ),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            return_value={
+                "summary": {
+                    "continuity_health": "ready",
+                    "primary_surface": "browser",
+                    "recommended_focus": None,
+                },
+                "recovery_actions": [],
+            },
         ),
     ):
         payload = await get_operator_timeline(limit=10, session_id="thread-1")

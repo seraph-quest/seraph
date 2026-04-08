@@ -9064,6 +9064,8 @@ describe("CockpitView", () => {
   });
 
   it("surfaces the team control plane in the operator terminal", async () => {
+    let controlPlaneUrl: string | null = null;
+
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) {
@@ -9134,6 +9136,7 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
       }
       if (url.includes("/api/operator/control-plane")) {
+        controlPlaneUrl = url;
         return Promise.resolve(mockResponse({
           governance: {
             workspace_mode: "single_operator_guarded_workspace",
@@ -9251,8 +9254,8 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByText("team control plane")).toBeInTheDocument());
-    expect(screen.getByText(/single operator guarded workspace/i)).toBeInTheDocument();
+    const controlPlane = await screen.findByRole("region", { name: /team control plane/i });
+    await waitFor(() => expect(controlPlane).toHaveTextContent(/single operator guarded workspace/i));
     expect(screen.getByText(/7 llm/i)).toBeInTheDocument();
     expect(screen.getByText(/1 blocked workflows/i)).toBeInTheDocument();
     expect(screen.getByText(/4\/5 extensions ready/i)).toBeInTheDocument();
@@ -9261,5 +9264,6 @@ describe("CockpitView", () => {
     expect(screen.getByText("Review Telegram relay")).toBeInTheDocument();
     expect(screen.getByText("Approval requested for write_file")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "continue" }).length).toBeGreaterThan(0);
+    expect(controlPlaneUrl).not.toContain("session_id=");
   });
 });

@@ -3129,7 +3129,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/capabilities/overview`),
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/control-plane${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/control-plane`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),

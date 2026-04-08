@@ -313,15 +313,17 @@ def _handoff_entries(
 ) -> dict[str, Any]:
     approvals: list[dict[str, Any]] = []
     for approval in pending_approvals[:4]:
-        session_id = approval.get("thread_id") or approval.get("session_id")
+        approval_thread_id = approval.get("thread_id") or approval.get("session_id")
         approvals.append({
             "id": f"approval:{approval.get('id')}",
             "kind": "approval",
             "label": str(approval.get("tool_name") or "approval"),
             "detail": str(approval.get("summary") or "Approval pending"),
             "status": str(approval.get("risk_level") or "pending"),
-            "thread_id": session_id,
-            "thread_label": approval.get("thread_label") or session_titles.get(str(session_id)) if session_id else None,
+            "thread_id": approval_thread_id,
+            "thread_label": (
+                approval.get("thread_label") or session_titles.get(str(approval_thread_id))
+            ) if approval_thread_id else None,
             "continue_message": approval.get("resume_message"),
         })
 

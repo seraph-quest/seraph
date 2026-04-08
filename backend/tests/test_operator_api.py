@@ -600,10 +600,7 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
             AsyncMock(return_value=[{"id": "session-1", "title": "Session 1"}]),
         ),
     ):
-        resp = await client.get(
-            "/api/operator/control-plane",
-            params={"window_hours": 24, "session_id": "session-1"},
-        )
+        resp = await client.get("/api/operator/control-plane", params={"window_hours": 24})
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -632,7 +629,8 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
     assert handoff["blocked_workflows"][0]["trust_boundary"]["status"] == "changed"
     assert handoff["blocked_workflows"][0]["trust_boundary"]["reason"] == "approval_context_changed"
     assert handoff["follow_ups"][0]["label"] == "Review Telegram relay"
-    assert len(handoff["follow_ups"]) == 1
+    assert len(handoff["follow_ups"]) == 2
+    assert handoff["follow_ups"][1]["label"] == "Ignore unrelated follow-up"
     assert handoff["review_receipts"][0]["status"] == "approval_requested"
 
 

@@ -37,6 +37,7 @@
 - [x] cockpit workflow density now also exposes family-history comparison summaries, family-output reuse, direct compare-output drafts across workflow branches, family-row checkpoint drill-in, direct family-row retry/repair controls, and bundled next-step planning drafts from workflow family state, so operators can compare sibling or ancestor runs, reuse the freshest useful family output, branch or retry from family checkpoints, repair failed family steps, and draft continuation plans without reconstructing lineage manually
 - [x] cockpit artifact control now also exposes source-run provenance when lineage is uniquely visible, related family outputs, follow-on workflow rows, artifact next-step drafting, and keyboard-first artifact inspect/plan/run shortcuts instead of treating artifacts as generic file-context handoff only
 - [x] cockpit artifact control now also exposes source-run open/continue, source-failure reuse, related-output comparison, family-output continuation/recovery parity, and explicit candidate-source rows when lineage is ambiguous instead of collapsing artifact follow-through into one inspector-only path
+- [x] cockpit operator-terminal density now also includes a dedicated workflow-supervision lane with history summaries, branch-debug context, direct continue/retry/repair/use-output/failure-context/best-continuation controls, and a top-supervision keyboard shortcut, so operators can supervise recent completed and in-flight runs without waiting for them to surface as active triage
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -63,12 +64,13 @@
 - [x] this workstream now also ships `workflow-family-recovery-control-parity-v1`
 - [x] this workstream now also ships `artifact-lineage-and-follow-on-control-v1`
 - [x] this workstream now also ships `artifact-lineage-and-long-running-control-v2`
+- [x] this workstream now also ships `operator-control-plane-and-workflow-supervision-v1`
 - [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
 
 ## Still To Do On `develop`
 
 - [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight, repair, bounded bootstrap, and first studio save flows
-- [ ] broader long-running workflow control, richer keyboard/operator density, and more flexible workspace ergonomics inside the cockpit beyond the current workflow-run layer, branch debugger, family-history comparison/output-diff layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
+- [ ] broader long-running workflow control, richer keyboard/operator density, and more flexible workspace ergonomics inside the cockpit beyond the current workflow-run layer, branch debugger, workflow-supervision lane, family-history comparison/output-diff layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 

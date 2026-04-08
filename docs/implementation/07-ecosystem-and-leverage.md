@@ -88,6 +88,7 @@
 - [x] `adapter-backed-authenticated-source-operations-v3` now ships reusable `plan_source_review` planning, bundled daily/progress/goal-alignment source-review starter packs and runbooks, explicit mixed-source review fallback truth, and backend CI sharding for the growing test surface
 - [x] `artifact-lineage-and-follow-on-control-v1` now ships verified artifact source-run provenance with explicit unresolved-state fallback, related family outputs, richer follow-on workflow rows, and artifact-specific planning shortcuts instead of leaving typed artifact chaining buried inside workflow-only inspector actions
 - [x] `artifact-lineage-and-long-running-control-v2` now ships artifact source-run open/continue plus source-failure and related-output comparison shortcuts across evidence, outputs, and inspector panes, while the backend CI surface now uses weighted shard assignment and ten backend shards to keep the growing test matrix stable
+- [x] `operator-control-plane-and-workflow-supervision-v1` now ships a dedicated operator-terminal workflow-supervision lane with history, lineage, and recovery summaries across recent runs, plus specialized `test_tools_api.py` CI sharding so the heaviest control-plane suite stops timing out as one monolithic backend bucket
 
 ## Review Follow-Up
 
@@ -118,7 +119,7 @@
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the current install/recommendation, preflight/autorepair, policy-aware recovery, catalog-install, and bounded bootstrap flow
 - [ ] richer extension health/test surfaces, deeper marketplace curation, and production-grade connector hardening beyond the current lifecycle API, governance queue, diagnostics summaries, operator health triage, and deterministic eval coverage
-- [ ] deeper multi-session workflow operating surfaces beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, explicit output/checkpoint/lineage workflow history rows, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
+- [ ] deeper multi-session workflow operating surfaces beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, workflow-supervision rows, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, explicit output/checkpoint/lineage workflow history rows, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the current operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, extension studio, and skill-registry loop
 - [ ] better leverage of delegation without making the product harder to trust or reason about
 

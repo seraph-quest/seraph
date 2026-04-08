@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from src.api.observer import _observer_presence_surface_payload
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
 from src.observer.context import CurrentContext
@@ -626,6 +627,53 @@ class TestObserverAPI:
                 },
             ),
             patch(
+                "src.api.observer._observer_presence_surface_payload",
+                return_value={
+                    "summary": {
+                        "surface_count": 2,
+                        "active_surface_count": 1,
+                        "ready_surface_count": 1,
+                        "attention_surface_count": 1,
+                    },
+                    "surfaces": [
+                        {
+                            "id": "messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                            "kind": "messaging_connector",
+                            "label": "Telegram relay",
+                            "package_label": "Seraph Relay Pack",
+                            "package_id": "seraph.relay",
+                            "status": "requires_config",
+                            "active": False,
+                            "ready": False,
+                            "attention": True,
+                            "detail": "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                            "repair_hint": "Finish connector configuration in the operator surface before routing follow-through here.",
+                            "follow_up_hint": None,
+                            "follow_up_prompt": None,
+                            "transport": None,
+                            "source_type": None,
+                        },
+                        {
+                            "id": "channel_adapters:seraph.native:channels/native.yaml",
+                            "kind": "channel_adapter",
+                            "label": "native notification channel",
+                            "package_label": "Seraph Native Pack",
+                            "package_id": "seraph.native",
+                            "status": "ready",
+                            "active": True,
+                            "ready": True,
+                            "attention": False,
+                            "detail": "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                            "repair_hint": None,
+                            "follow_up_hint": "Use operator review before routing external follow-through through this surface.",
+                            "follow_up_prompt": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+                            "transport": "native_notification",
+                            "source_type": None,
+                        },
+                    ],
+                },
+            ),
+            patch(
                 "src.api.observer.session_manager.list_sessions",
                 AsyncMock(return_value=[]),
             ),
@@ -636,6 +684,9 @@ class TestObserverAPI:
         payload = resp.json()
         assert payload["imported_reach"]["summary"]["attention_family_count"] == 1
         assert payload["source_adapters"]["summary"]["degraded_adapter_count"] == 1
+        assert payload["presence_surfaces"]["summary"]["surface_count"] == 2
+        assert payload["summary"]["presence_surface_count"] == 2
+        assert payload["summary"]["attention_presence_surface_count"] == 1
         assert payload["summary"]["continuity_health"] == "attention"
         assert payload["summary"]["primary_surface"] == "source_adapter"
         assert payload["summary"]["recommended_focus"] == "github-managed"
@@ -649,6 +700,18 @@ class TestObserverAPI:
             item["kind"] == "imported_reach_attention"
             and item["surface"] == "imported_reach"
             and item["label"] == "Review imported messaging"
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "presence_repair"
+            and item["surface"] == "presence"
+            and item["label"] == "Review presence surface Telegram relay"
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "presence_follow_up"
+            and item["surface"] == "presence"
+            and item["label"] == "Plan follow-up via native notification channel"
             for item in payload["recovery_actions"]
         )
 
@@ -948,3 +1011,48 @@ class TestObserverAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert "total_observations" in data
+
+    def test_observer_presence_surface_payload_keeps_disabled_and_planned_surfaces_visible(self):
+        with patch(
+            "src.extensions.lifecycle.list_extensions",
+            return_value={
+                "extensions": [
+                    {
+                        "id": "seraph.presence.pack",
+                        "display_name": "Presence Pack",
+                        "contributions": [
+                            {
+                                "type": "messaging_connectors",
+                                "name": "Telegram relay",
+                                "platform": "telegram",
+                                "reference": "connectors/messaging/telegram.yaml",
+                                "status": "disabled",
+                                "active": False,
+                            },
+                            {
+                                "type": "observer_definitions",
+                                "name": "Calendar observer",
+                                "source_type": "calendar",
+                                "reference": "observers/calendar.yaml",
+                                "status": "planned",
+                                "active": False,
+                            },
+                        ],
+                    }
+                ]
+            },
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["attention_surface_count"] == 2
+        assert any(
+            item["status"] == "disabled"
+            and item["repair_hint"] == "Re-enable this packaged contribution in extension lifecycle state."
+            for item in payload["surfaces"]
+        )
+        assert any(
+            item["status"] == "planned"
+            and item["repair_hint"] == "Enable the packaged contribution and confirm its runtime prerequisites in the operator surface."
+            for item in payload["surfaces"]
+        )

@@ -131,6 +131,16 @@ def _continuity_activity_items(
                     if isinstance(snapshot.get("summary"), dict)
                     else None
                 ),
+                "presence_surface_count": (
+                    snapshot.get("summary", {}).get("presence_surface_count")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "attention_presence_surface_count": (
+                    snapshot.get("summary", {}).get("attention_presence_surface_count")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
             },
         })
     return items

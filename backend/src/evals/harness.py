@@ -5539,6 +5539,53 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
                     ],
                 },
             ),
+            patch(
+                "src.api.observer._observer_presence_surface_payload",
+                return_value={
+                    "summary": {
+                        "surface_count": 2,
+                        "active_surface_count": 1,
+                        "ready_surface_count": 1,
+                        "attention_surface_count": 1,
+                    },
+                    "surfaces": [
+                        {
+                            "id": "messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                            "kind": "messaging_connector",
+                            "label": "Telegram relay",
+                            "package_label": "Seraph Relay Pack",
+                            "package_id": "seraph.relay",
+                            "status": "requires_config",
+                            "active": False,
+                            "ready": False,
+                            "attention": True,
+                            "detail": "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                            "repair_hint": "Finish connector configuration in the operator surface before routing follow-through here.",
+                            "follow_up_hint": None,
+                            "follow_up_prompt": None,
+                            "transport": None,
+                            "source_type": None,
+                        },
+                        {
+                            "id": "channel_adapters:seraph.native:channels/native.yaml",
+                            "kind": "channel_adapter",
+                            "label": "native notification channel",
+                            "package_label": "Seraph Native Pack",
+                            "package_id": "seraph.native",
+                            "status": "ready",
+                            "active": True,
+                            "ready": True,
+                            "attention": False,
+                            "detail": "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                            "repair_hint": None,
+                            "follow_up_hint": "Use operator review before routing external follow-through through this surface.",
+                            "follow_up_prompt": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+                            "transport": "native_notification",
+                            "source_type": None,
+                        },
+                    ],
+                },
+            ),
             patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
             patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
             patch("src.api.operator.audit_repository.list_events", AsyncMock(return_value=[])),
@@ -5582,10 +5629,18 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         "bundle_surface_present": "bundle_queue" in surfaces,
         "degraded_source_adapter_count": continuity["summary"]["degraded_source_adapter_count"],
         "attention_family_count": continuity["summary"]["attention_family_count"],
+        "presence_surface_count": continuity["summary"]["presence_surface_count"],
+        "attention_presence_surface_count": continuity["summary"]["attention_presence_surface_count"],
         "source_adapter_recovery_present": any(item["kind"] == "source_adapter_repair" for item in continuity["recovery_actions"]),
+        "presence_recovery_present": any(item["kind"] == "presence_repair" for item in continuity["recovery_actions"]),
+        "presence_follow_up_present": any(item["kind"] == "presence_follow_up" for item in continuity["recovery_actions"]),
         "imported_reach_recovery_present": any(item["kind"] == "imported_reach_attention" for item in continuity["recovery_actions"]),
         "operator_source_adapter_recovery_present": any(
             item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "source_adapter_repair"
+            for item in operator_items
+        ),
+        "operator_presence_recovery_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "presence_repair"
             for item in operator_items
         ),
         "operator_imported_reach_recovery_present": any(
@@ -5594,6 +5649,10 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         ),
         "activity_source_adapter_recovery_present": any(
             item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "source_adapter_repair"
+            for item in activity_items
+        ),
+        "activity_presence_recovery_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "presence_repair"
             for item in activity_items
         ),
         "activity_imported_reach_recovery_present": any(

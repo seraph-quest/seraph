@@ -20,6 +20,7 @@ export interface SeraphPresenceSnapshot {
   degradedRouteCount: number;
   degradedSourceAdapterCount: number;
   attentionImportedFamilyCount: number;
+  attentionPresenceSurfaceCount: number;
   actionableThreadCount: number;
   continuityHealth?: string | null;
   recommendedFocus?: string | null;
@@ -132,6 +133,7 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
     || snapshot.queuedInsightCount > 0
     || snapshot.degradedSourceAdapterCount > 0
     || snapshot.attentionImportedFamilyCount > 0
+    || snapshot.attentionPresenceSurfaceCount > 0
     || snapshot.latestResponseRole === "proactive"
     || snapshot.ambientState === "has_insight"
     || snapshot.recentInterventionCount > 0

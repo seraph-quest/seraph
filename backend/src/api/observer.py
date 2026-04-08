@@ -181,6 +181,36 @@ class ObserverSourceAdapterInventoryResponse(BaseModel):
     adapters: list[ObserverSourceAdapterResponse]
 
 
+class ObserverPresenceSurfaceResponse(BaseModel):
+    id: str
+    kind: str
+    label: str
+    package_label: str
+    package_id: str | None = None
+    status: str
+    active: bool
+    ready: bool
+    attention: bool
+    detail: str
+    repair_hint: str | None = None
+    follow_up_hint: str | None = None
+    follow_up_prompt: str | None = None
+    transport: str | None = None
+    source_type: str | None = None
+
+
+class ObserverPresenceSummaryResponse(BaseModel):
+    surface_count: int
+    active_surface_count: int
+    ready_surface_count: int
+    attention_surface_count: int
+
+
+class ObserverPresenceInventoryResponse(BaseModel):
+    summary: ObserverPresenceSummaryResponse
+    surfaces: list[ObserverPresenceSurfaceResponse]
+
+
 class ObserverContinuitySummaryResponse(BaseModel):
     continuity_health: str
     primary_surface: str
@@ -193,6 +223,8 @@ class ObserverContinuitySummaryResponse(BaseModel):
     degraded_route_count: int
     degraded_source_adapter_count: int
     attention_family_count: int
+    presence_surface_count: int = 0
+    attention_presence_surface_count: int = 0
 
 
 class ObserverContinuityThreadResponse(BaseModel):
@@ -236,6 +268,7 @@ class ObserverContinuityResponse(BaseModel):
     reach: ObserverReachResponse
     imported_reach: ObserverImportedReachResponse
     source_adapters: ObserverSourceAdapterInventoryResponse
+    presence_surfaces: ObserverPresenceInventoryResponse | None = None
     summary: ObserverContinuitySummaryResponse
     threads: list[ObserverContinuityThreadResponse]
     recovery_actions: list[ObserverContinuityRecoveryActionResponse]
@@ -409,6 +442,13 @@ _IMPORTED_REACH_FAMILY_DEFS: tuple[tuple[str, str], ...] = (
     ("observer_definitions", "observer sources"),
 )
 
+_PRESENCE_CONTRIBUTION_TYPES = {
+    "channel_adapters",
+    "messaging_connectors",
+    "node_adapters",
+    "observer_definitions",
+}
+
 
 def _extension_contribution_active(contribution: dict[str, Any]) -> bool:
     health = contribution.get("health")
@@ -581,6 +621,203 @@ def _observer_source_adapter_payload() -> dict[str, Any]:
     }
 
 
+def _presence_surface_status(contribution: dict[str, Any]) -> str:
+    health = contribution.get("health")
+    health_state = health.get("state") if isinstance(health, dict) else ""
+    return str(contribution.get("status") or health_state or "unknown").strip().lower() or "unknown"
+
+
+def _presence_surface_attention(contribution: dict[str, Any]) -> bool:
+    permission_profile = contribution.get("permission_profile")
+    status = _presence_surface_status(contribution)
+    return status in {
+        "degraded",
+        "disabled",
+        "invalid",
+        "invalid_config",
+        "overridden",
+        "planned",
+        "requires_config",
+    } or (
+        isinstance(permission_profile, dict)
+        and str(permission_profile.get("status") or "") == "missing_permissions"
+    )
+
+
+def _presence_surface_ready(contribution: dict[str, Any]) -> bool:
+    health = contribution.get("health")
+    status = _presence_surface_status(contribution)
+    return _extension_contribution_active(contribution) and (
+        (bool(health.get("ready")) if isinstance(health, dict) else False)
+        or status in {"ready", "active", "connected", "loaded", "enabled"}
+    )
+
+
+def _presence_surface_kind(contribution_type: str) -> str:
+    return {
+        "channel_adapters": "channel_adapter",
+        "messaging_connectors": "messaging_connector",
+        "node_adapters": "node_adapter",
+        "observer_definitions": "observer_definition",
+    }.get(contribution_type, contribution_type)
+
+
+def _presence_surface_label(contribution: dict[str, Any]) -> str:
+    contribution_type = str(contribution.get("type") or "")
+    name = str(contribution.get("name") or "").strip()
+    if contribution_type == "channel_adapters":
+        transport = str(contribution.get("transport") or "channel").replace("_", " ")
+        return name or f"{transport} channel"
+    if contribution_type == "messaging_connectors":
+        platform = str(contribution.get("platform") or "messaging").replace("_", " ")
+        return name or f"{platform} messaging"
+    if contribution_type == "observer_definitions":
+        source_type = str(contribution.get("source_type") or "observer").replace("_", " ")
+        return name or f"{source_type} observer"
+    if contribution_type == "node_adapters":
+        return name or "node adapter"
+    return name or contribution_type.replace("_", " ")
+
+
+def _presence_surface_detail(contribution: dict[str, Any], *, package_label: str) -> str:
+    contribution_type = str(contribution.get("type") or "")
+    label = _presence_surface_label(contribution)
+    status = _presence_surface_status(contribution).replace("_", " ")
+    if contribution_type == "channel_adapters":
+        transport = str(contribution.get("transport") or "channel").replace("_", " ")
+        return f"{package_label} exposes {label} for {transport} delivery ({status})."
+    if contribution_type == "messaging_connectors":
+        platform = str(contribution.get("platform") or "messaging").replace("_", " ")
+        return f"{package_label} exposes {label} on {platform} ({status})."
+    if contribution_type == "observer_definitions":
+        source_type = str(contribution.get("source_type") or "observer").replace("_", " ")
+        return f"{package_label} adds {label} for {source_type} observation ({status})."
+    if contribution_type == "node_adapters":
+        return f"{package_label} adds {label} for companion execution or device reach ({status})."
+    return f"{package_label} exposes {label} ({status})."
+
+
+def _presence_surface_repair_hint(contribution: dict[str, Any]) -> str | None:
+    status = _presence_surface_status(contribution)
+    contribution_type = str(contribution.get("type") or "")
+    if status in {"ready", "active", "connected", "loaded", "enabled"}:
+        return None
+    if status == "requires_config":
+        return "Finish connector configuration in the operator surface before routing follow-through here."
+    if status == "planned":
+        return "Enable the packaged contribution and confirm its runtime prerequisites in the operator surface."
+    if status == "overridden":
+        return "Inspect the competing packaged contribution that currently owns this surface."
+    if status == "disabled":
+        return "Re-enable this packaged contribution in extension lifecycle state."
+    if contribution_type == "channel_adapters":
+        return "Inspect channel routing and extension diagnostics in the operator surface."
+    if contribution_type == "observer_definitions":
+        return "Inspect observer package state and manifest diagnostics in the operator surface."
+    return "Inspect extension diagnostics and runtime prerequisites in the operator surface."
+
+
+def _presence_surface_follow_up_prompt(contribution: dict[str, Any]) -> str | None:
+    contribution_type = str(contribution.get("type") or "")
+    if contribution_type not in {"channel_adapters", "messaging_connectors"}:
+        return None
+    if not _presence_surface_ready(contribution):
+        return None
+    label = _presence_surface_label(contribution)
+    return (
+        f"Plan guarded follow-through for {label}. Confirm the audience, target reference, "
+        "channel scope, and approval boundaries before acting."
+    )
+
+
+def _observer_presence_surface_payload() -> dict[str, Any]:
+    from src.extensions.lifecycle import list_extensions
+
+    payload = list_extensions()
+    extensions = [
+        item
+        for item in payload.get("extensions", [])
+        if isinstance(item, dict)
+    ]
+
+    surfaces: list[dict[str, Any]] = []
+    for extension in extensions:
+        contributions = extension.get("contributions")
+        if not isinstance(contributions, list):
+            continue
+        package_label = str(extension.get("display_name") or extension.get("id") or "").strip() or "Extension package"
+        package_id = str(extension.get("id") or "").strip() or None
+        for contribution in contributions:
+            if not isinstance(contribution, dict):
+                continue
+            contribution_type = str(contribution.get("type") or "")
+            if contribution_type not in _PRESENCE_CONTRIBUTION_TYPES:
+                continue
+            status = _presence_surface_status(contribution)
+            active = _extension_contribution_active(contribution)
+            ready = _presence_surface_ready(contribution)
+            attention = _presence_surface_attention(contribution)
+            follow_up_prompt = _presence_surface_follow_up_prompt(contribution)
+            if not (
+                active
+                or attention
+                or follow_up_prompt
+                or status in {"planned", "overridden", "disabled"}
+            ):
+                continue
+            surfaces.append({
+                "id": (
+                    f"{contribution_type}:{package_id or package_label}:"
+                    f"{str(contribution.get('reference') or contribution.get('name') or contribution.get('transport') or contribution.get('source_type') or '')}"
+                ),
+                "kind": _presence_surface_kind(contribution_type),
+                "label": _presence_surface_label(contribution),
+                "package_label": package_label,
+                "package_id": package_id,
+                "status": status,
+                "active": active,
+                "ready": ready,
+                "attention": attention,
+                "detail": _presence_surface_detail(contribution, package_label=package_label),
+                "repair_hint": _presence_surface_repair_hint(contribution),
+                "follow_up_hint": (
+                    "Use operator review before routing external follow-through through this surface."
+                    if follow_up_prompt
+                    else None
+                ),
+                "follow_up_prompt": follow_up_prompt,
+                "transport": (
+                    str(contribution.get("transport") or "").strip() or None
+                    if contribution_type == "channel_adapters"
+                    else None
+                ),
+                "source_type": (
+                    str(contribution.get("source_type") or "").strip() or None
+                    if contribution_type == "observer_definitions"
+                    else None
+                ),
+            })
+
+    surfaces = sorted(
+        surfaces,
+        key=lambda item: (
+            0 if bool(item.get("attention")) else 1 if not bool(item.get("ready")) else 2,
+            str(item.get("kind") or ""),
+            str(item.get("label") or ""),
+            str(item.get("package_label") or ""),
+        ),
+    )
+    return {
+        "summary": {
+            "surface_count": len(surfaces),
+            "active_surface_count": sum(1 for item in surfaces if bool(item.get("active"))),
+            "ready_surface_count": sum(1 for item in surfaces if bool(item.get("ready"))),
+            "attention_surface_count": sum(1 for item in surfaces if bool(item.get("attention"))),
+        },
+        "surfaces": surfaces,
+    }
+
+
 def _summarize_thread_surfaces(surfaces: list[str]) -> str:
     labels = [surface.replace("_", " ") for surface in surfaces]
     if not labels:
@@ -720,6 +957,7 @@ def _build_continuity_recovery_actions(
     route_statuses: list[dict[str, Any]],
     imported_reach: dict[str, Any],
     source_adapters: dict[str, Any],
+    presence_surfaces: dict[str, Any],
     threads: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
@@ -813,6 +1051,39 @@ def _build_continuity_recovery_actions(
             "open_thread_available": False,
         })
 
+    for presence_surface in presence_surfaces.get("surfaces", []):
+        if not isinstance(presence_surface, dict):
+            continue
+        if bool(presence_surface.get("attention")):
+            actions.append({
+                "id": f"presence:{presence_surface.get('id')}",
+                "kind": "presence_repair",
+                "label": f"Review presence surface {presence_surface.get('label')}",
+                "detail": str(presence_surface.get("detail") or ""),
+                "status": str(presence_surface.get("status") or "attention"),
+                "surface": "presence",
+                "route": str(presence_surface.get("kind") or "") or None,
+                "repair_hint": presence_surface.get("repair_hint"),
+                "thread_id": None,
+                "continue_message": None,
+                "open_thread_available": False,
+            })
+            continue
+        if str(presence_surface.get("kind") or "") in {"channel_adapter", "messaging_connector"} and bool(presence_surface.get("follow_up_prompt")):
+            actions.append({
+                "id": f"presence-follow:{presence_surface.get('id')}",
+                "kind": "presence_follow_up",
+                "label": f"Plan follow-up via {presence_surface.get('label')}",
+                "detail": str(presence_surface.get("detail") or ""),
+                "status": "ready",
+                "surface": "presence",
+                "route": str(presence_surface.get("kind") or "") or None,
+                "repair_hint": presence_surface.get("follow_up_hint"),
+                "thread_id": None,
+                "continue_message": presence_surface.get("follow_up_prompt"),
+                "open_thread_available": False,
+            })
+
     for thread in threads:
         thread_name = thread.get("thread_label") or (
             f"thread {str(thread['thread_id'])[:6]}" if thread.get("thread_id") else "ambient follow-up"
@@ -834,7 +1105,12 @@ def _build_continuity_recovery_actions(
     return sorted(
         actions,
         key=lambda item: (
-            0 if item["kind"] == "reach_repair" else 1 if item["kind"] == "source_adapter_repair" else 2 if item["kind"] == "imported_reach_attention" else 3,
+            0 if item["kind"] == "reach_repair" else
+            1 if item["kind"] == "source_adapter_repair" else
+            2 if item["kind"] == "presence_repair" else
+            3 if item["kind"] == "imported_reach_attention" else
+            4 if item["kind"] == "thread_follow_up" else
+            5,
             _continuity_surface_priority(item.get("surface")),
             item["label"],
         ),
@@ -849,6 +1125,7 @@ def _build_continuity_summary(
     route_statuses: list[dict[str, Any]],
     imported_reach: dict[str, Any],
     source_adapters: dict[str, Any],
+    presence_surfaces: dict[str, Any],
     threads: list[dict[str, Any]],
 ) -> dict[str, Any]:
     degraded_routes = [item for item in route_statuses if str(item.get("status") or "") != "ready"]
@@ -861,6 +1138,11 @@ def _build_continuity_summary(
         item
         for item in imported_reach.get("families", [])
         if isinstance(item, dict) and int(item.get("attention") or 0) > 0
+    ]
+    attention_presence_surfaces = [
+        item
+        for item in presence_surfaces.get("surfaces", [])
+        if isinstance(item, dict) and bool(item.get("attention"))
     ]
     ambient_item_count = sum(
         int(item.get("item_count", 0))
@@ -887,6 +1169,11 @@ def _build_continuity_summary(
         continuity_health = "attention"
         primary_surface = "source_adapter"
         recommended_focus = str(lead_adapter.get("name") or "source adapter recovery")
+    elif attention_presence_surfaces:
+        lead_surface = attention_presence_surfaces[0]
+        continuity_health = "attention"
+        primary_surface = "presence"
+        recommended_focus = str(lead_surface.get("label") or "presence surface review")
     elif attention_families:
         lead_family = attention_families[0]
         continuity_health = "attention"
@@ -913,6 +1200,8 @@ def _build_continuity_summary(
         "degraded_route_count": len(degraded_routes),
         "degraded_source_adapter_count": len(degraded_source_adapters),
         "attention_family_count": len(attention_families),
+        "presence_surface_count": int(presence_surfaces.get("summary", {}).get("surface_count") or 0),
+        "attention_presence_surface_count": len(attention_presence_surfaces),
     }
 
 
@@ -1006,6 +1295,7 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
     reach_payload = _observer_reach_payload()
     imported_reach_payload = _observer_imported_reach_payload()
     source_adapter_payload = _observer_source_adapter_payload()
+    presence_surface_payload = _observer_presence_surface_payload()
 
     notifications_payload = [
         {
@@ -1110,6 +1400,7 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
         route_statuses=reach_payload["route_statuses"],
         imported_reach=imported_reach_payload,
         source_adapters=source_adapter_payload,
+        presence_surfaces=presence_surface_payload,
         threads=thread_payload,
     )
     summary_payload = _build_continuity_summary(
@@ -1119,6 +1410,7 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
         route_statuses=reach_payload["route_statuses"],
         imported_reach=imported_reach_payload,
         source_adapters=source_adapter_payload,
+        presence_surfaces=presence_surface_payload,
         threads=thread_payload,
     )
 
@@ -1131,6 +1423,7 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
         "reach": reach_payload,
         "imported_reach": imported_reach_payload,
         "source_adapters": source_adapter_payload,
+        "presence_surfaces": presence_surface_payload,
         "summary": summary_payload,
         "threads": thread_payload,
         "recovery_actions": recovery_actions_payload,

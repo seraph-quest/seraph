@@ -25,6 +25,16 @@ _MODELING_BUCKETS = (
     "routine",
     "timeline",
 )
+_PROJECT_SCOPED_BUCKETS = {
+    "project",
+    "commitment",
+    "collaborator",
+    "obligation",
+    "routine",
+    "timeline",
+}
+_PROVIDER_WRITEBACK_MIN_CONFIDENCE = 0.55
+_PROVIDER_WRITEBACK_MIN_IMPORTANCE = 0.5
 
 _PROVIDER_STALE_WINDOWS_DAYS = {
     MemoryKind.commitment: 30,
@@ -149,6 +159,15 @@ class MemoryProviderWritebackAggregateResult:
     write_failure_count: int = 0
 
 
+@dataclass(frozen=True)
+class _ScoredProviderHit:
+    hit: MemoryProviderHit
+    rank_score: float
+    relevance_score: float
+    freshness_score: float
+    topic_matches: tuple[str, ...] = ()
+
+
 _REGISTERED_MEMORY_PROVIDER_ADAPTERS: dict[str, MemoryProviderAdapter] = {}
 
 
@@ -254,6 +273,172 @@ def _filter_stale_provider_hits(
             continue
         fresh.append(hit)
     return tuple(fresh), stale_bucket_counts
+
+
+def _normalize_topic(value: str | None) -> str:
+    normalized = "".join(
+        character.lower() if character.isalnum() else " "
+        for character in str(value or "")
+    )
+    return " ".join(normalized.split())
+
+
+def _topic_matches(candidate: str, topic: str | None) -> bool:
+    normalized_candidate = _normalize_topic(candidate)
+    normalized_topic = _normalize_topic(topic)
+    if not normalized_candidate or not normalized_topic:
+        return False
+    return (
+        normalized_topic in normalized_candidate
+        or normalized_candidate in normalized_topic
+    )
+
+
+def _recentness_score(created_at: datetime | None, *, now: datetime) -> float:
+    normalized = _normalize_provider_timestamp(created_at)
+    if normalized is None:
+        return 0.0
+    age_days = max(0.0, (now - normalized).total_seconds() / 86_400)
+    if age_days <= 3:
+        return 0.12
+    if age_days <= 14:
+        return 0.08
+    if age_days <= 45:
+        return 0.04
+    return 0.0
+
+
+def _score_provider_hit(
+    hit: MemoryProviderHit,
+    *,
+    query: str,
+    active_projects: tuple[str, ...],
+    now: datetime,
+) -> _ScoredProviderHit:
+    normalized_query = query.strip()
+    topic_matches: list[str] = []
+    relevance_score = 0.0
+    if normalized_query and _topic_matches(hit.text, normalized_query):
+        relevance_score += 0.18
+        topic_matches.append("query")
+    for project in active_projects:
+        if _topic_matches(hit.text, project):
+            relevance_score += 0.22
+            topic_matches.append(project)
+            break
+    if hit.bucket in _PROJECT_SCOPED_BUCKETS and active_projects and not topic_matches:
+        relevance_score -= 0.28
+    freshness_score = _recentness_score(hit.created_at, now=now)
+    rank_score = float(hit.score) + relevance_score + freshness_score
+    return _ScoredProviderHit(
+        hit=hit,
+        rank_score=rank_score,
+        relevance_score=relevance_score,
+        freshness_score=freshness_score,
+        topic_matches=tuple(topic_matches),
+    )
+
+
+def _provider_hit_is_relevant(
+    scored_hit: _ScoredProviderHit,
+    *,
+    query: str,
+    active_projects: tuple[str, ...],
+) -> bool:
+    if scored_hit.hit.bucket not in _PROJECT_SCOPED_BUCKETS:
+        return True
+    if not query.strip() and not active_projects:
+        return True
+    return scored_hit.relevance_score >= 0.0
+
+
+def _filter_ranked_provider_hits(
+    hits: tuple[MemoryProviderHit, ...] | list[MemoryProviderHit],
+    *,
+    query: str,
+    active_projects: tuple[str, ...],
+    now: datetime,
+    limit: int,
+) -> tuple[tuple[_ScoredProviderHit, ...], dict[str, int]]:
+    scored_hits = [
+        _score_provider_hit(
+            hit,
+            query=query,
+            active_projects=active_projects,
+            now=now,
+        )
+        for hit in hits
+    ]
+    relevant: list[_ScoredProviderHit] = []
+    suppressed_bucket_counts: dict[str, int] = {}
+    for scored_hit in scored_hits:
+        if _provider_hit_is_relevant(
+            scored_hit,
+            query=query,
+            active_projects=active_projects,
+        ):
+            relevant.append(scored_hit)
+            continue
+        bucket = scored_hit.hit.bucket
+        suppressed_bucket_counts[bucket] = suppressed_bucket_counts.get(bucket, 0) + 1
+    relevant.sort(
+        key=lambda item: (
+            -item.rank_score,
+            -float(item.hit.score),
+            item.hit.provider_name,
+            item.hit.text.lower(),
+        )
+    )
+    return tuple(relevant[:limit]), suppressed_bucket_counts
+
+
+def _summarize_quality_state(
+    *,
+    hit_count: int,
+    stale_hit_count: int,
+    suppressed_irrelevant_hit_count: int,
+    failed_capabilities: list[str],
+) -> str:
+    if failed_capabilities and not hit_count:
+        return "failed"
+    if hit_count and not stale_hit_count and not suppressed_irrelevant_hit_count:
+        return "focused"
+    if hit_count:
+        return "guarded"
+    if stale_hit_count or suppressed_irrelevant_hit_count:
+        return "suppressed"
+    return "idle"
+
+
+def _select_provider_writeback_memories(
+    memories: tuple[ConsolidatedMemoryItem, ...],
+) -> tuple[tuple[ConsolidatedMemoryItem, ...], dict[str, int], dict[str, int]]:
+    eligible: list[ConsolidatedMemoryItem] = []
+    suppressed_reason_counts = {
+        "duplicate": 0,
+        "low_quality": 0,
+    }
+    suppressed_kind_counts: dict[str, int] = {}
+    seen_keys: set[tuple[str, str]] = set()
+    for memory in memories:
+        memory_key = (
+            memory.kind.value,
+            (memory.summary or memory.text).strip().lower(),
+        )
+        if (
+            float(memory.confidence) < _PROVIDER_WRITEBACK_MIN_CONFIDENCE
+            and float(memory.importance) < _PROVIDER_WRITEBACK_MIN_IMPORTANCE
+        ):
+            suppressed_reason_counts["low_quality"] += 1
+            suppressed_kind_counts[memory.kind.value] = suppressed_kind_counts.get(memory.kind.value, 0) + 1
+            continue
+        if memory_key in seen_keys:
+            suppressed_reason_counts["duplicate"] += 1
+            suppressed_kind_counts[memory.kind.value] = suppressed_kind_counts.get(memory.kind.value, 0) + 1
+            continue
+        seen_keys.add(memory_key)
+        eligible.append(memory)
+    return tuple(eligible), suppressed_reason_counts, suppressed_kind_counts
 
 
 def _required_config_missing(config_fields: list[dict[str, Any]], config_entry: dict[str, Any]) -> bool:
@@ -426,6 +611,15 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             "modeled_buckets": list(_MODELING_BUCKETS),
             "writeback_state": capability_states.get("consolidation", "undeclared"),
         }
+        item["quality_controls"] = {
+            "freshness_windows_days": {
+                kind.value if hasattr(kind, "value") else str(kind): days
+                for kind, days in _PROVIDER_STALE_WINDOWS_DAYS.items()
+            },
+            "project_scoped_buckets": sorted(_PROJECT_SCOPED_BUCKETS),
+            "writeback_minimum_confidence": _PROVIDER_WRITEBACK_MIN_CONFIDENCE,
+            "writeback_minimum_importance": _PROVIDER_WRITEBACK_MIN_IMPORTANCE,
+        }
         for capability, state in capability_states.items():
             if state == "ready":
                 capability_summary[f"{capability}_ready_count"] += 1
@@ -451,6 +645,15 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             "Provider-backed consolidation or writeback runs only after canonical guardian persistence succeeds and remains advisory.",
             "When canonical and provider context conflict, guardian-owned memory remains authoritative and provider evidence is advisory.",
         ],
+        "quality_controls": {
+            "freshness_windows_days": {
+                kind.value if hasattr(kind, "value") else str(kind): days
+                for kind, days in _PROVIDER_STALE_WINDOWS_DAYS.items()
+            },
+            "project_scoped_buckets": sorted(_PROJECT_SCOPED_BUCKETS),
+            "writeback_minimum_confidence": _PROVIDER_WRITEBACK_MIN_CONFIDENCE,
+            "writeback_minimum_importance": _PROVIDER_WRITEBACK_MIN_IMPORTANCE,
+        },
     }
 
 
@@ -497,6 +700,7 @@ async def retrieve_additive_memory_provider_context(
         failed_capabilities: list[str] = []
         provider_degraded = False
         stale_bucket_counts: dict[str, int] = {}
+        suppressed_irrelevant_bucket_counts: dict[str, int] = {}
 
         retrieval_state = str(capability_states.get("retrieval") or "")
         if query.strip() and retrieval_state in {"ready", "degraded"} and "retrieval" in item.get("capabilities", []):
@@ -513,13 +717,24 @@ async def retrieve_additive_memory_provider_context(
                 failed_capabilities.append("retrieval")
                 provider_notes.append("Provider retrieval failed; canonical guardian memory remained in control.")
             else:
-                fresh_hits, stale_counts = _filter_stale_provider_hits(result.hits[:limit], now=now)
+                fresh_hits, stale_counts = _filter_stale_provider_hits(result.hits, now=now)
                 for bucket, count in stale_counts.items():
                     stale_bucket_counts[bucket] = stale_bucket_counts.get(bucket, 0) + count
-                provider_hits.extend(fresh_hits)
+                ranked_hits, suppressed_counts = _filter_ranked_provider_hits(
+                    fresh_hits,
+                    query=query,
+                    active_projects=active_projects,
+                    now=now,
+                    limit=limit,
+                )
+                provider_hits.extend(item.hit for item in ranked_hits)
+                for bucket, count in suppressed_counts.items():
+                    suppressed_irrelevant_bucket_counts[bucket] = (
+                        suppressed_irrelevant_bucket_counts.get(bucket, 0) + count
+                    )
                 provider_summaries.append(result.summary)
                 _merge_provider_notes(provider_notes, result.notes)
-                if fresh_hits:
+                if ranked_hits:
                     capabilities_used.append("retrieval")
                 provider_degraded = provider_degraded or result.degraded or retrieval_state == "degraded"
 
@@ -544,30 +759,73 @@ async def retrieve_additive_memory_provider_context(
                 failed_capabilities.append("user_model")
                 provider_notes.append("Provider user-model augmentation failed; canonical guardian memory remained in control.")
             else:
-                normalized_hits = _normalize_modeling_hits(result.hits[:limit], provider_name=name)
+                normalized_hits = _normalize_modeling_hits(result.hits, provider_name=name)
                 fresh_hits, stale_counts = _filter_stale_provider_hits(normalized_hits, now=now)
                 for bucket, count in stale_counts.items():
                     stale_bucket_counts[bucket] = stale_bucket_counts.get(bucket, 0) + count
-                provider_hits.extend(fresh_hits)
+                ranked_hits, suppressed_counts = _filter_ranked_provider_hits(
+                    fresh_hits,
+                    query=query,
+                    active_projects=active_projects,
+                    now=now,
+                    limit=limit,
+                )
+                provider_hits.extend(item.hit for item in ranked_hits)
+                for bucket, count in suppressed_counts.items():
+                    suppressed_irrelevant_bucket_counts[bucket] = (
+                        suppressed_irrelevant_bucket_counts.get(bucket, 0) + count
+                    )
                 provider_summaries.append(result.summary)
                 _merge_provider_notes(provider_notes, result.notes)
-                if fresh_hits:
+                if ranked_hits:
                     capabilities_used.append("user_model")
                 provider_degraded = provider_degraded or result.degraded or user_model_state == "degraded"
 
         stale_hit_count = sum(stale_bucket_counts.values())
+        suppressed_irrelevant_hit_count = sum(suppressed_irrelevant_bucket_counts.values())
         if stale_hit_count:
             provider_notes.append(
                 "Stale provider evidence was suppressed so canonical guardian memory remained the active source of truth."
+            )
+        if suppressed_irrelevant_hit_count:
+            provider_notes.append(
+                "Provider evidence that did not line up with the live query or active projects was suppressed."
             )
 
         if not attempted_capabilities and not failed_capabilities:
             continue
 
-        all_hits.extend(provider_hits[:limit])
+        all_hits.extend(provider_hits)
         bucket_counts: dict[str, int] = {}
         for hit in provider_hits:
             bucket_counts[hit.bucket] = bucket_counts.get(hit.bucket, 0) + 1
+        scored_provider_hits = [
+            _score_provider_hit(
+                hit,
+                query=query,
+                active_projects=active_projects,
+                now=now,
+            )
+            for hit in provider_hits
+        ]
+        freshness_counts = {
+            "fresh": sum(1 for item in scored_provider_hits if item.freshness_score > 0.0),
+            "undated": sum(1 for item in scored_provider_hits if item.hit.created_at is None),
+        }
+        freshness_counts["neutral"] = max(0, len(scored_provider_hits) - freshness_counts["fresh"] - freshness_counts["undated"])
+        average_rank_score = (
+            sum(item.rank_score for item in scored_provider_hits) / len(scored_provider_hits)
+            if scored_provider_hits
+            else 0.0
+        )
+        topic_matches = sorted(
+            {
+                topic
+                for item in scored_provider_hits
+                for topic in item.topic_matches
+                if topic
+            }
+        )
         diagnostics.append(
             {
                 "name": name,
@@ -586,8 +844,20 @@ async def retrieve_additive_memory_provider_context(
                 "bucket_counts": bucket_counts,
                 "stale_hit_count": stale_hit_count,
                 "stale_bucket_counts": stale_bucket_counts,
+                "suppressed_irrelevant_hit_count": suppressed_irrelevant_hit_count,
+                "suppressed_irrelevant_bucket_counts": suppressed_irrelevant_bucket_counts,
+                "freshness_counts": freshness_counts,
+                "average_rank_score": round(average_rank_score, 3),
+                "quality_state": _summarize_quality_state(
+                    hit_count=len(provider_hits),
+                    stale_hit_count=stale_hit_count,
+                    suppressed_irrelevant_hit_count=suppressed_irrelevant_hit_count,
+                    failed_capabilities=failed_capabilities,
+                ),
+                "topic_matches": topic_matches,
             }
         )
+        degraded = degraded or provider_degraded
 
     seen_lines: set[str] = set()
     bucket_values: dict[str, list[str]] = {}
@@ -625,6 +895,7 @@ async def writeback_additive_memory_providers(
     diagnostics: list[dict[str, Any]] = []
     partial_write_count = 0
     write_failure_count = 0
+    eligible_memories, suppressed_reason_counts, suppressed_kind_counts = _select_provider_writeback_memories(memories)
 
     for item in items:
         if not isinstance(item, dict):
@@ -656,9 +927,39 @@ async def writeback_additive_memory_providers(
             name,
         )
         provider_notes: list[str] = []
+        if suppressed_reason_counts["low_quality"]:
+            provider_notes.append(
+                "Lower-confidence canonical memories were not forwarded to additive providers."
+            )
+        if suppressed_reason_counts["duplicate"]:
+            provider_notes.append(
+                "Duplicate canonical memories were deduplicated before additive provider writeback."
+            )
+        if not eligible_memories:
+            diagnostics.append(
+                {
+                    "name": name,
+                    "runtime_state": "ready" if consolidation_state == "ready" else "degraded",
+                    "stored_count": 0,
+                    "partial_write_count": 0,
+                    "write_failure_count": 0,
+                    "degraded": consolidation_state == "degraded",
+                    "summary": "No canonically persisted memories met additive provider writeback guardrails.",
+                    "notes": provider_notes,
+                    "capabilities_used": [],
+                    "failed_capabilities": [],
+                    "accepted_kinds": [],
+                    "considered_memory_count": len(memories),
+                    "eligible_memory_count": 0,
+                    "suppressed_memory_count": sum(suppressed_reason_counts.values()),
+                    "suppressed_kind_counts": suppressed_kind_counts,
+                    "suppressed_reason_counts": suppressed_reason_counts,
+                }
+            )
+            continue
         try:
             result = await writeback(
-                memories=memories,
+                memories=eligible_memories,
                 session_id=session_id,
                 trigger=trigger,
                 workflow_name=workflow_name,
@@ -682,6 +983,11 @@ async def writeback_additive_memory_providers(
                     "capabilities_used": [],
                     "failed_capabilities": ["consolidation"],
                     "accepted_kinds": [],
+                    "considered_memory_count": len(memories),
+                    "eligible_memory_count": len(eligible_memories),
+                    "suppressed_memory_count": sum(suppressed_reason_counts.values()),
+                    "suppressed_kind_counts": suppressed_kind_counts,
+                    "suppressed_reason_counts": suppressed_reason_counts,
                 }
             )
             partial_write_count += 1
@@ -702,6 +1008,11 @@ async def writeback_additive_memory_providers(
                 "capabilities_used": ["consolidation"],
                 "failed_capabilities": ["consolidation"] if result.write_failure_count else [],
                 "accepted_kinds": [kind for kind in result.accepted_kinds if kind],
+                "considered_memory_count": len(memories),
+                "eligible_memory_count": len(eligible_memories),
+                "suppressed_memory_count": sum(suppressed_reason_counts.values()),
+                "suppressed_kind_counts": suppressed_kind_counts,
+                "suppressed_reason_counts": suppressed_reason_counts,
             }
         )
         partial_write_count += int(result.partial_write_count)

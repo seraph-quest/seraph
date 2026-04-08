@@ -51,6 +51,7 @@
 - [x] capability-overview and cockpit operator surfaces now also compose starter packs, extension packs, and packaged runbooks into operator-readable marketplace flows with readiness counts, blocking reasons, install/update actions, and draft follow-through instead of leaving marketplace composition split across separate inventories
 - [x] backend CI now also applies per-file watchdog timeouts for the historically heaviest backend suites instead of letting `test_workflows.py` or `test_eval_harness.py` consume an entire shard window when they hang on hosted runners
 - [x] backend CI now also gives the historically slow approvals/context suites explicit shard weights and timeout headroom instead of letting those long-tail trust-boundary tests destabilize the backend matrix
+- [x] extension-backed memory providers now also expose operator-readable freshness/writeback quality controls, usefulness-ranked retrieval diagnostics, and guarded additive writeback semantics instead of acting like opaque “connected or not” external memory seams
 
 ## Working On Now
 

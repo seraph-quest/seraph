@@ -259,6 +259,75 @@ async def test_build_guardian_state_marks_history_inferred_focus_as_partial(asyn
 
 
 @pytest.mark.asyncio
+async def test_build_guardian_state_surfaces_memory_provider_diagnostics(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What matters for Atlas today?")
+    await sm.add_message("current", "assistant", "Let me ground that in provider-backed memory.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_window="VS Code",
+        screen_context="Editing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="low",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.plan_memory_retrieval",
+            AsyncMock(
+                return_value=MemoryRetrievalPlanResult(
+                    semantic_context="- [project] Atlas launch remains the live project anchor.",
+                    episodic_context="",
+                    memory_buckets={"project": ("Atlas launch remains the live project anchor.",)},
+                    degraded=False,
+                    lane="structured_plus_provider_model",
+                    provider_diagnostics=(
+                        {
+                            "name": "graph-memory",
+                            "capabilities_used": ["user_model"],
+                            "quality_state": "guarded",
+                            "hit_count": 1,
+                            "stale_hit_count": 0,
+                            "suppressed_irrelevant_hit_count": 1,
+                            "topic_matches": ["Atlas launch"],
+                        },
+                    ),
+                )
+            ),
+        ),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas launch"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
+            return_value="",
+        ),
+    ):
+        state = await build_guardian_state(session_id="current", user_message="What matters for Atlas today?")
+
+    assert state.memory_provider_diagnostics == (
+        "graph-memory quality=guarded, capabilities=user_model, hits=1, stale_suppressed=0, "
+        "irrelevant_suppressed=1, topic_matches=Atlas launch",
+    )
+    assert "Memory provider diagnostics:" in state.to_prompt_block()
+
+
+@pytest.mark.asyncio
 async def test_build_guardian_state_degrades_world_model_on_project_mismatch(async_db):
     sm = SessionManager()
     await sm.get_or_create("current")

@@ -1210,15 +1210,19 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_collaborator"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_obligation"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["memory_context_has_provider_project"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_diagnostics_visible"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_quality_focused"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_hit_count"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_bucket"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["quality_state_guarded"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["canonical_memory_kept_project"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_is_stable_within_session"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_includes_todo_overlay"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_line_count"] <= 8
@@ -1465,7 +1469,9 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
     assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["quality_state_guarded"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True

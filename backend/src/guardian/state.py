@@ -39,6 +39,7 @@ class GuardianState:
     learning_guidance: str = ""
     learning_diagnostics: tuple[str, ...] = ()
     bounded_memory_context: str = ""
+    memory_provider_diagnostics: tuple[str, ...] = ()
 
     @property
     def active_goals_summary(self) -> str:
@@ -86,6 +87,11 @@ class GuardianState:
             lines.append("")
             lines.append("Learning diagnostics:")
             lines.extend(f"- {item}" for item in self.learning_diagnostics)
+
+        if self.memory_provider_diagnostics:
+            lines.append("")
+            lines.append("Memory provider diagnostics:")
+            lines.extend(f"- {item}" for item in self.memory_provider_diagnostics)
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -369,6 +375,40 @@ def _merge_memory_contexts(*contexts: str) -> str:
     return "\n".join(lines)
 
 
+def _memory_provider_diagnostic_lines(
+    diagnostics: tuple[dict[str, object], ...],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for item in diagnostics:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        capabilities = [
+            str(capability)
+            for capability in item.get("capabilities_used", [])
+            if isinstance(capability, str) and capability.strip()
+        ]
+        quality_state = str(item.get("quality_state") or "idle")
+        hit_count = int(item.get("hit_count") or 0)
+        stale_hit_count = int(item.get("stale_hit_count") or 0)
+        suppressed_irrelevant_hit_count = int(item.get("suppressed_irrelevant_hit_count") or 0)
+        topic_matches = [
+            str(topic)
+            for topic in item.get("topic_matches", [])
+            if isinstance(topic, str) and topic.strip()
+        ]
+        line = (
+            f"{name} quality={quality_state}, capabilities="
+            f"{', '.join(capabilities) if capabilities else 'none'}, "
+            f"hits={hit_count}, stale_suppressed={stale_hit_count}, "
+            f"irrelevant_suppressed={suppressed_irrelevant_hit_count}"
+        )
+        if topic_matches:
+            line += f", topic_matches={', '.join(topic_matches[:3])}"
+        lines.append(line)
+    return tuple(lines)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -462,6 +502,7 @@ async def build_guardian_state(
     memory_context = retrieval.semantic_context
     episodic_memory_context = retrieval.episodic_context
     memory_buckets = retrieval.memory_buckets
+    memory_provider_diagnostics = _memory_provider_diagnostic_lines(retrieval.provider_diagnostics)
     try:
         snapshot_session_key = None
         if session_id is not None and session_record is not None:
@@ -554,5 +595,6 @@ async def build_guardian_state(
             arbitration=learning_arbitration,
             active_project=observer_context.active_project,
         ),
+        memory_provider_diagnostics=memory_provider_diagnostics,
         confidence=confidence,
     )

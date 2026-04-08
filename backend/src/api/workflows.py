@@ -958,9 +958,29 @@ def _workflow_boundary_blocked(*, replay_block_reason: str | None) -> bool:
     return replay_block_reason in {"approval_context_changed", "approval_context_missing"}
 
 
+def _workflow_continue_message_allowed(
+    *,
+    replay_block_reason: str | None,
+    approval_context: dict[str, Any] | None,
+) -> bool:
+    if replay_block_reason == "approval_context_changed":
+        return False
+    if replay_block_reason != "approval_context_missing":
+        return True
+    return False
+
+
 def workflow_surface_continue_message(run: dict[str, Any]) -> str | None:
     replay_block_reason = str(run.get("replay_block_reason") or "") or None
     if _workflow_boundary_blocked(replay_block_reason=replay_block_reason):
+        if _workflow_continue_message_allowed(
+            replay_block_reason=replay_block_reason,
+            approval_context=_as_record(run.get("current_approval_context"))
+            or _as_record(run.get("approval_context")),
+        ):
+            message = run.get("thread_continue_message")
+            if isinstance(message, str) and message.strip():
+                return message
         message = run.get("approval_recovery_message")
         return str(message) if isinstance(message, str) and message.strip() else None
     for value in (
@@ -1559,7 +1579,12 @@ async def _list_workflow_runs(
             ),
             "thread_continue_message": (
                 approvals[0].get("resume_message")
-                if resume_surface_allowed and approvals and isinstance(approvals[0], dict)
+                if approvals
+                and isinstance(approvals[0], dict)
+                and _workflow_continue_message_allowed(
+                    replay_block_reason=replay_block_reason,
+                    approval_context=current_approval_context,
+                )
                 else None
             ),
             "run_identity": run_identity,
@@ -1774,7 +1799,12 @@ async def _list_workflow_runs(
                 ),
                 "thread_continue_message": (
                     approvals[0].get("resume_message")
-                    if resume_surface_allowed and approvals and isinstance(approvals[0], dict)
+                    if approvals
+                    and isinstance(approvals[0], dict)
+                    and _workflow_continue_message_allowed(
+                        replay_block_reason=replay_block_reason,
+                        approval_context=current_approval_context,
+                    )
                     else None
                 ),
                 "run_identity": run_identity,

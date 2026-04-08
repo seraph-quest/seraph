@@ -194,6 +194,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] activity ledger rows now group request-scoped work into compact parent rows with emoji/icon scanability, child tool or routing rows, and completion summaries so operators can skim what Seraph did without opening raw trace panes
 - [x] the operator terminal now also surfaces imported capability reach and extension-governance state, while the activity ledger now shows top runtime-path and capability-family spend buckets for attributed LLM use
 - [x] the operator terminal now also surfaces active triage for approvals, workflow branch families, queued guardian items, and degraded reach plus evidence shortcuts for approval context, artifact lineage, and recent trace, with keyboard-first inspect, approve, continue, open-thread, and redirect control over the highest-priority items
+- [x] the operator terminal now also surfaces a dedicated workflow-supervision lane with history, lineage, branch-debug, and recovery summaries plus direct continue/use-output/failure/retry/repair/best-continuation actions, and keyboard-first top-supervision inspect control
 - [x] the cockpit now restores the last active session on reload, preserves explicit fresh-thread semantics, and marks background thread activity instead of silently resetting to an empty conversation
 - [x] larger more readable settings and priorities overlays now support the guardian workspace directly
 - [x] capability state, workflow history, the activity ledger, and live status are now visible in the current cockpit surface
@@ -224,13 +225,13 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Interface and presence
 
-- [ ] richer cockpit density and broader keyboard/operator control beyond the current workflow, activity-ledger, imported-reach, governance, active-triage, evidence-shortcut, artifact follow-through, broader artifact-source control, and first keyboard-first command surfaces
+- [ ] richer cockpit density and broader keyboard/operator control beyond the current workflow, workflow-supervision, activity-ledger, imported-reach, governance, active-triage, evidence-shortcut, artifact follow-through, broader artifact-source control, and first keyboard-first command surfaces
 - [ ] richer cross-surface continuity and broader non-browser presence beyond the current desktop presence shell, runtime route-health snapshot, channel routing, messaging connectors, browser mode matrix, automation triggers, node adapters, and canvas outputs
 - [ ] stronger explicit threading between ambient observation, workflow runs, native notifications, approvals, and deliberate interaction beyond the new shared thread metadata and continue/open-thread layer
 
 ### Workflow and leverage
 
-- [ ] deeper operator-facing multi-session workflow control beyond the new workflow-runs API, typed artifact handoff, artifact source/family follow-through, output/checkpoint/lineage workflow history rows, checkpoint branch controls, replay guardrails, timeline events, and cockpit workflow timeline
+- [ ] deeper operator-facing multi-session workflow control beyond the new workflow-runs API, typed artifact handoff, artifact source/family follow-through, output/checkpoint/lineage workflow history rows, checkpoint branch controls, replay guardrails, workflow-supervision rows, timeline events, and cockpit workflow timeline
 - [ ] stronger extension ergonomics around reusable capabilities and workflows beyond the new cockpit operator surface, starter packs, repair flows, and runbooks
 
 ## Practical Summary

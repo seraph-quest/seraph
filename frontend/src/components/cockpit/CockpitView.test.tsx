@@ -961,6 +961,29 @@ describe("CockpitView", () => {
               run_identity: "repair-1",
               root_run_identity: "repair-1",
             },
+            {
+              id: "run-complete",
+              tool_name: "workflow_summarize_file",
+              workflow_name: "summarize-file",
+              session_id: "session-2",
+              status: "succeeded",
+              started_at: "2026-03-18T12:06:00Z",
+              updated_at: "2026-03-18T12:07:00Z",
+              summary: "workflow_summarize_file saved final note",
+              step_tools: ["read_file"],
+              step_records: [],
+              artifact_paths: ["notes/final.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas summary",
+              run_identity: "complete-1",
+              root_run_identity: "complete-1",
+            },
           ],
         }));
       }
@@ -985,6 +1008,14 @@ describe("CockpitView", () => {
       expect(within(triage).getByText("reach: Bundle delivery")).toBeInTheDocument();
       expect(within(triage).getByText("unavailable · Bundle delivery waiting on browser reconnect")).toBeInTheDocument();
       expect(within(triage).getAllByRole("button", { name: /Inspect latest branch for workflow .*: web-brief-to-file/ })).toHaveLength(1);
+    });
+    expect(within(triage).queryByText("workflow: summarize-file")).not.toBeInTheDocument();
+
+    const supervision = await screen.findByLabelText("Workflow supervision");
+    await waitFor(() => {
+      expect(within(supervision).getByText("workflow: summarize-file")).toBeInTheDocument();
+      expect(within(supervision).getByText("completed · workflow_summarize_file saved final note")).toBeInTheDocument();
+      expect(within(supervision).getByText(/history 1 outputs/i)).toBeInTheDocument();
     });
 
     const approvalRow = within(triage).getByText("approval: shell_execute").closest(".cockpit-operator-row--entry");
@@ -1064,6 +1095,13 @@ describe("CockpitView", () => {
     expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Open best continuation for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
     expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Retry step for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
 
+    const supervisionRow = within(supervision).getByText("workflow: summarize-file").closest(".cockpit-operator-row--entry");
+    expect(supervisionRow).not.toBeNull();
+    expect(within(supervisionRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow supervision summarize-file" })).toBeInTheDocument();
+    expect(within(supervisionRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow supervision summarize-file" })).toBeInTheDocument();
+    fireEvent.click(within(supervisionRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow supervision summarize-file" }));
+    await waitFor(() => expect(screen.getByDisplayValue('Use the workspace file "notes/final.md" as context for the next action.')).toBeInTheDocument());
+
     fireEvent.keyDown(window, { key: "F", shiftKey: true });
     await waitFor(() =>
       expect(
@@ -1074,6 +1112,11 @@ describe("CockpitView", () => {
     fireEvent.keyDown(window, { key: "T", shiftKey: true });
     await waitFor(() =>
       expect(screen.getByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "H", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
     );
 
     fireEvent.keyDown(window, { key: "L", shiftKey: true });

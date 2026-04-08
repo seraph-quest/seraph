@@ -221,6 +221,48 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
     assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
 
 
+def test_run_shard_files_executes_specialized_tools_targets_in_order(tmp_path: Path):
+    files = ["tests/test_tools_api.py"]
+
+    with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
+        ]
+
+        result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
+
+    assert result == 0
+    assert mock_run.call_count == 4
+    first_command = mock_run.call_args_list[0].args[0]
+    second_command = mock_run.call_args_list[1].args[0]
+    third_command = mock_run.call_args_list[2].args[0]
+    fourth_command = mock_run.call_args_list[3].args[0]
+    assert first_command[4:7] == [
+        "tests/test_tools_api.py",
+        "-k",
+        "full_mode_includes_execute_code or safe_mode_keeps_clarify_available or safe_mode_keeps_todo_available or safe_mode_keeps_session_search_available or safe_mode_keeps_browser_session_available or safe_mode_keeps_get_scheduled_jobs_available or balanced_mode_hides_full_only_tools",
+    ]
+    assert second_command[4:7] == [
+        "tests/test_tools_api.py",
+        "-k",
+        "balanced_mode_keeps_delegate_task_available or balanced_mode_keeps_manage_scheduled_job_available or hides_delegate_task_when_delegation_is_disabled",
+    ]
+    assert third_command[4:7] == [
+        "tests/test_tools_api.py",
+        "-k",
+        "hides_mcp_tools_when_disabled or marks_mcp_tools_as_approval_required_in_approval_mode or marks_authenticated_mcp_tools_with_narrower_boundary or allows_mcp_tools_with_balanced_native_policy_when_mcp_approval_enabled",
+    ]
+    assert fourth_command[4:7] == [
+        "tests/test_tools_api.py",
+        "-k",
+        "surfaces_workflow_execution_boundaries",
+    ]
+    assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
+
+
 def test_pytest_invocations_for_target_splits_workflows_contract():
     invocations = pytest_invocations_for_target("tests/test_workflows.py")
 
@@ -294,6 +336,45 @@ def test_pytest_invocations_for_target_splits_delivery_contract():
                 "tests/test_delivery.py",
                 "-k",
                 "not (native_channel or channel_routing or queued_bundle)",
+            ],
+        ),
+    ]
+
+
+def test_pytest_invocations_for_target_splits_tools_api_contract():
+    invocations = pytest_invocations_for_target("tests/test_tools_api.py")
+
+    assert invocations == [
+        (
+            "tests/test_tools_api.py::native_policy_modes",
+            [
+                "tests/test_tools_api.py",
+                "-k",
+                "full_mode_includes_execute_code or safe_mode_keeps_clarify_available or safe_mode_keeps_todo_available or safe_mode_keeps_session_search_available or safe_mode_keeps_browser_session_available or safe_mode_keeps_get_scheduled_jobs_available or balanced_mode_hides_full_only_tools",
+            ],
+        ),
+        (
+            "tests/test_tools_api.py::delegation_and_scheduler",
+            [
+                "tests/test_tools_api.py",
+                "-k",
+                "balanced_mode_keeps_delegate_task_available or balanced_mode_keeps_manage_scheduled_job_available or hides_delegate_task_when_delegation_is_disabled",
+            ],
+        ),
+        (
+            "tests/test_tools_api.py::mcp_policy_surface",
+            [
+                "tests/test_tools_api.py",
+                "-k",
+                "hides_mcp_tools_when_disabled or marks_mcp_tools_as_approval_required_in_approval_mode or marks_authenticated_mcp_tools_with_narrower_boundary or allows_mcp_tools_with_balanced_native_policy_when_mcp_approval_enabled",
+            ],
+        ),
+        (
+            "tests/test_tools_api.py::workflow_boundary_surface",
+            [
+                "tests/test_tools_api.py",
+                "-k",
+                "surfaces_workflow_execution_boundaries",
             ],
         ),
     ]

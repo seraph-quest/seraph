@@ -881,6 +881,22 @@ interface OperatorEvidenceEntry {
   audit?: CockpitAuditEvent | null;
 }
 
+interface OperatorWorkflowEntry {
+  id: string;
+  label: string;
+  detail: string;
+  meta: string;
+  priority: number;
+  threadId?: string | null;
+  workflow: WorkflowRunRecord;
+  latestBranch: WorkflowRunRecord | null;
+  bestContinuation: WorkflowRunRecord | null;
+  latestFailure: { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null;
+  outputPath: string | null;
+  historySummary: string;
+  branchSummary: string;
+}
+
 interface ArtifactLineageResolution {
   sourceWorkflow: WorkflowRunRecord | null;
   candidateWorkflows: WorkflowRunRecord[];
@@ -4176,10 +4192,62 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     recentTrace,
     sessionTitleById,
   ]);
+  const operatorWorkflowEntries = useMemo<OperatorWorkflowEntry[]>(() => {
+    const seen = new Set<string>();
+    return workflowRunsWithArtifacts
+      .map((workflow) => resolveWorkflowRun(workflow))
+      .filter((workflow) => {
+        const key = workflow.runIdentity ?? workflow.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((workflow) => {
+        const latestBranch = workflowLatestBranchRun(workflow);
+        const bestContinuation = workflowBestContinuationRun(workflow);
+        const latestFailure = workflowLatestFailureContext(workflow);
+        const outputPath = workflowPrimaryOutputPath(workflow);
+        const threadLabel = workflow.threadLabel
+          ?? (workflow.threadId ? sessionTitleById[workflow.threadId] : null)
+          ?? (workflow.threadId ? `thread ${workflow.threadId.slice(0, 6)}` : null);
+        const historySummary = workflowHistorySummary(workflow);
+        const branchSummary = workflowBranchDebugSummary(workflow);
+        let priority = 50;
+        if ((workflow.pendingApprovalCount ?? 0) > 0) priority = 98;
+        else if (workflow.status === "running") priority = 94;
+        else if (workflow.status === "awaiting_approval") priority = 92;
+        else if (workflow.status === "failed" || workflow.status === "degraded") priority = 90;
+        else if (latestBranch) priority = 82;
+        else if (historySummary.length > 0) priority = 76;
+        else if (outputPath) priority = 68;
+        return {
+          id: `supervision:${workflow.id}`,
+          label: `workflow: ${workflow.workflowName}`,
+          detail: `${workflowSupervisionLabel(workflow)} · ${workflow.summary}`,
+          meta: [threadLabel, formatAge(workflow.updatedAt)].filter(Boolean).join(" · "),
+          priority,
+          threadId: workflow.threadId ?? workflow.sessionId ?? null,
+          workflow,
+          latestBranch,
+          bestContinuation,
+          latestFailure,
+          outputPath,
+          historySummary: historySummary.join(" · "),
+          branchSummary: branchSummary.join(" · "),
+        };
+      })
+      .sort((left, right) => (
+        right.priority - left.priority
+        || compareWorkflowRunsNewestFirst(left.workflow, right.workflow)
+        || left.label.localeCompare(right.label)
+      ))
+      .slice(0, 6);
+  }, [sessionTitleById, workflowRunsWithArtifacts]);
   const primaryTriageEntry = operatorTriageEntries[0] ?? null;
   const primaryApprovalTriageEntry = operatorTriageEntries.find((entry) => entry.approval) ?? null;
   const primaryWorkflowTriageEntry = operatorTriageEntries.find((entry) => entry.workflow) ?? null;
   const primaryEvidenceEntry = operatorEvidenceEntries[0] ?? null;
+  const primaryWorkflowSupervisionEntry = operatorWorkflowEntries[0] ?? null;
   function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry) return;
     if (entry.approval) {
@@ -4246,6 +4314,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       queueArtifactFollowOnPlan(entry.artifact);
     }
   }
+  function inspectOperatorWorkflowEntry(entry: OperatorWorkflowEntry | null | undefined) {
+    if (!entry) return;
+    inspectWorkflowRun(entry.workflow);
+  }
+  function continueOperatorWorkflowEntry(entry: OperatorWorkflowEntry | null | undefined) {
+    if (!entry) return;
+    continueWorkflowRun(entry.workflow);
+  }
+  function openOperatorWorkflowThread(entry: OperatorWorkflowEntry | null | undefined) {
+    if (!entry?.threadId || !canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds)) return;
+    void openThread(entry.threadId);
+  }
   useEffect(() => {
     const handleOperatorShortcut = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -4283,6 +4363,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       } else if (key === "w") {
         event.preventDefault();
         inspectPrimaryWorkflowEntry();
+      } else if (key === "h") {
+        event.preventDefault();
+        inspectOperatorWorkflowEntry(primaryWorkflowSupervisionEntry);
       } else if (key === "l") {
         event.preventDefault();
         inspectLatestWorkflowBranch(primaryWorkflowShortcutTarget());
@@ -4332,12 +4415,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [
     approveOperatorTriageEntry,
     continueOperatorTriageEntry,
+    continueOperatorWorkflowEntry,
     inspectOperatorEvidenceEntry,
     inspectOperatorTriageEntry,
+    inspectOperatorWorkflowEntry,
     openOperatorTriageThread,
+    openOperatorWorkflowThread,
     paletteOpen,
     primaryApprovalTriageEntry,
     primaryEvidenceEntry,
+    primaryWorkflowSupervisionEntry,
     primaryTriageEntry,
     primaryWorkflowTriageEntry,
     inspectLatestWorkflowBranch,
@@ -9682,7 +9769,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                     )}
                     <div className="cockpit-sublist-item">
-                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+H inspect top supervised workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
                     </div>
                   </div>
 
@@ -9894,6 +9981,173 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     })}
                     {operatorTriageEntries.length === 0 && (
                       <div className="cockpit-empty">No active workflows, approvals, queued guardian items, or reach failures need action.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Workflow supervision">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">workflow supervision</span>
+                      <span className="cockpit-operator-link">{operatorWorkflowEntries.length} tracked</span>
+                    </div>
+                    {operatorWorkflowEntries.map((entry) => {
+                      const hasDistinctBestContinuation = entry.bestContinuation
+                        ? (entry.bestContinuation.runIdentity ?? entry.bestContinuation.id) !== (entry.workflow.runIdentity ?? entry.workflow.id)
+                        : false;
+                      const bestContinuationOutput = entry.bestContinuation ? workflowPrimaryOutputPath(entry.bestContinuation) : null;
+                      const latestFailure = entry.latestFailure;
+                      return (
+                        <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                          <button
+                            type="button"
+                            className="cockpit-operator-details cockpit-operator-details--button"
+                            aria-label={`Inspect workflow supervision for ${entry.workflow.workflowName}`}
+                            onClick={() => inspectOperatorWorkflowEntry(entry)}
+                          >
+                            <div className="cockpit-value">{entry.label}</div>
+                            <div className="cockpit-operator-note">{entry.detail}</div>
+                            <div className="cockpit-operator-note">
+                              {entry.historySummary.length > 0 ? entry.historySummary : "history just started"}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              {[entry.branchSummary, entry.meta].filter(Boolean).join(" · ")}
+                            </div>
+                          </button>
+                          <div className="cockpit-operator-actions">
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Inspect workflow supervision for ${entry.workflow.workflowName}`}
+                              onClick={() => inspectOperatorWorkflowEntry(entry)}
+                            >
+                              inspect
+                            </button>
+                            {workflowCanContinue(entry.workflow) && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Continue workflow supervision for ${entry.workflow.workflowName}`}
+                                onClick={() => continueOperatorWorkflowEntry(entry)}
+                              >
+                                continue
+                              </button>
+                            )}
+                            {entry.outputPath && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Use latest output for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                              >
+                                use output
+                              </button>
+                            )}
+                            {latestFailure && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Use failure context for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueWorkflowStepContext(latestFailure.workflow, latestFailure.step)}
+                              >
+                                use failure
+                              </button>
+                            )}
+                            {entry.workflow.retryFromStepDraft && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Retry step for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueComposerDraft(entry.workflow.retryFromStepDraft ?? "")}
+                              >
+                                retry step
+                              </button>
+                            )}
+                            {entry.workflow.replayAllowed === false && entry.workflow.replayRecommendedActions?.length ? (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Repair replay for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => void repairWorkflowReplay(entry.workflow)}
+                              >
+                                repair replay
+                              </button>
+                            ) : null}
+                            {latestFailure?.step.recoveryActions?.length ? (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Repair step for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => void runCapabilityActions(
+                                  readActionList(latestFailure.step.recoveryActions),
+                                  `${latestFailure.workflow.workflowName} ${latestFailure.step.id}`,
+                                )}
+                              >
+                                repair step
+                              </button>
+                            ) : null}
+                            {entry.latestBranch && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Inspect latest branch for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => inspectLatestWorkflowBranch(entry.workflow)}
+                              >
+                                latest branch
+                              </button>
+                            )}
+                            {hasDistinctBestContinuation && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Open best continuation for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => inspectWorkflowBestContinuation(entry.workflow)}
+                              >
+                                open best
+                              </button>
+                            )}
+                            {hasDistinctBestContinuation && entry.bestContinuation && workflowCanContinue(entry.bestContinuation) && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Continue best continuation for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => continueWorkflowBestContinuation(entry.workflow)}
+                              >
+                                continue best
+                              </button>
+                            )}
+                            {entry.outputPath && hasDistinctBestContinuation && bestContinuationOutput && bestContinuationOutput !== entry.outputPath && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Compare best continuation for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueWorkflowBestContinuationComparison(entry.workflow)}
+                              >
+                                compare best
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft next step for workflow supervision ${entry.workflow.workflowName}`}
+                              onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                            >
+                              draft next step
+                            </button>
+                            {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Open thread for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => openOperatorWorkflowThread(entry)}
+                              >
+                                open thread
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {operatorWorkflowEntries.length === 0 && (
+                      <div className="cockpit-empty">No recent workflow runs are available for supervision.</div>
                     )}
                   </section>
 

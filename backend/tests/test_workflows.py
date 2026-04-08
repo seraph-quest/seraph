@@ -1610,7 +1610,9 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
     assert run["run_fingerprint"] == "web-brief-secret"
     assert run["pending_approval_count"] == 1
     assert run["pending_approvals"][0]["id"] == "approval-1"
-    assert run["thread_continue_message"] == "Continue after approval"
+    assert run["replay_block_reason"] == "approval_context_missing"
+    assert run["thread_continue_message"] is None
+    assert "predates trust-boundary tracking" in run["approval_recovery_message"]
 
 
 @pytest.mark.asyncio

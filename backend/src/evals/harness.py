@@ -3675,7 +3675,7 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
                         bucket="collaborator",
                     ),
                     MemoryProviderHit(
-                        text="Weekly investor note goes out on Friday.",
+                        text="Atlas launch investor note goes out on Friday.",
                         score=0.61,
                         provider_name=self.name,
                         bucket="obligation",
@@ -3791,8 +3791,12 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
             if "consolidation" in provider["capability_states"]
             else True,
             "world_model_has_provider_collaborator": "Alice owns Atlas launch communications." in state.world_model.collaborators,
-            "world_model_has_provider_obligation": "Weekly investor note goes out on Friday." in state.world_model.recurring_obligations,
+            "world_model_has_provider_obligation": "Atlas launch investor note goes out on Friday." in state.world_model.recurring_obligations,
             "memory_context_has_provider_project": "Atlas launch remains the live project anchor." in state.memory_context,
+            "memory_provider_diagnostics_visible": bool(state.memory_provider_diagnostics),
+            "memory_provider_quality_focused": any(
+                "quality=focused" in item for item in state.memory_provider_diagnostics
+            ),
         }
 
 
@@ -3915,6 +3919,7 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
         "stale_hit_count": diagnostics["stale_hit_count"] == 1,
         "stale_collaborator_bucket": diagnostics["stale_bucket_counts"].get("collaborator") == 1,
         "lane_stays_provider_model": retrieval.lane == "structured_plus_provider_model",
+        "quality_state_guarded": diagnostics["quality_state"] == "guarded",
     }
 
 
@@ -4055,6 +4060,14 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                     "importance": 0.86,
                     "project": "Atlas launch",
                 },
+                {
+                    "text": "Maybe revisit Atlas later.",
+                    "kind": "timeline",
+                    "summary": "Maybe revisit Atlas later",
+                    "confidence": 0.21,
+                    "importance": 0.22,
+                    "project": "Atlas launch",
+                },
             ],
             "facts": [],
             "patterns": [],
@@ -4097,6 +4110,10 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
             "audit_has_provider_writeback": consolidation_event["provider_writeback_count"] == 2,
             "audit_has_no_provider_failures": consolidation_event["provider_writeback_failure_count"] == 0,
             "canonical_memory_kept_project": any(memory.summary == "Atlas launch" for memory in stored_memories),
+            "provider_writeback_suppressed_low_quality": consolidation_event["provider_writeback_diagnostics"][0][
+                "suppressed_reason_counts"
+            ]["low_quality"]
+            == 1,
         }
 
 

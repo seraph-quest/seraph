@@ -205,6 +205,15 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     assert "Canonical guardian memory remains authoritative" in provider["notes"][0]
     assert provider["capability_states"]["retrieval"] == "ready"
     assert provider["governance"]["authoritative_memory"] == "guardian"
+    assert provider["quality_controls"]["writeback_minimum_confidence"] == 0.55
+    assert payload["quality_controls"]["project_scoped_buckets"] == [
+        "collaborator",
+        "commitment",
+        "obligation",
+        "project",
+        "routine",
+        "timeline",
+    ]
 
 
 @pytest.mark.asyncio
@@ -390,6 +399,69 @@ async def test_plan_memory_retrieval_combines_retrieval_and_user_model_provider_
 
 
 @pytest.mark.asyncio
+async def test_plan_memory_retrieval_keeps_high_value_user_model_hits_when_retrieval_fills_limit(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("retrieval", "user_model"))
+    adapter = FakeMemoryProviderAdapter(capabilities=("retrieval", "user_model"))
+
+    async def crowded_retrieve(*, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+        return MemoryProviderRetrievalResult(
+            hits=tuple(
+                MemoryProviderHit(
+                    text=f"Provider recall item {index} for {query}",
+                    score=0.4 + (index * 0.01),
+                    provider_name="graph-memory",
+                    bucket="project",
+                )
+                for index in range(8)
+            ),
+            summary="Provider-assisted retrieval available.",
+        )
+
+    async def high_value_model(*, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+        return MemoryProviderRetrievalResult(
+            hits=(
+                MemoryProviderHit(
+                    text="Alice owns Atlas launch communications.",
+                    score=0.99,
+                    provider_name="graph-memory",
+                    bucket="collaborator",
+                ),
+            ),
+            summary="Provider-backed user model available.",
+        )
+
+    adapter.retrieve = crowded_retrieve
+    adapter.augment_model = high_value_model
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep canonical memory first", {"goal": ("Keep canonical memory first",)}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.retrieve_hybrid_memory",
+                return_value=HybridMemoryRetrievalResult(
+                    context="- [project] Atlas launch",
+                    buckets={"project": ("Atlas launch",)},
+                    degraded=False,
+                    hits=(),
+                ),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="atlas launch", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    assert retrieval.lane == "hybrid_plus_provider_model"
+    assert "Alice owns Atlas launch communications." in retrieval.semantic_context
+    assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["retrieval", "user_model"]
+
+
+@pytest.mark.asyncio
 async def test_plan_memory_retrieval_suppresses_stale_provider_retrieval_hits(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -488,6 +560,53 @@ async def test_plan_memory_retrieval_suppresses_stale_provider_user_model_hits(t
     assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["user_model"]
     assert retrieval.provider_diagnostics[0]["stale_hit_count"] == 1
     assert retrieval.provider_diagnostics[0]["stale_bucket_counts"]["collaborator"] == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_memory_retrieval_suppresses_irrelevant_project_scoped_provider_hits(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("user_model",))
+    adapter = FakeMemoryProviderAdapter(
+        capabilities=("user_model",),
+        model_hits=(
+            MemoryProviderHit(
+                text="Hermes migration remains the live project anchor.",
+                score=0.91,
+                provider_name="graph-memory",
+                bucket="project",
+                created_at=datetime.now(timezone.utc) - timedelta(days=1),
+            ),
+            MemoryProviderHit(
+                text="Alice owns Atlas launch communications.",
+                score=0.67,
+                provider_name="graph-memory",
+                bucket="collaborator",
+                created_at=datetime.now(timezone.utc) - timedelta(days=1),
+            ),
+        ),
+    )
+    register_memory_provider_adapter(adapter)
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [goal] Keep Atlas moving", {"goal": ("Keep Atlas moving",)}),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    diagnostics = retrieval.provider_diagnostics[0]
+    assert "Hermes migration remains the live project anchor." not in retrieval.semantic_context
+    assert "Alice owns Atlas launch communications." in retrieval.semantic_context
+    assert diagnostics["capabilities_used"] == ["user_model"]
+    assert diagnostics["suppressed_irrelevant_hit_count"] == 1
+    assert diagnostics["suppressed_irrelevant_bucket_counts"]["project"] == 1
+    assert diagnostics["quality_state"] == "guarded"
+    assert diagnostics["topic_matches"] == ["Atlas launch"]
 
 
 @pytest.mark.asyncio
@@ -632,3 +751,98 @@ async def test_memory_provider_writeback_degrades_cleanly_when_provider_fails(tm
     assert result.write_failure_count == 1
     assert result.diagnostics[0]["runtime_state"] == "unavailable"
     assert result.diagnostics[0]["failed_capabilities"] == ["consolidation"]
+
+
+@pytest.mark.asyncio
+async def test_memory_provider_writeback_filters_low_quality_and_duplicate_memories(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("consolidation",))
+    adapter = FakeMemoryProviderAdapter(capabilities=("consolidation",))
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            result = await writeback_additive_memory_providers(
+                memories=(
+                    ConsolidatedMemoryItem(
+                        text="Atlas launch is the active release project.",
+                        kind=normalize_memory_kind("project"),
+                        category=kind_to_category("project"),
+                        summary="Atlas launch",
+                        confidence=0.91,
+                        importance=0.9,
+                    ),
+                    ConsolidatedMemoryItem(
+                        text="Atlas launch is the active release project.",
+                        kind=normalize_memory_kind("project"),
+                        category=kind_to_category("project"),
+                        summary="Atlas launch",
+                        confidence=0.91,
+                        importance=0.9,
+                    ),
+                    ConsolidatedMemoryItem(
+                        text="Maybe think about Atlas sometime.",
+                        kind=normalize_memory_kind("commitment"),
+                        category=kind_to_category("commitment"),
+                        summary="Maybe think about Atlas sometime",
+                        confidence=0.21,
+                        importance=0.32,
+                    ),
+                ),
+                session_id="s1",
+                trigger="workflow_completed",
+                workflow_name="atlas-launch",
+            )
+    finally:
+        clear_memory_provider_adapters()
+
+    diagnostics = result.diagnostics[0]
+    assert adapter.writeback_calls[0]["kinds"] == ["project"]
+    assert diagnostics["eligible_memory_count"] == 1
+    assert diagnostics["suppressed_memory_count"] == 2
+    assert diagnostics["suppressed_reason_counts"]["duplicate"] == 1
+    assert diagnostics["suppressed_reason_counts"]["low_quality"] == 1
+    assert diagnostics["suppressed_kind_counts"]["project"] == 1
+    assert diagnostics["suppressed_kind_counts"]["commitment"] == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_provider_writeback_keeps_high_quality_duplicate_when_low_quality_copy_appears_first(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_memory_provider_extension(workspace, capabilities=("consolidation",))
+    adapter = FakeMemoryProviderAdapter(capabilities=("consolidation",))
+    register_memory_provider_adapter(adapter)
+    try:
+        with patch.object(settings, "workspace_dir", str(workspace)):
+            result = await writeback_additive_memory_providers(
+                memories=(
+                    ConsolidatedMemoryItem(
+                        text="Atlas launch is the active release project.",
+                        kind=normalize_memory_kind("project"),
+                        category=kind_to_category("project"),
+                        summary="Atlas launch",
+                        confidence=0.21,
+                        importance=0.32,
+                    ),
+                    ConsolidatedMemoryItem(
+                        text="Atlas launch is the active release project.",
+                        kind=normalize_memory_kind("project"),
+                        category=kind_to_category("project"),
+                        summary="Atlas launch",
+                        confidence=0.91,
+                        importance=0.9,
+                    ),
+                ),
+                session_id="s1",
+                trigger="workflow_completed",
+            )
+    finally:
+        clear_memory_provider_adapters()
+
+    diagnostics = result.diagnostics[0]
+    assert diagnostics["stored_count"] == 1
+    assert diagnostics["eligible_memory_count"] == 1
+    assert diagnostics["suppressed_reason_counts"]["low_quality"] == 1
+    assert diagnostics["suppressed_reason_counts"]["duplicate"] == 0
+    assert adapter.writeback_calls[0]["texts"] == ["Atlas launch is the active release project."]

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 from src.agent.session import session_manager
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
+from src.guardian.learning_arbitration import GuardianLearningArbitration
+from src.guardian.feedback import ScopedGuardianLearningResolution
 from src.observer.context import CurrentContext
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ class GuardianState:
     confidence: GuardianStateConfidence
     recent_execution_summary: str = ""
     learning_guidance: str = ""
+    learning_diagnostics: tuple[str, ...] = ()
     bounded_memory_context: str = ""
 
     @property
@@ -78,6 +81,11 @@ class GuardianState:
 
         if self.learning_guidance:
             lines.extend(["", "Learned communication guidance:", self.learning_guidance])
+
+        if self.learning_diagnostics:
+            lines.append("")
+            lines.append("Learning diagnostics:")
+            lines.extend(f"- {item}" for item in self.learning_diagnostics)
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -251,6 +259,58 @@ def _learning_guidance_text(
     return "\n".join(f"- {line}" for line in guidance)
 
 
+def _learning_diagnostics_lines(
+    *,
+    live_learning_resolution: ScopedGuardianLearningResolution,
+    arbitration: GuardianLearningArbitration,
+    active_project: str | None,
+) -> tuple[str, ...]:
+    signal = arbitration.effective_signal
+    lines: list[str] = []
+    scope_label = live_learning_resolution.dominant_scope.replace("_", "+")
+    if live_learning_resolution.dominant_scope in {"project", "thread_project"} and active_project:
+        lines.append(
+            f"Live learning is currently anchored to {scope_label} scope for '{active_project}'."
+        )
+    else:
+        lines.append(f"Live learning is currently anchored to {scope_label} scope.")
+    lines.append(
+        "Observed outcomes: "
+        f"helpful={signal.helpful_count}, acknowledged={signal.acknowledged_count}, "
+        f"not_helpful={signal.not_helpful_count}, failed={signal.failed_count}."
+    )
+    if any(
+        (
+            signal.multi_day_positive_days,
+            signal.multi_day_negative_days,
+            signal.scheduled_positive_days,
+            signal.scheduled_negative_days,
+        )
+    ):
+        lines.append(
+            "Long-horizon spread: "
+            f"multi-day +{signal.multi_day_positive_days}/-{signal.multi_day_negative_days}, "
+            f"scheduled +{signal.scheduled_positive_days}/-{signal.scheduled_negative_days}."
+        )
+    selected_biases = [
+        f"{decision.axis}={decision.selected_bias}"
+        for decision in live_learning_resolution.decisions
+        if decision.selected_bias != "neutral"
+    ]
+    if selected_biases:
+        lines.append(f"Dominant live biases: {', '.join(selected_biases[:4])}.")
+    procedural_overrides = [
+        f"{decision.axis}={decision.selected_bias}"
+        for decision in arbitration.decisions
+        if decision.selected_source == "procedural_memory" and decision.selected_bias != "neutral"
+    ]
+    if procedural_overrides:
+        lines.append(
+            f"Procedural memory is still steering: {', '.join(procedural_overrides[:4])}."
+        )
+    return tuple(lines)
+
+
 def _extract_soul_section_lines(soul_context: str, section: str, *, limit: int) -> tuple[str, ...]:
     header = f"## {section}".lower()
     lines = soul_context.splitlines()
@@ -368,12 +428,17 @@ async def build_guardian_state(
             continuity_thread_id=session_id,
             active_project=observer_context.active_project,
         )
-        effective_learning_signal = arbitrate_learning_signal(
+        learning_arbitration = arbitrate_learning_signal(
             live_signal=advisory_learning_signal,
             procedural_guidance=procedural_guidance,
-        ).effective_signal
+        )
+        effective_learning_signal = learning_arbitration.effective_signal
     except Exception:
         logger.debug("Failed to load procedural guidance for guardian state", exc_info=True)
+        learning_arbitration = arbitrate_learning_signal(
+            live_signal=advisory_learning_signal,
+            procedural_guidance=None,
+        )
     try:
         recent_execution_summary = _summarize_recent_execution(
             await audit_repository.list_events(limit=20, session_id=session_id)
@@ -483,6 +548,11 @@ async def build_guardian_state(
             blocked_state_bias=effective_learning_signal.blocked_state_bias,
             suppression_bias=effective_learning_signal.suppression_bias,
             thread_preference_bias=effective_learning_signal.thread_preference_bias,
+        ),
+        learning_diagnostics=_learning_diagnostics_lines(
+            live_learning_resolution=live_learning_resolution,
+            arbitration=learning_arbitration,
+            active_project=observer_context.active_project,
         ),
         confidence=confidence,
     )

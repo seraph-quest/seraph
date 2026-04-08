@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _timeline_timestamp(value: str | datetime | None) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
+
+
 class ScreenObservationData(BaseModel):
     app: str | None = None
     window_title: str | None = None
@@ -322,12 +328,19 @@ async def daemon_status():
     return await _daemon_status_payload()
 
 
-def _continuity_surface(*, latest_outcome: str, transport: str | None, policy_action: str) -> str:
-    if transport == "native_notification" or latest_outcome.startswith("notification_"):
+def _continuity_surface(
+    *,
+    latest_outcome: str | None,
+    transport: str | None,
+    policy_action: str | None,
+) -> str:
+    normalized_outcome = latest_outcome or ""
+    normalized_action = policy_action or ""
+    if transport == "native_notification" or normalized_outcome.startswith("notification_"):
         return "native_notification"
-    if policy_action == "bundle" or latest_outcome.startswith("bundle") or latest_outcome == "queued":
+    if normalized_action == "bundle" or normalized_outcome.startswith("bundle") or normalized_outcome == "queued":
         return "bundle_queue"
-    if latest_outcome == "failed":
+    if normalized_outcome == "failed":
         return "delivery_failed"
     return "browser"
 
@@ -968,7 +981,7 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
     }
     intervention_thread_map: dict[str, tuple[str | None, str | None]] = {}
     for item in recent_interventions:
-        thread_id = item.session_id
+        thread_id = getattr(item, "session_id", None)
         intervention_thread_map[item.id] = (
             thread_id,
             session_titles.get(thread_id) if thread_id else None,
@@ -977,16 +990,17 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
         str(item.intervention_id)
         for item in queued_insights
         if item.intervention_id
-        and not item.session_id
+        and not getattr(item, "session_id", None)
         and str(item.intervention_id) not in intervention_thread_map
     }
     for intervention_id in missing_intervention_ids:
         fallback_intervention = await guardian_feedback_repository.get(intervention_id)
-        if fallback_intervention is None or not fallback_intervention.session_id:
+        fallback_session_id = getattr(fallback_intervention, "session_id", None) if fallback_intervention else None
+        if fallback_intervention is None or not fallback_session_id:
             continue
         intervention_thread_map[intervention_id] = (
-            fallback_intervention.session_id,
-            session_titles.get(fallback_intervention.session_id),
+            fallback_session_id,
+            session_titles.get(fallback_session_id),
         )
 
     reach_payload = _observer_reach_payload()
@@ -996,6 +1010,8 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
     notifications_payload = [
         {
             **item,
+            "created_at": _timeline_timestamp(item.get("created_at")),
+            "updated_at": _timeline_timestamp(item.get("updated_at") or item.get("created_at")),
             "thread_id": item.get("thread_id") or item.get("session_id"),
             "thread_label": _thread_label(
                 str(item.get("thread_id") or item.get("session_id"))
@@ -1014,14 +1030,14 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
             "intervention_type": item.intervention_type,
             "urgency": item.urgency,
             "reasoning": item.reasoning,
-            "session_id": item.session_id,
-            "thread_id": item.session_id or (
+            "session_id": getattr(item, "session_id", None),
+            "thread_id": getattr(item, "session_id", None) or (
                 intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                 if item.intervention_id
                 else None
             ),
             "thread_label": _thread_label(
-                item.session_id or (
+                getattr(item, "session_id", None) or (
                     intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                     if item.intervention_id
                     else None
@@ -1034,13 +1050,13 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
             ),
             "thread_source": (
                 "session"
-                if item.session_id
+                if getattr(item, "session_id", None)
                 else "intervention_session"
                 if item.intervention_id and intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                 else "ambient"
             ),
             "continuation_mode": _continuation_mode(
-                item.session_id or (
+                getattr(item, "session_id", None) or (
                     intervention_thread_map.get(item.intervention_id or "", (None, None))[0]
                     if item.intervention_id
                     else None
@@ -1050,33 +1066,37 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
                 f"Follow up on this deferred guardian item: "
                 f"{item.content[:157] + '...' if len(item.content) > 160 else item.content}"
             ),
-            "created_at": item.created_at.isoformat(),
+            "created_at": _timeline_timestamp(getattr(item, "created_at", None)),
         }
         for item in queued_insights
     ]
     recent_interventions_payload = [
         {
-            "id": item.id,
-            "session_id": item.session_id,
-            "intervention_type": item.intervention_type,
-            "content_excerpt": item.content_excerpt,
-            "policy_action": item.policy_action,
-            "policy_reason": item.policy_reason,
-            "delivery_decision": item.delivery_decision,
-            "latest_outcome": item.latest_outcome,
-            "transport": item.transport,
-            "notification_id": item.notification_id,
-            "feedback_type": item.feedback_type,
-            "thread_id": item.session_id,
-            "thread_label": _thread_label(item.session_id, session_titles),
-            "thread_source": "session" if item.session_id else "ambient",
-            "continuation_mode": _continuation_mode(item.session_id),
-            "resume_message": f"Continue from this guardian intervention: {item.content_excerpt}",
-            "updated_at": item.updated_at.isoformat(),
+            "id": getattr(item, "id", None),
+            "session_id": getattr(item, "session_id", None),
+            "intervention_type": getattr(item, "intervention_type", None),
+            "content_excerpt": getattr(item, "content_excerpt", "") or "",
+            "policy_action": getattr(item, "policy_action", "") or "",
+            "policy_reason": getattr(item, "policy_reason", "") or "",
+            "delivery_decision": getattr(item, "delivery_decision", None),
+            "latest_outcome": getattr(item, "latest_outcome", "") or "",
+            "transport": getattr(item, "transport", None),
+            "notification_id": getattr(item, "notification_id", None),
+            "feedback_type": getattr(item, "feedback_type", None),
+            "thread_id": getattr(item, "session_id", None),
+            "thread_label": _thread_label(getattr(item, "session_id", None), session_titles),
+            "thread_source": "session" if getattr(item, "session_id", None) else "ambient",
+            "continuation_mode": _continuation_mode(getattr(item, "session_id", None)),
+            "resume_message": (
+                f"Continue from this guardian intervention: {getattr(item, 'content_excerpt', None)}"
+                if getattr(item, "content_excerpt", None)
+                else "Continue from this guardian intervention."
+            ),
+            "updated_at": _timeline_timestamp(getattr(item, "updated_at", None)),
             "continuity_surface": _continuity_surface(
-                latest_outcome=item.latest_outcome,
-                transport=item.transport,
-                policy_action=item.policy_action,
+                latest_outcome=getattr(item, "latest_outcome", None),
+                transport=getattr(item, "transport", None),
+                policy_action=getattr(item, "policy_action", None),
             ),
         }
         for item in recent_interventions

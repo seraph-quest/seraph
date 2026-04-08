@@ -65,6 +65,10 @@ def _make_guardian_state() -> GuardianState:
         recent_sessions_summary='- Prior roadmap: assistant said "Land guardian-state synthesis next"',
         recent_intervention_feedback="- advisory delivered, feedback=helpful, reason=available_capacity: Stretch and refocus.",
         recent_execution_summary="- Workflow brief-sync degraded at write_file",
+        learning_diagnostics=(
+            "Live learning is currently anchored to project scope for 'Guardian cockpit'.",
+            "Observed outcomes: helpful=2, acknowledged=1, not_helpful=0, failed=0.",
+        ),
         confidence=GuardianStateConfidence(
             overall="grounded",
             observer="grounded",
@@ -2187,6 +2191,7 @@ def test_guardian_state_prompt_block_exposes_confidence_and_recent_sessions():
     assert "Relevant episodes:" in block
     assert "Recent sessions:" in block
     assert "Recent intervention feedback:" in block
+    assert "Learning diagnostics:" in block
     assert "Recent execution:" in block
     assert "Ship guardian state" in block
     assert "Prior roadmap" in block
@@ -2403,6 +2408,153 @@ def test_world_model_flags_project_anchor_ambiguity_when_scores_split():
         "Project-anchor evidence remains ambiguous between 'Atlas' and 'Hermes migration'."
         in model.judgment_risks
     )
+    assert any("Atlas: score=" in item for item in model.project_ranking_diagnostics)
+    assert any(
+        "Competing anchor 'Hermes migration' remains close enough" in item
+        for item in model.stale_signal_arbitration
+    )
+
+
+def test_world_model_ranks_anchor_context_and_surfaces_stale_signal_arbitration():
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas launch release notes",
+        upcoming_events=[{"summary": "Atlas launch sync"}],
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=ctx,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary='- Hermes migration follow-up: close the rollout note.\n- Atlas launch review: close the launch checklist.',
+        recent_intervention_feedback="",
+        active_projects=("Atlas", "Hermes migration"),
+        recent_execution_summary="- Workflow Hermes migration degraded at notify_release",
+        memory_buckets={
+            "project": ("Hermes migration", "Atlas launch"),
+            "routine": (
+                "Weekly Atlas launch review happens before the Atlas launch sync",
+                "Weekly Hermes rollout review happens before the Hermes note",
+            ),
+            "obligation": (
+                "Atlas launch note goes out before the Atlas launch sync",
+                "Weekly Hermes rollout note goes out on Friday",
+            ),
+            "collaborator": (
+                "Alice owns Atlas launch communications",
+                "Bob owns Hermes migration communications",
+            ),
+            "timeline": (
+                "Atlas launch timeline ends after the Atlas launch sync",
+                "Hermes migration timeline ends on Friday",
+            ),
+        },
+    )
+
+    assert model.active_routines[0].startswith("Weekly Atlas launch review")
+    assert model.recurring_obligations[0].startswith("Atlas launch note goes out")
+    assert model.collaborators[0] == "Alice owns Atlas launch communications"
+    assert model.project_timeline[0].startswith("Atlas launch timeline")
+    assert any(
+        "Supporting collaborator/obligation/timeline context is mixed" in item
+        for item in model.stale_signal_arbitration
+    )
+    assert any(
+        "Recent execution evidence is stale against the preferred project anchor." == item
+        for item in model.stale_signal_arbitration
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_surfaces_learning_diagnostics(async_db):
+    from datetime import datetime, timedelta, timezone
+    from sqlmodel import select
+    from src.db.models import GuardianIntervention
+
+    base_time = datetime.now(timezone.utc)
+    for offset_days, feedback_type, is_scheduled in (
+        (0, "not_helpful", True),
+        (1, "not_helpful", True),
+        (3, "helpful", False),
+    ):
+        intervention = await guardian_feedback_repository.create_intervention(
+            session_id="current",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content=f"Intervention {offset_days}",
+            reasoning="available_capacity",
+            is_scheduled=is_scheduled,
+            policy_action="act",
+            policy_reason="available_capacity",
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+            active_project="Atlas",
+        )
+        await guardian_feedback_repository.record_feedback(
+            intervention.id,
+            feedback_type=feedback_type,
+        )
+        async with async_db() as db:
+            stored = (
+                await db.execute(
+                    select(GuardianIntervention).where(GuardianIntervention.id == intervention.id)
+                )
+            ).scalar_one()
+            stored.updated_at = base_time - timedelta(days=offset_days)
+            if stored.feedback_at is not None:
+                stored.feedback_at = stored.updated_at
+            db.add(stored)
+            await db.flush()
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", return_value=["Atlas"]),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="How should I handle Atlas today?",
+        )
+
+    assert any("Live learning is currently anchored" in item for item in state.learning_diagnostics)
+    assert any("Observed outcomes:" in item for item in state.learning_diagnostics)
+    assert any("Long-horizon spread:" in item for item in state.learning_diagnostics)
 
 
 @patch("src.agent.factory.ToolCallingAgent")

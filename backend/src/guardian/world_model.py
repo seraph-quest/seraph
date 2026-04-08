@@ -41,6 +41,8 @@ class GuardianWorldModel:
     routine_watchpoints: tuple[str, ...] = ()
     collaborator_watchpoints: tuple[str, ...] = ()
     corroboration_sources: tuple[str, ...] = ()
+    project_ranking_diagnostics: tuple[str, ...] = ()
+    stale_signal_arbitration: tuple[str, ...] = ()
     judgment_risks: tuple[str, ...] = ()
 
     def to_prompt_block(self) -> str:
@@ -52,6 +54,12 @@ class GuardianWorldModel:
         ]
         if self.corroboration_sources:
             lines.append(f"Corroboration sources: {', '.join(self.corroboration_sources)}")
+        if self.project_ranking_diagnostics:
+            lines.append("Project ranking diagnostics:")
+            lines.extend(f"- {item}" for item in self.project_ranking_diagnostics)
+        if self.stale_signal_arbitration:
+            lines.append("Stale-signal arbitration:")
+            lines.extend(f"- {item}" for item in self.stale_signal_arbitration)
         if self.judgment_risks:
             lines.append("Judgment risks:")
             lines.extend(f"- {item}" for item in self.judgment_risks)
@@ -249,6 +257,13 @@ def _shares_topic_token(candidate: str, topic: str | None) -> bool:
     return bool(candidate_tokens & topic_tokens)
 
 
+@dataclass(frozen=True)
+class _RankedContextItem:
+    item: str
+    score: int
+    signals: tuple[str, ...]
+
+
 def _project_candidate_signals(
     *,
     candidate: str,
@@ -348,6 +363,143 @@ def _rank_project_candidates(
         )
     )
     return ranked
+
+
+def _context_item_signals(
+    *,
+    item: str,
+    project_anchor: str,
+    observer_context: CurrentContext,
+    recent_session_lines: list[str],
+    execution_pressure: list[str],
+) -> tuple[int, tuple[str, ...]]:
+    score = 0
+    signals: list[str] = []
+    if project_anchor and _text_matches_topic(item, project_anchor):
+        score += 4
+        signals.append("project_anchor")
+    if _shares_topic_token(item, observer_context.active_goals_summary):
+        score += 2
+        signals.append("observer_goals")
+    if _shares_topic_token(item, observer_context.current_event):
+        score += 2
+        signals.append("current_event")
+    if any(_shares_topic_token(item, event.get("summary")) for event in observer_context.upcoming_events[:2]):
+        score += 2
+        signals.append("upcoming_event")
+    if any(_shares_topic_token(item, line) for line in recent_session_lines):
+        score += 1
+        signals.append("recent_sessions")
+    if any(_shares_topic_token(item, line) for line in execution_pressure):
+        score += 1
+        signals.append("execution")
+    return score, _dedupe(signals)
+
+
+def _rank_anchor_context(
+    items: list[str],
+    *,
+    project_anchor: str,
+    observer_context: CurrentContext,
+    recent_session_lines: list[str],
+    execution_pressure: list[str],
+    limit: int,
+) -> list[str]:
+    ranked: list[_RankedContextItem] = []
+    for item in items:
+        normalized = _clean_line(item)
+        if not normalized:
+            continue
+        score, signals = _context_item_signals(
+            item=normalized,
+            project_anchor=project_anchor,
+            observer_context=observer_context,
+            recent_session_lines=recent_session_lines,
+            execution_pressure=execution_pressure,
+        )
+        ranked.append(_RankedContextItem(item=normalized, score=score, signals=signals))
+    ranked.sort(
+        key=lambda candidate: (
+            -candidate.score,
+            0 if project_anchor and _text_matches_topic(candidate.item, project_anchor) else 1,
+            candidate.item.lower(),
+        )
+    )
+    ordered = list(_dedupe([candidate.item for candidate in ranked]))
+    return ordered[:limit]
+
+
+def _project_ranking_diagnostics(
+    ranked_projects: list[tuple[str, int, tuple[str, ...]]],
+) -> tuple[str, ...]:
+    diagnostics: list[str] = []
+    for candidate, score, signals in ranked_projects[:3]:
+        if not signals:
+            continue
+        diagnostics.append(
+            f"{candidate}: score={score} from {', '.join(signals)}."
+        )
+    return _dedupe(diagnostics)
+
+
+def _stale_signal_arbitration(
+    *,
+    observer_project: str,
+    preferred_project_anchor: str,
+    competing_project_anchor: str,
+    matching_support: list[str],
+    stale_support: list[str],
+    matching_execution_pressure: list[str],
+    stale_execution_pressure: list[str],
+    matching_recent_threads: list[str],
+    stale_recent_threads: list[str],
+    distinct_ranked_projects: list[tuple[str, int, tuple[str, ...]]],
+) -> tuple[str, ...]:
+    items: list[str] = []
+    if (
+        observer_project
+        and preferred_project_anchor
+        and not _text_matches_topic(observer_project, preferred_project_anchor)
+    ):
+        top_score = distinct_ranked_projects[0][1] if distinct_ranked_projects else 0
+        next_score = distinct_ranked_projects[1][1] if len(distinct_ranked_projects) > 1 else 0
+        items.append(
+            f"Observer project '{observer_project}' is being overruled by stronger cross-source support for '{preferred_project_anchor}' (score {top_score}"
+            + (f" vs {next_score}" if next_score else "")
+            + ")."
+        )
+    if matching_support and stale_support:
+        items.append(
+            "Supporting collaborator/obligation/timeline context is mixed; prefer the anchor-backed items and treat the rest as stale until corroborated."
+        )
+    elif stale_support and not matching_support:
+        items.append(
+            "Supporting collaborator/obligation/timeline context is currently stale against the live anchor."
+        )
+    if matching_execution_pressure and stale_execution_pressure:
+        items.append(
+            "Execution evidence is split across projects; keep follow-through guidance scoped to the preferred anchor."
+        )
+    elif stale_execution_pressure and not matching_execution_pressure:
+        items.append(
+            "Recent execution evidence is stale against the preferred project anchor."
+        )
+    if matching_recent_threads and stale_recent_threads:
+        items.append(
+            "Recent continuity threads are mixed; prefer the anchor-backed thread and treat the rest as stale continuity."
+        )
+    elif stale_recent_threads and not matching_recent_threads:
+        items.append(
+            "Recent continuity threads are stale against the preferred project anchor."
+        )
+    if competing_project_anchor and preferred_project_anchor and distinct_ranked_projects:
+        top_score = distinct_ranked_projects[0][1]
+        next_score = distinct_ranked_projects[1][1] if len(distinct_ranked_projects) > 1 else 0
+        if next_score >= max(1, top_score - 2):
+            items.append(
+                f"Competing anchor '{competing_project_anchor}' remains close enough to require conservative arbitration."
+            )
+    return _dedupe(items)
 
 
 def _derive_focus_alignment(observer_context: CurrentContext) -> str:
@@ -660,10 +812,38 @@ def build_guardian_world_model(
     anchor_for_prioritization = project_anchor or observer_project
     recent_session_lines = _prioritize_topic_context(recent_session_lines, anchor_for_prioritization, limit=3)
     project_memory = _prioritize_topic_context(project_memory, anchor_for_prioritization, limit=2)
-    active_routines = _prioritize_topic_context(active_routines, anchor_for_prioritization, limit=3)
-    collaborators = _prioritize_topic_context(collaborators, anchor_for_prioritization, limit=3)
-    recurring_obligations = _prioritize_topic_context(recurring_obligations, anchor_for_prioritization, limit=3)
-    timeline_memory = _prioritize_topic_context(timeline_memory, anchor_for_prioritization, limit=3)
+    active_routines = _rank_anchor_context(
+        _prioritize_topic_context(active_routines, anchor_for_prioritization),
+        project_anchor=anchor_for_prioritization,
+        observer_context=observer_context,
+        recent_session_lines=recent_session_lines,
+        execution_pressure=execution_pressure,
+        limit=3,
+    )
+    collaborators = _rank_anchor_context(
+        _prioritize_topic_context(collaborators, anchor_for_prioritization),
+        project_anchor=anchor_for_prioritization,
+        observer_context=observer_context,
+        recent_session_lines=recent_session_lines,
+        execution_pressure=execution_pressure,
+        limit=3,
+    )
+    recurring_obligations = _rank_anchor_context(
+        _prioritize_topic_context(recurring_obligations, anchor_for_prioritization),
+        project_anchor=anchor_for_prioritization,
+        observer_context=observer_context,
+        recent_session_lines=recent_session_lines,
+        execution_pressure=execution_pressure,
+        limit=3,
+    )
+    timeline_memory = _rank_anchor_context(
+        _prioritize_topic_context(timeline_memory, anchor_for_prioritization),
+        project_anchor=anchor_for_prioritization,
+        observer_context=observer_context,
+        recent_session_lines=recent_session_lines,
+        execution_pressure=execution_pressure,
+        limit=3,
+    )
     supporting_context = list(collaborators) + list(recurring_obligations) + list(timeline_memory)
     matching_anchor_threads = [
         item for item in recent_session_lines
@@ -824,6 +1004,8 @@ def build_guardian_world_model(
     if execution_pressure:
         corroboration_sources.append("execution")
 
+    project_ranking_diagnostics = _project_ranking_diagnostics(distinct_ranked_projects)
+
     judgment_risks: list[str] = []
     if focus_source in {"current_session", "memory", "recent_sessions"}:
         judgment_risks.append(
@@ -853,6 +1035,31 @@ def build_guardian_world_model(
         item for item in execution_pressure
         if not _text_matches_topic(item, observer_project)
     ] if observer_project else []
+    arbitration_anchor = preferred_project_anchor or observer_project
+    matching_anchor_support_for_arbitration = [
+        item for item in supporting_context
+        if _text_matches_topic(item, arbitration_anchor)
+    ] if arbitration_anchor else []
+    stale_anchor_support_for_arbitration = [
+        item for item in supporting_context
+        if not _text_matches_topic(item, arbitration_anchor)
+    ] if arbitration_anchor else []
+    matching_anchor_execution_for_arbitration = [
+        item for item in execution_pressure
+        if _text_matches_topic(item, arbitration_anchor)
+    ] if arbitration_anchor else []
+    stale_anchor_execution_for_arbitration = [
+        item for item in execution_pressure
+        if not _text_matches_topic(item, arbitration_anchor)
+    ] if arbitration_anchor else []
+    matching_anchor_threads_for_arbitration = [
+        item for item in recent_session_lines
+        if _text_matches_topic(item, arbitration_anchor)
+    ] if arbitration_anchor else []
+    stale_anchor_threads_for_arbitration = [
+        item for item in recent_session_lines
+        if not _text_matches_topic(item, arbitration_anchor)
+    ] if arbitration_anchor else []
     has_follow_through_pressure = bool(
         observer_project and matching_recent_threads and matching_execution_pressure
     )
@@ -965,6 +1172,18 @@ def build_guardian_world_model(
         judgment_risks.append(
             f"Scheduled review and briefing outcomes have degraded across {learning_signal.scheduled_negative_days} day(s)."
         )
+    stale_signal_arbitration = _stale_signal_arbitration(
+        observer_project=observer_project,
+        preferred_project_anchor=preferred_project_anchor,
+        competing_project_anchor=competing_project_anchor,
+        matching_support=matching_anchor_support_for_arbitration,
+        stale_support=stale_anchor_support_for_arbitration,
+        matching_execution_pressure=matching_anchor_execution_for_arbitration,
+        stale_execution_pressure=stale_anchor_execution_for_arbitration,
+        matching_recent_threads=matching_anchor_threads_for_arbitration,
+        stale_recent_threads=stale_anchor_threads_for_arbitration,
+        distinct_ranked_projects=distinct_ranked_projects,
+    )
 
     return GuardianWorldModel(
         current_focus=current_focus,
@@ -996,5 +1215,7 @@ def build_guardian_world_model(
         routine_watchpoints=routine_watchpoints,
         collaborator_watchpoints=collaborator_watchpoints,
         corroboration_sources=_dedupe(corroboration_sources),
+        project_ranking_diagnostics=project_ranking_diagnostics,
+        stale_signal_arbitration=stale_signal_arbitration,
         judgment_risks=_dedupe(judgment_risks),
     )

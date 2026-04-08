@@ -116,6 +116,26 @@ def test_source_report_action_workflow_behavior_runtime_eval_details():
     ]
 
 
+def test_governed_self_evolution_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["governed_self_evolution_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert "prompt_pack" in details["target_types"]
+    assert "skill" in details["target_types"]
+    assert details["proposal_status"] == "saved"
+    assert details["proposal_quality_state"] in {"guarded", "ready"}
+    assert details["saved_candidate_has_goal_section"] is True
+    assert details["saved_candidate_path"].endswith("extensions/workspace-capabilities/skills/web-briefing-review-candidate.md")
+    assert details["stored_receipt_candidate_name"] == "web-briefing Review Candidate"
+    assert details["blocked_status"] is True
+    assert details["blocked_constraint"] == "blocked"
+    assert details["blocked_tokens"] == ["vault://"]
+
+
 def test_main_lists_available_scenarios(capsys):
     exit_code = main(["--list"])
 
@@ -160,6 +180,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "approval_explainability_surface_behavior" in captured.out
     assert "source_report_action_workflow_behavior" in captured.out
+    assert "governed_self_evolution_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out

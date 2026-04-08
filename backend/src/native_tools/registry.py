@@ -167,6 +167,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "propose_capability_evolution": {
+        "description": "Generate an eval-gated review candidate for a declarative skill, runbook, starter pack, or prompt pack",
+        "policy_modes": ["balanced", "full"],
+        "execution_boundaries": ["workspace_write", "local_compute"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

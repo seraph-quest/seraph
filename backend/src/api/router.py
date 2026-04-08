@@ -10,6 +10,7 @@ from src.api.catalog import router as catalog_router
 from src.api.capabilities import router as capabilities_router
 from src.api.chat import router as chat_router
 from src.api.extensions import router as extensions_router
+from src.api.evolution import router as evolution_router
 from src.api.goals import router as goals_router
 from src.api.mcp import router as mcp_router
 from src.api.memory import router as memory_router
@@ -37,6 +38,7 @@ api_router.include_router(catalog_router, prefix="/api", tags=["catalog"])
 api_router.include_router(capabilities_router, prefix="/api", tags=["capabilities"])
 api_router.include_router(chat_router, prefix="/api", tags=["chat"])
 api_router.include_router(extensions_router, prefix="/api", tags=["extensions"])
+api_router.include_router(evolution_router, prefix="/api", tags=["evolution"])
 api_router.include_router(sessions_router, prefix="/api", tags=["sessions"])
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])

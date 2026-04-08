@@ -11,11 +11,14 @@ from typing import Any
 import yaml
 
 from config.settings import settings
-from src.extensions.layout import resolve_package_reference
+from src.extensions.layout import expected_layout_prefixes, resolve_package_reference
 from src.extensions.manifest import load_extension_manifest, parse_extension_manifest
 from src.extensions.permissions import evaluate_tool_permissions
+from src.runbooks.loader import parse_runbook_content
 from src.skills.loader import parse_skill_content
+from src.starter_packs.loader import parse_starter_pack_payload
 from src.workflows.loader import parse_workflow_content
+from src.extensions.capability_contributions import parse_prompt_pack_definition
 
 WORKSPACE_CAPABILITY_PACKAGE_ID = "seraph.workspace-capabilities"
 WORKSPACE_CAPABILITY_PACKAGE_DIRNAME = "workspace-capabilities"
@@ -155,12 +158,12 @@ def save_workspace_contribution(
     content: str,
     workspace_dir: str | None = None,
 ) -> Path:
-    if contribution_type not in {"skills", "workflows"}:
+    if contribution_type not in {"skills", "workflows", "runbooks", "starter_packs", "prompt_packs"}:
         raise ValueError(f"unsupported managed workspace contribution type: {contribution_type}")
 
     package_root = workspace_capability_package_root(workspace_dir)
     payload = _load_or_create_manifest_payload(package_root)
-    relative_reference = f"{contribution_type}/{file_name}"
+    relative_reference = f"{expected_layout_prefixes(contribution_type)[0]}{file_name}"
     contribution_bucket = payload.setdefault("contributes", {}).setdefault(contribution_type, [])
     if relative_reference not in contribution_bucket:
         contribution_bucket.append(relative_reference)
@@ -168,13 +171,63 @@ def save_workspace_contribution(
     payload["version"] = _today_version()
 
     target_path = package_root / relative_reference
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(content, encoding="utf-8")
+    _validate_workspace_contribution(contribution_type, target_path, content)
 
-    _write_manifest_payload(package_root, payload)
-    payload = yaml.safe_load((package_root / "manifest.yaml").read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"managed workspace manifest at {package_root / 'manifest.yaml'} is invalid")
-    _recompute_permissions(package_root, payload)
-    _write_manifest_payload(package_root, payload)
-    return target_path
+    manifest_path = package_root / "manifest.yaml"
+    original_manifest = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else None
+    target_existed = target_path.exists()
+    original_target = target_path.read_text(encoding="utf-8") if target_existed else None
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
+
+        _write_manifest_payload(package_root, payload)
+        payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"managed workspace manifest at {manifest_path} is invalid")
+        _recompute_permissions(package_root, payload)
+        _write_manifest_payload(package_root, payload)
+        return target_path
+    except Exception:
+        if original_manifest is None:
+            manifest_path.unlink(missing_ok=True)
+        else:
+            manifest_path.write_text(original_manifest, encoding="utf-8")
+        if target_existed:
+            target_path.write_text(original_target or "", encoding="utf-8")
+        else:
+            target_path.unlink(missing_ok=True)
+        raise
+
+
+def _validate_workspace_contribution(contribution_type: str, target_path: Path, content: str) -> None:
+    if contribution_type == "skills":
+        errors: list[dict[str, str]] = []
+        if parse_skill_content(content, path=str(target_path), errors=errors) is None:
+            raise ValueError(f"skill draft is invalid: {errors[0]['message'] if errors else target_path}")
+        return
+    if contribution_type == "workflows":
+        errors = []
+        if parse_workflow_content(content, path=str(target_path), errors=errors) is None:
+            raise ValueError(f"workflow draft is invalid: {errors[0]['message'] if errors else target_path}")
+        return
+    if contribution_type == "runbooks":
+        errors = []
+        if parse_runbook_content(content, path=str(target_path), errors=errors) is None:
+            raise ValueError(f"runbook draft is invalid: {errors[0]['message'] if errors else target_path}")
+        return
+    if contribution_type == "starter_packs":
+        try:
+            payload = yaml.safe_load(content)
+        except yaml.YAMLError:
+            payload = None
+        if payload is None:
+            import json
+            payload = json.loads(content)
+        errors = []
+        if parse_starter_pack_payload(payload, path=str(target_path), errors=errors) is None:
+            raise ValueError(f"starter pack draft is invalid: {errors[0]['message'] if errors else target_path}")
+        return
+    if contribution_type == "prompt_packs":
+        parse_prompt_pack_definition(content, source=str(target_path))

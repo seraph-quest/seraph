@@ -444,6 +444,197 @@ async def test_operator_timeline_uses_persisted_queued_insight_session_id_when_r
 
 
 @pytest.mark.asyncio
+async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_handoff(client):
+    with (
+        patch("src.api.operator.settings.use_delegation", True),
+        patch(
+            "src.api.operator.context_manager.get_context",
+            return_value=SimpleNamespace(
+                approval_mode="high_risk",
+                tool_policy_mode="balanced",
+                mcp_policy_mode="approval",
+            ),
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-1",
+                        "workflow_name": "repo-review",
+                        "summary": "Workflow is blocked by approval context drift",
+                        "status": "blocked",
+                        "availability": "blocked",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "started_at": "2026-04-08T10:00:00Z",
+                        "updated_at": "2026-04-08T10:05:00Z",
+                        "replay_block_reason": "approval_context_changed",
+                        "thread_continue_message": "Start a fresh guarded repo review.",
+                    },
+                    {
+                        "id": "run-2",
+                        "workflow_name": "daily-brief",
+                        "summary": "Workflow still running",
+                        "status": "running",
+                        "availability": "ready",
+                        "thread_id": "session-2",
+                        "thread_label": "Session 2",
+                        "started_at": "2026-04-08T09:00:00Z",
+                        "updated_at": "2026-04-08T09:03:00Z",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "approval-1",
+                        "tool_name": "write_file",
+                        "summary": "Approve guarded write",
+                        "risk_level": "high",
+                        "session_id": "session-1",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "resume_message": "Resume after approval.",
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "presence",
+                        "recommended_focus": "telegram relay",
+                        "actionable_thread_count": 2,
+                        "degraded_route_count": 1,
+                        "degraded_source_adapter_count": 1,
+                        "attention_presence_surface_count": 1,
+                    },
+                    "recovery_actions": [
+                        {
+                            "id": "presence:telegram",
+                            "kind": "presence_repair",
+                            "label": "Review Telegram relay",
+                            "detail": "Connector requires config.",
+                            "status": "requires_config",
+                            "thread_id": "session-1",
+                            "continue_message": "Plan the Telegram repair.",
+                        },
+                        {
+                            "id": "presence:other",
+                            "kind": "presence_repair",
+                            "label": "Ignore unrelated follow-up",
+                            "detail": "Different session.",
+                            "status": "requires_config",
+                            "thread_id": "session-2",
+                            "continue_message": "Do not surface this.",
+                        }
+                    ],
+                }
+            ),
+        ),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-1",
+                        "event_type": "approval_requested",
+                        "tool_name": "write_file",
+                        "summary": "Approval requested for write_file",
+                        "created_at": "2026-04-08T10:01:00Z",
+                        "session_id": "session-1",
+                    },
+                    {
+                        "id": "audit-2",
+                        "event_type": "tool_failed",
+                        "tool_name": "write_file",
+                        "summary": "write_file failed",
+                        "created_at": "2026-04-08T10:02:00Z",
+                        "session_id": "session-1",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": "2026-04-08T10:00:00Z",
+                    "source": "rest_chat",
+                    "cost_usd": 0.012,
+                    "tokens": {"input": 120, "output": 60},
+                },
+                {
+                    "timestamp": "2026-04-08T10:01:00Z",
+                    "source": "background",
+                    "cost_usd": 0.004,
+                    "tokens": {"input": 40, "output": 25},
+                },
+            ],
+        ),
+        patch(
+            "src.api.operator.list_extensions",
+            return_value={
+                "summary": {
+                    "total": 3,
+                    "ready": 2,
+                    "degraded": 1,
+                    "issue_count": 4,
+                    "degraded_connector_count": 2,
+                },
+                "extensions": [
+                    {"id": "ext-1", "approval_profile": {"requires_lifecycle_approval": True}},
+                    {"id": "ext-2", "approval_profile": {"requires_lifecycle_approval": False}},
+                ],
+            },
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Session 1"}]),
+        ),
+    ):
+        resp = await client.get("/api/operator/control-plane", params={"window_hours": 24})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["governance"]["workspace_mode"] == "single_operator_guarded_workspace"
+    assert payload["governance"]["approval_mode"] == "high_risk"
+    assert payload["governance"]["delegation_enabled"] is True
+    assert payload["governance"]["roles"][0]["id"] == "human_operator"
+
+    usage = payload["usage"]
+    assert usage["llm_call_count"] == 2
+    assert usage["llm_cost_usd"] == 0.016
+    assert usage["pending_approvals"] == 1
+    assert usage["active_workflows"] == 2
+    assert usage["blocked_workflows"] == 1
+    assert usage["failure_count"] == 1
+
+    runtime_posture = payload["runtime_posture"]
+    assert runtime_posture["extensions"]["total"] == 3
+    assert runtime_posture["extensions"]["governed"] == 1
+    assert runtime_posture["continuity"]["continuity_health"] == "attention"
+    assert runtime_posture["continuity"]["degraded_route_count"] == 1
+
+    handoff = payload["handoff"]
+    assert handoff["pending_approvals"][0]["label"] == "write_file"
+    assert handoff["blocked_workflows"][0]["label"] == "repo-review"
+    assert handoff["blocked_workflows"][0]["trust_boundary"]["status"] == "changed"
+    assert handoff["blocked_workflows"][0]["trust_boundary"]["reason"] == "approval_context_changed"
+    assert handoff["follow_ups"][0]["label"] == "Review Telegram relay"
+    assert len(handoff["follow_ups"]) == 2
+    assert handoff["follow_ups"][1]["label"] == "Ignore unrelated follow-up"
+    assert handoff["review_receipts"][0]["status"] == "approval_requested"
+
+
+@pytest.mark.asyncio
 async def test_operator_timeline_projects_routing_metadata(client):
     with (
         patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),

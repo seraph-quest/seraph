@@ -38,6 +38,7 @@
 - [x] high-risk extension configure and source-save paths now bind approvals to materially changed config targets or exact requested source content, and pending approval/operator/activity surfaces carry structured approval scope, lifecycle boundary, and trust-context metadata instead of flattening privileged mutations into generic approval rows
 - [x] sync helper runtime-audit logging now fails soft when no event loop is active and uses tracked background tasks when a loop exists, so audit persistence no longer destabilizes sync execution paths in CI teardown
 - [x] tool and MCP metadata now expose explicit `secret_ref_fields`, wrapped MCP tools preserve only declared injection-safe secret-bearing fields, and connector-backed authenticated mutation execution now rejects undeclared payload keys instead of forwarding arbitrary action arguments to managed runtimes
+- [x] operator control-plane synthesis now exposes workspace governance modes, role inventory, usage rollups, runtime posture, review receipts, and blocked-workflow or approval handoff state through one operator API instead of leaving team-control context split across settings, audit, extensions, continuity, and workflow surfaces
 
 ## Working On Now
 
@@ -51,6 +52,7 @@
 - [x] this workstream now also ships `connector-backed-authenticated-mutation-boundaries-v1` for typed source-write planning, scoped connector mutation approvals, and CI stabilization around the heaviest backend/frontend suites
 - [x] this workstream now also ships the first `adapter-backed-authenticated-operations-and-report-workflows-v1` Batch AM aggregate for executable connector-backed source actions, provider-neutral report publication planning, structured mutation execution audit, and heavier backend shard weighting for the approval/context suites
 - [x] this workstream now also ships the first Batch AT aggregate for field-scoped secret-reference execution surfaces, explicit per-tool secret-ref metadata, and allowlisted authenticated mutation payload enforcement
+- [x] this workstream now also ships the first Batch AU aggregate for operator control-plane governance, usage/runtime posture synthesis, and collaboration-safe handoff receipts across approvals, workflows, audit, continuity, and extension state
 
 ## Still To Do On `develop`
 

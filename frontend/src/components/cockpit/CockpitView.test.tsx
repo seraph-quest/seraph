@@ -8971,7 +8971,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 10 }, () => {
+    const deferredResponses = Array.from({ length: 11 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -8996,7 +8996,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(13));
+    await waitFor(() => expect(cockpitFetchCount).toBe(14));
     view.unmount();
 
     await act(async () => {
@@ -9061,5 +9061,209 @@ describe("CockpitView", () => {
     fireEvent.submit(composer.closest("form")!);
 
     await waitFor(() => expect(screen.getByDisplayValue("keep me")).toBeInTheDocument());
+  });
+
+  it("surfaces the team control plane in the operator terminal", async () => {
+    let controlPlaneUrl: string | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "2026.3.19",
+          build_id: "SERAPH_PRIME_v2026.3.19",
+          provider: "openrouter",
+          model: "openrouter/openai/gpt-4.1-mini",
+          model_label: "gpt-4.1-mini",
+          llm_logging_enabled: true,
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "attention",
+            primary_surface: "presence",
+            recommended_focus: "telegram relay",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 1,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 1,
+            attention_presence_surface_count: 1,
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        controlPlaneUrl = url;
+        return Promise.resolve(mockResponse({
+          governance: {
+            workspace_mode: "single_operator_guarded_workspace",
+            review_posture: "human review gates privileged mutations, extension lifecycle changes, and governed evolution proposals",
+            approval_mode: "high_risk",
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            delegation_enabled: true,
+            roles: [
+              {
+                id: "human_operator",
+                label: "Human operator",
+                scope: "workspace_governance",
+                summary: "Owns approvals, deployment posture, and final review of privileged mutations.",
+                status: "active",
+                permissions: ["approve high-risk actions"],
+                boundaries: ["human_review", "workspace_write", "external_mcp"],
+              },
+            ],
+          },
+          usage: {
+            window_hours: 24,
+            llm_call_count: 7,
+            llm_cost_usd: 0.0234,
+            input_tokens: 300,
+            output_tokens: 120,
+            user_triggered_llm_calls: 3,
+            autonomous_llm_calls: 4,
+            failure_count: 1,
+            pending_approvals: 2,
+            active_workflows: 3,
+            blocked_workflows: 1,
+          },
+          runtime_posture: {
+            runtime: {
+              version: "2026.3.19",
+              build_id: "SERAPH_PRIME_v2026.3.19",
+              provider: "openrouter",
+              model: "openrouter/openai/gpt-4.1-mini",
+              model_label: "gpt-4.1-mini",
+            },
+            extensions: {
+              total: 5,
+              ready: 4,
+              degraded: 1,
+              governed: 2,
+              issue_count: 3,
+              degraded_connector_count: 1,
+            },
+            continuity: {
+              continuity_health: "attention",
+              primary_surface: "presence",
+              recommended_focus: "telegram relay",
+              actionable_thread_count: 1,
+              degraded_route_count: 1,
+              degraded_source_adapter_count: 0,
+              attention_presence_surface_count: 1,
+            },
+          },
+          handoff: {
+            pending_approvals: [
+              {
+                id: "approval:1",
+                kind: "approval",
+                label: "write_file",
+                detail: "Approve guarded write",
+                status: "high",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                continue_message: "Resume after approval.",
+              },
+            ],
+            blocked_workflows: [
+              {
+                id: "workflow:1",
+                kind: "workflow",
+                label: "repo-review",
+                detail: "Workflow is blocked by approval context drift",
+                status: "blocked",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                continue_message: "Start a fresh guarded repo review.",
+              },
+            ],
+            follow_ups: [
+              {
+                id: "follow:1",
+                kind: "presence_repair",
+                label: "Review Telegram relay",
+                detail: "Connector requires config.",
+                status: "requires_config",
+                continue_message: "Plan the Telegram repair.",
+              },
+            ],
+            review_receipts: [
+              {
+                id: "review:1",
+                title: "write_file",
+                summary: "Approval requested for write_file",
+                status: "approval_requested",
+                created_at: "2026-04-08T10:00:00Z",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+              },
+            ],
+          },
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const controlPlane = await screen.findByRole("region", { name: /team control plane/i });
+    await waitFor(() => expect(controlPlane).toHaveTextContent(/single operator guarded workspace/i));
+    expect(screen.getByText(/7 llm/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 blocked workflows/i)).toBeInTheDocument();
+    expect(screen.getByText(/4\/5 extensions ready/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 governed/i)).toBeInTheDocument();
+    expect(screen.getByText("Human operator")).toBeInTheDocument();
+    expect(screen.getByText("Review Telegram relay")).toBeInTheDocument();
+    expect(screen.getByText("Approval requested for write_file")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "continue" }).length).toBeGreaterThan(0);
+    expect(controlPlaneUrl).not.toContain("session_id=");
   });
 });

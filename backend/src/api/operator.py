@@ -1,13 +1,19 @@
-"""Operator API — threaded live timeline across workflows, approvals, notifications, and guardian continuity."""
+"""Operator API — threaded live timeline and team control plane surfaces."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Query
 
+from config.settings import settings
 from src.agent.session import session_manager
+from src.app import _runtime_model_label, _runtime_provider_label
+from src.extensions.lifecycle import list_extensions
+from src.llm_logger import list_recent_llm_calls
+from src.observer.manager import context_manager
 from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
 from src.api.workflows import (
     _list_workflow_runs,
@@ -117,6 +123,346 @@ def _continuity_operator_items(
             },
         })
     return items
+
+
+def _runtime_status_payload() -> dict[str, Any]:
+    model = settings.default_model.strip()
+    return {
+        "version": "2026.3.19",
+        "build_id": "SERAPH_PRIME_v2026.3.19",
+        "provider": _runtime_provider_label(),
+        "model": model,
+        "model_label": _runtime_model_label(model),
+        "api_base": settings.llm_api_base.strip(),
+        "timezone": settings.user_timezone,
+        "llm_logging_enabled": settings.llm_log_enabled,
+    }
+
+
+def _control_plane_roles(tool_policy_mode: str, mcp_policy_mode: str, approval_mode: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "human_operator",
+            "label": "Human operator",
+            "scope": "workspace_governance",
+            "summary": "Owns approvals, deployment posture, and final review of privileged mutations.",
+            "status": "active",
+            "permissions": [
+                "approve high-risk actions",
+                "configure extensions and connectors",
+                "promote governed evolution proposals",
+                "decide deployment and runtime posture",
+            ],
+            "boundaries": ["human_review", "workspace_write", "external_mcp"],
+        },
+        {
+            "id": "guardian_runtime",
+            "label": "Guardian runtime",
+            "scope": "autonomous_triage",
+            "summary": "Synthesizes continuity, usage, and intervention signals without owning privileged execution.",
+            "status": "active",
+            "permissions": [
+                "queue interventions",
+                "surface runtime diagnostics",
+                "recommend follow-through",
+            ],
+            "boundaries": ["advisory_only", approval_mode],
+        },
+        {
+            "id": "delegated_specialists",
+            "label": "Delegated specialists",
+            "scope": "bounded_execution",
+            "summary": (
+                "Run bounded delegated work under the current workspace approval posture."
+                if settings.use_delegation
+                else "Delegation is disabled for this runtime."
+            ),
+            "status": "enabled" if settings.use_delegation else "disabled",
+            "permissions": [
+                "bounded workflow execution",
+                "specialist planning",
+            ] if settings.use_delegation else [],
+            "boundaries": ["delegation", tool_policy_mode],
+        },
+        {
+            "id": "connector_runtime",
+            "label": "Connector runtime",
+            "scope": "authenticated_io",
+            "summary": "Managed connectors run with explicit MCP and mutation boundaries instead of ambient trust.",
+            "status": "guarded",
+            "permissions": [
+                "typed source evidence",
+                "adapter-backed operations",
+                "channel and presence routing",
+            ],
+            "boundaries": [mcp_policy_mode, "secret_ref_allowlist", "approval_scoped_writes"],
+        },
+    ]
+
+
+def _usage_summary(
+    workflow_runs: list[dict[str, Any]],
+    pending_approvals: list[dict[str, Any]],
+    llm_calls: list[dict[str, Any]],
+    audit_events: list[dict[str, Any]],
+    *,
+    window_hours: int,
+) -> dict[str, Any]:
+    terminal_statuses = {"completed", "succeeded", "failed", "cancelled"}
+    active_workflows = sum(
+        1
+        for run in workflow_runs
+        if str(run.get("status") or "").lower() not in terminal_statuses
+    )
+    blocked_workflows = sum(
+        1
+        for run in workflow_runs
+        if str(run.get("availability") or "") == "blocked"
+    )
+    llm_cost_usd = round(
+        sum(float(call.get("cost_usd", 0) or 0) for call in llm_calls),
+        6,
+    )
+    input_tokens = sum(int((call.get("tokens") or {}).get("input", 0) or 0) for call in llm_calls)
+    output_tokens = sum(int((call.get("tokens") or {}).get("output", 0) or 0) for call in llm_calls)
+    user_llm_calls = sum(
+        1
+        for call in llm_calls
+        if str(call.get("source") or "") in {"rest_chat", "websocket_chat"}
+    )
+    autonomous_llm_calls = len(llm_calls) - user_llm_calls
+    failure_count = sum(
+        1
+        for event in audit_events
+        if str(event.get("event_type") or "") in {
+            "tool_failed",
+            "integration_failed",
+            "llm_primary_failure",
+            "llm_fallback_failure",
+        }
+    )
+    return {
+        "window_hours": window_hours,
+        "llm_call_count": len(llm_calls),
+        "llm_cost_usd": llm_cost_usd,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "user_triggered_llm_calls": user_llm_calls,
+        "autonomous_llm_calls": autonomous_llm_calls,
+        "failure_count": failure_count,
+        "pending_approvals": len(pending_approvals),
+        "active_workflows": active_workflows,
+        "blocked_workflows": blocked_workflows,
+    }
+
+
+def _review_receipts(audit_events: list[dict[str, Any]], session_titles: dict[str, str]) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for event in audit_events:
+        event_type = str(event.get("event_type") or "")
+        if not (
+            event_type.startswith("approval_")
+            or event_type.startswith("integration_")
+            or event_type in {"tool_failed", "llm_routing_decision", "llm_target_rerouted"}
+        ):
+            continue
+        session_id = event.get("session_id")
+        receipts.append({
+            "id": f"review:{event.get('id')}",
+            "title": str(event.get("tool_name") or event_type.replace("_", " ")),
+            "summary": str(event.get("summary") or event_type.replace("_", " ")),
+            "status": event_type,
+            "created_at": str(event.get("created_at") or ""),
+            "thread_id": session_id,
+            "thread_label": session_titles.get(str(session_id)) if session_id else None,
+        })
+    return receipts[:4]
+
+
+def _handoff_trust_boundary(run: dict[str, Any]) -> dict[str, Any] | None:
+    trust_boundary = run.get("trust_boundary")
+    if isinstance(trust_boundary, dict):
+        return trust_boundary
+    replay_block_reason = str(run.get("replay_block_reason") or "")
+    if replay_block_reason == "approval_context_changed":
+        return {
+            "status": "changed",
+            "blocked": True,
+            "reason": "approval_context_changed",
+            "message": "Workflow trust boundary changed after the original run.",
+            "requires_fresh_run": True,
+        }
+    if replay_block_reason == "approval_context_missing":
+        return {
+            "status": "missing",
+            "blocked": True,
+            "reason": "approval_context_missing",
+            "message": "Workflow predates tracked trust-boundary metadata for this privileged surface.",
+            "requires_fresh_run": True,
+        }
+    return None
+
+
+def _handoff_entries(
+    workflow_runs: list[dict[str, Any]],
+    pending_approvals: list[dict[str, Any]],
+    continuity_snapshot: dict[str, Any],
+    session_titles: dict[str, str],
+    *,
+    session_id: str | None,
+) -> dict[str, Any]:
+    approvals: list[dict[str, Any]] = []
+    for approval in pending_approvals[:4]:
+        approval_thread_id = approval.get("thread_id") or approval.get("session_id")
+        approvals.append({
+            "id": f"approval:{approval.get('id')}",
+            "kind": "approval",
+            "label": str(approval.get("tool_name") or "approval"),
+            "detail": str(approval.get("summary") or "Approval pending"),
+            "status": str(approval.get("risk_level") or "pending"),
+            "thread_id": approval_thread_id,
+            "thread_label": (
+                approval.get("thread_label") or session_titles.get(str(approval_thread_id))
+            ) if approval_thread_id else None,
+            "continue_message": approval.get("resume_message"),
+        })
+
+    blocked_workflows: list[dict[str, Any]] = []
+    for run in workflow_runs:
+        if str(run.get("availability") or "") != "blocked":
+            continue
+        blocked_workflows.append({
+            "id": f"workflow:{run.get('id')}",
+            "kind": "workflow",
+            "label": str(run.get("workflow_name") or "workflow"),
+            "detail": str(run.get("summary") or "Workflow blocked"),
+            "status": str(run.get("status") or "blocked"),
+            "thread_id": run.get("thread_id"),
+            "thread_label": run.get("thread_label"),
+            "continue_message": workflow_surface_continue_message(run),
+            "trust_boundary": _handoff_trust_boundary(run) or workflow_surface_resume_metadata(run).get("trust_boundary"),
+        })
+        if len(blocked_workflows) >= 4:
+            break
+
+    follow_ups: list[dict[str, Any]] = []
+    recovery_actions = continuity_snapshot.get("recovery_actions")
+    if isinstance(recovery_actions, list):
+        for action in recovery_actions[:4]:
+            if not isinstance(action, dict):
+                continue
+            thread_id = action.get("thread_id")
+            if session_id and thread_id not in {None, session_id}:
+                continue
+            follow_ups.append({
+                "id": f"continuity:{action.get('id')}",
+                "kind": str(action.get("kind") or "continuity"),
+                "label": str(action.get("label") or "Follow-up"),
+                "detail": str(action.get("detail") or ""),
+                "status": str(action.get("status") or "attention"),
+                "thread_id": thread_id,
+                "thread_label": session_titles.get(str(thread_id)) if thread_id else None,
+                "continue_message": action.get("continue_message"),
+            })
+
+    return {
+        "pending_approvals": approvals,
+        "blocked_workflows": blocked_workflows,
+        "follow_ups": follow_ups,
+    }
+
+
+@router.get("/operator/control-plane")
+async def get_operator_control_plane(
+    session_id: str | None = Query(default=None),
+    window_hours: int = Query(default=24, ge=1, le=168),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    ctx = context_manager.get_context()
+    session_titles = {
+        str(session["id"]): str(session.get("title") or "Untitled session")
+        for session in await session_manager.list_sessions()
+        if isinstance(session, dict) and session.get("id")
+    }
+
+    workflow_runs, pending_approvals, continuity_snapshot, audit_events, llm_calls = await asyncio.gather(
+        _list_workflow_runs(limit=60, session_id=session_id),
+        approval_repository.list_pending(session_id=session_id, limit=20),
+        build_observer_continuity_snapshot(),
+        audit_repository.list_events(limit=40, session_id=session_id, since=cutoff),
+        asyncio.to_thread(list_recent_llm_calls, limit=300, session_id=session_id, since=cutoff),
+    )
+    extension_payload = await asyncio.to_thread(list_extensions)
+    extension_summary = extension_payload.get("summary", {}) if isinstance(extension_payload, dict) else {}
+    extensions = extension_payload.get("extensions", []) if isinstance(extension_payload, dict) else []
+    governed_extension_count = sum(
+        1
+        for extension in extensions
+        if isinstance(extension, dict)
+        and isinstance(extension.get("approval_profile"), dict)
+        and extension["approval_profile"].get("requires_lifecycle_approval")
+    )
+    continuity_summary = (
+        continuity_snapshot.get("summary")
+        if isinstance(continuity_snapshot.get("summary"), dict)
+        else {}
+    )
+
+    return {
+        "governance": {
+            "workspace_mode": "single_operator_guarded_workspace",
+            "review_posture": "human review gates privileged mutations, extension lifecycle changes, and governed evolution proposals",
+            "approval_mode": ctx.approval_mode,
+            "tool_policy_mode": ctx.tool_policy_mode,
+            "mcp_policy_mode": ctx.mcp_policy_mode,
+            "delegation_enabled": bool(settings.use_delegation),
+            "workspace_dir": settings.workspace_dir,
+            "roles": _control_plane_roles(
+                str(ctx.tool_policy_mode),
+                str(ctx.mcp_policy_mode),
+                str(ctx.approval_mode),
+            ),
+        },
+        "usage": _usage_summary(
+            workflow_runs,
+            pending_approvals,
+            llm_calls,
+            audit_events,
+            window_hours=window_hours,
+        ),
+        "runtime_posture": {
+            "runtime": _runtime_status_payload(),
+            "extensions": {
+                "total": int(extension_summary.get("total") or 0),
+                "ready": int(extension_summary.get("ready") or 0),
+                "degraded": int(extension_summary.get("degraded") or 0),
+                "governed": governed_extension_count,
+                "issue_count": int(extension_summary.get("issue_count") or 0),
+                "degraded_connector_count": int(extension_summary.get("degraded_connector_count") or 0),
+            },
+            "continuity": {
+                "continuity_health": str(continuity_summary.get("continuity_health") or "unknown"),
+                "primary_surface": continuity_summary.get("primary_surface"),
+                "recommended_focus": continuity_summary.get("recommended_focus"),
+                "actionable_thread_count": int(continuity_summary.get("actionable_thread_count") or 0),
+                "degraded_route_count": int(continuity_summary.get("degraded_route_count") or 0),
+                "degraded_source_adapter_count": int(continuity_summary.get("degraded_source_adapter_count") or 0),
+                "attention_presence_surface_count": int(
+                    continuity_summary.get("attention_presence_surface_count") or 0
+                ),
+            },
+        },
+        "handoff": {
+            **_handoff_entries(
+                workflow_runs,
+                pending_approvals,
+                continuity_snapshot,
+                session_titles,
+                session_id=session_id,
+            ),
+            "review_receipts": _review_receipts(audit_events, session_titles),
+        },
+    }
 
 
 @router.get("/operator/timeline")

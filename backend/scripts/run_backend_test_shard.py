@@ -38,19 +38,43 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             ],
         ),
         (
-            "tests/test_capabilities_api.py::starter_pack_activation",
+            "tests/test_capabilities_api.py::starter_pack_activation_foundations",
             [
                 "tests/test_capabilities_api.py",
                 "-k",
-                "activate_ or ensure_bundled_workflow_available",
+                "activate_starter_pack_enables_seeded_assets or activate_manifest_backed_starter_pack_works or ensure_bundled_workflow_available",
             ],
         ),
         (
-            "tests/test_capabilities_api.py::bootstrap_and_validation",
+            "tests/test_capabilities_api.py::starter_pack_activation_bundled_core",
             [
                 "tests/test_capabilities_api.py",
                 "-k",
-                "capability_ or workflow_draft_validation_and_save",
+                "activate_bundled_core_capability_pack_uses_manifest_runtime or activate_bundled_core_capability_pack_uses_real_catalog_install",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_approvals_and_degraded",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_starter_pack_requires_catalog_install_approval or activate_starter_pack_preflights_all_approvals_without_consuming_them or activate_starter_pack_reports_degraded_when_enable_fails",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_manual_routes",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_bootstrap_leaves_policy_changes_manual or capability_bootstrap_leaves_mcp_enable_actions_manual or capability_bootstrap_leaves_extension_enable_actions_manual",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_apply_and_validation",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_preflight_returns_workflow_and_runbook_repair_metadata or capability_bootstrap_can_apply_low_risk_toggle_actions or capability_bootstrap_does_not_reclassify_low_risk_actions_as_manual_after_failed_apply or workflow_draft_validation_and_save",
             ],
         ),
     ],
@@ -74,19 +98,35 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "tests/test_eval_harness.py": [
         (
-            "tests/test_eval_harness.py::runtime_groups_1_2",
+            "tests/test_eval_harness.py::runtime_group_1",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2",
+                "test_run_runtime_evals_passes_group_1",
             ],
         ),
         (
-            "tests/test_eval_harness.py::runtime_groups_3_4",
+            "tests/test_eval_harness.py::runtime_group_2",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4",
+                "test_run_runtime_evals_passes_group_2",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_3",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_3",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_4",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_4",
             ],
         ),
         (

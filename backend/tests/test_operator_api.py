@@ -635,6 +635,146 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
 
 
 @pytest.mark.asyncio
+async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-1",
+                        "run_identity": "session-1:workflow_repo_review:1",
+                        "workflow_name": "repo-review",
+                        "summary": "Waiting on guarded approval",
+                        "status": "awaiting_approval",
+                        "availability": "blocked",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "started_at": "2026-04-08T10:00:00Z",
+                        "updated_at": "2026-04-08T10:05:00Z",
+                        "thread_continue_message": "Resume repo review.",
+                        "pending_approval_count": 1,
+                        "artifact_paths": ["notes/repo-review.md"],
+                        "step_records": [
+                            {
+                                "id": "collect",
+                                "index": 0,
+                                "tool": "web_search",
+                                "status": "succeeded",
+                            },
+                            {
+                                "id": "approve",
+                                "index": 1,
+                                "tool": "write_file",
+                                "status": "awaiting_approval",
+                                "result_summary": "Awaiting approval",
+                                "recovery_hint": "Approve write_file to continue.",
+                            },
+                        ],
+                        "checkpoint_candidates": [{"step_id": "collect", "label": "collect"}],
+                    },
+                    {
+                        "id": "run-2",
+                        "run_identity": "session-2:workflow_daily_brief:1",
+                        "workflow_name": "daily-brief",
+                        "summary": "Failed while drafting follow-up",
+                        "status": "failed",
+                        "availability": "ready",
+                        "thread_id": "session-2",
+                        "thread_label": "Session 2",
+                        "started_at": "2026-04-08T09:00:00Z",
+                        "updated_at": "2026-04-08T09:07:00Z",
+                        "thread_continue_message": "Retry the daily brief.",
+                        "retry_from_step_draft": "Retry daily brief from draft step.",
+                        "artifact_paths": ["notes/daily-brief.md"],
+                        "step_records": [
+                            {
+                                "id": "draft",
+                                "index": 0,
+                                "tool": "write_file",
+                                "status": "failed",
+                                "error_summary": "write_file denied",
+                                "recovery_hint": "Retry or repair permissions.",
+                                "recovery_actions": [{"type": "set_tool_policy"}],
+                                "is_recoverable": True,
+                            },
+                        ],
+                    },
+                    {
+                        "id": "run-3",
+                        "run_identity": "ambient:workflow_cleanup:1",
+                        "workflow_name": "cleanup",
+                        "summary": "Currently running cleanup.",
+                        "status": "running",
+                        "availability": "ready",
+                        "thread_id": None,
+                        "thread_label": None,
+                        "started_at": "2026-04-08T08:00:00Z",
+                        "updated_at": "2026-04-08T08:30:00Z",
+                        "thread_continue_message": "Continue cleanup.",
+                        "step_records": [
+                            {
+                                "id": "scan",
+                                "index": 0,
+                                "tool": "filesystem_read",
+                                "status": "running",
+                                "result_summary": "Scanning workspace",
+                            },
+                        ],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(
+                return_value=[
+                    {"id": "session-1", "title": "Session 1"},
+                    {"id": "session-2", "title": "Session 2"},
+                ]
+            ),
+        ),
+    ):
+        resp = await client.get(
+            "/api/operator/workflow-orchestration",
+            params={"limit_sessions": 6, "limit_workflows": 8},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["tracked_sessions"] == 2
+    assert payload["summary"]["workflow_count"] == 3
+    assert payload["summary"]["active_workflows"] == 2
+    assert payload["summary"]["blocked_workflows"] == 1
+    assert payload["summary"]["awaiting_approval_workflows"] == 1
+    assert payload["summary"]["recoverable_workflows"] == 1
+
+    sessions = payload["sessions"]
+    assert sessions[0]["thread_id"] == "session-1"
+    assert sessions[0]["lead_workflow_name"] == "repo-review"
+    assert sessions[0]["blocked_workflows"] == 1
+    assert sessions[0]["continue_message"] == "Resume repo review."
+    assert sessions[0]["lead_step_focus"]["kind"] == "active"
+    assert sessions[1]["thread_id"] is None
+    assert sessions[1]["thread_label"] == "Ambient workflows"
+    assert sessions[1]["lead_step_focus"]["kind"] == "active"
+    assert sessions[2]["thread_id"] == "session-2"
+    assert sessions[2]["recoverable_workflows"] == 1
+    assert sessions[2]["lead_step_focus"]["kind"] == "failure"
+
+    workflows = payload["workflows"]
+    assert workflows[0]["workflow_name"] == "repo-review"
+    assert workflows[0]["step_focus"]["kind"] == "active"
+    assert workflows[0]["checkpoint_candidate_count"] == 1
+    assert workflows[1]["workflow_name"] == "cleanup"
+    assert workflows[1]["step_focus"]["kind"] == "active"
+    assert workflows[2]["workflow_name"] == "daily-brief"
+    assert workflows[2]["retry_from_step_available"] is True
+    assert workflows[2]["step_focus"]["kind"] == "failure"
+    assert workflows[2]["step_focus"]["recovery_action_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_operator_timeline_projects_routing_metadata(client):
     with (
         patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),

@@ -39,6 +39,7 @@
 - [x] cockpit artifact control now also exposes source-run open/continue, source-failure reuse, related-output comparison, family-output continuation/recovery parity, and explicit candidate-source rows when lineage is ambiguous instead of collapsing artifact follow-through into one inspector-only path
 - [x] cockpit operator-terminal density now also includes a dedicated workflow-supervision lane with history summaries, branch-debug context, direct continue/retry/repair/use-output/failure-context/best-continuation controls, and a top-supervision keyboard shortcut, so operators can supervise recent completed and in-flight runs without waiting for them to surface as active triage
 - [x] cockpit operator-terminal density now also includes a team control-plane lane with governance modes, role inventory, usage summaries, runtime posture, review receipts, and direct approval/workflow handoff controls instead of forcing team operations to bounce between settings, activity, and workflow panes
+- [x] cockpit operator-terminal density now also includes a workspace-level workflow-orchestration lane that groups long-running runs by session, surfaces lead-run step focus and recoverability across multiple active threads, and gives operators direct inspect/continue/failure-context/open-thread or next-step control without collapsing long-running supervision back to only the currently inspected thread
 - [x] onboarding can now inspect an explicitly user-linked webpage during the onboarding turn, so profile and workspace context can be grounded in a real source without widening onboarding into general web search
 - [x] activity ledger rows now surface routing summaries, selected reason codes, rejected targets, native thread-source/continuation metadata, and per-call LLM token/cost attribution
 - [x] activity ledger rows now group related request work into compact parent bundles with emoji/icon scanning, child tool/routing rows, and completion footers so the operator can browse a day of agent work without reconstructing it from raw trace output
@@ -67,12 +68,13 @@
 - [x] this workstream now also ships `artifact-lineage-and-long-running-control-v2`
 - [x] this workstream now also ships `operator-control-plane-and-workflow-supervision-v1`
 - [x] this workstream now also ships `team-control-plane-governance-and-handoff-v1`
-- [x] this workstream now hands the queue forward to richer long-running control, broader keyboard/operator density, and deeper studio ergonomics rather than first-pass workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
+- [x] this workstream now also ships `long-running-workflow-orchestration-and-multi-session-operator-control-v2`
+- [x] this workstream now hands the queue forward to deeper step-level branch/resume/repair density, broader cross-surface operator command control, and deeper studio ergonomics rather than first-pass multi-session orchestration, workflow family history, output reuse, comparison drafts, family-plan bundling, triage quick actions, the first best-continuation keyboard layer, and the first family-row follow-through parity layer
 
 ## Still To Do On `develop`
 
 - [ ] richer capability installation, recommendation, and command-surface guidance inside the cockpit so shipped tools, skills, workflows, and blocked states become easier to bootstrap automatically, not only preflight, repair, bounded bootstrap, and first studio save flows
-- [ ] broader long-running workflow control, richer keyboard/operator density, and more flexible workspace ergonomics inside the cockpit beyond the current workflow-run layer, branch debugger, workflow-supervision lane, family-history comparison/output-diff layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
+- [ ] deeper step-level branch/resume/repair density, broader cross-surface operator command control, and more flexible workspace ergonomics inside the cockpit beyond the current workflow-run layer, workspace-level workflow orchestration lane, branch debugger, workflow-supervision lane, family-history comparison/output-diff layer, Activity Ledger, pane model, extension studio, and saved-layout composition model
 - [ ] richer ambient indicators and any surviving embodiment strictly subordinate to the cockpit
 - [ ] stronger mobile and cross-surface UX coherence
 

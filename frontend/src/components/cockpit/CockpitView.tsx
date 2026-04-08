@@ -156,6 +156,80 @@ interface OperatorControlPlane {
   };
 }
 
+interface WorkflowOrchestrationStepFocus {
+  kind: string;
+  step_id?: string | null;
+  tool?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  error_summary?: string | null;
+  recovery_hint?: string | null;
+  recovery_action_count: number;
+  is_recoverable: boolean;
+}
+
+interface WorkflowOrchestrationSessionEntry {
+  thread_id?: string | null;
+  thread_label?: string | null;
+  workflow_count: number;
+  active_workflows: number;
+  blocked_workflows: number;
+  awaiting_approval_workflows: number;
+  recoverable_workflows: number;
+  latest_updated_at: string;
+  lead_run_identity?: string | null;
+  lead_workflow_name?: string | null;
+  lead_status?: string | null;
+  lead_summary?: string | null;
+  continue_message?: string | null;
+  lead_step_focus?: WorkflowOrchestrationStepFocus | null;
+}
+
+interface WorkflowOrchestrationWorkflowEntry {
+  id?: string | null;
+  tool_name?: string | null;
+  run_identity?: string | null;
+  root_run_identity?: string | null;
+  parent_run_identity?: string | null;
+  workflow_name: string;
+  summary: string;
+  status: string;
+  availability?: string | null;
+  session_id?: string | null;
+  started_at?: string;
+  updated_at: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  continue_message?: string | null;
+  thread_continue_message?: string | null;
+  output_path?: string | null;
+  artifact_paths?: string[];
+  step_records?: Array<Record<string, unknown>>;
+  pending_approval_count: number;
+  pending_approval_ids?: string[];
+  checkpoint_candidate_count: number;
+  checkpoint_candidates?: Array<Record<string, unknown>>;
+  retry_from_step_available: boolean;
+  retry_from_step_draft?: string | null;
+  replay_allowed?: boolean;
+  replay_block_reason?: string | null;
+  replay_recommended_actions?: Array<Record<string, unknown>>;
+  step_focus?: WorkflowOrchestrationStepFocus | null;
+}
+
+interface OperatorWorkflowOrchestration {
+  summary: {
+    tracked_sessions: number;
+    workflow_count: number;
+    active_workflows: number;
+    blocked_workflows: number;
+    awaiting_approval_workflows: number;
+    recoverable_workflows: number;
+  };
+  sessions: WorkflowOrchestrationSessionEntry[];
+  workflows: WorkflowOrchestrationWorkflowEntry[];
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -1056,6 +1130,26 @@ interface OperatorWorkflowEntry {
   branchSummary: string;
 }
 
+interface OperatorWorkflowOrchestrationEntry {
+  id: string;
+  threadId: string | null;
+  threadLabel: string;
+  workflowCount: number;
+  activeWorkflows: number;
+  blockedWorkflows: number;
+  awaitingApprovalWorkflows: number;
+  recoverableWorkflows: number;
+  latestUpdatedAt: string;
+  continueMessage: string | null;
+  leadWorkflowName: string | null;
+  leadStatus: string | null;
+  leadSummary: string | null;
+  leadStepFocus: WorkflowOrchestrationStepFocus | null;
+  workflow: WorkflowRunRecord | null;
+  latestFailure: { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null;
+  outputPath: string | null;
+}
+
 interface ArtifactLineageResolution {
   sourceWorkflow: WorkflowRunRecord | null;
   candidateWorkflows: WorkflowRunRecord[];
@@ -1586,6 +1680,120 @@ function normalizeOperatorControlPlane(value: unknown): OperatorControlPlane | n
         ? handoffRecord.review_receipts as OperatorControlPlaneReviewReceipt[]
         : [],
     },
+  };
+}
+
+function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchestration | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const normalizeStepFocus = (entry: unknown): WorkflowOrchestrationStepFocus | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const step = entry as Record<string, unknown>;
+    return {
+      kind: typeof step.kind === "string" ? step.kind : "latest",
+      step_id: typeof step.step_id === "string" ? step.step_id : null,
+      tool: typeof step.tool === "string" ? step.tool : null,
+      status: typeof step.status === "string" ? step.status : null,
+      summary: typeof step.summary === "string" ? step.summary : null,
+      error_summary: typeof step.error_summary === "string" ? step.error_summary : null,
+      recovery_hint: typeof step.recovery_hint === "string" ? step.recovery_hint : null,
+      recovery_action_count: typeof step.recovery_action_count === "number" ? step.recovery_action_count : 0,
+      is_recoverable: Boolean(step.is_recoverable),
+    };
+  };
+  return {
+    summary: {
+      tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
+      workflow_count: typeof summaryRecord.workflow_count === "number" ? summaryRecord.workflow_count : 0,
+      active_workflows: typeof summaryRecord.active_workflows === "number" ? summaryRecord.active_workflows : 0,
+      blocked_workflows: typeof summaryRecord.blocked_workflows === "number" ? summaryRecord.blocked_workflows : 0,
+      awaiting_approval_workflows: typeof summaryRecord.awaiting_approval_workflows === "number" ? summaryRecord.awaiting_approval_workflows : 0,
+      recoverable_workflows: typeof summaryRecord.recoverable_workflows === "number" ? summaryRecord.recoverable_workflows : 0,
+    },
+    sessions: Array.isArray(record.sessions)
+      ? record.sessions.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const session = entry as Record<string, unknown>;
+          return [{
+            thread_id: typeof session.thread_id === "string" ? session.thread_id : null,
+            thread_label: typeof session.thread_label === "string" ? session.thread_label : null,
+            workflow_count: typeof session.workflow_count === "number" ? session.workflow_count : 0,
+            active_workflows: typeof session.active_workflows === "number" ? session.active_workflows : 0,
+            blocked_workflows: typeof session.blocked_workflows === "number" ? session.blocked_workflows : 0,
+            awaiting_approval_workflows: typeof session.awaiting_approval_workflows === "number" ? session.awaiting_approval_workflows : 0,
+            recoverable_workflows: typeof session.recoverable_workflows === "number" ? session.recoverable_workflows : 0,
+            latest_updated_at: typeof session.latest_updated_at === "string" ? session.latest_updated_at : "",
+            lead_run_identity: typeof session.lead_run_identity === "string" ? session.lead_run_identity : null,
+            lead_workflow_name: typeof session.lead_workflow_name === "string" ? session.lead_workflow_name : null,
+            lead_status: typeof session.lead_status === "string" ? session.lead_status : null,
+            lead_summary: typeof session.lead_summary === "string" ? session.lead_summary : null,
+            continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
+            lead_step_focus: normalizeStepFocus(session.lead_step_focus),
+          }];
+        })
+      : [],
+    workflows: Array.isArray(record.workflows)
+      ? record.workflows.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const workflow = entry as Record<string, unknown>;
+          return [{
+            id: typeof workflow.id === "string" ? workflow.id : null,
+            tool_name: typeof workflow.tool_name === "string" ? workflow.tool_name : null,
+            run_identity: typeof workflow.run_identity === "string" ? workflow.run_identity : null,
+            root_run_identity: typeof workflow.root_run_identity === "string" ? workflow.root_run_identity : null,
+            parent_run_identity: typeof workflow.parent_run_identity === "string" ? workflow.parent_run_identity : null,
+            workflow_name: typeof workflow.workflow_name === "string" ? workflow.workflow_name : "workflow",
+            summary: typeof workflow.summary === "string" ? workflow.summary : "",
+            status: typeof workflow.status === "string" ? workflow.status : "unknown",
+            availability: typeof workflow.availability === "string" ? workflow.availability : null,
+            session_id: typeof workflow.session_id === "string" ? workflow.session_id : null,
+            started_at: typeof workflow.started_at === "string" ? workflow.started_at : "",
+            updated_at: typeof workflow.updated_at === "string" ? workflow.updated_at : "",
+            thread_id: typeof workflow.thread_id === "string" ? workflow.thread_id : null,
+            thread_label: typeof workflow.thread_label === "string" ? workflow.thread_label : null,
+            continue_message: typeof workflow.continue_message === "string" ? workflow.continue_message : null,
+            thread_continue_message: typeof workflow.thread_continue_message === "string" ? workflow.thread_continue_message : null,
+            output_path: typeof workflow.output_path === "string" ? workflow.output_path : null,
+            artifact_paths: Array.isArray(workflow.artifact_paths)
+              ? workflow.artifact_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            step_records: Array.isArray(workflow.step_records)
+              ? workflow.step_records.flatMap((item) => (
+                item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []
+              ))
+              : [],
+            pending_approval_count: typeof workflow.pending_approval_count === "number" ? workflow.pending_approval_count : 0,
+            pending_approval_ids: Array.isArray(workflow.pending_approval_ids)
+              ? workflow.pending_approval_ids.filter((item): item is string => typeof item === "string")
+              : [],
+            checkpoint_candidate_count: typeof workflow.checkpoint_candidate_count === "number" ? workflow.checkpoint_candidate_count : 0,
+            checkpoint_candidates: Array.isArray(workflow.checkpoint_candidates)
+              ? workflow.checkpoint_candidates.flatMap((item) => (
+                item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []
+              ))
+              : [],
+            retry_from_step_available: Boolean(workflow.retry_from_step_available),
+            retry_from_step_draft: typeof workflow.retry_from_step_draft === "string" ? workflow.retry_from_step_draft : null,
+            replay_allowed: typeof workflow.replay_allowed === "boolean" ? workflow.replay_allowed : true,
+            replay_block_reason: typeof workflow.replay_block_reason === "string" ? workflow.replay_block_reason : null,
+            replay_recommended_actions: Array.isArray(workflow.replay_recommended_actions)
+              ? workflow.replay_recommended_actions.flatMap((item) => (
+                item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []
+              ))
+              : [],
+            step_focus: normalizeStepFocus(workflow.step_focus),
+          }];
+        })
+      : [],
   };
 }
 
@@ -2940,6 +3148,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
   const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
+  const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
@@ -3115,6 +3324,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       extensionsResult,
       activityLedgerResult,
       controlPlaneResult,
+      workflowOrchestrationResult,
       workflowRunsResult,
       artifactLineageRunsResult,
       toolModeResult,
@@ -3130,6 +3340,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/control-plane`),
+      fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
@@ -3188,6 +3399,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setExtensionPackages([]);
     }
     setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
@@ -3389,19 +3601,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         .filter((artifact): artifact is ArtifactRecord => artifact != null),
     }));
   }, [artifactLineageRuns, artifacts]);
+  const workspaceWorkflowRunsWithArtifacts = useMemo(() => {
+    const entries = new Map<string, WorkflowRunRecord>();
+    artifactLineageRunsWithArtifacts.forEach((workflow) => {
+      entries.set(workflow.runIdentity ?? workflow.id, workflow);
+    });
+    workflowRunsWithArtifacts.forEach((workflow) => {
+      entries.set(workflow.runIdentity ?? workflow.id, workflow);
+    });
+    return [...entries.values()].sort(compareWorkflowRunsNewestFirst);
+  }, [artifactLineageRunsWithArtifacts, workflowRunsWithArtifacts]);
   const workflowRunById = useMemo(
-    () => new Map(workflowRunsWithArtifacts.map((workflow) => [workflow.id, workflow])),
-    [workflowRunsWithArtifacts],
+    () => new Map(workspaceWorkflowRunsWithArtifacts.map((workflow) => [workflow.id, workflow])),
+    [workspaceWorkflowRunsWithArtifacts],
   );
   const workflowRunByIdentity = useMemo(() => {
-    const entries = workflowRunsWithArtifacts
+    const entries = workspaceWorkflowRunsWithArtifacts
       .filter((workflow) => typeof workflow.runIdentity === "string" && workflow.runIdentity.trim().length > 0)
       .map((workflow) => [workflow.runIdentity as string, workflow] as const);
     return new Map(entries);
-  }, [workflowRunsWithArtifacts]);
+  }, [workspaceWorkflowRunsWithArtifacts]);
   const workflowChildrenByParentIdentity = useMemo(() => {
     const grouped = new Map<string, WorkflowRunRecord[]>();
-    workflowRunsWithArtifacts.forEach((workflow) => {
+    workspaceWorkflowRunsWithArtifacts.forEach((workflow) => {
       if (!workflow.parentRunIdentity) return;
       const existing = grouped.get(workflow.parentRunIdentity) ?? [];
       existing.push(workflow);
@@ -3411,10 +3633,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       grouped.set(key, [...entries].sort(compareWorkflowRunsNewestFirst));
     });
     return grouped;
-  }, [workflowRunsWithArtifacts]);
+  }, [workspaceWorkflowRunsWithArtifacts]);
   const workflowFamilyByRootIdentity = useMemo(() => {
     const grouped = new Map<string, WorkflowRunRecord[]>();
-    workflowRunsWithArtifacts.forEach((workflow) => {
+    workspaceWorkflowRunsWithArtifacts.forEach((workflow) => {
       const rootIdentity = workflowFamilyRootIdentity(workflow);
       const existing = grouped.get(rootIdentity) ?? [];
       existing.push(workflow);
@@ -3424,7 +3646,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       grouped.set(key, [...entries].sort(compareWorkflowRunsNewestFirst));
     });
     return grouped;
-  }, [workflowRunsWithArtifacts]);
+  }, [workspaceWorkflowRunsWithArtifacts]);
   const artifactRoundtripWorkflows = useMemo(
     () =>
       workflows.filter(
@@ -4504,7 +4726,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   ]);
   const operatorWorkflowEntries = useMemo<OperatorWorkflowEntry[]>(() => {
     const seen = new Set<string>();
-    return workflowRunsWithArtifacts
+    return workspaceWorkflowRunsWithArtifacts
       .map((workflow) => resolveWorkflowRun(workflow))
       .filter((workflow) => {
         const key = workflow.runIdentity ?? workflow.id;
@@ -4551,8 +4773,45 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         || compareWorkflowRunsNewestFirst(left.workflow, right.workflow)
         || left.label.localeCompare(right.label)
       ))
-      .slice(0, 6);
-  }, [sessionTitleById, workflowRunsWithArtifacts]);
+      .slice(0, 8);
+  }, [sessionTitleById, workspaceWorkflowRunsWithArtifacts]);
+  const orchestrationWorkflowRunByIdentity = useMemo(() => {
+    if (!operatorWorkflowOrchestration) return new Map<string, WorkflowRunRecord>();
+    const entries = operatorWorkflowOrchestration.workflows.flatMap((workflow) => {
+      if (!workflow.run_identity) return [];
+      return [[workflow.run_identity, normalizeWorkflowRun(workflow as unknown as Record<string, unknown>)] as const];
+    });
+    return new Map(entries);
+  }, [operatorWorkflowOrchestration]);
+  const operatorWorkflowOrchestrationEntries = useMemo<OperatorWorkflowOrchestrationEntry[]>(() => {
+    if (!operatorWorkflowOrchestration) return [];
+    return operatorWorkflowOrchestration.sessions.map((entry) => {
+      const workflow = entry.lead_run_identity
+        ? workflowRunByIdentity.get(entry.lead_run_identity)
+          ?? orchestrationWorkflowRunByIdentity.get(entry.lead_run_identity)
+          ?? null
+        : null;
+      return {
+        id: `orchestration:${entry.thread_id ?? "ambient"}:${entry.lead_run_identity ?? entry.lead_workflow_name ?? "workflow"}`,
+        threadId: entry.thread_id ?? null,
+        threadLabel: entry.thread_label ?? (entry.thread_id ? `thread ${entry.thread_id.slice(0, 6)}` : "Ambient workflows"),
+        workflowCount: entry.workflow_count,
+        activeWorkflows: entry.active_workflows,
+        blockedWorkflows: entry.blocked_workflows,
+        awaitingApprovalWorkflows: entry.awaiting_approval_workflows,
+        recoverableWorkflows: entry.recoverable_workflows,
+        latestUpdatedAt: entry.latest_updated_at,
+        continueMessage: entry.continue_message ?? workflow?.threadContinueMessage ?? null,
+        leadWorkflowName: entry.lead_workflow_name ?? workflow?.workflowName ?? null,
+        leadStatus: entry.lead_status ?? workflow?.status ?? null,
+        leadSummary: entry.lead_summary ?? workflow?.summary ?? null,
+        leadStepFocus: entry.lead_step_focus ?? null,
+        workflow,
+        latestFailure: workflow ? workflowLatestFailureContext(workflow) : null,
+        outputPath: workflow ? workflowPrimaryOutputPath(workflow) : null,
+      };
+    });
+  }, [operatorWorkflowOrchestration, orchestrationWorkflowRunByIdentity, workflowRunByIdentity]);
   const primaryTriageEntry = operatorTriageEntries[0] ?? null;
   const primaryApprovalTriageEntry = operatorTriageEntries.find((entry) => entry.approval) ?? null;
   const primaryWorkflowTriageEntry = operatorTriageEntries.find((entry) => entry.workflow) ?? null;
@@ -4634,6 +4893,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
   function openOperatorWorkflowThread(entry: OperatorWorkflowEntry | null | undefined) {
     if (!entry?.threadId || !canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds)) return;
+    void openThread(entry.threadId);
+  }
+  function inspectOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    inspectWorkflowRun(entry.workflow);
+  }
+  function continueOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+      return;
+    }
+    if (entry.workflow) {
+      continueWorkflowRun(entry.workflow);
+    }
+  }
+  function openOperatorWorkflowOrchestrationThread(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.threadId) return;
     void openThread(entry.threadId);
   }
   useEffect(() => {
@@ -6676,7 +6953,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
     const candidates = [
       primaryWorkflowTriageEntry?.workflow ?? null,
-      ...workflowRunsWithArtifacts,
+      ...workspaceWorkflowRunsWithArtifacts,
     ]
       .filter((workflow): workflow is WorkflowRunRecord => workflow != null)
       .map((workflow) => resolveWorkflowRun(workflow));
@@ -10423,6 +10700,145 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     })}
                     {operatorTriageEntries.length === 0 && (
                       <div className="cockpit-empty">No active workflows, approvals, queued guardian items, or reach failures need action.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Workflow orchestration">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">workflow orchestration</span>
+                      <span className="cockpit-operator-link">
+                        {operatorWorkflowOrchestration
+                          ? `${operatorWorkflowOrchestration.summary.workflow_count} workflows · ${operatorWorkflowOrchestration.summary.tracked_sessions} sessions`
+                          : "summary unavailable"}
+                      </span>
+                    </div>
+                    {operatorWorkflowOrchestration ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${operatorWorkflowOrchestration.summary.active_workflows} active`,
+                            `${operatorWorkflowOrchestration.summary.awaiting_approval_workflows} awaiting approval`,
+                            `${operatorWorkflowOrchestration.summary.blocked_workflows} blocked`,
+                            `${operatorWorkflowOrchestration.summary.recoverable_workflows} recoverable`,
+                          ].join(" · ")}
+                        </div>
+                        {operatorWorkflowOrchestrationEntries.map((entry) => {
+                          const stepFocusSummary = [
+                            entry.leadStepFocus?.kind ? formatContinuityLabel(entry.leadStepFocus.kind) : null,
+                            entry.leadStepFocus?.tool ? `tool ${entry.leadStepFocus.tool}` : null,
+                            entry.leadStepFocus?.summary ?? entry.leadStepFocus?.error_summary ?? entry.leadStepFocus?.recovery_hint ?? null,
+                          ].filter(Boolean).join(" · ");
+                          return (
+                            <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                              <button
+                                type="button"
+                                className="cockpit-operator-details cockpit-operator-details--button"
+                                aria-label={`Inspect workflow orchestration for ${entry.threadLabel}`}
+                                onClick={() => inspectOperatorWorkflowOrchestrationEntry(entry)}
+                              >
+                                <div className="cockpit-value">{entry.threadLabel}</div>
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    entry.leadWorkflowName ? `${entry.leadWorkflowName}` : null,
+                                    entry.leadStatus ? formatContinuityLabel(entry.leadStatus) : null,
+                                    entry.leadSummary,
+                                  ].filter(Boolean).join(" · ")}
+                                </div>
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    `${entry.workflowCount} workflows`,
+                                    entry.activeWorkflows > 0 ? `${entry.activeWorkflows} active` : null,
+                                    entry.awaitingApprovalWorkflows > 0 ? `${entry.awaitingApprovalWorkflows} awaiting approval` : null,
+                                    entry.blockedWorkflows > 0 ? `${entry.blockedWorkflows} blocked` : null,
+                                    entry.recoverableWorkflows > 0 ? `${entry.recoverableWorkflows} recoverable` : null,
+                                    entry.latestUpdatedAt ? formatAge(entry.latestUpdatedAt) : null,
+                                  ].filter(Boolean).join(" · ")}
+                                </div>
+                                <div className="cockpit-operator-note">
+                                  {stepFocusSummary || "No step-level workflow focus surfaced yet."}
+                                </div>
+                              </button>
+                              <div className="cockpit-operator-actions">
+                                {entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Inspect workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => inspectOperatorWorkflowOrchestrationEntry(entry)}
+                                  >
+                                    inspect
+                                  </button>
+                                )}
+                                {(entry.continueMessage || (entry.workflow && workflowCanContinue(entry.workflow))) && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Continue workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => continueOperatorWorkflowOrchestrationEntry(entry)}
+                                  >
+                                    continue
+                                  </button>
+                                )}
+                                {entry.outputPath && entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Use latest output for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                                  >
+                                    use output
+                                  </button>
+                                )}
+                                {entry.latestFailure && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Use failure context for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowStepContext(entry.latestFailure!.workflow, entry.latestFailure!.step)}
+                                  >
+                                    use failure
+                                  </button>
+                                )}
+                                {entry.workflow?.retryFromStepDraft && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Retry step for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueComposerDraft(entry.workflow?.retryFromStepDraft ?? "")}
+                                  >
+                                    retry step
+                                  </button>
+                                )}
+                                {entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft next step for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                                  >
+                                    draft next step
+                                  </button>
+                                )}
+                                {entry.threadId && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Open thread for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => openOperatorWorkflowOrchestrationThread(entry)}
+                                  >
+                                    open thread
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {operatorWorkflowOrchestrationEntries.length === 0 && (
+                          <div className="cockpit-empty">No multi-session workflow orchestration is available yet.</div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Workflow orchestration summary unavailable.</div>
                     )}
                   </section>
 

@@ -193,7 +193,6 @@ def infer_delegation_approval_context(
         if selected_name and selected_name.startswith("mcp_"):
             if "external_mcp" not in execution_boundaries:
                 execution_boundaries.append("external_mcp")
-            accepts_secret_refs = True
             risk_level = "high"
 
     for tool in specialist_tools:
@@ -206,7 +205,11 @@ def infer_delegation_approval_context(
         for boundary in get_tool_execution_boundaries(canonical_name, is_mcp=is_mcp, tool=tool):
             if boundary not in execution_boundaries:
                 execution_boundaries.append(boundary)
-        accepts_secret_refs = accepts_secret_refs or tool_accepts_secret_refs(canonical_name, is_mcp=is_mcp)
+        accepts_secret_refs = accepts_secret_refs or tool_accepts_secret_refs(
+            canonical_name,
+            is_mcp=is_mcp,
+            tool=tool,
+        )
         risk_level = _max_risk_level(risk_level, get_tool_risk_level(canonical_name, is_mcp=is_mcp))
         source_context = get_tool_source_context(tool)
         if is_mcp and isinstance(source_context, dict) and bool(source_context.get("authenticated_source")):

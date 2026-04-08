@@ -1327,6 +1327,9 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         mgr = WorkflowManager()
         mgr.init(str(workflows_dir))
         mcp_tool = DummyTool("mcp_list_tasks", lambda: "task-a\ntask-b")
+        mcp_tool.inputs = {
+            "headers": {"type": "object", "description": "Authentication headers"},
+        }
         write = DummyTool("write_file", lambda file_path, content: f"saved {file_path}: {content}")
         workflow_tools = mgr.build_workflow_tools([mcp_tool, write], active_skill_names=[])
         tool = workflow_tools[0]
@@ -1338,6 +1341,34 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         assert mgr.get_tool_metadata(tool.name)["policy_modes"] == ["full"]
         assert mgr.get_tool_metadata(tool.name)["execution_boundaries"] == ["external_mcp", "workspace_write"]
         assert mgr.get_tool_metadata(tool.name)["accepts_secret_refs"] is True
+
+    def test_workflow_metadata_uses_runtime_mcp_secret_ref_fields(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "mcp_read_only.md").write_text(
+            "---\n"
+            "name: mcp-read-only\n"
+            "description: Export MCP body-only result\n"
+            "requires:\n"
+            "  tools: [mcp_read_only]\n"
+            "steps:\n"
+            "  - id: fetch\n"
+            "    tool: mcp_read_only\n"
+            "    arguments: {}\n"
+            "---\n"
+        )
+
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir))
+        mcp_tool = DummyTool("mcp_read_only", lambda: "ok")
+        mcp_tool.inputs = {
+            "body": {"type": "string", "description": "Request body"},
+        }
+
+        workflow_tools = mgr.build_workflow_tools([mcp_tool], active_skill_names=[])
+
+        assert workflow_tools[0].get_approval_context({})["accepts_secret_refs"] is False
+        assert mgr.get_tool_metadata(workflow_tools[0].name)["accepts_secret_refs"] is False
 
     def test_build_tools_tracks_last_completed_step_before_continued_error(self, tmp_path):
         workflows_dir = tmp_path / "workflows"

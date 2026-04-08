@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools.delegate_task_tool import delegate_task
+from src.tools.delegate_task_tool import delegate_task, infer_delegation_approval_context
 
 
 def _specialist(name: str, output: str):
@@ -123,3 +123,21 @@ class TestDelegateTask:
             result = delegate_task("Top-level task", specialist="files")
 
         assert result == "Error: Nested delegation is not allowed."
+
+
+def test_infer_delegation_approval_context_preserves_mcp_secret_ref_fields():
+    mcp_tool = MagicMock()
+    mcp_tool.name = "mcp_tasks"
+    mcp_tool.inputs = {
+        "headers": {"type": "object", "description": "Authentication headers"},
+        "body": {"type": "string", "description": "Request body"},
+    }
+    specialist = SimpleNamespace(name="mcp_tasks", tools=[mcp_tool])
+
+    approval_context = infer_delegation_approval_context(
+        task="Handle MCP task",
+        specialist="mcp_tasks",
+        specialists=[specialist],
+    )
+
+    assert approval_context["accepts_secret_refs"] is True

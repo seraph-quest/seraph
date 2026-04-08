@@ -6,6 +6,7 @@ from typing import Any
 
 from src.extensions.registry import ExtensionRecord
 from src.native_tools.registry import canonical_tool_name
+from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import (
     get_tool_execution_boundaries,
     get_tool_risk_level,
@@ -91,13 +92,34 @@ def _tool_risk_level(tool_names: list[str]) -> str:
 
 
 def _tools_accept_secret_refs(tool_names: list[str]) -> bool:
+    runtime_mcp_tools = _runtime_mcp_tools_by_name()
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
         canonical_name = canonical_tool_name(tool_name)
-        if tool_accepts_secret_refs(canonical_name, is_mcp=canonical_name.startswith("mcp_")):
+        runtime_tool = runtime_mcp_tools.get(canonical_name) if canonical_name.startswith("mcp_") else None
+        if tool_accepts_secret_refs(
+            canonical_name,
+            is_mcp=canonical_name.startswith("mcp_"),
+            tool=runtime_tool,
+        ):
             return True
     return False
+
+
+def _runtime_mcp_tools_by_name() -> dict[str, object]:
+    try:
+        tools = mcp_manager.get_tools()
+    except Exception:
+        return {}
+    by_name: dict[str, object] = {}
+    for tool in tools:
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            continue
+        canonical_name = canonical_tool_name(tool_name)
+        by_name[canonical_name] = tool
+    return by_name
 
 
 def _password_config_fields_present(metadata: dict[str, Any]) -> bool:

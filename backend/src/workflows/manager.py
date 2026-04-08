@@ -23,7 +23,7 @@ from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
 from src.memory.flush import flush_session_memory_sync
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
-from src.tools.policy import get_tool_source_context
+from src.tools.policy import get_tool_source_context, tool_accepts_secret_refs
 from src.workflows.loader import Workflow, scan_workflow_paths
 from src.workflows.run_identity import parse_workflow_run_identity
 
@@ -527,10 +527,15 @@ def _approval_context_for_workflow(
         if isinstance(tools_by_name, dict):
             runtime_tool = tools_by_name.get(tool_name) or tools_by_name.get(canonical_name)
         source_context = get_tool_source_context(runtime_tool)
+        is_mcp = canonical_name.startswith("mcp_")
+        accepts_secret_refs = accepts_secret_refs or tool_accepts_secret_refs(
+            canonical_name,
+            is_mcp=is_mcp,
+            tool=runtime_tool,
+        )
         if canonical_name.startswith("mcp_"):
             if "external_mcp" not in execution_boundaries:
                 execution_boundaries.append("external_mcp")
-            accepts_secret_refs = True
             if isinstance(source_context, dict) and bool(source_context.get("authenticated_source")):
                 authenticated_source = True
                 if "authenticated_external_source" not in execution_boundaries:

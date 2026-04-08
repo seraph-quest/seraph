@@ -24,6 +24,7 @@ RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_delivery.py": 1_200,
     "tests/test_eval_harness.py": 1_500,
     "tests/test_observer_api.py": 1_200,
+    "tests/test_tools_api.py": 1_500,
     "tests/test_workflows.py": 1_500,
 }
 
@@ -102,7 +103,15 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_1",
+                "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::source_report_action_workflow_behavior",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "source_report_action_workflow_behavior",
             ],
         ),
         (
@@ -182,11 +191,27 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             ],
         ),
         (
-            "tests/test_workflows.py::remaining",
+            "tests/test_workflows.py::history_and_projection_surface",
             [
                 "tests/test_workflows.py",
                 "-k",
-                "not (approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint)",
+                "projects_history or stored_fingerprint or pending_run_lacks_tracked_authenticated_context or marks_waiting_runs_as_awaiting_approval or does_not_suggest_tool_policy or hides_later_retry_draft or disambiguates_duplicate_fingerprinted_runs",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::resume_plan_branching_surface",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "returns_structured_branch_metadata or rejects_approval_gate or rejects_noninitial_checkpoint or blocks_branching_past_pending_approval_gate or falls_back_to_scoped_run_lookup",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::remaining_boundary_surface",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "not (approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint or projects_history or stored_fingerprint or pending_run_lacks_tracked_authenticated_context or marks_waiting_runs_as_awaiting_approval or does_not_suggest_tool_policy or hides_later_retry_draft or disambiguates_duplicate_fingerprinted_runs or returns_structured_branch_metadata or rejects_approval_gate or rejects_noninitial_checkpoint or blocks_branching_past_pending_approval_gate or falls_back_to_scoped_run_lookup)",
             ],
         ),
     ],

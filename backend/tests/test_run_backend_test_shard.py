@@ -82,6 +82,7 @@ def test_timeout_for_file_uses_runtime_heavy_override():
     assert timeout_for_file("tests/test_approvals_api.py", 900) == 1_200
     assert timeout_for_file("tests/test_context_window.py", 900) == 1_200
     assert timeout_for_file("tests/test_delivery.py", 900) == 1_200
+    assert timeout_for_file("tests/test_tools_api.py", 900) == 1_500
     assert timeout_for_file("tests/test_alpha.py", 900) == 900
 
 
@@ -94,7 +95,15 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_1",
+                "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::source_report_action_workflow_behavior",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "source_report_action_workflow_behavior",
             ],
         ),
         (
@@ -166,38 +175,45 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
             CompletedProcess(args=["pytest"], returncode=0),
             CompletedProcess(args=["pytest"], returncode=0),
             CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
         ]
 
         result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
 
     assert result == 0
-    assert mock_run.call_count == 5
+    assert mock_run.call_count == 6
     first_command = mock_run.call_args_list[0].args[0]
     second_command = mock_run.call_args_list[1].args[0]
     third_command = mock_run.call_args_list[2].args[0]
     fourth_command = mock_run.call_args_list[3].args[0]
     fifth_command = mock_run.call_args_list[4].args[0]
+    sixth_command = mock_run.call_args_list[5].args[0]
     assert first_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "test_run_runtime_evals_passes_group_1",
+        "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
     ]
     assert second_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "test_run_runtime_evals_passes_group_2",
+        "source_report_action_workflow_behavior",
     ]
     assert third_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "test_run_runtime_evals_passes_group_3",
+        "test_run_runtime_evals_passes_group_2",
     ]
     assert fourth_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "test_run_runtime_evals_passes_group_4",
+        "test_run_runtime_evals_passes_group_3",
     ]
     assert fifth_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "test_run_runtime_evals_passes_group_4",
+    ]
+    assert sixth_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
         "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
@@ -234,11 +250,27 @@ def test_pytest_invocations_for_target_splits_workflows_contract():
             ],
         ),
         (
-            "tests/test_workflows.py::remaining",
+            "tests/test_workflows.py::history_and_projection_surface",
             [
                 "tests/test_workflows.py",
                 "-k",
-                "not (approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint)",
+                "projects_history or stored_fingerprint or pending_run_lacks_tracked_authenticated_context or marks_waiting_runs_as_awaiting_approval or does_not_suggest_tool_policy or hides_later_retry_draft or disambiguates_duplicate_fingerprinted_runs",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::resume_plan_branching_surface",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "returns_structured_branch_metadata or rejects_approval_gate or rejects_noninitial_checkpoint or blocks_branching_past_pending_approval_gate or falls_back_to_scoped_run_lookup",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::remaining_boundary_surface",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "not (approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint or projects_history or stored_fingerprint or pending_run_lacks_tracked_authenticated_context or marks_waiting_runs_as_awaiting_approval or does_not_suggest_tool_policy or hides_later_retry_draft or disambiguates_duplicate_fingerprinted_runs or returns_structured_branch_metadata or rejects_approval_gate or rejects_noninitial_checkpoint or blocks_branching_past_pending_approval_gate or falls_back_to_scoped_run_lookup)",
             ],
         ),
     ]

@@ -122,11 +122,20 @@ def test_source_capabilities_tool_reports_connector_first_guidance():
                 },
                 {
                     "contract": "work_items.write",
-                    "input_mode": "query",
+                    "input_mode": "structured_action",
                     "executable": False,
                     "reason": "route_not_defined",
                     "mutating": True,
                     "requires_approval": True,
+                    "actions": [
+                        {
+                            "kind": "create",
+                            "executable": False,
+                            "reason": "route_not_defined",
+                            "target_reference_mode": "repository",
+                            "required_payload_fields": ["title", "body"],
+                        }
+                    ],
                 },
             ],
         }
@@ -144,6 +153,8 @@ def test_source_capabilities_tool_reports_connector_first_guidance():
     assert "Prefer typed authenticated connectors over browser login" in result
     assert "no_runtime_adapter" in result
     assert "approval_required" in result
+    assert "actions:" in result
+    assert "create" in result
 
 
 def test_source_capabilities_tool_reports_bound_runtime_routes():

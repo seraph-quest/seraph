@@ -7,9 +7,18 @@ from src.app import create_app
 from src.observer.context import CurrentContext
 from src.browser.sessions import browser_session_runtime
 from src.api.capabilities import _build_capability_overview
-from src.extensions.source_operations import build_source_mutation_plan, build_source_review_plan
+from src.extensions.source_operations import (
+    build_source_mutation_plan,
+    build_source_report_plan,
+    build_source_review_plan,
+    execute_source_mutation_bundle,
+)
 from src.tools.source_evidence_tool import collect_source_evidence
-from src.tools.source_mutation_tool import plan_source_mutation
+from src.tools.source_mutation_tool import (
+    execute_source_mutation,
+    plan_source_mutation,
+    plan_source_report,
+)
 from src.tools.source_review_tool import plan_source_review
 
 
@@ -17,8 +26,12 @@ class FakeMCPTool:
     def __init__(self, name: str, payload):
         self.name = name
         self._payload = payload
+        self.calls = []
 
     def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if callable(self._payload):
+            return self._payload(**kwargs)
         return self._payload
 
 
@@ -236,6 +249,11 @@ async def test_source_adapters_endpoint_promotes_managed_connector_when_runtime_
         FakeMCPTool("search_repositories", [{"id": 1, "full_name": "seraph-quest/seraph"}]),
         FakeMCPTool("search_issues", [{"id": 2, "title": "Fix source adapter", "html_url": "https://example.com/issues/2"}]),
         FakeMCPTool("search_pull_requests", [{"id": 3, "title": "Improve adapters", "html_url": "https://example.com/pulls/3"}]),
+        FakeMCPTool("create_issue", [{"id": 4, "title": "Create issue route", "html_url": "https://example.com/issues/4"}]),
+        FakeMCPTool(
+            "add_comment_to_issue",
+            [{"id": 5, "html_url": "https://example.com/issues/2#issuecomment-5"}],
+        ),
     ]
 
     with (
@@ -260,7 +278,14 @@ async def test_source_adapters_endpoint_promotes_managed_connector_when_runtime_
     work_items_write_route = next(item for item in managed["operations"] if item["contract"] == "work_items.write")
     assert work_items_write_route["mutating"] is True
     assert work_items_write_route["requires_approval"] is True
-    assert work_items_write_route["reason"] == "route_not_defined"
+    assert work_items_write_route["input_mode"] == "structured_action"
+    assert {item["kind"] for item in work_items_write_route["actions"]} == {"create", "comment"}
+    create_action = next(item for item in work_items_write_route["actions"] if item["kind"] == "create")
+    comment_action = next(item for item in work_items_write_route["actions"] if item["kind"] == "comment")
+    assert create_action["tool_name"] == "create_issue"
+    assert create_action["target_reference_mode"] == "repository"
+    assert comment_action["tool_name"] == "add_comment_to_issue"
+    assert comment_action["target_reference_mode"] == "work_item"
 
 
 @pytest.mark.asyncio
@@ -576,6 +601,192 @@ def test_build_source_mutation_plan_returns_scoped_approval_for_bound_write_rout
     assert plan["audit_payload"]["tool_name"] == "create_issue"
 
 
+def test_build_source_mutation_plan_requires_explicit_action_kind_for_multi_action_route():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "create",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "create_issue",
+                                "target_reference_mode": "repository",
+                                "required_payload_fields": ["title", "body"],
+                            },
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "required_payload_fields": ["body"],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Publish the update",
+            target_reference="seraph-quest/seraph#343",
+            fields=["body"],
+        )
+
+    assert plan["status"] == "failed"
+    assert "requires an explicit action_kind" in plan["warnings"][0]
+    assert {item["kind"] for item in plan["available_actions"]} == {"create", "comment"}
+
+
+def test_build_source_mutation_plan_selects_requested_action_for_bound_write_route():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "create",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "create_issue",
+                                "target_reference_mode": "repository",
+                                "required_payload_fields": ["title", "body"],
+                            },
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "required_payload_fields": ["body"],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_kind="comment",
+            action_summary="Publish the update",
+            target_reference="seraph-quest/seraph#343",
+            fields=["body"],
+        )
+
+    assert plan["status"] == "approval_required"
+    assert plan["action"]["kind"] == "comment"
+    assert plan["action"]["tool_name"] == "add_comment_to_issue"
+    assert plan["approval_scope"]["action"]["target_reference_mode"] == "work_item"
+    assert plan["approval_context"]["mutation_action_kind"] == "comment"
+    assert plan["audit_payload"]["action_kind"] == "comment"
+
+
+def test_build_source_mutation_plan_records_implicit_single_action_scope():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "required_payload_fields": ["body"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_mutation_plan(
+            contract="work_items.write",
+            source="github-managed",
+            action_summary="Publish the update",
+            target_reference="seraph-quest/seraph#343",
+            fields=["body"],
+        )
+
+    assert plan["status"] == "approval_required"
+    assert plan["action"]["kind"] == "comment"
+    assert plan["approval_context"]["mutation_action_kind"] == "comment"
+    assert plan["audit_payload"]["action_kind"] == "comment"
+
+
 def test_build_source_mutation_plan_reports_missing_runtime_route():
     adapter_inventory = {
         "summary": {"adapter_count": 1, "ready_adapter_count": 1},
@@ -676,6 +887,535 @@ def test_build_source_mutation_plan_preserves_mutation_scope_for_missing_runtime
     assert "cannot execute 'work_items.write' right now" in plan["warnings"][0]
 
 
+def test_execute_source_mutation_bundle_executes_repository_create_action():
+    create_issue = FakeMCPTool(
+        "create_issue",
+        {
+            "id": 343,
+            "title": "Adapter-backed status report",
+            "html_url": "https://github.com/seraph-quest/seraph/issues/343",
+            "body": "Published from Seraph.",
+            "number": 343,
+        },
+    )
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "result_kind": "work_item",
+                        "actions": [
+                            {
+                                "kind": "create",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "create_issue",
+                                "target_reference_mode": "repository",
+                                "target_argument_name": "repo_full_name",
+                                "required_payload_fields": ["title", "body"],
+                                "payload_argument_map": {"title": "title", "body": "body"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[create_issue]),
+        patch("src.extensions.source_operations.log_integration_event_sync") as log_event,
+    ):
+        result = execute_source_mutation_bundle(
+            contract="work_items.write",
+            source="github-managed",
+            action_kind="create",
+            target_reference="seraph-quest/seraph",
+            payload={"title": "Adapter-backed status report", "body": "Published from Seraph."},
+        )
+
+    assert result["status"] == "ok"
+    assert create_issue.calls == [
+        {
+            "repo_full_name": "seraph-quest/seraph",
+            "title": "Adapter-backed status report",
+            "body": "Published from Seraph.",
+        }
+    ]
+    assert result["result"]["kind"] == "work_item"
+    assert result["result"]["location"] == "https://github.com/seraph-quest/seraph/issues/343"
+    log_event.assert_called_once()
+
+
+def test_execute_source_mutation_bundle_executes_issue_comment_action():
+    add_comment = FakeMCPTool(
+        "add_comment_to_issue",
+        {
+            "id": 501,
+            "html_url": "https://github.com/seraph-quest/seraph/issues/343#issuecomment-501",
+            "body": "Status posted.",
+        },
+    )
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "result_kind": "work_item",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "issue_number",
+                                "required_payload_fields": ["body"],
+                                "payload_argument_map": {"body": "comment"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[add_comment]),
+        patch("src.extensions.source_operations.log_integration_event_sync") as log_event,
+    ):
+        result = execute_source_mutation_bundle(
+            contract="work_items.write",
+            source="github-managed",
+            action_kind="comment",
+            target_reference="seraph-quest/seraph#343",
+            payload={"body": "Status posted."},
+        )
+
+    assert result["status"] == "ok"
+    assert add_comment.calls == [
+        {
+            "repo_full_name": "seraph-quest/seraph",
+            "issue_number": 343,
+            "comment": "Status posted.",
+        }
+    ]
+    assert result["result"]["location"].endswith("#issuecomment-501")
+    log_event.assert_called_once()
+
+
+def test_execute_source_mutation_bundle_rejects_invalid_target_reference():
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "issue_number",
+                                "required_payload_fields": ["body"],
+                                "payload_argument_map": {"body": "comment"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch(
+            "src.extensions.source_operations.mcp_manager.get_server_tools",
+            return_value=[FakeMCPTool("add_comment_to_issue", {"id": 1})],
+        ),
+    ):
+        result = execute_source_mutation_bundle(
+            contract="work_items.write",
+            source="github-managed",
+            action_kind="comment",
+            target_reference="seraph-quest/seraph",
+            payload={"body": "Status posted."},
+        )
+
+    assert result["status"] == "failed"
+    assert "owner/repo#number" in result["warnings"][0]
+
+
+def test_build_source_report_plan_composes_review_and_publish():
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": ["runbook:source-progress-review"],
+        "recommended_starter_packs": ["source-progress-review"],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "github-managed",
+            }
+        ],
+    }
+    publish_plan = {
+        "status": "approval_required",
+        "adapter": {"name": "github-managed"},
+        "action": {"kind": "comment"},
+        "approval_scope": {"target": {"reference": "seraph-quest/seraph#343"}},
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.build_source_mutation_plan", return_value=publish_plan),
+    ):
+        plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph#343",
+        )
+
+    assert plan["status"] == "ready"
+    assert plan["publish_plan"]["action"]["kind"] == "comment"
+    assert plan["recommended_runbooks"] == [
+        "runbook:source-progress-review",
+        "runbook:source-progress-report",
+    ]
+    assert plan["recommended_starter_packs"] == [
+        "source-progress-review",
+        "source-progress-report",
+    ]
+
+
+def test_build_source_report_plan_falls_back_to_write_capable_adapter():
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": [],
+        "recommended_starter_packs": [],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "jira-managed",
+            }
+        ],
+    }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "jira-managed",
+                "provider": "jira",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": "",
+                "contracts": ["work_items.read"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.read",
+                        "input_mode": "query",
+                        "executable": True,
+                    }
+                ],
+            },
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": "",
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "issue_number",
+                                "required_payload_fields": ["body"],
+                                "payload_argument_map": {"body": "comment"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph#343",
+        )
+
+    assert plan["publish_plan"]["status"] == "approval_required"
+    assert plan["publish_plan"]["adapter"]["name"] == "github-managed"
+    assert "does not provide a ready executable route for 'work_items.write'" in plan["warnings"][0]
+
+
+def test_build_source_report_plan_falls_forward_from_degraded_preferred_write_adapter():
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": [],
+        "recommended_starter_packs": [],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "jira-managed",
+            }
+        ],
+    }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "jira-managed",
+                "provider": "jira",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "degraded",
+                "degraded_reason": "requires_runtime_adapter",
+                "contracts": ["work_items.read", "work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.read",
+                        "input_mode": "query",
+                        "executable": True,
+                    },
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": False,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "reason": "requires_runtime_adapter",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": False,
+                                "runtime_server": "jira",
+                                "tool_name": "comment_on_ticket",
+                                "target_reference_mode": "work_item",
+                                "required_payload_fields": ["body"],
+                            }
+                        ],
+                    },
+                ],
+            },
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": "",
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "issue_number",
+                                "required_payload_fields": ["body"],
+                                "payload_argument_map": {"body": "comment"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph#343",
+        )
+
+    assert plan["publish_plan"]["status"] == "approval_required"
+    assert plan["publish_plan"]["adapter"]["name"] == "github-managed"
+    assert "falling back to 'github-managed'" in plan["warnings"][0]
+
+
+def test_build_source_report_plan_requires_target_reference_for_publication():
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": [],
+        "recommended_starter_packs": [],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "github-managed",
+            }
+        ],
+    }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": "",
+                "contracts": ["work_items.read", "work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "create",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "create_issue",
+                                "target_reference_mode": "repository",
+                                "target_argument_name": "repo_full_name",
+                                "required_payload_fields": ["title", "body"],
+                                "payload_argument_map": {"title": "title", "body": "body"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+        )
+
+    assert plan["publish_plan"]["status"] == "unavailable"
+    assert "Provide target_reference" in plan["publish_plan"]["warnings"][0]
+    assert "Provide target_reference" in plan["warnings"][-1]
+
+
 @pytest.mark.asyncio
 async def test_source_mutation_plan_endpoint_returns_structured_scope():
     mutation_plan = {
@@ -725,6 +1465,39 @@ async def test_source_mutation_plan_endpoint_returns_structured_scope():
     assert payload["approval_scope"]["target"]["reference"] == "seraph-quest/seraph#342"
 
 
+@pytest.mark.asyncio
+async def test_source_report_plan_endpoint_returns_review_and_publish_plan():
+    report_plan = {
+        "status": "ready",
+        "title": "Progress Review for adapter-backed authenticated operations",
+        "report_outline": ["Summarize movement."],
+        "review_plan": {"summary": {"step_count": 2, "ready_step_count": 2, "degraded_step_count": 0}},
+        "publish_plan": {
+            "status": "approval_required",
+            "adapter": {"name": "github-managed"},
+            "action": {"kind": "comment"},
+            "approval_scope": {"target": {"reference": "seraph-quest/seraph#343"}},
+        },
+        "warnings": [],
+    }
+
+    with patch("src.api.capabilities.build_source_report_plan", return_value=report_plan):
+        async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+            response = await client.post(
+                "/api/capabilities/source-report-plan",
+                json={
+                    "intent": "progress_review",
+                    "focus": "adapter-backed authenticated operations",
+                    "target_reference": "seraph-quest/seraph#343",
+                },
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["publish_plan"]["action"]["kind"] == "comment"
+
+
 def test_plan_source_mutation_tool_renders_structured_scope():
     mutation_plan = {
         "status": "approval_required",
@@ -765,6 +1538,64 @@ def test_plan_source_mutation_tool_renders_structured_scope():
     assert "adapter_state: ready" in result
     assert "github work_item seraph-quest/seraph#342" in result
     assert "fields: title, body" in result
+
+
+def test_execute_source_mutation_tool_renders_execution_result():
+    execution_result = {
+        "status": "ok",
+        "adapter": {"name": "github-managed", "adapter_state": "ready"},
+        "action": {"kind": "comment", "runtime_server": "github", "tool_name": "add_comment_to_issue"},
+        "result": {
+            "title": "Comment posted",
+            "location": "https://github.com/seraph-quest/seraph/issues/343#issuecomment-501",
+        },
+        "warnings": [],
+    }
+
+    with patch("src.tools.source_mutation_tool.execute_source_mutation_bundle", return_value=execution_result):
+        result = execute_source_mutation.forward(
+            contract="work_items.write",
+            action_kind="comment",
+            source="github-managed",
+            target_reference="seraph-quest/seraph#343",
+            payload_json='{"body":"Status posted."}',
+        )
+
+    assert "status: ok" in result
+    assert "runtime: github/add_comment_to_issue" in result
+    assert "location: https://github.com/seraph-quest/seraph/issues/343#issuecomment-501" in result
+
+
+def test_plan_source_report_tool_renders_publish_plan():
+    report_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review for adapter-backed authenticated operations",
+        "report_outline": [
+            "Summarize the current state.",
+            "List the strongest evidence.",
+        ],
+        "review_plan": {"summary": {"step_count": 3, "ready_step_count": 2, "degraded_step_count": 1}},
+        "publish_plan": {
+            "status": "approval_required",
+            "adapter": {"name": "github-managed"},
+            "action": {"kind": "comment"},
+            "approval_scope": {"target": {"reference": "seraph-quest/seraph#343"}},
+        },
+        "warnings": [],
+    }
+
+    with patch("src.tools.source_mutation_tool.build_source_report_plan", return_value=report_plan):
+        result = plan_source_report.forward(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph#343",
+        )
+
+    assert "status: ready" in result
+    assert "publish_plan:" in result
+    assert "- action: comment" in result
+    assert "- target: seraph-quest/seraph#343" in result
 
 
 def test_plan_source_review_tool_renders_structured_plan():

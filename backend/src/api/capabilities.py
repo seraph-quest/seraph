@@ -28,6 +28,7 @@ from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, de
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.extensions.source_operations import (
     build_source_review_plan,
+    build_source_report_plan,
     build_source_mutation_plan,
     collect_source_evidence_bundle,
     list_source_adapter_inventory,
@@ -128,9 +129,20 @@ class SourceReviewPlanRequest(BaseModel):
 class SourceMutationPlanRequest(BaseModel):
     contract: str
     source: str = ""
+    action_kind: str = ""
     action_summary: str = ""
     target_reference: str = ""
     fields: list[str] = []
+
+
+class SourceReportPlanRequest(BaseModel):
+    intent: str
+    focus: str = ""
+    goal_context: str = ""
+    time_window: str = ""
+    source: str = ""
+    target_reference: str = ""
+    publish_action_kind: str = ""
 
 
 class WorkflowDraftRequest(BaseModel):
@@ -163,11 +175,25 @@ async def source_review_plan(req: SourceReviewPlanRequest):
     )
 
 
+@router.post("/capabilities/source-report-plan")
+async def source_report_plan(req: SourceReportPlanRequest):
+    return build_source_report_plan(
+        intent=req.intent,
+        focus=req.focus,
+        goal_context=req.goal_context,
+        time_window=req.time_window,
+        source=req.source,
+        target_reference=req.target_reference,
+        publish_action_kind=req.publish_action_kind,
+    )
+
+
 @router.post("/capabilities/source-mutation-plan")
 async def source_mutation_plan(req: SourceMutationPlanRequest):
     return build_source_mutation_plan(
         contract=req.contract,
         source=req.source,
+        action_kind=req.action_kind,
         action_summary=req.action_summary,
         target_reference=req.target_reference,
         fields=req.fields,

@@ -312,7 +312,7 @@ class TestOfflineReliability:
         finally:
             context_window._load_encoding.cache_clear()
 
-    def test_sync_summary_skips_persisted_runtime_audit_without_running_loop(self):
+    def test_sync_summary_persists_runtime_audit_without_running_loop(self):
         from src.agent.context_window import _summarize_middle
 
         mock_response = MagicMock()
@@ -333,4 +333,6 @@ class TestOfflineReliability:
             )
 
         assert result == "offline summary"
-        mock_log_event.assert_not_awaited()
+        mock_log_event.assert_awaited_once()
+        assert mock_log_event.await_args.kwargs["event_type"] == "background_task_succeeded"
+        assert mock_log_event.await_args.kwargs["tool_name"] == "context_window_summary"

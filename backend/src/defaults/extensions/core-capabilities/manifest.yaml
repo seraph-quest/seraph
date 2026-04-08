@@ -15,9 +15,11 @@ permissions:
     - collect_source_evidence
     - create_goal
     - execute_code
+    - execute_source_mutation
     - get_goal_progress
     - get_goals
     - http_request
+    - plan_source_report
     - plan_source_review
     - plan_source_mutation
     - read_file
@@ -38,6 +40,7 @@ contributes:
     - skills/source-evidence-review.md
     - skills/source-goal-alignment.md
     - skills/source-progress-review.md
+    - skills/source-progress-report.md
     - skills/web-briefing.md
     - skills/weekly-planner.md
   workflows:
@@ -50,6 +53,7 @@ contributes:
     - runbooks/source-evidence-review.yaml
     - runbooks/source-goal-alignment.yaml
     - runbooks/source-progress-review.yaml
+    - runbooks/source-progress-report.yaml
     - runbooks/weekly-alignment.yaml
   starter_packs:
     - starter-packs/daily-operator-rhythm.json
@@ -58,4 +62,5 @@ contributes:
     - starter-packs/source-evidence-review.json
     - starter-packs/source-goal-alignment.json
     - starter-packs/source-progress-review.json
+    - starter-packs/source-progress-report.json
     - starter-packs/weekly-alignment.json

@@ -157,6 +157,16 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "execute_source_mutation": {
+        "description": "Execute a bounded connector-backed typed mutation with explicit approval and audit scope",
+        "policy_modes": ["full"],
+        "execution_boundaries": ["external_mcp", "authenticated_external_source", "connector_mutation"],
+    },
+    "plan_source_report": {
+        "description": "Plan a provider-neutral source report plus an optional authenticated publication path",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["external_read"],
+    },
     # Vault tools
     "store_secret": {
         "description": "Store an encrypted secret in the vault",

@@ -79,6 +79,8 @@ def test_run_shard_files_passes_per_file_timeout(tmp_path: Path):
 def test_timeout_for_file_uses_runtime_heavy_override():
     assert timeout_for_file("tests/test_workflows.py", 900) == 1_500
     assert timeout_for_file("tests/test_eval_harness.py", None) == 1_500
+    assert timeout_for_file("tests/test_approvals_api.py", 900) == 1_200
+    assert timeout_for_file("tests/test_context_window.py", 900) == 1_200
     assert timeout_for_file("tests/test_delivery.py", 900) == 1_200
     assert timeout_for_file("tests/test_alpha.py", 900) == 900
 
@@ -88,15 +90,43 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
 
     assert invocations == [
         (
-            "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios",
-            ["tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios"],
+            "tests/test_eval_harness.py::runtime_group_1",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_1",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_2",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_2",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_3",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_3",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_4",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_4",
+            ],
         ),
         (
             "tests/test_eval_harness.py::remaining",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not test_run_runtime_evals_passes_all_scenarios",
+                "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
             ],
         ),
     ]
@@ -133,19 +163,44 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
         mock_run.side_effect = [
             CompletedProcess(args=["pytest"], returncode=0),
             CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
         ]
 
         result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
 
     assert result == 0
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 5
     first_command = mock_run.call_args_list[0].args[0]
     second_command = mock_run.call_args_list[1].args[0]
-    assert "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios" in first_command
+    third_command = mock_run.call_args_list[2].args[0]
+    fourth_command = mock_run.call_args_list[3].args[0]
+    fifth_command = mock_run.call_args_list[4].args[0]
+    assert first_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "test_run_runtime_evals_passes_group_1",
+    ]
     assert second_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "not test_run_runtime_evals_passes_all_scenarios",
+        "test_run_runtime_evals_passes_group_2",
+    ]
+    assert third_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "test_run_runtime_evals_passes_group_3",
+    ]
+    assert fourth_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "test_run_runtime_evals_passes_group_4",
+    ]
+    assert fifth_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
     ]
     assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
 
@@ -155,11 +210,27 @@ def test_pytest_invocations_for_target_splits_workflows_contract():
 
     assert invocations == [
         (
-            "tests/test_workflows.py::boundary_drift",
+            "tests/test_workflows.py::approval_and_legacy_boundary_drift",
             [
                 "tests/test_workflows.py",
                 "-k",
-                "approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint",
+                "approval_context or legacy_checkpoint",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::authenticated_source_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "authenticated_source",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::delegation_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "delegated_specialist or delegated_tool_inventory",
             ],
         ),
         (
@@ -191,6 +262,61 @@ def test_pytest_invocations_for_target_splits_delivery_contract():
                 "tests/test_delivery.py",
                 "-k",
                 "not (native_channel or channel_routing or queued_bundle)",
+            ],
+        ),
+    ]
+
+
+def test_pytest_invocations_for_target_splits_capabilities_api_contract():
+    invocations = pytest_invocations_for_target("tests/test_capabilities_api.py")
+
+    assert invocations == [
+        (
+            "tests/test_capabilities_api.py::overview_and_catalog",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "load_starter_packs or attach_ or mcp_status or doctor_reports or capabilities_overview",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_foundations",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_starter_pack_enables_seeded_assets or activate_manifest_backed_starter_pack_works or ensure_bundled_workflow_available",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_bundled_core",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_bundled_core_capability_pack_uses_manifest_runtime or activate_bundled_core_capability_pack_uses_real_catalog_install",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_approvals_and_degraded",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_starter_pack_requires_catalog_install_approval or activate_starter_pack_preflights_all_approvals_without_consuming_them or activate_starter_pack_reports_degraded_when_enable_fails",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_manual_routes",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_bootstrap_leaves_policy_changes_manual or capability_bootstrap_leaves_mcp_enable_actions_manual or capability_bootstrap_leaves_extension_enable_actions_manual",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_apply_and_validation",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_preflight_returns_workflow_and_runbook_repair_metadata or capability_bootstrap_can_apply_low_risk_toggle_actions or capability_bootstrap_does_not_reclassify_low_risk_actions_as_manual_after_failed_apply or workflow_draft_validation_and_save",
             ],
         ),
     ]

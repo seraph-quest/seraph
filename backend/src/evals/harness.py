@@ -6792,6 +6792,118 @@ async def _eval_source_mutation_boundary_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
+    from src.extensions.source_operations import build_source_report_plan, execute_source_mutation_bundle
+
+    class _EvalTool:
+        def __init__(self, name: str, payload: dict[str, Any]) -> None:
+            self.name = name
+            self._payload = payload
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return self._payload
+
+    add_comment = _EvalTool(
+        "add_comment_to_issue",
+        {
+            "id": 501,
+            "html_url": "https://github.com/seraph-quest/seraph/issues/343#issuecomment-501",
+            "body": "Posted progress update.",
+        },
+    )
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "result_kind": "work_item",
+                        "actions": [
+                            {
+                                "kind": "comment",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_comment_to_issue",
+                                "target_reference_mode": "work_item",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "issue_number",
+                                "required_payload_fields": ["body"],
+                                "payload_argument_map": {"body": "comment"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": ["runbook:source-progress-review"],
+        "recommended_starter_packs": ["source-progress-review"],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "github-managed",
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[add_comment]),
+        patch("src.extensions.source_operations.log_integration_event_sync"),
+    ):
+        report_plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph#343",
+        )
+        execution = execute_source_mutation_bundle(
+            contract="work_items.write",
+            source="github-managed",
+            action_kind="comment",
+            target_reference="seraph-quest/seraph#343",
+            payload={"body": "Posted progress update."},
+        )
+
+    return {
+        "report_status": report_plan["status"],
+        "publish_status": report_plan["publish_plan"]["status"],
+        "publish_action_kind": report_plan["publish_plan"]["action"]["kind"],
+        "publish_target_reference": report_plan["publish_plan"]["approval_scope"]["target"]["reference"],
+        "recommended_runbook": report_plan["recommended_runbooks"][-1],
+        "recommended_starter_pack": report_plan["recommended_starter_packs"][-1],
+        "execution_status": execution["status"],
+        "execution_location": execution["result"]["location"],
+        "execution_tool_name": execution["action"]["tool_name"],
+        "execution_argument_keys": sorted(add_comment.calls[0].keys()),
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -8005,6 +8117,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Connector-backed mutation paths stay planned, approval-scoped, and auditable instead of being implied as direct executable access.",
         runner=_eval_source_mutation_boundary_behavior,
+    ),
+    EvalScenario(
+        name="source_report_action_workflow_behavior",
+        category="behavior",
+        description="Source report workflows compose provider-neutral review planning with bounded authenticated publication instead of inventing provider-specific report paths.",
+        runner=_eval_source_report_action_workflow_behavior,
     ),
     EvalScenario(
         name="capability_repair_behavior",

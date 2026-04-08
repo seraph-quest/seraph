@@ -18,6 +18,8 @@ TestFile.__test__ = False
 
 # File size alone underestimates a few high-latency suites that dominate backend CI.
 RUNTIME_HINT_WEIGHTS: dict[str, int] = {
+    "tests/test_approvals_api.py": 170_000,
+    "tests/test_context_window.py": 160_000,
     "tests/test_workflows.py": 260_000,
     "tests/test_extensions_api.py": 230_000,
     "tests/test_llm_runtime.py": 220_000,

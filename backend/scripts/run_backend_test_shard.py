@@ -19,6 +19,8 @@ except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
 
 
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
+    "tests/test_approvals_api.py": 1_200,
+    "tests/test_context_window.py": 1_200,
     "tests/test_delivery.py": 1_200,
     "tests/test_eval_harness.py": 1_500,
     "tests/test_observer_api.py": 1_200,
@@ -26,6 +28,56 @@ RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
 }
 
 SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
+    "tests/test_capabilities_api.py": [
+        (
+            "tests/test_capabilities_api.py::overview_and_catalog",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "load_starter_packs or attach_ or mcp_status or doctor_reports or capabilities_overview",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_foundations",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_starter_pack_enables_seeded_assets or activate_manifest_backed_starter_pack_works or ensure_bundled_workflow_available",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_bundled_core",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_bundled_core_capability_pack_uses_manifest_runtime or activate_bundled_core_capability_pack_uses_real_catalog_install",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::starter_pack_activation_approvals_and_degraded",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "activate_starter_pack_requires_catalog_install_approval or activate_starter_pack_preflights_all_approvals_without_consuming_them or activate_starter_pack_reports_degraded_when_enable_fails",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_manual_routes",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_bootstrap_leaves_policy_changes_manual or capability_bootstrap_leaves_mcp_enable_actions_manual or capability_bootstrap_leaves_extension_enable_actions_manual",
+            ],
+        ),
+        (
+            "tests/test_capabilities_api.py::bootstrap_apply_and_validation",
+            [
+                "tests/test_capabilities_api.py",
+                "-k",
+                "capability_preflight_returns_workflow_and_runbook_repair_metadata or capability_bootstrap_can_apply_low_risk_toggle_actions or capability_bootstrap_does_not_reclassify_low_risk_actions_as_manual_after_failed_apply or workflow_draft_validation_and_save",
+            ],
+        ),
+    ],
     "tests/test_delivery.py": [
         (
             "tests/test_delivery.py::channel_and_bundle",
@@ -46,15 +98,43 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "tests/test_eval_harness.py": [
         (
-            "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios",
-            ["tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios"],
+            "tests/test_eval_harness.py::runtime_group_1",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_1",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_2",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_2",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_3",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_3",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_group_4",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_4",
+            ],
         ),
         (
             "tests/test_eval_harness.py::remaining",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not test_run_runtime_evals_passes_all_scenarios",
+                "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
             ],
         ),
     ],
@@ -78,11 +158,27 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "tests/test_workflows.py": [
         (
-            "tests/test_workflows.py::boundary_drift",
+            "tests/test_workflows.py::approval_and_legacy_boundary_drift",
             [
                 "tests/test_workflows.py",
                 "-k",
-                "approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint",
+                "approval_context or legacy_checkpoint",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::authenticated_source_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "authenticated_source",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::delegation_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "delegated_specialist or delegated_tool_inventory",
             ],
         ),
         (

@@ -33,6 +33,7 @@
 - [x] guardian state now also prioritizes live-project cross-thread continuity from recent sessions, carries matching recent-thread commitments into `next_up` and dominant-thread synthesis, and surfaces explicit follow-through risk when open project commitments and recent execution setbacks line up on the same live project
 - [x] guardian world-model synthesis now also ranks competing projects from observer, recent-session, memory, and execution evidence, prefers stronger cross-source project anchors over passive list order, preserves richer canonical project labels, and surfaces explicit ambiguity or drift risks when project evidence stays split
 - [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, provider-backed user/project modeling augmentation, stale-provider-evidence suppression, usefulness-ranked provider diagnostics with explicit provenance lines inside guardian state, post-canonical provider writeback guardrails that suppress duplicate or low-quality canonical memories before additive mirroring, capability-state governance, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
+- [x] governed self-evolution can now turn explicit objectives and trace observations into eval-scored review candidates for declarative capability assets while keeping the resulting changes bounded, reviewable, and outside live guardian self-modification
 
 ## Working On Now
 

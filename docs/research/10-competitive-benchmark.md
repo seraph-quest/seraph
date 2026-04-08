@@ -71,6 +71,7 @@ Seraph is currently at par with Hermes on longitudinal memory overall, while sti
 - Hermes ships a strong TUI with persistent status, slash-command grammar, interrupt-and-redirect, and strong terminal ergonomics.
 - Hermes ships broader workflow surfaces today through tools, skills, background sessions, messaging channels, cron, sub-agents, and code execution; Seraph now has first-class reusable workflows but not yet the same operator-facing workflow density.
 - Hermes still keeps bounded built-in memory, but it now also ships seven additive external memory providers. Seraph still has the stronger guardian-specific policy-time memory use and world-model integration, but the structural memory lead is no longer clear enough to score as `Ahead`.
+- Seraph now ships a governed self-evolution substrate for declarative skills, runbooks, starter packs, and prompt packs, but it remains deliberately human-reviewed and narrower than Hermes' broader self-evolution ambition.
 - Seraph documents a deterministic runtime eval harness and broader guardian-specific proactive scaffolding than the official Hermes materials show.
 
 ### Sources

@@ -28,6 +28,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph now also has a first connector-backed authenticated source-read path: when a managed connector is enabled, configured, and matched to a live MCP runtime, Seraph can normalize repository, work-item, and code-activity evidence through the same source-evidence contract instead of leaving authenticated providers permanently stuck in inventory-only degraded mode.
 - [x] Seraph now also has reusable connector-first source review routines: `plan_source_review`, bundled daily/progress/goal-alignment starter packs and runbooks, mixed-source review plans that stay provider-neutral, and explicit degraded-step truth instead of forcing each external review flow into bespoke provider glue.
 - [x] Seraph now also has a first connector-backed authenticated source-action and report workflow path: managed adapters can execute bounded write actions with action-scoped approval and audit metadata, and `plan_source_report` can compose provider-neutral review plus publication flows instead of forcing bespoke provider-specific report pipelines.
+- [x] Seraph now also has a governed self-evolution loop for declarative capability assets: `/api/evolution` plus `propose_capability_evolution` can generate eval-scored review candidates for skills, runbooks, starter packs, and prompt packs, persist review receipts inside the managed workspace package, and block semantic drift or privileged prompt-surface expansion before anything reaches human PR review.
 - [x] Seraph now also has synthesized cross-surface recovery state: observer continuity groups pending follow-through by thread, summarizes degraded reach and pending recovery in one payload, and drives cockpit presence plus desktop-shell recovery actions instead of leaving those surfaces to infer state from raw notifications, queued items, and route rows.
 - [x] Seraph now also carries imported capability-family attention and typed source-adapter degradation through that same observer continuity path, so broader reach problems show up in cockpit presence, desktop-shell recovery, and active triage instead of hiding in separate operator inventories.
 - [x] The same broader reach continuity contract now also feeds the threaded operator timeline and Activity Ledger, so typed source-adapter and imported-reach recovery remains visible outside the raw observer endpoint and cockpit shell.
@@ -212,6 +213,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] MCP-powered extension surface
 - [x] recursive delegation foundations behind a flag
 - [x] reusable workflow runtime with tool, skill, specialist, and MCP-aware gating
+- [x] governed self-evolution for declarative capability assets with bounded variant generation, persisted eval receipts, and review-candidate save paths that stay outside live in-session mutation
 
 ## Still To Do On `develop`
 

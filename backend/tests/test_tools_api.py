@@ -103,6 +103,18 @@ async def test_tools_api_balanced_mode_keeps_manage_scheduled_job_available(clie
 
 
 @pytest.mark.asyncio
+async def test_tools_api_balanced_mode_surfaces_governed_self_evolution_tool(client):
+    ctx = CurrentContext(tool_policy_mode="balanced")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    entry = next(tool for tool in resp.json() if tool["name"] == "propose_capability_evolution")
+    assert entry["policy_modes"] == ["balanced", "full"]
+    assert entry["execution_boundaries"] == ["workspace_write", "local_compute"]
+    assert entry["requires_approval"] is False
+
+
+@pytest.mark.asyncio
 async def test_tools_api_hides_delegate_task_when_delegation_is_disabled(client):
     ctx = CurrentContext(tool_policy_mode="full")
     with (

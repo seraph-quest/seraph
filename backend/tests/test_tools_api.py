@@ -1,9 +1,17 @@
 """Tests for tool list filtering by tool policy mode."""
 
 import pytest
+import pytest_asyncio
 from unittest.mock import patch, MagicMock
+from httpx import ASGITransport, AsyncClient
 
 from src.observer.context import CurrentContext
+
+
+@pytest_asyncio.fixture
+async def client(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
 
 
 @pytest.mark.asyncio
@@ -218,3 +226,28 @@ async def test_tools_api_surfaces_workflow_execution_boundaries(client):
             "execution_boundaries": ["external_read", "workspace_write"],
             "accepts_secret_refs": False,
         }]
+
+
+@pytest.mark.asyncio
+async def test_tools_api_uses_lightweight_specialist_descriptors_when_delegation_is_enabled(client):
+    ctx = CurrentContext(tool_policy_mode="balanced")
+    descriptors = [
+        {"name": "memory_keeper", "description": "Manages memory"},
+        {"name": "workflow_runner", "description": "Executes workflows"},
+    ]
+    with (
+        patch("src.tools.policy.context_manager.get_context", return_value=ctx),
+        patch("src.agent.factory.settings.use_delegation", True),
+        patch("src.api.tools.settings.use_delegation", True),
+        patch("src.api.tools.list_specialist_descriptors", return_value=descriptors) as mock_list,
+        patch(
+            "src.agent.specialists.build_all_specialists",
+            side_effect=AssertionError("route should not instantiate specialist agents"),
+        ),
+    ):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    names = {tool["name"] for tool in resp.json()}
+    assert "memory_keeper" in names
+    assert "workflow_runner" in names
+    mock_list.assert_called_once()

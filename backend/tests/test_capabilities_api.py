@@ -5,6 +5,7 @@ from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException
 import pytest
 
+from src.api.capabilities import _explicit_runbook_entries, _runbook_labels_by_starter_pack
 from src.app import create_app
 from src.observer.context import CurrentContext
 from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
@@ -424,6 +425,75 @@ async def test_capabilities_overview_includes_catalog_extension_packs():
             },
         }
     ]
+    assert payload["marketplace_flows"] == [
+        {
+            "id": "extension-pack:seraph.hermes-session-memory",
+            "label": "Hermes Session Memory",
+            "kind": "extension_pack",
+            "availability": "ready",
+            "summary": "Optional Hermes-style session recall and checklist skills.",
+            "detail": "trust bundled · 2 contribution types",
+            "ready_count": 1,
+            "total_count": 1,
+            "primary_action": {
+                "type": "install_catalog_item",
+                "label": "Install pack",
+                "name": "seraph.hermes-session-memory",
+            },
+            "recommended_actions": [
+                {
+                    "type": "install_catalog_item",
+                    "label": "Install pack",
+                    "name": "seraph.hermes-session-memory",
+                }
+            ],
+            "draft_command": None,
+            "blocking_reasons": [],
+            "install_items": [],
+            "skills": [],
+            "workflows": [],
+            "related_runbooks": [],
+            "catalog_id": "seraph.hermes-session-memory",
+            "installed": False,
+            "update_available": False,
+            "version": "2026.3.23",
+            "version_line": None,
+            "installed_version": None,
+            "contribution_types": ["context_packs", "skills"],
+            "trust": "bundled",
+            "publisher": None,
+            "compatibility": None,
+            "diagnostics_summary": None,
+            "status": "ready",
+        }
+    ]
+
+
+def test_explicit_runbook_entries_preserve_starter_pack_linkage():
+    entries, _, _ = _explicit_runbook_entries(
+        [
+            {
+                "id": "runbook:research-briefing",
+                "title": "Research Briefing",
+                "summary": "Run the packaged research workflow.",
+                "starter_pack": "research-briefing",
+            }
+        ],
+        workflows_by_name={},
+        starter_packs_by_name={
+            "research-briefing": {
+                "name": "research-briefing",
+                "availability": "ready",
+                "recommended_actions": [],
+                "sample_prompt": "Research the latest release notes",
+            }
+        },
+    )
+
+    assert entries[0]["starter_pack_name"] == "research-briefing"
+    assert _runbook_labels_by_starter_pack(entries) == {
+        "research-briefing": ["Research Briefing"],
+    }
 
 
 @pytest.mark.asyncio
@@ -1249,6 +1319,13 @@ async def test_capabilities_overview_counts_missing_install_items_in_pack_availa
     assert research_pack["missing_install_items"] == ["http-request"]
     assert research_pack["availability"] == "partial"
     assert any(action["type"] == "install_catalog_item" for action in research_pack["recommended_actions"])
+    research_flow = next(flow for flow in payload["marketplace_flows"] if flow["id"] == "starter-pack:research-briefing")
+    assert research_flow["kind"] == "starter_pack"
+    assert research_flow["availability"] == "partial"
+    assert research_flow["ready_count"] == 2
+    assert research_flow["total_count"] == 3
+    assert research_flow["related_runbooks"] == ["Research Briefing"]
+    assert research_flow["blocking_reasons"] == ["missing install item: http-request"]
 
 
 @pytest.mark.asyncio

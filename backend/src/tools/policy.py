@@ -11,6 +11,27 @@ MCP_POLICY_MODES = ("disabled", "approval", "full")
 DEFAULT_MCP_POLICY_MODE = "full"
 
 
+def _get_explicit_instance_attr(obj: object | None, attr_name: str) -> object | None:
+    """Read only explicitly assigned instance attributes, avoiding dynamic mock chains."""
+    if obj is None:
+        return None
+    try:
+        instance_dict = vars(obj)
+    except TypeError:
+        instance_dict = None
+    if isinstance(instance_dict, dict) and attr_name in instance_dict:
+        return instance_dict[attr_name]
+    slots = getattr(type(obj), "__slots__", ())
+    if isinstance(slots, str):
+        slots = (slots,)
+    if attr_name in slots:
+        try:
+            return object.__getattribute__(obj, attr_name)
+        except AttributeError:
+            return None
+    return None
+
+
 def normalize_tool_policy_mode(mode: str | None) -> str:
     """Coerce missing or invalid modes to the default."""
     if mode in TOOL_POLICY_MODES:
@@ -117,10 +138,10 @@ def get_tool_source_context(tool: object | None) -> dict[str, object] | None:
         if current_id in visited_ids:
             break
         visited_ids.add(current_id)
-        source_context = getattr(current, "seraph_source_context", None)
+        source_context = _get_explicit_instance_attr(current, "seraph_source_context")
         if isinstance(source_context, dict):
             return source_context
-        current = getattr(current, "wrapped_tool", None)
+        current = _get_explicit_instance_attr(current, "wrapped_tool")
     return None
 
 

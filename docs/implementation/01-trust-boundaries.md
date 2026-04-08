@@ -27,6 +27,7 @@
 - [x] catalog installs and starter-pack activation now preflight lifecycle approvals before bundled MCP-backed capability expansion instead of letting approval-required installs surface only after mutation starts
 - [x] generated doctor-plan and replay repair bundles no longer batch-apply multiple privileged mutations from one click; multi-step privileged fixes now require step-by-step operator execution
 - [x] authenticated MCP-backed tools now preserve source-specific approval and audit context through wrapper layers, and workflow checkpoint/replay paths fail closed when a run crosses into an authenticated external-source boundary instead of treating it like generic MCP read access
+- [x] tool metadata and runtime secret-ref handling now fail closed to explicit field-level injection surfaces, and connector-backed authenticated mutation bundles now reject undeclared payload fields instead of passing arbitrary write arguments through to external runtimes
 
 ## Working On Now
 
@@ -40,11 +41,13 @@
 - [x] this workstream now also ships `privileged-repair-bundle-gating-v1`
 - [x] this workstream now also ships `authenticated-source-boundary-hardening-v1`
 - [x] this workstream now also ships `workflow-authenticated-source-drift-enforcement-v1`
+- [x] this workstream now also ships the first Batch AT aggregate for field-scoped secret-reference injection, per-tool boundary narrowing, and allowlisted authenticated mutation payloads
 
 ## Still To Do On `develop`
 
 - [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, credential-placeholder, and specialist-surface hardening passes
 - [ ] add deeper policy distinctions inside MCP and external execution paths
+- [ ] add disposable worker or stronger recovery containment beyond the new fail-closed secret-ref and mutation-allowlist boundary layer
 - [ ] keep trust UX strict without making approvals noisy or unusable
 
 ## Non-Goals

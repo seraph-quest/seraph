@@ -9,6 +9,7 @@ from src.tools.policy import (
     get_current_tool_policy_mode,
     get_tool_execution_boundaries,
     get_tool_risk_level,
+    get_tool_secret_ref_fields,
     get_tool_source_context,
 )
 from src.workflows.manager import workflow_manager
@@ -37,6 +38,7 @@ async def list_tools():
         risk_level = meta.get("risk_level") if meta else None
         if not isinstance(risk_level, str):
             risk_level = get_tool_risk_level(tool.name, is_mcp=is_mcp)
+        secret_ref_fields = get_tool_secret_ref_fields(tool.name, is_mcp=is_mcp, tool=tool)
         requires_approval = (
             (is_mcp and mcp_mode == "approval")
             or ("external_mcp" in execution_boundaries and mcp_mode == "approval")
@@ -56,7 +58,8 @@ async def list_tools():
             "approval_behavior": approval_behavior,
             "risk_level": risk_level,
             "execution_boundaries": execution_boundaries,
-            "accepts_secret_refs": bool(meta.get("accepts_secret_refs", is_mcp)) if meta else is_mcp,
+            "accepts_secret_refs": bool(secret_ref_fields) if is_mcp else bool(meta.get("accepts_secret_refs", False)) if meta else False,
+            "secret_ref_fields": secret_ref_fields,
             **({
                 "authenticated_source": bool(
                     isinstance(source_context, dict)
@@ -82,6 +85,7 @@ async def list_tools():
                 "risk_level": "low",
                 "execution_boundaries": ["delegation"],
                 "accepts_secret_refs": False,
+                "secret_ref_fields": [],
             })
 
     return result

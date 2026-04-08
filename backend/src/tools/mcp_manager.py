@@ -54,6 +54,7 @@ class _InstrumentedMCPTool:
         self.output_schema = output_schema if isinstance(output_schema, dict) else None
         self.is_initialized = True
         self.seraph_source_context = dict(source_context)
+        self.seraph_secret_ref_fields = MCPManager._secret_ref_fields_for_tool(wrapped_tool)
         self.get_approval_context = approval_context_fn
         self.get_audit_call_payload = audit_call_payload_fn
         self.get_audit_result_payload = audit_result_payload_fn
@@ -205,6 +206,7 @@ class MCPManager:
 
         try:
             setattr(tool, "seraph_source_context", dict(source_context))
+            setattr(tool, "seraph_secret_ref_fields", MCPManager._secret_ref_fields_for_tool(tool))
             setattr(tool, "get_approval_context", _get_approval_context)
             setattr(tool, "get_audit_call_payload", _get_audit_call_payload)
             setattr(tool, "get_audit_result_payload", _get_audit_result_payload)
@@ -219,6 +221,19 @@ class MCPManager:
                 audit_result_payload_fn=_get_audit_result_payload,
                 audit_failure_payload_fn=_get_audit_failure_payload,
             )
+
+    @staticmethod
+    def _secret_ref_fields_for_tool(tool: object) -> list[str]:
+        inputs = getattr(tool, "inputs", None)
+        if not isinstance(inputs, dict):
+            return []
+        allowed: list[str] = []
+        seen: set[str] = set()
+        for field_name in ("headers", "authorization", "auth_header", "api_key", "token", "bearer_token", "password", "secret_ref"):
+            if field_name in inputs and field_name not in seen:
+                allowed.append(field_name)
+                seen.add(field_name)
+        return allowed
 
     @staticmethod
     def _resolve_env_vars(value: str) -> str:

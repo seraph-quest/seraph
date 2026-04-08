@@ -50,13 +50,23 @@ def test_secret_ref_wrapper_resolves_nested_values_for_current_session():
     try:
         result = wrapped(
             headers={"Authorization": f"Bearer {secret_ref}"},
-            body=f"token={secret_ref}",
         )
     finally:
         reset_runtime_context(tokens)
 
     assert result["kwargs"]["headers"]["Authorization"] == "Bearer super-secret-value"
-    assert result["kwargs"]["body"] == "token=super-secret-value"
+    assert wrapped.seraph_secret_ref_fields == ["headers"]
+
+
+def test_secret_ref_wrapper_blocks_refs_outside_allowlisted_fields():
+    wrapped = SecretRefResolvingTool(DummyHeaderTool())
+    secret_ref = _issue_ref_for_session("s1")
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with pytest.raises(ValueError, match="allowlisted fields: headers"):
+            wrapped(body=f"token={secret_ref}")
+    finally:
+        reset_runtime_context(tokens)
 
 
 def test_secret_ref_wrapper_blocks_disallowed_tools():

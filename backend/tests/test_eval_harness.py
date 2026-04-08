@@ -1403,6 +1403,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_shows_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_requires_approval"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_accepts_secret_refs"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_secret_ref_fields"] == ["headers"]
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1

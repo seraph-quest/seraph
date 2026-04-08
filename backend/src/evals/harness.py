@@ -8017,6 +8017,10 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
     mcp_tool = MagicMock()
     mcp_tool.name = "mcp_tasks"
     mcp_tool.description = "Task MCP"
+    mcp_tool.inputs = {
+        "headers": {"type": "object", "description": "Authentication headers"},
+        "body": {"type": "string", "description": "Request body"},
+    }
 
     try:
         with (
@@ -8059,6 +8063,7 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "mcp_approval_shows_tool": "mcp_tasks" in approval_tools,
             "mcp_approval_requires_approval": approval_tools["mcp_tasks"]["requires_approval"],
             "mcp_approval_accepts_secret_refs": approval_tools["mcp_tasks"]["accepts_secret_refs"],
+            "mcp_approval_secret_ref_fields": approval_tools["mcp_tasks"]["secret_ref_fields"],
         }
     finally:
         stack.close()

@@ -65,6 +65,97 @@ interface RuntimeStatus {
   llm_logging_enabled?: boolean;
 }
 
+interface OperatorControlPlaneRole {
+  id: string;
+  label: string;
+  scope: string;
+  summary: string;
+  status: string;
+  permissions: string[];
+  boundaries: string[];
+}
+
+interface OperatorControlPlaneGovernance {
+  workspace_mode: string;
+  review_posture: string;
+  approval_mode: string;
+  tool_policy_mode: string;
+  mcp_policy_mode: string;
+  delegation_enabled: boolean;
+  workspace_dir?: string;
+  roles: OperatorControlPlaneRole[];
+}
+
+interface OperatorControlPlaneUsage {
+  window_hours: number;
+  llm_call_count: number;
+  llm_cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  user_triggered_llm_calls: number;
+  autonomous_llm_calls: number;
+  failure_count: number;
+  pending_approvals: number;
+  active_workflows: number;
+  blocked_workflows: number;
+}
+
+interface OperatorControlPlaneRuntimeExtensions {
+  total: number;
+  ready: number;
+  degraded: number;
+  governed: number;
+  issue_count: number;
+  degraded_connector_count: number;
+}
+
+interface OperatorControlPlaneRuntimeContinuity {
+  continuity_health: string;
+  primary_surface?: string | null;
+  recommended_focus?: string | null;
+  actionable_thread_count: number;
+  degraded_route_count: number;
+  degraded_source_adapter_count: number;
+  attention_presence_surface_count: number;
+}
+
+interface OperatorControlPlaneHandoffEntry {
+  id: string;
+  kind: string;
+  label: string;
+  detail: string;
+  status: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  continue_message?: string | null;
+}
+
+interface OperatorControlPlaneReviewReceipt {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  created_at: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+}
+
+interface OperatorControlPlane {
+  governance: OperatorControlPlaneGovernance;
+  usage: OperatorControlPlaneUsage;
+  runtime_posture: {
+    runtime: RuntimeStatus;
+    extensions: OperatorControlPlaneRuntimeExtensions;
+    continuity: OperatorControlPlaneRuntimeContinuity;
+  };
+  handoff: {
+    pending_approvals: OperatorControlPlaneHandoffEntry[];
+    blocked_workflows: OperatorControlPlaneHandoffEntry[];
+    follow_ups: OperatorControlPlaneHandoffEntry[];
+    review_receipts: OperatorControlPlaneReviewReceipt[];
+  };
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -1400,6 +1491,101 @@ function normalizeExtensionDiagnosticsSummary(value: unknown): ExtensionDiagnost
     highlighted_messages: Array.isArray(record.highlighted_messages)
       ? record.highlighted_messages.filter((entry): entry is string => typeof entry === "string")
       : [],
+  };
+}
+
+function normalizeOperatorControlPlane(value: unknown): OperatorControlPlane | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const governance = record.governance;
+  const usage = record.usage;
+  const runtimePosture = record.runtime_posture;
+  const handoff = record.handoff;
+  if (
+    !governance || typeof governance !== "object" || Array.isArray(governance)
+    || !usage || typeof usage !== "object" || Array.isArray(usage)
+    || !runtimePosture || typeof runtimePosture !== "object" || Array.isArray(runtimePosture)
+    || !handoff || typeof handoff !== "object" || Array.isArray(handoff)
+  ) {
+    return null;
+  }
+  const governanceRecord = governance as Record<string, unknown>;
+  const usageRecord = usage as Record<string, unknown>;
+  const runtimePostureRecord = runtimePosture as Record<string, unknown>;
+  const handoffRecord = handoff as Record<string, unknown>;
+  const runtime = runtimePostureRecord.runtime;
+  const extensions = runtimePostureRecord.extensions;
+  const continuity = runtimePostureRecord.continuity;
+  if (
+    !runtime || typeof runtime !== "object" || Array.isArray(runtime)
+    || !extensions || typeof extensions !== "object" || Array.isArray(extensions)
+    || !continuity || typeof continuity !== "object" || Array.isArray(continuity)
+  ) {
+    return null;
+  }
+  return {
+    governance: {
+      workspace_mode: typeof governanceRecord.workspace_mode === "string" ? governanceRecord.workspace_mode : "unknown",
+      review_posture: typeof governanceRecord.review_posture === "string" ? governanceRecord.review_posture : "",
+      approval_mode: typeof governanceRecord.approval_mode === "string" ? governanceRecord.approval_mode : "unknown",
+      tool_policy_mode: typeof governanceRecord.tool_policy_mode === "string" ? governanceRecord.tool_policy_mode : "unknown",
+      mcp_policy_mode: typeof governanceRecord.mcp_policy_mode === "string" ? governanceRecord.mcp_policy_mode : "unknown",
+      delegation_enabled: Boolean(governanceRecord.delegation_enabled),
+      workspace_dir: typeof governanceRecord.workspace_dir === "string" ? governanceRecord.workspace_dir : undefined,
+      roles: Array.isArray(governanceRecord.roles)
+        ? governanceRecord.roles.flatMap((entry) => (
+          entry && typeof entry === "object" && !Array.isArray(entry)
+            ? [{
+              id: typeof (entry as Record<string, unknown>).id === "string" ? String((entry as Record<string, unknown>).id) : "role",
+              label: typeof (entry as Record<string, unknown>).label === "string" ? String((entry as Record<string, unknown>).label) : "role",
+              scope: typeof (entry as Record<string, unknown>).scope === "string" ? String((entry as Record<string, unknown>).scope) : "unknown",
+              summary: typeof (entry as Record<string, unknown>).summary === "string" ? String((entry as Record<string, unknown>).summary) : "",
+              status: typeof (entry as Record<string, unknown>).status === "string" ? String((entry as Record<string, unknown>).status) : "unknown",
+              permissions: Array.isArray((entry as Record<string, unknown>).permissions)
+                ? ((entry as Record<string, unknown>).permissions as unknown[]).filter((item): item is string => typeof item === "string")
+                : [],
+              boundaries: Array.isArray((entry as Record<string, unknown>).boundaries)
+                ? ((entry as Record<string, unknown>).boundaries as unknown[]).filter((item): item is string => typeof item === "string")
+                : [],
+            }]
+            : []
+        ))
+        : [],
+    },
+    usage: {
+      window_hours: typeof usageRecord.window_hours === "number" ? usageRecord.window_hours : 24,
+      llm_call_count: typeof usageRecord.llm_call_count === "number" ? usageRecord.llm_call_count : 0,
+      llm_cost_usd: typeof usageRecord.llm_cost_usd === "number" ? usageRecord.llm_cost_usd : 0,
+      input_tokens: typeof usageRecord.input_tokens === "number" ? usageRecord.input_tokens : 0,
+      output_tokens: typeof usageRecord.output_tokens === "number" ? usageRecord.output_tokens : 0,
+      user_triggered_llm_calls: typeof usageRecord.user_triggered_llm_calls === "number" ? usageRecord.user_triggered_llm_calls : 0,
+      autonomous_llm_calls: typeof usageRecord.autonomous_llm_calls === "number" ? usageRecord.autonomous_llm_calls : 0,
+      failure_count: typeof usageRecord.failure_count === "number" ? usageRecord.failure_count : 0,
+      pending_approvals: typeof usageRecord.pending_approvals === "number" ? usageRecord.pending_approvals : 0,
+      active_workflows: typeof usageRecord.active_workflows === "number" ? usageRecord.active_workflows : 0,
+      blocked_workflows: typeof usageRecord.blocked_workflows === "number" ? usageRecord.blocked_workflows : 0,
+    },
+    runtime_posture: {
+      runtime: runtime as RuntimeStatus,
+      extensions: extensions as OperatorControlPlaneRuntimeExtensions,
+      continuity: continuity as OperatorControlPlaneRuntimeContinuity,
+    },
+    handoff: {
+      pending_approvals: Array.isArray(handoffRecord.pending_approvals)
+        ? handoffRecord.pending_approvals as OperatorControlPlaneHandoffEntry[]
+        : [],
+      blocked_workflows: Array.isArray(handoffRecord.blocked_workflows)
+        ? handoffRecord.blocked_workflows as OperatorControlPlaneHandoffEntry[]
+        : [],
+      follow_ups: Array.isArray(handoffRecord.follow_ups)
+        ? handoffRecord.follow_ups as OperatorControlPlaneHandoffEntry[]
+        : [],
+      review_receipts: Array.isArray(handoffRecord.review_receipts)
+        ? handoffRecord.review_receipts as OperatorControlPlaneReviewReceipt[]
+        : [],
+    },
   };
 }
 
@@ -2753,6 +2939,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
+  const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
@@ -2927,6 +3114,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       capabilitiesResult,
       extensionsResult,
       activityLedgerResult,
+      controlPlaneResult,
       workflowRunsResult,
       artifactLineageRunsResult,
       toolModeResult,
@@ -2941,6 +3129,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/capabilities/overview`),
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/control-plane${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
@@ -2998,6 +3187,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } else {
       setExtensionPackages([]);
     }
+    setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
@@ -3875,6 +4065,35 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .replace(/[_/-]+/g, " ")
     .toUpperCase();
   const runtimeBuildLabel = runtimeStatus?.build_id ?? SERAPH_BUILD_ID;
+  const controlPlaneHandoffEntries = useMemo(
+    () => (
+      operatorControlPlane
+        ? [
+          ...operatorControlPlane.handoff.pending_approvals,
+          ...operatorControlPlane.handoff.blocked_workflows,
+          ...operatorControlPlane.handoff.follow_ups,
+        ].slice(0, 6)
+        : []
+    ),
+    [operatorControlPlane],
+  );
+  const controlPlaneRuntimeSummary = operatorControlPlane
+    ? [
+      `${operatorControlPlane.runtime_posture.runtime.provider}/${operatorControlPlane.runtime_posture.runtime.model_label}`,
+      `${operatorControlPlane.runtime_posture.extensions.ready}/${operatorControlPlane.runtime_posture.extensions.total} extensions ready`,
+      `${operatorControlPlane.runtime_posture.extensions.governed} governed`,
+      `${operatorControlPlane.runtime_posture.continuity.continuity_health} continuity`,
+    ].join(" · ")
+    : null;
+  const controlPlaneUsageSummary = operatorControlPlane
+    ? [
+      `last ${operatorControlPlane.usage.window_hours}h`,
+      `${operatorControlPlane.usage.llm_call_count} llm`,
+      `${formatUsd(operatorControlPlane.usage.llm_cost_usd) ?? "$0.0000"} spend`,
+      `${operatorControlPlane.usage.pending_approvals} approvals`,
+      `${operatorControlPlane.usage.blocked_workflows} blocked workflows`,
+    ].join(" · ")
+    : null;
   const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
   const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
   const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
@@ -9907,6 +10126,94 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+H inspect top supervised workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
                     </div>
                   </div>
+
+                  <section className="cockpit-operator-section" aria-label="Team control plane">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">team control plane</span>
+                      <span className="cockpit-operator-link">
+                        {operatorControlPlane?.governance.delegation_enabled ? "delegation on" : "delegation off"}
+                      </span>
+                    </div>
+                    {operatorControlPlane ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorControlPlane.governance.workspace_mode.replace(/_/g, " "),
+                            `approval ${operatorControlPlane.governance.approval_mode}`,
+                            `tool ${operatorControlPlane.governance.tool_policy_mode}`,
+                            `mcp ${operatorControlPlane.governance.mcp_policy_mode}`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">{operatorControlPlane.governance.review_posture}</div>
+                        {controlPlaneUsageSummary ? (
+                          <div className="cockpit-sublist-item">{controlPlaneUsageSummary}</div>
+                        ) : null}
+                        {controlPlaneRuntimeSummary ? (
+                          <div className="cockpit-sublist-item">{controlPlaneRuntimeSummary}</div>
+                        ) : null}
+                        {operatorControlPlane.governance.roles.slice(0, 4).map((role) => (
+                          <div key={role.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{role.label}</div>
+                              <div className="cockpit-operator-note">
+                                {[role.scope.replace(/_/g, " "), role.status, ...role.boundaries].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{role.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                        {controlPlaneHandoffEntries.map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{entry.label}</div>
+                              <div className="cockpit-operator-note">
+                                {[entry.kind.replace(/_/g, " "), entry.status, entry.thread_label].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{entry.detail}</div>
+                            </div>
+                            <div className="cockpit-operator-actions">
+                              {entry.continue_message ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  onClick={() => queueComposerDraft(entry.continue_message ?? "")}
+                                >
+                                  continue
+                                </button>
+                              ) : null}
+                              {entry.thread_id ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  onClick={() => {
+                                    void switchSession(entry.thread_id ?? "", "live");
+                                  }}
+                                >
+                                  open thread
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorControlPlane.handoff.review_receipts.slice(0, 4).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{receipt.title}</div>
+                              <div className="cockpit-operator-note">
+                                {[receipt.status.replace(/_/g, " "), receipt.thread_label].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{receipt.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                        {controlPlaneHandoffEntries.length === 0 && operatorControlPlane.handoff.review_receipts.length === 0 ? (
+                          <div className="cockpit-empty">No approvals, blocked workflows, or review receipts need handoff.</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Team control plane summary unavailable.</div>
+                    )}
+                  </section>
 
                   <section className="cockpit-operator-section" aria-label="Active triage">
                     <div className="cockpit-operator-row">

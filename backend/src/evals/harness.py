@@ -2159,8 +2159,8 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
     ]
     assert chat_model._runtime_profile == "local"
     assert [fallback.model_id for fallback in chat_model._fallback_models] == [
-        "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-mini",
+        "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-nano",
         "openai/gpt-4o-mini",
     ]

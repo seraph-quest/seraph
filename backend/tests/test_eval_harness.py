@@ -299,6 +299,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "threaded_operator_timeline_behavior",
                 "workflow_boundary_blocked_surface_behavior",
                 "approval_explainability_surface_behavior",
+                "source_adapter_evidence_behavior",
+                "source_mutation_boundary_behavior",
+                "source_review_routine_behavior",
                 "source_report_action_workflow_behavior",
                 "capability_repair_behavior",
                 "capability_preflight_behavior",
@@ -1121,8 +1124,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "local"
     assert details_by_name["provider_policy_capabilities"]["chat_fallback_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-mini",
+        "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-nano",
         "openai/gpt-4o-mini",
     ]

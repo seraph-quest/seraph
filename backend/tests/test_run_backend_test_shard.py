@@ -99,11 +99,11 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
             ],
         ),
         (
-            "tests/test_eval_harness.py::source_report_action_workflow_behavior",
+            "tests/test_eval_harness.py::test_source_report_action_workflow_behavior_runtime_eval_details",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "source_report_action_workflow_behavior",
+                "test_source_report_action_workflow_behavior_runtime_eval_details",
             ],
         ),
         (
@@ -135,7 +135,7 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
+                "not (test_run_runtime_evals_passes_group_1 or test_source_report_action_workflow_behavior_runtime_eval_details or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
             ],
         ),
     ]
@@ -196,7 +196,7 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
     assert second_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "source_report_action_workflow_behavior",
+        "test_source_report_action_workflow_behavior_runtime_eval_details",
     ]
     assert third_command[4:7] == [
         "tests/test_eval_harness.py",
@@ -216,7 +216,7 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
     assert sixth_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
+        "not (test_run_runtime_evals_passes_group_1 or test_source_report_action_workflow_behavior_runtime_eval_details or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
     ]
     assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
 

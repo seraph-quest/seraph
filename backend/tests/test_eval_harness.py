@@ -24,8 +24,17 @@ def _runtime_eval_groups() -> list[tuple[str, list[str]]]:
     ]
 
 
-def test_run_runtime_evals_passes_group_1():
+def _runtime_group_1_without_source_report() -> list[str]:
     _, scenario_names = _runtime_eval_groups()[0]
+    return [
+        scenario_name
+        for scenario_name in scenario_names
+        if scenario_name != "source_report_action_workflow_behavior"
+    ]
+
+
+def test_run_runtime_evals_passes_group_1():
+    scenario_names = _runtime_group_1_without_source_report()
     summary = asyncio.run(run_runtime_evals(scenario_names))
 
     result_names = {result.name for result in summary.results}
@@ -82,6 +91,29 @@ def test_run_runtime_evals_can_filter_specific_scenarios():
 def test_run_runtime_evals_rejects_unknown_scenarios():
     with pytest.raises(ValueError, match="Unknown eval scenario"):
         asyncio.run(run_runtime_evals(["missing-scenario"]))
+
+
+def test_source_report_action_workflow_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["source_report_action_workflow_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert details["report_status"] == "ready"
+    assert details["publish_status"] == "approval_required"
+    assert details["publish_action_kind"] == "comment"
+    assert details["publish_target_reference"] == "seraph-quest/seraph#343"
+    assert details["recommended_runbook"] == "runbook:source-progress-report"
+    assert details["recommended_starter_pack"] == "source-progress-report"
+    assert details["execution_status"] == "ok"
+    assert details["execution_tool_name"] == "add_comment_to_issue"
+    assert details["execution_argument_keys"] == [
+        "comment",
+        "issue_number",
+        "repo_full_name",
+    ]
 
 
 def test_main_lists_available_scenarios(capsys):
@@ -545,11 +577,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["cross_surface_continuity_behavior"]["bundle_surface_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["degraded_source_adapter_count"] == 1
     assert details_by_name["cross_surface_continuity_behavior"]["attention_family_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["presence_surface_count"] == 2
+    assert details_by_name["cross_surface_continuity_behavior"]["attention_presence_surface_count"] == 1
     assert details_by_name["cross_surface_continuity_behavior"]["source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["presence_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["presence_follow_up_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["imported_reach_recovery_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["operator_source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_presence_recovery_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["operator_imported_reach_recovery_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["activity_source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_presence_recovery_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["activity_imported_reach_recovery_present"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"

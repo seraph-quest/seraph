@@ -661,6 +661,8 @@ describe("CockpitView", () => {
             degraded_route_count: 1,
             degraded_source_adapter_count: 1,
             attention_family_count: 1,
+            presence_surface_count: 2,
+            attention_presence_surface_count: 1,
           },
           imported_reach: {
             summary: {
@@ -702,6 +704,50 @@ describe("CockpitView", () => {
                 contracts: ["work_items.read", "code_activity.read"],
                 degraded_reason: "runtime_adapter_missing",
                 next_best_sources: [{ name: "web_search", reason: "fallback", description: "Use public context." }],
+              },
+            ],
+          },
+          presence_surfaces: {
+            summary: {
+              surface_count: 2,
+              active_surface_count: 1,
+              ready_surface_count: 1,
+              attention_surface_count: 1,
+            },
+            surfaces: [
+              {
+                id: "messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                kind: "messaging_connector",
+                label: "Telegram relay",
+                package_label: "Seraph Relay Pack",
+                package_id: "seraph.relay",
+                status: "requires_config",
+                active: false,
+                ready: false,
+                attention: true,
+                detail: "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                repair_hint: "Finish connector configuration in the operator surface before routing follow-through here.",
+                follow_up_hint: null,
+                follow_up_prompt: null,
+                transport: null,
+                source_type: null,
+              },
+              {
+                id: "channel_adapters:seraph.native:channels/native.yaml",
+                kind: "channel_adapter",
+                label: "native notification channel",
+                package_label: "Seraph Native Pack",
+                package_id: "seraph.native",
+                status: "ready",
+                active: true,
+                ready: true,
+                attention: false,
+                detail: "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                repair_hint: null,
+                follow_up_hint: "Use operator review before routing external follow-through through this surface.",
+                follow_up_prompt: "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+                transport: "native_notification",
+                source_type: null,
               },
             ],
           },
@@ -765,6 +811,19 @@ describe("CockpitView", () => {
               open_thread_available: false,
             },
             {
+              id: "presence:messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+              kind: "presence_repair",
+              label: "Review presence surface Telegram relay",
+              detail: "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+              status: "requires_config",
+              surface: "presence",
+              route: "messaging_connector",
+              repair_hint: "Finish connector configuration in the operator surface before routing follow-through here.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
               id: "imported:messaging_connectors",
               kind: "imported_reach_attention",
               label: "Review imported messaging",
@@ -775,6 +834,45 @@ describe("CockpitView", () => {
               repair_hint: "Inspect Seraph Relay Pack in the operator surface.",
               thread_id: null,
               continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "presence:observer_definitions:seraph.observer:observers/calendar.yaml",
+              kind: "presence_repair",
+              label: "Review presence surface Calendar observer",
+              detail: "Seraph Observer Pack adds Calendar observer for calendar observation (planned).",
+              status: "planned",
+              surface: "presence",
+              route: "observer_definition",
+              repair_hint: "Enable the packaged contribution and confirm its runtime prerequisites in the operator surface.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "imported:node_adapters",
+              kind: "imported_reach_attention",
+              label: "Review imported node adapters",
+              detail: "1 imported contribution needs attention across 1 package.",
+              status: "attention",
+              surface: "imported_reach",
+              route: null,
+              repair_hint: "Inspect Node Pack in the operator surface.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "presence-follow:channel_adapters:seraph.native:channels/native.yaml",
+              kind: "presence_follow_up",
+              label: "Plan follow-up via native notification channel",
+              detail: "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+              status: "ready",
+              surface: "presence",
+              route: "channel_adapter",
+              repair_hint: "Use operator review before routing external follow-through through this surface.",
+              thread_id: null,
+              continue_message: "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
               open_thread_available: false,
             },
           ],
@@ -1165,6 +1263,7 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Desktop shell")).toBeInTheDocument());
     expect(screen.getByText(/continuity degraded · threads 1 · ambient 0/i)).toBeInTheDocument();
     expect(screen.getByText(/typed adapters 0\/1 ready · authenticated 0\/1/i)).toBeInTheDocument();
+    expect(screen.getByText(/presence 1\/2 ready · 1 attention/i)).toBeInTheDocument();
     expect(screen.getByText(/imported reach 1\/1 active · 1 attention/i)).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Draft repair" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Continue" }).length).toBeGreaterThan(0);
@@ -1181,10 +1280,12 @@ describe("CockpitView", () => {
       ).toBeInTheDocument(),
     );
 
-    const importedRow = within(triage).getByText("reach: Review imported messaging").closest(".cockpit-operator-row--entry");
-    expect(importedRow).not.toBeNull();
-    fireEvent.click(within(importedRow as HTMLElement).getByRole("button", { name: "Open operator surface for reach: Review imported messaging" }));
-    await waitFor(() => expect(screen.getByText("Operator terminal")).toBeInTheDocument());
+    const followUpDesktopRow = screen.getByText("Plan follow-up via native notification channel").closest(".cockpit-row");
+    expect(followUpDesktopRow).not.toBeNull();
+    fireEvent.click(within(followUpDesktopRow as HTMLElement).getByRole("button", { name: "Draft follow-up" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Plan guarded follow-through for native notification channel/i)).toBeInTheDocument(),
+    );
   }, 30000);
 
   it("surfaces evidence shortcuts and keyboard-first triage control", async () => {

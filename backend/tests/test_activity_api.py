@@ -432,6 +432,8 @@ async def test_activity_ledger_surfaces_observer_recovery_actions(client):
                         "continuity_health": "attention",
                         "primary_surface": "source_adapter",
                         "recommended_focus": "github-managed",
+                        "presence_surface_count": 2,
+                        "attention_presence_surface_count": 1,
                     },
                     "recovery_actions": [
                         {
@@ -445,6 +447,32 @@ async def test_activity_ledger_surfaces_observer_recovery_actions(client):
                             "repair_hint": "Inspect the typed source adapter inventory and runtime bridge.",
                             "thread_id": None,
                             "continue_message": "Draft a repair plan for github-managed.",
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "presence:messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                            "kind": "presence_repair",
+                            "label": "Review presence surface Telegram relay",
+                            "detail": "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                            "status": "requires_config",
+                            "surface": "presence",
+                            "route": "messaging_connector",
+                            "repair_hint": "Finish connector configuration in the operator surface before routing follow-through here.",
+                            "thread_id": None,
+                            "continue_message": None,
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "presence:channel_adapters:seraph.native:channels/native.yaml",
+                            "kind": "presence_follow_up",
+                            "label": "Plan follow-up via native notification channel",
+                            "detail": "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                            "status": "ready",
+                            "surface": "presence",
+                            "route": "channel_adapter",
+                            "repair_hint": None,
+                            "thread_id": None,
+                            "continue_message": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
                             "open_thread_available": False,
                         },
                         {
@@ -477,6 +505,28 @@ async def test_activity_ledger_surfaces_observer_recovery_actions(client):
     assert adapter_item["continue_message"] == "Draft a repair plan for github-managed."
     assert adapter_item["metadata"]["kind"] == "source_adapter_repair"
     assert adapter_item["metadata"]["recommended_focus"] == "github-managed"
+    assert adapter_item["metadata"]["presence_surface_count"] == 2
+    assert adapter_item["metadata"]["attention_presence_surface_count"] == 1
+
+    presence_item = next(
+        item
+        for item in payload["items"]
+        if item["id"] == "continuity:presence:messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml"
+    )
+    assert presence_item["metadata"]["kind"] == "presence_repair"
+    assert presence_item["metadata"]["surface"] == "presence"
+
+    follow_up_item = next(
+        item
+        for item in payload["items"]
+        if item["id"] == "continuity:presence:channel_adapters:seraph.native:channels/native.yaml"
+    )
+    assert follow_up_item["metadata"]["kind"] == "presence_follow_up"
+    assert follow_up_item["metadata"]["surface"] == "presence"
+    assert follow_up_item["continue_message"] == (
+        "Plan guarded follow-through for native notification channel. Confirm the audience, "
+        "target reference, channel scope, and approval boundaries before acting."
+    )
 
     imported_item = next(item for item in payload["items"] if item["id"] == "continuity:imported:messaging")
     assert imported_item["metadata"]["kind"] == "imported_reach_attention"

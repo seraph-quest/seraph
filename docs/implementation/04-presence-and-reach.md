@@ -22,6 +22,7 @@
 - [x] the shared continuity snapshot now also synthesizes continuity health, grouped follow-through threads, and explicit recovery actions, and the cockpit desktop shell now uses that richer contract instead of reconstructing cross-surface recovery from raw notifications, queued items, and route rows
 - [x] the shared continuity snapshot now also carries imported capability-family attention and typed source-adapter degradation, so browser/native route health is no longer the only reach surface visible in observer continuity or cockpit recovery flows
 - [x] broader reach continuity now also propagates into the operator timeline and Activity Ledger, so typed source-adapter and imported-reach recovery is not stranded in the observer endpoint or cockpit-only surfaces
+- [x] observer continuity now also carries explicit presence-surface inventory across channel adapters, messaging connectors, node adapters, and observer definitions, with ready versus attention summaries, follow-up prompts, repair hints, and the same presence recovery surfaced into cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 
 ## Working On Now
@@ -36,6 +37,7 @@
 - [x] this workstream now also ships `cross-surface-recovery-summary-v1`
 - [x] this workstream now also ships `broader-channel-adapter-surface-v1`
 - [x] this workstream now also ships `reach-evals-and-integration-hardening-v2`
+- [x] this workstream now also ships `cross-surface-presence-contracts-v1`
 
 ## Still To Do On `develop`
 
@@ -95,3 +97,31 @@
     - the cockpit desktop shell was truncating route-health visibility to the first two routes, so `bundle_delivery` and later routes are now rendered instead of being silently hidden
   - full `uv run pytest tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q` is still failing in this environment for unrelated authenticated-provider scenarios outside Batch I; the Batch I proof therefore uses the scenario-specific `cross_surface_continuity_behavior` harness run above instead of claiming an unrelated full-harness green result
   - a subagent review was requested against the uncommitted Batch I reach-hardening diff for bugs, regressions, and hallucinated assumptions; if that review does not return before PR preparation, this branch record should rely on the direct review findings plus the targeted validation above instead of claiming an unreturned clean review
+
+## Batch AP Branch Review Log
+
+### Slice: cross-surface presence contracts v1
+
+- status: complete on `feat/production-reach-cross-surface-batch-ap-v1`, intended for the aggregate Batch AP PR for `#346`
+- root cause addressed:
+  - broader reach continuity still treated route health, imported capability attention, and typed source-adapter degradation as the only actionable non-thread surfaces, so messaging connectors, channel adapters, node adapters, and observer definitions could still disappear behind separate inventories instead of showing up in the same operator recovery loop
+  - observer continuity, cockpit triage, and the desktop shell did not carry a truthful presence-surface-ready versus attention summary, so follow-up-capable surfaces could remain invisible while only repair-oriented reach issues surfaced
+  - the operator timeline and Activity Ledger were still missing the presence-surface counts and recovery kinds needed to keep the widened reach contract visible outside the observer endpoint and cockpit shell
+- delivered in this slice:
+  - explicit presence-surface inventory in observer continuity across channel adapters, messaging connectors, node adapters, and observer definitions, including ready versus attention summaries, repair hints, and follow-up prompts
+  - cockpit desktop-shell and triage visibility for presence repair plus follow-up flows, including a new top-presence summary line and direct follow-up drafting for ready surfaces
+  - threaded operator timeline and Activity Ledger continuity metadata for presence-surface counts and presence recovery actions
+  - deterministic backend and frontend coverage for the widened continuity contract, plus the pre-batch backend shard fix for the `cross_surface_continuity_behavior` eval-harness routing seam
+- validation:
+  - `python3 -m py_compile backend/scripts/run_backend_test_shard.py backend/src/api/activity.py backend/src/api/observer.py backend/src/api/operator.py backend/src/evals/harness.py backend/tests/test_activity_api.py backend/tests/test_eval_harness.py backend/tests/test_observer_api.py backend/tests/test_operator_api.py backend/tests/test_run_backend_test_shard.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_run_backend_test_shard.py -q`
+  - `cd backend && .venv/bin/python -m pytest tests/test_observer_api.py -q -k "surfaces_imported_reach_and_source_adapter_attention or partial_namespace_items"`
+  - `cd backend && .venv/bin/python -m pytest tests/test_operator_api.py tests/test_activity_api.py -q -k "surfaces_observer_recovery_actions"`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "test_main_lists_available_scenarios"`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/seraphPresence.test.ts src/components/cockpit/CockpitView.test.tsx -t "surfaces active triage for approvals, workflows, queued guardian items, and reach failures|deriveSeraphPresenceState"`
+  - `cd frontend && npm run build`
+  - `cd docs && npm run build`
+- review follow-up captured during validation:
+  - the first triage proof assumed imported-reach follow-through would still land in the top visible rows after the new presence surfaces were added, but that ordering guarantee was no longer truthful once the widened continuity contract legitimately displaced lower-priority rows
+  - the first desktop-shell pass truncated recovery rows early enough that the new `presence_follow_up` action could be produced by the backend but never rendered, so the recovery list now exposes enough rows for the new ready-surface follow-up contract to remain actionable
+  - the observer continuity hardening from the pre-batch fix is folded into this slice because partial intervention rows were still failing response validation on missing legacy string fields, and that would have made the new broader continuity contract brittle under older stored payloads

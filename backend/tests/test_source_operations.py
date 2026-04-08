@@ -631,6 +631,7 @@ def test_build_source_mutation_plan_requires_explicit_action_kind_for_multi_acti
                                 "tool_name": "create_issue",
                                 "target_reference_mode": "repository",
                                 "required_payload_fields": ["title", "body"],
+                                "allowed_payload_fields": ["title", "body"],
                             },
                             {
                                 "kind": "comment",
@@ -639,6 +640,7 @@ def test_build_source_mutation_plan_requires_explicit_action_kind_for_multi_acti
                                 "tool_name": "add_comment_to_issue",
                                 "target_reference_mode": "work_item",
                                 "required_payload_fields": ["body"],
+                                "allowed_payload_fields": ["body"],
                             },
                         ],
                     }
@@ -662,6 +664,7 @@ def test_build_source_mutation_plan_requires_explicit_action_kind_for_multi_acti
     assert plan["status"] == "failed"
     assert "requires an explicit action_kind" in plan["warnings"][0]
     assert {item["kind"] for item in plan["available_actions"]} == {"create", "comment"}
+    assert next(item for item in plan["available_actions"] if item["kind"] == "comment")["allowed_payload_fields"] == ["body"]
 
 
 def test_build_source_mutation_plan_selects_requested_action_for_bound_write_route():
@@ -694,6 +697,7 @@ def test_build_source_mutation_plan_selects_requested_action_for_bound_write_rou
                                 "tool_name": "create_issue",
                                 "target_reference_mode": "repository",
                                 "required_payload_fields": ["title", "body"],
+                                "allowed_payload_fields": ["title", "body"],
                             },
                             {
                                 "kind": "comment",
@@ -702,6 +706,7 @@ def test_build_source_mutation_plan_selects_requested_action_for_bound_write_rou
                                 "tool_name": "add_comment_to_issue",
                                 "target_reference_mode": "work_item",
                                 "required_payload_fields": ["body"],
+                                "allowed_payload_fields": ["body"],
                             },
                         ],
                     }
@@ -727,6 +732,7 @@ def test_build_source_mutation_plan_selects_requested_action_for_bound_write_rou
     assert plan["action"]["kind"] == "comment"
     assert plan["action"]["tool_name"] == "add_comment_to_issue"
     assert plan["approval_scope"]["action"]["target_reference_mode"] == "work_item"
+    assert plan["approval_scope"]["action"]["allowed_payload_fields"] == ["body"]
     assert plan["approval_context"]["mutation_action_kind"] == "comment"
     assert plan["audit_payload"]["action_kind"] == "comment"
 
@@ -929,6 +935,7 @@ def test_execute_source_mutation_bundle_executes_repository_create_action():
                                 "target_reference_mode": "repository",
                                 "target_argument_name": "repo_full_name",
                                 "required_payload_fields": ["title", "body"],
+                                "allowed_payload_fields": ["title", "body"],
                                 "payload_argument_map": {"title": "title", "body": "body"},
                             }
                         ],
@@ -1006,6 +1013,7 @@ def test_execute_source_mutation_bundle_executes_issue_comment_action():
                                 "target_argument_name": "repo_full_name",
                                 "number_argument_name": "issue_number",
                                 "required_payload_fields": ["body"],
+                                "allowed_payload_fields": ["body"],
                                 "payload_argument_map": {"body": "comment"},
                             }
                         ],
@@ -1073,6 +1081,7 @@ def test_execute_source_mutation_bundle_rejects_invalid_target_reference():
                                 "target_argument_name": "repo_full_name",
                                 "number_argument_name": "issue_number",
                                 "required_payload_fields": ["body"],
+                                "allowed_payload_fields": ["body"],
                                 "payload_argument_map": {"body": "comment"},
                             }
                         ],
@@ -1100,6 +1109,66 @@ def test_execute_source_mutation_bundle_rejects_invalid_target_reference():
 
     assert result["status"] == "failed"
     assert "owner/repo#number" in result["warnings"][0]
+
+
+def test_execute_source_mutation_bundle_rejects_undeclared_payload_fields():
+    create_issue = FakeMCPTool("create_issue", {"id": 343, "title": "ok"})
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["work_items.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "work_items.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "create",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "create_issue",
+                                "target_reference_mode": "repository",
+                                "target_argument_name": "repo_full_name",
+                                "required_payload_fields": ["title", "body"],
+                                "allowed_payload_fields": ["title", "body"],
+                                "payload_argument_map": {"title": "title", "body": "body"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[create_issue]),
+    ):
+        result = execute_source_mutation_bundle(
+            contract="work_items.write",
+            source="github-managed",
+            action_kind="create",
+            target_reference="seraph-quest/seraph",
+            payload={"title": "Adapter-backed status report", "body": "Published from Seraph.", "labels": ["unsafe-extra"]},
+        )
+
+    assert result["status"] == "failed"
+    assert "undeclared fields" in result["warnings"][0]
+    assert create_issue.calls == []
 
 
 def test_build_source_report_plan_composes_review_and_publish():

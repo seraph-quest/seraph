@@ -160,6 +160,10 @@ async def test_tools_api_marks_mcp_tools_as_approval_required_in_approval_mode(c
     mcp_tool = MagicMock()
     mcp_tool.name = "mcp_tasks"
     mcp_tool.description = "Task MCP"
+    mcp_tool.inputs = {
+        "headers": {"type": "object", "description": "Request headers"},
+        "body": {"type": "string", "description": "Request body"},
+    }
     with patch("src.tools.policy.context_manager.get_context", return_value=ctx), \
          patch("src.agent.factory.mcp_manager.get_tools", return_value=[mcp_tool]):
         resp = await client.get("/api/tools")
@@ -171,6 +175,7 @@ async def test_tools_api_marks_mcp_tools_as_approval_required_in_approval_mode(c
     assert mcp_entry["risk_level"] == "high"
     assert mcp_entry["execution_boundaries"] == ["external_mcp"]
     assert mcp_entry["accepts_secret_refs"] is True
+    assert mcp_entry["secret_ref_fields"] == ["headers"]
     assert mcp_entry["authenticated_source"] is False
 
 
@@ -180,6 +185,10 @@ async def test_tools_api_marks_authenticated_mcp_tools_with_narrower_boundary(cl
     mcp_tool = MagicMock()
     mcp_tool.name = "mcp_tasks"
     mcp_tool.description = "Task MCP"
+    mcp_tool.inputs = {
+        "headers": {"type": "object", "description": "Request headers"},
+        "body": {"type": "string", "description": "Request body"},
+    }
     mcp_tool.seraph_source_context = {
         "authenticated_source": True,
         "server_name": "github",
@@ -199,6 +208,7 @@ async def test_tools_api_allows_mcp_tools_with_balanced_native_policy_when_mcp_a
     mcp_tool = MagicMock()
     mcp_tool.name = "mcp_tasks"
     mcp_tool.description = "Task MCP"
+    mcp_tool.inputs = {"headers": {"type": "object", "description": "Request headers"}}
     with patch("src.tools.policy.context_manager.get_context", return_value=ctx), \
          patch("src.agent.factory.mcp_manager.get_tools", return_value=[mcp_tool]):
         resp = await client.get("/api/tools")
@@ -237,6 +247,7 @@ async def test_tools_api_surfaces_workflow_execution_boundaries(client):
             "risk_level": "medium",
             "execution_boundaries": ["external_read", "workspace_write"],
             "accepts_secret_refs": False,
+            "secret_ref_fields": [],
         }]
 
 

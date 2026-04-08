@@ -297,6 +297,14 @@ def _build_mutation_action_routes(
         tool_names = _normalize_string_tuple(raw_action.get("tool_names"))
         required_payload_fields = _normalize_string_tuple(raw_action.get("required_payload_fields"))
         payload_argument_map = _normalize_string_dict(raw_action.get("payload_argument_map"))
+        allowed_payload_fields = _normalize_string_tuple(raw_action.get("allowed_payload_fields"))
+        if not allowed_payload_fields:
+            inferred_allowed_fields = [
+                field_name
+                for field_name in (*required_payload_fields, *payload_argument_map.keys())
+                if isinstance(field_name, str) and field_name.strip()
+            ]
+            allowed_payload_fields = _normalize_string_tuple(inferred_allowed_fields)
         target_reference_mode = str(raw_action.get("target_reference_mode") or "").strip() or "none"
         target_argument_name = str(raw_action.get("target_argument_name") or "").strip()
         number_argument_name = str(raw_action.get("number_argument_name") or "").strip()
@@ -317,6 +325,7 @@ def _build_mutation_action_routes(
                 **({"runtime_server": bound_server} if bound_server else {}),
                 **({"tool_name": matched_tool_name} if matched_tool_name else {}),
                 "required_payload_fields": list(required_payload_fields),
+                "allowed_payload_fields": list(allowed_payload_fields),
                 "payload_argument_map": payload_argument_map,
                 "target_reference_mode": target_reference_mode,
                 **({"target_argument_name": target_argument_name} if target_argument_name else {}),
@@ -1074,6 +1083,7 @@ def build_source_mutation_plan(
                 "executable": bool(action.get("executable")),
                 "target_reference_mode": str(action.get("target_reference_mode") or "none"),
                 "required_payload_fields": list(action.get("required_payload_fields") or []),
+                "allowed_payload_fields": list(action.get("allowed_payload_fields") or []),
             }
             for action in available_actions
         ]
@@ -1145,6 +1155,7 @@ def build_source_mutation_plan(
             "kind": str(selected_action.get("kind") or normalized_action_kind),
             "target_reference_mode": str(selected_action.get("target_reference_mode") or "none"),
             "required_payload_fields": list(selected_action.get("required_payload_fields") or []),
+            "allowed_payload_fields": list(selected_action.get("allowed_payload_fields") or []),
         }
     approval_context = {
         "risk_level": "high",
@@ -1260,6 +1271,21 @@ def execute_source_mutation_bundle(
             f"Missing required payload fields for {action_kind.strip().lower() or 'mutation'}: {', '.join(missing_fields)}."
         )
         return response
+    allowed_payload_fields = _normalize_string_tuple(selected_action.get("allowed_payload_fields"))
+    if allowed_payload_fields:
+        unexpected_fields = [
+            field_name
+            for field_name in normalized_payload
+            if field_name not in allowed_payload_fields
+        ]
+        if unexpected_fields:
+            response["status"] = "failed"
+            response["warnings"].append(
+                "Payload included undeclared fields for "
+                f"{action_kind.strip().lower() or 'mutation'}: {', '.join(unexpected_fields)}. "
+                f"Allowed fields: {', '.join(allowed_payload_fields)}."
+            )
+            return response
 
     target_reference_mode = str(selected_action.get("target_reference_mode") or "none")
     arguments: dict[str, Any] = {}
@@ -1293,10 +1319,6 @@ def execute_source_mutation_bundle(
             continue
         arguments[argument_name] = normalized_payload[payload_field]
         consumed_payload_fields.add(payload_field)
-    for key, value in normalized_payload.items():
-        if key in consumed_payload_fields or key in arguments:
-            continue
-        arguments[key] = value
 
     try:
         raw_result = tool(**arguments)

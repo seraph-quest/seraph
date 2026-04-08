@@ -44,6 +44,9 @@ runtime_adapter:
           required_payload_fields:
             - title
             - body
+          allowed_payload_fields:
+            - title
+            - body
           payload_argument_map:
             title: title
             body: body
@@ -54,6 +57,8 @@ runtime_adapter:
           target_argument_name: repo_full_name
           number_argument_name: issue_number
           required_payload_fields:
+            - body
+          allowed_payload_fields:
             - body
           payload_argument_map:
             body: comment

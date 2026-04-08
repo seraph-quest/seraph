@@ -5,7 +5,7 @@ from __future__ import annotations
 from smolagents import Tool, tool
 
 from src.approval.runtime import get_current_session_id
-from src.tools.policy import tool_accepts_secret_refs
+from src.tools.policy import get_tool_secret_ref_fields, tool_accepts_secret_refs
 from src.tools.vault_tools import _log_secret_event, _run
 from src.vault.refs import _REF_PREFIX
 from src.vault.refs import issue_secret_ref, resolve_secret_refs
@@ -21,6 +21,7 @@ class SecretRefResolvingTool(Tool):
         super().__init__()
         self.wrapped_tool = wrapped_tool
         self.name = str(getattr(wrapped_tool, "name", "wrapped_tool"))
+        self._is_mcp = self.name.startswith("mcp_")
         description = getattr(wrapped_tool, "description", "")
         self.description = description if isinstance(description, str) else ""
         inputs = getattr(wrapped_tool, "inputs", {})
@@ -29,6 +30,11 @@ class SecretRefResolvingTool(Tool):
         self.output_type = output_type if isinstance(output_type, str) else "string"
         output_schema = getattr(wrapped_tool, "output_schema", None)
         self.output_schema = output_schema if isinstance(output_schema, dict) else None
+        self.seraph_secret_ref_fields = get_tool_secret_ref_fields(
+            self.name,
+            is_mcp=self._is_mcp,
+            tool=wrapped_tool,
+        )
         self.is_initialized = True
 
     def forward(self, *args, **kwargs):
@@ -36,23 +42,38 @@ class SecretRefResolvingTool(Tool):
 
     def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
         session_id = get_current_session_id()
-        if not tool_accepts_secret_refs(self.name, is_mcp=self.name.startswith("mcp_")):
-            if any(_contains_secret_ref(arg) for arg in args) or any(
-                _contains_secret_ref(value) for value in kwargs.values()
-            ):
+        invocation = self._normalize_invocation(args, kwargs)
+        has_secret_refs = any(_contains_secret_ref(value) for value in invocation.values())
+        if not tool_accepts_secret_refs(self.name, is_mcp=self._is_mcp, tool=self.wrapped_tool):
+            if has_secret_refs:
                 raise ValueError(
                     f"Tool '{self.name}' cannot receive secret references; "
                     "use an explicit secret-injection path instead."
                 )
-        resolved_args = tuple(resolve_secret_refs(arg, session_id) for arg in args)
-        resolved_kwargs = {
-            key: resolve_secret_refs(value, session_id)
-            for key, value in kwargs.items()
+        secret_ref_fields = list(self.seraph_secret_ref_fields)
+        if has_secret_refs:
+            disallowed_fields = sorted(
+                field_name
+                for field_name, value in invocation.items()
+                if _contains_secret_ref(value) and field_name not in secret_ref_fields
+            )
+            if disallowed_fields:
+                field_list = ", ".join(disallowed_fields)
+                raise ValueError(
+                    f"Tool '{self.name}' can only receive secret references in allowlisted fields: "
+                    f"{', '.join(secret_ref_fields) or 'none'}. Refs were provided in: {field_list}."
+                )
+        resolved_invocation = {
+            key: (
+                resolve_secret_refs(value, session_id)
+                if key in secret_ref_fields
+                else value
+            )
+            for key, value in invocation.items()
         }
         return self.wrapped_tool(
-            *resolved_args,
             sanitize_inputs_outputs=sanitize_inputs_outputs,
-            **resolved_kwargs,
+            **resolved_invocation,
         )
 
     def get_audit_result_payload(self, arguments, result):
@@ -84,6 +105,18 @@ class SecretRefResolvingTool(Tool):
         if callable(hook):
             return hook(arguments)
         return None
+
+    def _normalize_invocation(self, args, kwargs):
+        if len(args) == 1 and not kwargs and isinstance(args[0], dict):
+            return dict(args[0])
+        if kwargs:
+            return dict(kwargs)
+        input_names = list(self.inputs.keys())
+        return {
+            name: args[idx]
+            for idx, name in enumerate(input_names)
+            if idx < len(args)
+        }
 
 
 def wrap_tools_for_secret_refs(tools: list[Tool]) -> list[Tool]:

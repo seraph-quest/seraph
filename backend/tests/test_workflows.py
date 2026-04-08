@@ -4308,6 +4308,7 @@ class TestWorkflowSurfaces:
             "risk_level": "medium",
             "execution_boundaries": ["external_read", "workspace_write"],
             "accepts_secret_refs": False,
+            "secret_ref_fields": [],
         }]
 
     def test_factory_wraps_high_risk_workflows_for_approval(self, async_db):

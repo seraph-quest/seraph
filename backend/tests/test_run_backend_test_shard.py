@@ -90,15 +90,27 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
 
     assert invocations == [
         (
-            "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios",
-            ["tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios"],
+            "tests/test_eval_harness.py::runtime_groups_1_2",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_groups_3_4",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4",
+            ],
         ),
         (
             "tests/test_eval_harness.py::remaining",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not test_run_runtime_evals_passes_all_scenarios",
+                "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
             ],
         ),
     ]
@@ -135,19 +147,30 @@ def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Pa
         mock_run.side_effect = [
             CompletedProcess(args=["pytest"], returncode=0),
             CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=0),
         ]
 
         result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
 
     assert result == 0
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 3
     first_command = mock_run.call_args_list[0].args[0]
     second_command = mock_run.call_args_list[1].args[0]
-    assert "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios" in first_command
+    third_command = mock_run.call_args_list[2].args[0]
+    assert first_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2",
+    ]
     assert second_command[4:7] == [
         "tests/test_eval_harness.py",
         "-k",
-        "not test_run_runtime_evals_passes_all_scenarios",
+        "test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4",
+    ]
+    assert third_command[4:7] == [
+        "tests/test_eval_harness.py",
+        "-k",
+        "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
     ]
     assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
 
@@ -157,11 +180,27 @@ def test_pytest_invocations_for_target_splits_workflows_contract():
 
     assert invocations == [
         (
-            "tests/test_workflows.py::boundary_drift",
+            "tests/test_workflows.py::approval_and_legacy_boundary_drift",
             [
                 "tests/test_workflows.py",
                 "-k",
-                "approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint",
+                "approval_context or legacy_checkpoint",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::authenticated_source_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "authenticated_source",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::delegation_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "delegated_specialist or delegated_tool_inventory",
             ],
         ),
         (

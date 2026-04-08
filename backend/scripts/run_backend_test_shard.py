@@ -74,15 +74,27 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "tests/test_eval_harness.py": [
         (
-            "tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios",
-            ["tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios"],
+            "tests/test_eval_harness.py::runtime_groups_1_2",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::runtime_groups_3_4",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4",
+            ],
         ),
         (
             "tests/test_eval_harness.py::remaining",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not test_run_runtime_evals_passes_all_scenarios",
+                "not (test_run_runtime_evals_passes_group_1 or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
             ],
         ),
     ],
@@ -106,11 +118,27 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "tests/test_workflows.py": [
         (
-            "tests/test_workflows.py::boundary_drift",
+            "tests/test_workflows.py::approval_and_legacy_boundary_drift",
             [
                 "tests/test_workflows.py",
                 "-k",
-                "approval_context or authenticated_source or delegated_specialist or delegated_tool_inventory or legacy_checkpoint",
+                "approval_context or legacy_checkpoint",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::authenticated_source_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "authenticated_source",
+            ],
+        ),
+        (
+            "tests/test_workflows.py::delegation_boundary_drift",
+            [
+                "tests/test_workflows.py",
+                "-k",
+                "delegated_specialist or delegated_tool_inventory",
             ],
         ),
         (

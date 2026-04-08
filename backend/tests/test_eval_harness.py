@@ -11,15 +11,61 @@ from src.evals import harness
 from src.evals.harness import available_scenarios, main, run_runtime_evals
 
 
-def test_run_runtime_evals_passes_all_scenarios():
-    summary = asyncio.run(run_runtime_evals())
+def _runtime_eval_scenario_names() -> list[str]:
+    return [scenario.name for scenario in available_scenarios()]
 
-    scenario_names = {scenario.name for scenario in available_scenarios()}
+
+def _runtime_eval_groups() -> list[tuple[str, list[str]]]:
+    scenario_names = _runtime_eval_scenario_names()
+    group_size = 26
+    return [
+        (f"group_{index + 1}", scenario_names[index : index + group_size])
+        for index in range(0, len(scenario_names), group_size)
+    ]
+
+
+def test_run_runtime_evals_passes_group_1():
+    _, scenario_names = _runtime_eval_groups()[0]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
     result_names = {result.name for result in summary.results}
 
     assert summary.total == len(scenario_names)
     assert summary.failed == 0
-    assert result_names == scenario_names
+    assert result_names == set(scenario_names)
+
+
+def test_run_runtime_evals_passes_group_2():
+    _, scenario_names = _runtime_eval_groups()[1]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.total == len(scenario_names)
+    assert summary.failed == 0
+    assert result_names == set(scenario_names)
+
+
+def test_run_runtime_evals_passes_group_3():
+    _, scenario_names = _runtime_eval_groups()[2]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.total == len(scenario_names)
+    assert summary.failed == 0
+    assert result_names == set(scenario_names)
+
+
+def test_run_runtime_evals_passes_group_4():
+    _, scenario_names = _runtime_eval_groups()[3]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.total == len(scenario_names)
+    assert summary.failed == 0
+    assert result_names == set(scenario_names)
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():

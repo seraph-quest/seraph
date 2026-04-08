@@ -48,6 +48,7 @@
 - [x] first connector-backed authenticated source-action path that can execute bounded `work_items.write` actions through managed adapters, expose action-scoped approval and audit metadata, and compose provider-neutral report publication flows instead of falling back to bespoke provider-specific write pipelines
 - [x] backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting long-tail runtime skew dominate workflow delivery
 - [x] extension lifecycle, catalog, and capability surfaces now expose package version lines, compatibility truth, publisher metadata, and diagnostics summaries together, while the cockpit operator surface now summarizes extension health, governance, and update/studio actions instead of forcing package triage through raw studio or catalog lists
+- [x] capability-overview and cockpit operator surfaces now also compose starter packs, extension packs, and packaged runbooks into operator-readable marketplace flows with readiness counts, blocking reasons, install/update actions, and draft follow-through instead of leaving marketplace composition split across separate inventories
 - [x] backend CI now also applies per-file watchdog timeouts for the historically heaviest backend suites instead of letting `test_workflows.py` or `test_eval_harness.py` consume an entire shard window when they hang on hosted runners
 - [x] backend CI now also gives the historically slow approvals/context suites explicit shard weights and timeout headroom instead of letting those long-tail trust-boundary tests destabilize the backend matrix
 
@@ -89,6 +90,7 @@
 - [x] `artifact-lineage-and-follow-on-control-v1` now ships verified artifact source-run provenance with explicit unresolved-state fallback, related family outputs, richer follow-on workflow rows, and artifact-specific planning shortcuts instead of leaving typed artifact chaining buried inside workflow-only inspector actions
 - [x] `artifact-lineage-and-long-running-control-v2` now ships artifact source-run open/continue plus source-failure and related-output comparison shortcuts across evidence, outputs, and inspector panes, while the backend CI surface now uses weighted shard assignment and ten backend shards to keep the growing test matrix stable
 - [x] `operator-control-plane-and-workflow-supervision-v1` now ships a dedicated operator-terminal workflow-supervision lane with history, lineage, and recovery summaries across recent runs, plus specialized `test_tools_api.py` CI sharding so the heaviest control-plane suite stops timing out as one monolithic backend bucket
+- [x] `ecosystem-and-marketplace-depth-v3` now ships marketplace-flow composition across starter packs, extension packs, and packaged runbooks, adds cockpit-side marketplace follow-through with activate/update/repair/draft actions, stops `/api/tools` from instantiating full specialists for metadata-only listings, and hardens tools-policy wrapper walks so mock/tool metadata inspection cannot explode into synthetic wrapper chains
 
 ## Review Follow-Up
 
@@ -118,7 +120,7 @@
 ## Still To Do On `develop`
 
 - [ ] bundled capability-pack auto-install and stronger policy/dependency repair beyond the current install/recommendation, preflight/autorepair, policy-aware recovery, catalog-install, and bounded bootstrap flow
-- [ ] richer extension health/test surfaces, deeper marketplace curation, and production-grade connector hardening beyond the current lifecycle API, governance queue, diagnostics summaries, operator health triage, and deterministic eval coverage
+- [ ] richer extension health/test surfaces, deeper marketplace curation, and production-grade connector hardening beyond the current lifecycle API, governance queue, diagnostics summaries, operator health triage, marketplace-flow composition, and deterministic eval coverage
 - [ ] deeper multi-session workflow operating surfaces beyond the current cockpit timeline, typed artifact handoff, artifact source/family follow-through, step records, branch-family supervision, workflow-supervision rows, branch comparison, family-output reuse, output-comparison drafts, family-row checkpoint drill-in, family-row retry/repair controls, explicit output/checkpoint/lineage workflow history rows, checkpoint branch actions, replay guardrails, workflow runtimes, canvas outputs, and operator terminal
 - [ ] clearer extension ergonomics for third-party and user-authored capabilities beyond the current operator surface, repair actions, live logs, runbooks, preflight surfaces, diagnostics, extension studio, and skill-registry loop
 - [ ] better leverage of delegation without making the product harder to trust or reason about

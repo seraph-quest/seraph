@@ -2051,6 +2051,8 @@ describe("CockpitView", () => {
             starter_packs_total: 0,
             mcp_servers_ready: 0,
             mcp_servers_total: 0,
+            marketplace_flows_ready: 1,
+            marketplace_flows_total: 2,
           },
           native_tools: [],
           skills: [],
@@ -7453,6 +7455,69 @@ describe("CockpitView", () => {
           }],
           recommendations: [],
           runbooks: [],
+          marketplace_flows: [
+            {
+              id: "extension-pack:seraph.research-pack",
+              label: "Research Pack",
+              kind: "extension_pack",
+              availability: "ready",
+              summary: "Workspace research routines.",
+              detail: "2026.4 · 2026.4.03 -> 2026.4.11 · trust workspace",
+              ready_count: 1,
+              total_count: 1,
+              primary_action: { type: "install_catalog_item", label: "Update pack", name: "seraph.research-pack" },
+              recommended_actions: [],
+              draft_command: null,
+              blocking_reasons: [],
+              install_items: [],
+              skills: [],
+              workflows: [],
+              related_runbooks: [],
+              catalog_id: "seraph.research-pack",
+              installed: true,
+              update_available: true,
+              version: "2026.4.11",
+              version_line: "2026.4",
+              installed_version: "2026.4.03",
+              contribution_types: ["managed_connectors", "runbooks"],
+              trust: "workspace",
+              publisher: { name: "Workspace", homepage: null, support: null },
+              compatibility: {
+                seraph: ">=2026.4.01",
+                current_version: "2026.4.07",
+                compatible: true,
+              },
+              diagnostics_summary: {
+                issue_count: 0,
+                error_issue_count: 0,
+                warning_issue_count: 0,
+                load_error_count: 0,
+                degraded_contribution_count: 0,
+                degraded_connector_count: 0,
+                state_counts: { ready: 3 },
+                highlighted_messages: [],
+              },
+              status: "ready",
+            },
+            {
+              id: "starter-pack:research-briefing",
+              label: "Research Briefing",
+              kind: "starter_pack",
+              availability: "partial",
+              summary: "Compose research skills, workflow, and installables.",
+              detail: "0/3 ready · 1 install items missing · 1 runbooks",
+              ready_count: 0,
+              total_count: 3,
+              primary_action: { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
+              recommended_actions: [{ type: "install_catalog_item", label: "Install http-request", name: "http-request" }],
+              draft_command: "Research the latest release notes",
+              blocking_reasons: ["missing install item: http-request"],
+              install_items: ["http-request"],
+              skills: ["web-briefing"],
+              workflows: ["web-brief-to-file"],
+              related_runbooks: ["Research Briefing"],
+            },
+          ],
         }));
       }
       if (url.includes("/api/extensions") && !url.includes("/source")) {
@@ -7548,6 +7613,10 @@ describe("CockpitView", () => {
     await waitFor(() => {
       expect(screen.getByText("1 available · 1 updates · 1 extension packs · 1 compatible")).toBeInTheDocument();
     });
+    await waitFor(() => {
+      expect(screen.getByText("marketplace flows")).toBeInTheDocument();
+      expect(screen.getByText("1/2 ready · 1 updates · 1 attention")).toBeInTheDocument();
+    });
 
     const healthSection = screen.getByText("extension health").closest(".cockpit-operator-section");
     expect(healthSection).not.toBeNull();
@@ -7558,6 +7627,14 @@ describe("CockpitView", () => {
     expect(within(healthRow as HTMLElement).getByRole("button", { name: "draft" })).toBeInTheDocument();
     expect(within(healthRow as HTMLElement).getByText(/publisher Workspace/)).toBeInTheDocument();
     expect(within(healthRow as HTMLElement).getByText(/lifecycle approval/)).toBeInTheDocument();
+
+    const flowSection = screen.getByText("marketplace flows").closest(".cockpit-operator-section");
+    expect(flowSection).not.toBeNull();
+    const flowRow = within(flowSection as HTMLElement).getByText("Research Briefing").closest(".cockpit-operator-row");
+    expect(flowRow).not.toBeNull();
+    expect(within(flowRow as HTMLElement).getByRole("button", { name: "Activate pack" })).toBeInTheDocument();
+    expect(within(flowRow as HTMLElement).getByRole("button", { name: "repair" })).toBeInTheDocument();
+    expect(within(flowRow as HTMLElement).getByRole("button", { name: "draft" })).toBeInTheDocument();
   }, 15000);
 
   it("surfaces approval-required update responses in extension studio", async () => {

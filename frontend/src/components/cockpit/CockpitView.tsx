@@ -696,6 +696,37 @@ interface CapabilityRecommendation {
   action?: CapabilityAction | null;
 }
 
+interface MarketplaceFlowInfo {
+  id: string;
+  label: string;
+  kind: "starter_pack" | "extension_pack";
+  availability: "ready" | "partial" | "blocked" | "attention" | "installed";
+  summary: string;
+  detail: string;
+  ready_count: number;
+  total_count: number;
+  primary_action?: CapabilityAction | null;
+  recommended_actions?: CapabilityAction[];
+  draft_command?: string | null;
+  blocking_reasons?: string[];
+  install_items?: string[];
+  skills?: string[];
+  workflows?: string[];
+  related_runbooks?: string[];
+  catalog_id?: string;
+  installed?: boolean;
+  update_available?: boolean;
+  version?: string | null;
+  version_line?: string | null;
+  installed_version?: string | null;
+  contribution_types?: string[];
+  trust?: string;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  compatibility?: ExtensionCompatibilityInfo | null;
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
+  status?: string;
+}
+
 interface RunbookInfo {
   id: string;
   name?: string;
@@ -727,6 +758,8 @@ interface CapabilityOverview {
     starter_packs_total: number;
     mcp_servers_ready: number;
     mcp_servers_total: number;
+    marketplace_flows_ready?: number;
+    marketplace_flows_total?: number;
   };
   native_tools: ToolInfo[];
   skills: SkillInfo[];
@@ -736,6 +769,7 @@ interface CapabilityOverview {
   catalog_items: CatalogItemInfo[];
   recommendations: CapabilityRecommendation[];
   runbooks: RunbookInfo[];
+  marketplace_flows?: MarketplaceFlowInfo[];
 }
 
 interface ActivityLedgerSummary {
@@ -2679,6 +2713,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [catalogItems, setCatalogItems] = useState<CatalogItemInfo[]>([]);
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
+  const [marketplaceFlows, setMarketplaceFlows] = useState<MarketplaceFlowInfo[]>([]);
   const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
@@ -2918,6 +2953,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
       );
       setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
+      setMarketplaceFlows(
+        Array.isArray(capabilityPayload.marketplace_flows) ? capabilityPayload.marketplace_flows : [],
+      );
     }
     if (extensionsResult.ok) {
       setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
@@ -4999,6 +5037,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       reviewNeeded > 0 ? `${reviewNeeded} review` : null,
     ].filter(Boolean).join(" · ");
   }, [installableCatalogItems]);
+  const marketplaceFlowSummary = useMemo(() => {
+    const readyCount = marketplaceFlows.filter((flow) => flow.availability === "ready" || flow.availability === "installed").length;
+    const updateCount = marketplaceFlows.filter((flow) => flow.kind === "extension_pack" && flow.update_available).length;
+    const blockedCount = marketplaceFlows.filter(
+      (flow) => flow.availability === "blocked" || flow.availability === "attention" || flow.availability === "partial",
+    ).length;
+    return [
+      `${readyCount}/${marketplaceFlows.length} ready`,
+      updateCount > 0 ? `${updateCount} updates` : null,
+      blockedCount > 0 ? `${blockedCount} attention` : null,
+    ].filter(Boolean).join(" · ");
+  }, [marketplaceFlows]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     if (workflow.pendingApprovalIds?.length) {
@@ -10677,6 +10727,99 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     ))}
                     {starterPacks.length === 0 && (
                       <div className="cockpit-empty">No starter packs published.</div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">marketplace flows</span>
+                      <span className="cockpit-operator-link">{marketplaceFlowSummary || "0/0 ready"}</span>
+                    </div>
+                    {marketplaceFlows.slice(0, 6).map((flow) => (
+                      <div key={flow.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: flow.kind === "starter_pack" ? "starter_pack" : "extension_manifest",
+                                name: flow.label,
+                                meta: `${flow.kind.replace("_", " ")} · ${flow.availability}`,
+                                summary: flow.summary,
+                                details: {
+                                  detail: flow.detail,
+                                  ready_count: flow.ready_count,
+                                  total_count: flow.total_count,
+                                  blocking_reasons: flow.blocking_reasons ?? [],
+                                  install_items: flow.install_items ?? [],
+                                  skills: flow.skills ?? [],
+                                  workflows: flow.workflows ?? [],
+                                  related_runbooks: flow.related_runbooks ?? [],
+                                  contribution_types: flow.contribution_types ?? [],
+                                  trust: flow.trust ?? "",
+                                  version_line: flow.version_line ?? "",
+                                  installed_version: flow.installed_version ?? "",
+                                  update_available: flow.update_available ?? false,
+                                  compatibility: flow.compatibility ?? null,
+                                  publisher: flow.publisher ?? null,
+                                  diagnostics_summary: flow.diagnostics_summary ?? null,
+                                  recommended_actions: flow.recommended_actions ?? [],
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{flow.label}</div>
+                          <div className="cockpit-operator-note">
+                            {[flow.detail, flow.summary].filter(Boolean).join(" · ")}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {flow.primary_action ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityAction(flow.primary_action ?? null)}
+                            >
+                              {flow.primary_action.label}
+                            </button>
+                          ) : null}
+                          {flow.recommended_actions?.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityActions(flow.recommended_actions ?? [], flow.label)}
+                            >
+                              repair
+                            </button>
+                          ) : null}
+                          {flow.draft_command ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => queueComposerDraft(flow.draft_command ?? "")}
+                            >
+                              draft
+                            </button>
+                          ) : null}
+                          {flow.kind === "extension_pack" && flow.catalog_id && flow.installed ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${flow.catalog_id}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                    {marketplaceFlows.length === 0 && (
+                      <div className="cockpit-empty">No marketplace flows composed yet.</div>
                     )}
                   </div>
 

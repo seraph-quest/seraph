@@ -364,6 +364,10 @@ def _workflow_blocking_reasons(workflow: dict[str, Any]) -> list[str]:
 
 def _starter_pack_blocking_reasons(pack: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    for item_name in pack.get("missing_install_items", []) or []:
+        item = str(item_name or "").strip()
+        if item:
+            reasons.append(f"missing install item: {item}")
     for blocked in pack.get("blocked_skills", []) or []:
         if not isinstance(blocked, dict):
             continue
@@ -548,6 +552,7 @@ def _explicit_runbook_entries(
             "label": title,
             "description": summary,
             "source": "extension_runbook",
+            "starter_pack_name": starter_pack_name,
             "command": command,
             "availability": availability,
             "blocking_reasons": blocking_reasons,
@@ -1565,6 +1570,151 @@ def _starter_pack_statuses(
     return packs
 
 
+def _runbook_labels_by_starter_pack(runbooks: list[dict[str, Any]]) -> dict[str, list[str]]:
+    labels_by_pack: dict[str, list[str]] = {}
+    for runbook in runbooks:
+        if not isinstance(runbook, dict):
+            continue
+        starter_pack_name = str(runbook.get("starter_pack_name") or "")
+        if not starter_pack_name and str(runbook.get("source") or "") == "starter_pack":
+            starter_pack_name = str(runbook.get("name") or "")
+        if not starter_pack_name:
+            continue
+        labels_by_pack.setdefault(starter_pack_name, []).append(
+            str(runbook.get("label") or starter_pack_name)
+        )
+    return labels_by_pack
+
+
+def _marketplace_flows(
+    *,
+    starter_packs: list[dict[str, Any]],
+    catalog_items: list[dict[str, Any]],
+    runbooks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    flows: list[dict[str, Any]] = []
+    runbook_labels = _runbook_labels_by_starter_pack(runbooks)
+
+    for pack in starter_packs:
+        if not isinstance(pack, dict):
+            continue
+        ready_count = (
+            len(pack.get("ready_skills", []) or [])
+            + len(pack.get("ready_workflows", []) or [])
+            + len(pack.get("ready_install_items", []) or [])
+        )
+        total_count = (
+            len(pack.get("skills", []) or [])
+            + len(pack.get("workflows", []) or [])
+            + len(pack.get("install_items", []) or [])
+        )
+        missing_install_items = [str(item) for item in pack.get("missing_install_items", []) or [] if str(item)]
+        blocked_skill_names = [
+            str(item.get("name"))
+            for item in pack.get("blocked_skills", []) or []
+            if isinstance(item, dict) and str(item.get("name") or "")
+        ]
+        blocked_workflow_names = [
+            str(item.get("name"))
+            for item in pack.get("blocked_workflows", []) or []
+            if isinstance(item, dict) and str(item.get("name") or "")
+        ]
+        detail_parts = [
+            f"{ready_count}/{total_count} ready" if total_count else "no components",
+            f"{len(missing_install_items)} install items missing" if missing_install_items else None,
+            f"{len(blocked_skill_names)} skills blocked" if blocked_skill_names else None,
+            f"{len(blocked_workflow_names)} workflows blocked" if blocked_workflow_names else None,
+            f"{len(runbook_labels.get(str(pack.get('name') or ''), []))} runbooks" if runbook_labels.get(str(pack.get("name") or ""), []) else None,
+        ]
+        flows.append(
+            {
+                "id": f"starter-pack:{pack['name']}",
+                "label": str(pack.get("label") or pack["name"]),
+                "kind": "starter_pack",
+                "availability": str(pack.get("availability") or "blocked"),
+                "summary": str(pack.get("description") or ""),
+                "detail": " · ".join(part for part in detail_parts if part),
+                "ready_count": ready_count,
+                "total_count": total_count,
+                "primary_action": {"type": "activate_starter_pack", "label": "Activate pack", "name": pack["name"]},
+                "recommended_actions": [item for item in pack.get("recommended_actions", []) or [] if isinstance(item, dict)],
+                "draft_command": str(pack.get("sample_prompt") or "") or None,
+                "blocking_reasons": _starter_pack_blocking_reasons(pack),
+                "install_items": [str(item) for item in pack.get("install_items", []) or [] if str(item)],
+                "skills": [str(item) for item in pack.get("skills", []) or [] if str(item)],
+                "workflows": [str(item) for item in pack.get("workflows", []) or [] if str(item)],
+                "related_runbooks": list(runbook_labels.get(str(pack.get("name") or ""), [])),
+            }
+        )
+
+    for item in catalog_items:
+        if not isinstance(item, dict) or str(item.get("type") or "") != "extension_pack":
+            continue
+        status = str(item.get("status") or "ready")
+        installed = bool(item.get("installed"))
+        update_available = bool(item.get("update_available"))
+        availability = "attention" if status != "ready" else "ready"
+        if installed and not update_available and status == "ready":
+            availability = "installed"
+        action = None
+        if item.get("recommended_actions"):
+            first_action = next(
+                (candidate for candidate in item.get("recommended_actions", []) if isinstance(candidate, dict)),
+                None,
+            )
+            action = first_action
+        detail_parts = [
+            str(item.get("version_line") or "") or None,
+            (
+                f"{item.get('installed_version') or 'installed'} -> {item.get('version') or 'candidate'}"
+                if installed and update_available
+                else None
+            ),
+            f"trust {item.get('trust')}" if item.get("trust") else None,
+            f"{len(item.get('contribution_types', []) or [])} contribution types" if item.get("contribution_types") else None,
+        ]
+        diagnostics_summary = item.get("diagnostics_summary")
+        if isinstance(diagnostics_summary, dict):
+            issue_count = int(diagnostics_summary.get("issue_count") or 0)
+            load_error_count = int(diagnostics_summary.get("load_error_count") or 0)
+            if issue_count or load_error_count:
+                detail_parts.append(f"{issue_count} issues")
+        flows.append(
+            {
+                "id": f"extension-pack:{item.get('catalog_id') or item.get('name')}",
+                "label": str(item.get("name") or item.get("catalog_id") or "extension pack"),
+                "kind": "extension_pack",
+                "availability": availability,
+                "summary": str(item.get("description") or ""),
+                "detail": " · ".join(part for part in detail_parts if part),
+                "ready_count": 1 if status == "ready" else 0,
+                "total_count": 1,
+                "primary_action": action,
+                "recommended_actions": [candidate for candidate in item.get("recommended_actions", []) or [] if isinstance(candidate, dict)],
+                "draft_command": None,
+                "blocking_reasons": [],
+                "install_items": [],
+                "skills": [],
+                "workflows": [],
+                "related_runbooks": [],
+                "catalog_id": item.get("catalog_id"),
+                "installed": installed,
+                "update_available": update_available,
+                "version": item.get("version"),
+                "version_line": item.get("version_line"),
+                "installed_version": item.get("installed_version"),
+                "contribution_types": list(item.get("contribution_types") or []),
+                "trust": item.get("trust"),
+                "publisher": item.get("publisher"),
+                "compatibility": item.get("compatibility"),
+                "diagnostics_summary": diagnostics_summary,
+                "status": status,
+            }
+        )
+
+    return flows
+
+
 def _build_capability_overview() -> dict[str, Any]:
     base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
     tool_mode = get_current_tool_policy_mode()
@@ -1599,6 +1749,11 @@ def _build_capability_overview() -> dict[str, Any]:
         mcp_servers=mcp_servers,
         tool_mode=tool_mode,
     )
+    marketplace_flows = _marketplace_flows(
+        starter_packs=starter_packs,
+        catalog_items=catalog_items,
+        runbooks=runbooks,
+    )
     ready_tools = sum(1 for tool in native_tools if tool["availability"] == "ready")
     ready_skills = sum(1 for skill in skills if skill["availability"] == "ready")
     ready_workflows = sum(1 for workflow in workflows if workflow["availability"] == "ready")
@@ -1620,6 +1775,11 @@ def _build_capability_overview() -> dict[str, Any]:
             "mcp_servers_total": len(mcp_servers),
             "source_adapters_ready": int(source_adapter_inventory["summary"]["ready_adapter_count"]),
             "source_adapters_total": int(source_adapter_inventory["summary"]["adapter_count"]),
+            "marketplace_flows_ready": sum(
+                1 for flow in marketplace_flows
+                if str(flow.get("availability") or "") in {"ready", "installed"}
+            ),
+            "marketplace_flows_total": len(marketplace_flows),
         },
         "native_tools": native_tools,
         "skills": skills,
@@ -1631,6 +1791,7 @@ def _build_capability_overview() -> dict[str, Any]:
         "catalog_items": catalog_items,
         "recommendations": recommendations,
         "runbooks": runbooks,
+        "marketplace_flows": marketplace_flows,
     }
 
 

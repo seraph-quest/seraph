@@ -213,6 +213,68 @@ def create_mcp_specialist(
     return create_specialist(name, description, tools, temperature=0.3, max_steps=6)
 
 
+def list_specialist_descriptors(
+    available_tools: list,
+    *,
+    tool_mode: str | None = None,
+    mcp_mode: str | None = None,
+) -> list[dict[str, str]]:
+    """Return lightweight specialist metadata without instantiating agents/models."""
+    mode = tool_mode or get_current_tool_policy_mode()
+    effective_mcp_mode = mcp_mode or get_current_mcp_policy_mode()
+    available_tool_names = {getattr(tool, "name", "") for tool in available_tools}
+
+    descriptors: list[dict[str, str]] = []
+    for specialist_name in (
+        "memory_keeper",
+        "vault_keeper",
+        "goal_planner",
+        "web_researcher",
+        "file_worker",
+    ):
+        domain = SPECIALIST_CONFIGS[specialist_name]["domain"]
+        if any(tool_name in available_tool_names for tool_name in DOMAIN_TOOLS.get(domain, [])):
+            descriptors.append(
+                {
+                    "name": specialist_name,
+                    "description": SPECIALIST_CONFIGS[specialist_name]["description"],
+                }
+            )
+
+    server_configs = mcp_manager.get_config()
+    for server_info in server_configs:
+        name = str(server_info.get("name") or "")
+        if not name or not mcp_manager.is_connected(name):
+            continue
+        filtered_server_tools = filter_tools(
+            mcp_manager.get_server_tools(name),
+            mode,
+            is_mcp=True,
+            mcp_mode=effective_mcp_mode,
+        )
+        if not filtered_server_tools:
+            continue
+        description = str(server_info.get("description") or "").strip()
+        if not description:
+            tool_names = [getattr(tool, "name", str(tool)) for tool in filtered_server_tools]
+            description = f"MCP server '{name}' with tools: {', '.join(tool_names)}"
+        descriptors.append(
+            {
+                "name": mcp_specialist_runtime_path(name),
+                "description": description,
+            }
+        )
+
+    if any(name.startswith("workflow_") for name in available_tool_names):
+        descriptors.append(
+            {
+                "name": "workflow_runner",
+                "description": WORKFLOW_RUNNER_CONFIG["description"],
+            }
+        )
+    return descriptors
+
+
 # --- Build all specialists ---
 
 def build_all_specialists() -> list[ToolCallingAgent]:

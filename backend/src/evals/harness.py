@@ -3003,6 +3003,7 @@ async def _eval_process_recovery_boundary_behavior() -> dict[str, Any]:
         return {
             "process_id": process_id,
             "session_scoped": owner_payload["session_scoped"],
+            "output_path_within_workspace": owner_payload["output_path"].startswith(str(settings.workspace_dir)),
             "owner_list_includes_process": process_id in owner_list,
             "owner_output_visible": "scoped-ready" in owner_output,
             "owner_stop_succeeds": f"Stopped process '{process_id}'" in owner_stop,

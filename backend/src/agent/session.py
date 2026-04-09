@@ -28,6 +28,7 @@ from src.db.models import (
 from src.db.session_refs import ensure_sessions_exist
 from src.memory.episodes import build_message_episode
 from src.memory.flush import flush_session_memory
+from src.tools.process_tools import process_runtime_manager
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class SessionManager:
             session = result.scalars().first()
             if not session:
                 return False
+            process_runtime_manager.stop_processes_for_session(session_id)
             msgs = await db.execute(
                 select(Message).where(Message.session_id == session_id)
             )

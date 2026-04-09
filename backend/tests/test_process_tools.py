@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 import textwrap
 import time
 from pathlib import Path
@@ -236,3 +238,29 @@ def test_process_recovery_is_scoped_to_the_starting_session():
         assert f"Stopped process '{process_id}'" in stopped
     finally:
         reset_runtime_context(owner_tokens)
+
+
+def test_process_output_logs_live_outside_the_workspace():
+    script_name = _write_script(
+        "wave2_process_log_location.py",
+        """
+        import time
+        print("outside-workspace", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+        payload = next(
+            process
+            for process in process_runtime_manager.list_processes()
+            if process["process_id"] == process_id
+        )
+    finally:
+        reset_runtime_context(owner_tokens)
+
+    assert not str(payload["output_path"]).startswith(str(Path(settings.workspace_dir).resolve()))
+    assert stat.S_IMODE(os.stat(payload["output_path"]).st_mode) == 0o600

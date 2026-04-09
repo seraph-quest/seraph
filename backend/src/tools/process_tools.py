@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
@@ -110,8 +111,15 @@ def _workspace_root() -> Path:
 
 
 def _process_runtime_root() -> Path:
-    path = _workspace_root() / ".seraph_runtime" / "processes"
+    workspace_tag = uuid.uuid5(uuid.NAMESPACE_URL, str(_workspace_root()))
+    root = Path(tempfile.gettempdir()) / "seraph_runtime" / str(workspace_tag)
+    path = root / "processes"
     path.mkdir(parents=True, exist_ok=True)
+    for candidate in (root.parent, root, path):
+        try:
+            candidate.chmod(0o700)
+        except OSError:
+            logger.debug("Failed to tighten permissions on %s", candidate, exc_info=True)
     return path
 
 
@@ -439,6 +447,7 @@ class ProcessRuntimeManager:
         if process.popen.poll() is None:
             if force:
                 process.popen.kill()
+                process.popen.wait(timeout=5)
             else:
                 process.popen.terminate()
                 try:
@@ -449,6 +458,13 @@ class ProcessRuntimeManager:
         payload = process.status_payload()
         payload["stopped"] = True
         return payload
+
+    @staticmethod
+    def _delete_process_artifacts(process: ManagedProcess) -> None:
+        try:
+            process.output_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to delete process log %s", process.output_path, exc_info=True)
 
     def run_command(
         self,
@@ -511,7 +527,8 @@ class ProcessRuntimeManager:
         )
         process_id = uuid.uuid4().hex
         output_path = _process_runtime_root() / f"{process_id}.log"
-        with output_path.open("w", encoding="utf-8", errors="replace") as output_stream:
+        output_fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(output_fd, "w", encoding="utf-8", errors="replace") as output_stream:
             popen = subprocess.Popen(
                 [executable, *args],
                 cwd=str(resolved_cwd),
@@ -588,8 +605,27 @@ class ProcessRuntimeManager:
                 self._stop_managed_process(process, force=True)
             except Exception:
                 logger.debug("Failed to stop test process %s", process.process_id, exc_info=True)
+            self._delete_process_artifacts(process)
         with self._lock:
             self._processes.clear()
+
+    def stop_processes_for_session(self, session_id: str) -> int:
+        with self._lock:
+            processes = [
+                process
+                for process in self._processes.values()
+                if process.owner_session_id == session_id
+            ]
+        for process in processes:
+            try:
+                self._stop_managed_process(process, force=True)
+            except Exception:
+                logger.debug("Failed to stop session-owned process %s", process.process_id, exc_info=True)
+            self._delete_process_artifacts(process)
+        with self._lock:
+            for process in processes:
+                self._processes.pop(process.process_id, None)
+        return len(processes)
 
 
 process_runtime_manager = ProcessRuntimeManager()

@@ -163,6 +163,7 @@ def test_process_recovery_boundary_behavior_runtime_eval_details():
     details = summary.results[0].details
 
     assert details["session_scoped"] is True
+    assert details["output_path_within_workspace"] is False
     assert details["owner_list_includes_process"] is True
     assert details["owner_output_visible"] is True
     assert details["owner_stop_succeeds"] is True
@@ -1360,6 +1361,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     }
     assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
     assert details_by_name["process_recovery_boundary_behavior"]["session_scoped"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["output_path_within_workspace"] is False
     assert details_by_name["process_recovery_boundary_behavior"]["owner_list_includes_process"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["owner_output_visible"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["owner_stop_succeeds"] is True

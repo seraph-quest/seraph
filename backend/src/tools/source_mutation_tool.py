@@ -188,6 +188,7 @@ def _render_report_publish_plan(plan: dict[str, Any]) -> list[str]:
     return [
         "publish_plan:",
         f"- status: {publish_plan.get('status', 'unknown')}",
+        f"- contract: {plan.get('publish_contract') or (publish_plan.get('request') or {}).get('contract') or 'work_items.write'}",
         f"- source: {(publish_plan.get('adapter') or {}).get('name') or 'unresolved'}",
         f"- action: {action.get('kind') or 'unresolved'}",
         f"- target: {target.get('reference') or '(reference unset)'}",
@@ -203,6 +204,7 @@ def plan_source_report(
     source: str = "",
     target_reference: str = "",
     publish_action_kind: str = "",
+    publish_contract: str = "",
 ) -> str:
     """Plan a source-backed report plus an optional authenticated publication step.
 
@@ -213,7 +215,8 @@ def plan_source_report(
         time_window: Optional review window such as today or this week.
         source: Optional preferred typed source adapter.
         target_reference: Optional owner/repo or owner/repo#number publication target.
-        publish_action_kind: Optional explicit publish action such as create or comment.
+        publish_action_kind: Optional explicit publish action such as create, comment, or review.
+        publish_contract: Optional publish contract such as work_items.write or code_activity.write.
 
     Returns:
         A short structured report-and-publication plan.
@@ -226,6 +229,7 @@ def plan_source_report(
         source=source,
         target_reference=target_reference,
         publish_action_kind=publish_action_kind,
+        publish_contract=publish_contract,
     )
     lines = [
         f"status: {plan.get('status', 'unknown')}",

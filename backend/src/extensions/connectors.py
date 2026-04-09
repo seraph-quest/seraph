@@ -246,6 +246,21 @@ def _parse_string_dict(payload: Any, *, source: str, field_name: str) -> dict[st
     return normalized
 
 
+def _parse_json_like_dict(payload: Any, *, source: str, field_name: str) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ConnectorDefinitionError(f"{source}: managed connector {field_name} must be an object")
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ConnectorDefinitionError(
+                f"{source}: managed connector {field_name} keys must be non-empty strings"
+            )
+        normalized[key.strip()] = value
+    return normalized
+
+
 def _parse_runtime_route_actions(payload: Any, *, source: str, contract: str) -> dict[str, dict[str, Any]]:
     if payload is None:
         return {}
@@ -314,6 +329,13 @@ def _parse_runtime_route_actions(payload: Any, *, source: str, contract: str) ->
                 field_name=f"runtime_adapter.routes.{contract}.actions.{action_name}.payload_argument_map",
             ),
         }
+        fixed_arguments = _parse_json_like_dict(
+            raw_action.get("fixed_arguments"),
+            source=source,
+            field_name=f"runtime_adapter.routes.{contract}.actions.{action_name}.fixed_arguments",
+        )
+        if fixed_arguments:
+            action_payload["fixed_arguments"] = fixed_arguments
         if isinstance(raw_target_argument_name, str) and raw_target_argument_name.strip():
             action_payload["target_argument_name"] = raw_target_argument_name.strip()
         if isinstance(raw_number_argument_name, str) and raw_number_argument_name.strip():

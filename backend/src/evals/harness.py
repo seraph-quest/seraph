@@ -6926,6 +6926,14 @@ async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
             "body": "Posted progress update.",
         },
     )
+    add_review = _EvalTool(
+        "add_review_to_pr",
+        {
+            "id": 777,
+            "html_url": "https://github.com/seraph-quest/seraph/pull/343#pullrequestreview-777",
+            "body": "Posted progress review.",
+        },
+    )
     adapter_inventory = {
         "summary": {"adapter_count": 1, "ready_adapter_count": 1},
         "adapters": [
@@ -6936,7 +6944,7 @@ async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
                 "authenticated": True,
                 "adapter_state": "ready",
                 "degraded_reason": None,
-                "contracts": ["work_items.write"],
+                "contracts": ["work_items.write", "code_activity.write"],
                 "next_best_sources": [],
                 "operations": [
                     {
@@ -6959,6 +6967,31 @@ async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
                                 "number_argument_name": "issue_number",
                                 "required_payload_fields": ["body"],
                                 "payload_argument_map": {"body": "comment"},
+                            }
+                        ],
+                    },
+                    {
+                        "contract": "code_activity.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "result_kind": "code_activity",
+                        "actions": [
+                            {
+                                "kind": "review",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_review_to_pr",
+                                "target_reference_mode": "pull_request",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "pr_number",
+                                "required_payload_fields": ["review"],
+                                "allowed_payload_fields": ["review"],
+                                "fixed_arguments": {"action": "COMMENT", "file_comments": []},
+                                "payload_argument_map": {"review": "review"},
                             }
                         ],
                     }
@@ -6987,7 +7020,7 @@ async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
         patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
         patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
         patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
-        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[add_comment]),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[add_comment, add_review]),
         patch("src.extensions.source_operations.log_integration_event_sync"),
     ):
         report_plan = build_source_report_plan(
@@ -6995,12 +7028,26 @@ async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
             focus="adapter-backed authenticated operations",
             target_reference="seraph-quest/seraph#343",
         )
+        review_publish_plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph/pull/343",
+            publish_contract="code_activity.write",
+            publish_action_kind="review",
+        )
         execution = execute_source_mutation_bundle(
             contract="work_items.write",
             source="github-managed",
             action_kind="comment",
             target_reference="seraph-quest/seraph#343",
             payload={"body": "Posted progress update."},
+        )
+        review_execution = execute_source_mutation_bundle(
+            contract="code_activity.write",
+            source="github-managed",
+            action_kind="review",
+            target_reference="seraph-quest/seraph/pull/343",
+            payload={"review": "Posted progress review."},
         )
 
     return {
@@ -7014,6 +7061,14 @@ async def _eval_source_report_action_workflow_behavior() -> dict[str, Any]:
         "execution_location": execution["result"]["location"],
         "execution_tool_name": execution["action"]["tool_name"],
         "execution_argument_keys": sorted(add_comment.calls[0].keys()),
+        "review_publish_status": review_publish_plan["publish_plan"]["status"],
+        "review_publish_contract": review_publish_plan["publish_contract"],
+        "review_publish_action_kind": review_publish_plan["publish_plan"]["action"]["kind"],
+        "review_fixed_argument_keys": review_publish_plan["publish_plan"]["approval_scope"]["action"]["fixed_argument_keys"],
+        "review_execution_status": review_execution["status"],
+        "review_execution_location": review_execution["result"]["location"],
+        "review_execution_tool_name": review_execution["action"]["tool_name"],
+        "review_execution_argument_keys": sorted(add_review.calls[0].keys()),
     }
 
 

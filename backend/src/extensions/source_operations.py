@@ -327,6 +327,12 @@ def _build_mutation_action_routes(
                 "required_payload_fields": list(required_payload_fields),
                 "allowed_payload_fields": list(allowed_payload_fields),
                 "payload_argument_map": payload_argument_map,
+                "fixed_arguments": dict(raw_action.get("fixed_arguments") or {}),
+                "fixed_argument_keys": sorted(
+                    str(key)
+                    for key in (raw_action.get("fixed_arguments") or {}).keys()
+                    if isinstance(key, str) and key
+                ),
                 "target_reference_mode": target_reference_mode,
                 **({"target_argument_name": target_argument_name} if target_argument_name else {}),
                 **({"number_argument_name": number_argument_name} if number_argument_name else {}),
@@ -994,6 +1000,25 @@ def _parse_work_item_reference(target_reference: str) -> tuple[str, int] | None:
     return repo_full_name, number
 
 
+def _parse_pull_request_reference(target_reference: str) -> tuple[str, int] | None:
+    normalized = " ".join(str(target_reference or "").split()).strip().strip("/")
+    if not normalized:
+        return None
+    parts = normalized.split("/")
+    if len(parts) != 4 or parts[2] not in {"pull", "pulls"}:
+        return None
+    repo_full_name = _parse_repository_reference("/".join(parts[:2]))
+    if not repo_full_name:
+        return None
+    try:
+        number = int(parts[3])
+    except ValueError:
+        return None
+    if number <= 0:
+        return None
+    return repo_full_name, number
+
+
 def build_source_mutation_plan(
     *,
     contract: str,
@@ -1084,6 +1109,11 @@ def build_source_mutation_plan(
                 "target_reference_mode": str(action.get("target_reference_mode") or "none"),
                 "required_payload_fields": list(action.get("required_payload_fields") or []),
                 "allowed_payload_fields": list(action.get("allowed_payload_fields") or []),
+                "fixed_argument_keys": sorted(
+                    str(key)
+                    for key in (action.get("fixed_arguments") or {}).keys()
+                    if isinstance(key, str) and key
+                ),
             }
             for action in available_actions
         ]
@@ -1156,6 +1186,11 @@ def build_source_mutation_plan(
             "target_reference_mode": str(selected_action.get("target_reference_mode") or "none"),
             "required_payload_fields": list(selected_action.get("required_payload_fields") or []),
             "allowed_payload_fields": list(selected_action.get("allowed_payload_fields") or []),
+            "fixed_argument_keys": sorted(
+                str(key)
+                for key in (selected_action.get("fixed_arguments") or {}).keys()
+                if isinstance(key, str) and key
+            ),
         }
     approval_context = {
         "risk_level": "high",
@@ -1288,7 +1323,8 @@ def execute_source_mutation_bundle(
             return response
 
     target_reference_mode = str(selected_action.get("target_reference_mode") or "none")
-    arguments: dict[str, Any] = {}
+    fixed_arguments = selected_action.get("fixed_arguments")
+    arguments: dict[str, Any] = dict(fixed_arguments) if isinstance(fixed_arguments, dict) else {}
     consumed_payload_fields: set[str] = set()
     if target_reference_mode == "repository":
         repository = _parse_repository_reference(target_reference)
@@ -1312,6 +1348,21 @@ def execute_source_mutation_bundle(
             arguments[target_argument_name] = repository
         if number_argument_name:
             arguments[number_argument_name] = issue_number
+    elif target_reference_mode == "pull_request":
+        pull_request_reference = _parse_pull_request_reference(target_reference)
+        if pull_request_reference is None:
+            response["status"] = "failed"
+            response["warnings"].append(
+                "target_reference must be an owner/repo/pull/number reference for this mutation."
+            )
+            return response
+        repository, pr_number = pull_request_reference
+        target_argument_name = str(selected_action.get("target_argument_name") or "").strip()
+        number_argument_name = str(selected_action.get("number_argument_name") or "").strip()
+        if target_argument_name:
+            arguments[target_argument_name] = repository
+        if number_argument_name:
+            arguments[number_argument_name] = pr_number
 
     payload_argument_map = _normalize_string_dict(selected_action.get("payload_argument_map"))
     for payload_field, argument_name in payload_argument_map.items():
@@ -1319,6 +1370,10 @@ def execute_source_mutation_bundle(
             continue
         arguments[argument_name] = normalized_payload[payload_field]
         consumed_payload_fields.add(payload_field)
+    if isinstance(fixed_arguments, dict):
+        for argument_name, value in fixed_arguments.items():
+            if isinstance(argument_name, str) and argument_name:
+                arguments[argument_name] = value
 
     try:
         raw_result = tool(**arguments)
@@ -1382,6 +1437,7 @@ def build_source_report_plan(
     source: str = "",
     target_reference: str = "",
     publish_action_kind: str = "",
+    publish_contract: str = "",
 ) -> dict[str, Any]:
     review_plan = build_source_review_plan(
         intent=intent,
@@ -1412,25 +1468,73 @@ def build_source_report_plan(
         publish_source_hint = str(step.get("source") or "")
         if publish_source_hint:
             break
+    normalized_publish_contract = publish_contract.strip()
+    if not normalized_publish_contract:
+        normalized_publish_contract = "work_items.write"
     normalized_publish_action = publish_action_kind.strip().lower()
+    repository_target_reference = _parse_repository_reference(target_reference)
+    pull_request_target_reference = _parse_pull_request_reference(target_reference)
     if not normalized_publish_action:
-        normalized_publish_action = "comment" if "#" in target_reference else "create"
+        if normalized_publish_contract == "code_activity.write":
+            if pull_request_target_reference is not None:
+                normalized_publish_action = "review"
+            elif repository_target_reference:
+                normalized_publish_action = "create"
+        else:
+            normalized_publish_action = "comment" if "#" in target_reference else "create"
     publish_plan = None
     warnings = list(review_plan.get("warnings") or [])
     publish_adapter, publish_adapter_warnings = _select_mutation_adapter(
         adapters=adapters,
-        contract="work_items.write",
+        contract=normalized_publish_contract,
         preferred_source=publish_source_hint,
     )
     warnings.extend(publish_adapter_warnings)
-    if publish_adapter is not None:
+    if (
+        normalized_publish_contract == "code_activity.write"
+        and normalized_publish_action == "review"
+        and pull_request_target_reference is None
+    ):
+        warning = (
+            "code_activity.write review publication requires target_reference like "
+            "owner/repo/pull/number."
+        )
+        warnings.append(warning)
+        publish_plan = {
+            "status": "unavailable",
+            "adapter": {
+                "name": str(publish_adapter.get("name") or ""),
+                "provider": str(publish_adapter.get("provider") or ""),
+            } if publish_adapter is not None else None,
+            "action": {"kind": "review"},
+            "warnings": [warning],
+        }
+    elif normalized_publish_contract == "code_activity.write" and not normalized_publish_action:
+        warning = (
+            "Provide target_reference like owner/repo for PR creation or "
+            "owner/repo/pull/number for PR review publication."
+        )
+        warnings.append(warning)
+        publish_plan = {
+            "status": "unavailable",
+            "adapter": {
+                "name": str(publish_adapter.get("name") or ""),
+                "provider": str(publish_adapter.get("provider") or ""),
+            } if publish_adapter is not None else None,
+            "warnings": [warning],
+        }
+    elif publish_adapter is not None:
         publish_plan = build_source_mutation_plan(
-            contract="work_items.write",
+            contract=normalized_publish_contract,
             source=str(publish_adapter.get("name") or ""),
             action_kind=normalized_publish_action,
             action_summary=f"Publish a source report for {focus_phrase}",
             target_reference=target_reference,
-            fields=["title", "body"] if normalized_publish_action == "create" else ["body"],
+            fields=(
+                ["title", "body", "head_branch", "base_branch"]
+                if normalized_publish_contract == "code_activity.write" and normalized_publish_action == "create"
+                else (["review"] if normalized_publish_contract == "code_activity.write" else (["title", "body"] if normalized_publish_action == "create" else ["body"]))
+            ),
         )
         if not target_reference.strip():
             publish_plan = {
@@ -1447,7 +1551,9 @@ def build_source_report_plan(
             }
             warnings.append("Provide target_reference to publish the report through the authenticated source.")
     else:
-        warnings.append("No authenticated work-item adapter is currently available for report publication.")
+        warnings.append(
+            f"No authenticated adapter is currently available for report publication via '{normalized_publish_contract}'."
+        )
 
     return {
         "status": review_plan.get("status", "unavailable"),
@@ -1456,6 +1562,7 @@ def build_source_report_plan(
         "focus": focus.strip(),
         "goal_context": goal_context.strip(),
         "time_window": time_window.strip(),
+        "publish_contract": normalized_publish_contract,
         "report_outline": report_outline,
         "review_plan": review_plan,
         "publish_plan": publish_plan,

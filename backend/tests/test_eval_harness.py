@@ -114,6 +114,19 @@ def test_source_report_action_workflow_behavior_runtime_eval_details():
         "issue_number",
         "repo_full_name",
     ]
+    assert details["review_publish_status"] == "approval_required"
+    assert details["review_publish_contract"] == "code_activity.write"
+    assert details["review_publish_action_kind"] == "review"
+    assert details["review_fixed_argument_keys"] == ["action", "file_comments"]
+    assert details["review_execution_status"] == "ok"
+    assert details["review_execution_tool_name"] == "add_review_to_pr"
+    assert details["review_execution_argument_keys"] == [
+        "action",
+        "file_comments",
+        "pr_number",
+        "repo_full_name",
+        "review",
+    ]
 
 
 def test_governed_self_evolution_behavior_runtime_eval_details():

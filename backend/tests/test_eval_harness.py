@@ -154,6 +154,23 @@ def test_governed_self_evolution_behavior_runtime_eval_details():
     assert details["blocked_review_risk_mentions_trace_coverage"] is True
 
 
+def test_process_recovery_boundary_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["process_recovery_boundary_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert details["session_scoped"] is True
+    assert details["owner_list_includes_process"] is True
+    assert details["owner_output_visible"] is True
+    assert details["owner_stop_succeeds"] is True
+    assert details["other_list_hidden"] is True
+    assert details["other_read_hidden"] is True
+    assert details["other_stop_hidden"] is True
+
+
 def test_main_lists_available_scenarios(capsys):
     exit_code = main(["--list"])
 
@@ -229,6 +246,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "memory_decay_contradiction_cleanup_behavior" in captured.out
     assert "procedural_memory_adaptation_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
+    assert "process_recovery_boundary_behavior" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "browser_runtime_audit" in captured.out
@@ -351,6 +369,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "memory_decay_contradiction_cleanup_behavior",
                 "procedural_memory_adaptation_behavior",
                 "scheduled_local_runtime_profile",
+                "process_recovery_boundary_behavior",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
                 "browser_runtime_audit",
@@ -1340,6 +1359,13 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "weekly_activity_review": "http://localhost:11434/v1",
     }
     assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
+    assert details_by_name["process_recovery_boundary_behavior"]["session_scoped"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["owner_list_includes_process"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["owner_output_visible"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["owner_stop_succeeds"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["other_list_hidden"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["other_read_hidden"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["other_stop_hidden"] is True
     assert details_by_name["daily_briefing_delivery_behavior"]["message_type"] == "proactive"
     assert details_by_name["daily_briefing_delivery_behavior"]["intervention_type"] == "advisory"
     assert details_by_name["daily_briefing_delivery_behavior"]["scheduled_delivery"] is True

@@ -42,12 +42,12 @@
 - [x] this workstream now also ships `authenticated-source-boundary-hardening-v1`
 - [x] this workstream now also ships `workflow-authenticated-source-drift-enforcement-v1`
 - [x] this workstream now also ships the first Batch AT aggregate for field-scoped secret-reference injection, per-tool boundary narrowing, and allowlisted authenticated mutation payloads
+- [x] this workstream now also ships the second Batch AT aggregate for session-bound managed-process recovery, so background-process listing, output reads, and stop controls fail closed outside the originating session instead of leaving cross-session recovery handles live
 
 ## Still To Do On `develop`
 
 - [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, credential-placeholder, and specialist-surface hardening passes
 - [ ] add deeper policy distinctions inside MCP and external execution paths
-- [ ] add disposable worker or stronger recovery containment beyond the new fail-closed secret-ref and mutation-allowlist boundary layer
 - [ ] keep trust UX strict without making approvals noisy or unusable
 
 ## Non-Goals

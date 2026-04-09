@@ -19,6 +19,7 @@ from typing import Any
 from smolagents import Tool
 
 from config.settings import settings
+from src.approval.runtime import get_current_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +405,7 @@ class ManagedProcess:
     cwd: str
     output_path: Path
     started_at: datetime
+    owner_session_id: str | None
 
     def status_payload(self) -> dict[str, Any]:
         exit_code = self.popen.poll()
@@ -417,6 +419,7 @@ class ManagedProcess:
             "exit_code": exit_code,
             "started_at": self.started_at.isoformat(),
             "output_path": str(self.output_path),
+            "session_scoped": self.owner_session_id is not None,
         }
 
 
@@ -424,6 +427,28 @@ class ProcessRuntimeManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._processes: dict[str, ManagedProcess] = {}
+
+    @staticmethod
+    def _is_visible_to_session(process: ManagedProcess, session_id: str | None) -> bool:
+        if process.owner_session_id is None:
+            return session_id is None
+        return process.owner_session_id == session_id
+
+    @staticmethod
+    def _stop_managed_process(process: ManagedProcess, *, force: bool) -> dict[str, Any]:
+        if process.popen.poll() is None:
+            if force:
+                process.popen.kill()
+            else:
+                process.popen.terminate()
+                try:
+                    process.popen.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.popen.kill()
+                    process.popen.wait(timeout=5)
+        payload = process.status_payload()
+        payload["stopped"] = True
+        return payload
 
     def run_command(
         self,
@@ -507,26 +532,33 @@ class ProcessRuntimeManager:
             cwd=str(resolved_cwd),
             output_path=output_path,
             started_at=_utc_now(),
+            owner_session_id=get_current_session_id(),
         )
         with self._lock:
             self._processes[process_id] = managed
         return managed.status_payload()
 
     def list_processes(self) -> list[dict[str, Any]]:
+        session_id = get_current_session_id()
         with self._lock:
             return [
                 process.status_payload()
                 for process in sorted(
-                    self._processes.values(),
+                    (
+                        process
+                        for process in self._processes.values()
+                        if self._is_visible_to_session(process, session_id)
+                    ),
                     key=lambda item: item.started_at,
                     reverse=True,
                 )
             ]
 
     def read_process_output(self, process_id: str, *, max_chars: int = _PROCESS_OUTPUT_DEFAULT) -> dict[str, Any] | None:
+        session_id = get_current_session_id()
         with self._lock:
             process = self._processes.get(process_id)
-        if process is None:
+        if process is None or not self._is_visible_to_session(process, session_id):
             return None
         bounded = max(1, min(max_chars, _PROCESS_OUTPUT_MAX))
         output, truncated = _tail_text(process.output_path, max_chars=bounded)
@@ -541,33 +573,21 @@ class ProcessRuntimeManager:
         return payload
 
     def stop_process(self, process_id: str, *, force: bool = False) -> dict[str, Any] | None:
+        session_id = get_current_session_id()
         with self._lock:
             process = self._processes.get(process_id)
-        if process is None:
+        if process is None or not self._is_visible_to_session(process, session_id):
             return None
-
-        if process.popen.poll() is None:
-            if force:
-                process.popen.kill()
-            else:
-                process.popen.terminate()
-                try:
-                    process.popen.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.popen.kill()
-                    process.popen.wait(timeout=5)
-        payload = process.status_payload()
-        payload["stopped"] = True
-        return payload
+        return self._stop_managed_process(process, force=force)
 
     def reset_for_tests(self) -> None:
         with self._lock:
-            process_ids = list(self._processes.keys())
-        for process_id in process_ids:
+            processes = list(self._processes.values())
+        for process in processes:
             try:
-                self.stop_process(process_id, force=True)
+                self._stop_managed_process(process, force=True)
             except Exception:
-                logger.debug("Failed to stop test process %s", process_id, exc_info=True)
+                logger.debug("Failed to stop test process %s", process.process_id, exc_info=True)
         with self._lock:
             self._processes.clear()
 

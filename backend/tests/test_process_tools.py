@@ -187,3 +187,52 @@ def test_start_list_read_and_stop_process():
 
 def test_stop_process_missing_returns_error():
     assert stop_process(process_id="missing-process") == "Error: Process 'missing-process' was not found."
+
+
+def test_process_recovery_is_scoped_to_the_starting_session():
+    script_name = _write_script(
+        "wave2_process_scoped.py",
+        """
+        import time
+        print("scoped", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+    finally:
+        reset_runtime_context(owner_tokens)
+
+    other_tokens = set_runtime_context("other-session", "high_risk")
+    try:
+        assert process_id not in list_processes()
+        assert read_process_output(process_id=process_id) == f"Error: Process '{process_id}' was not found."
+        assert stop_process(process_id=process_id) == f"Error: Process '{process_id}' was not found."
+    finally:
+        reset_runtime_context(other_tokens)
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        for _ in range(20):
+            listed = list_processes()
+            if process_id in listed:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("process did not appear in owner session list_processes output")
+
+        output = ""
+        for _ in range(20):
+            output = read_process_output(process_id=process_id)
+            if "scoped" in output:
+                break
+            time.sleep(0.05)
+        assert "scoped" in output
+
+        stopped = stop_process(process_id=process_id)
+        assert f"Stopped process '{process_id}'" in stopped
+    finally:
+        reset_runtime_context(owner_tokens)

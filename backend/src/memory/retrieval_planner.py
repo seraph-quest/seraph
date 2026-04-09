@@ -32,6 +32,65 @@ class MemoryRetrievalPlanResult:
     provider_diagnostics: tuple[dict[str, object], ...] = ()
 
 
+def _normalize_topic(value: str | None) -> str:
+    normalized = "".join(
+        character.lower() if character.isalnum() else " "
+        for character in str(value or "")
+    )
+    return " ".join(normalized.split())
+
+
+def _text_matches_topic(candidate: str, topic: str | None) -> bool:
+    normalized_candidate = _normalize_topic(candidate)
+    normalized_topic = _normalize_topic(topic)
+    if not normalized_candidate or not normalized_topic:
+        return False
+    return (
+        normalized_topic in normalized_candidate
+        or normalized_candidate in normalized_topic
+    )
+
+
+def _shares_topic_token(candidate: str, topic: str | None) -> bool:
+    normalized_candidate = _normalize_topic(candidate)
+    normalized_topic = _normalize_topic(topic)
+    if not normalized_candidate or not normalized_topic:
+        return False
+    candidate_tokens = {token for token in normalized_candidate.split() if len(token) >= 4}
+    topic_tokens = {token for token in normalized_topic.split() if len(token) >= 4}
+    if not candidate_tokens or not topic_tokens:
+        return False
+    return bool(candidate_tokens & topic_tokens)
+
+
+def _project_hint_candidates(
+    *,
+    query: str,
+    active_projects: tuple[str, ...],
+    structured_buckets: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    if active_projects:
+        return active_projects
+    normalized_query = query.strip()
+    if not normalized_query:
+        return ()
+    hinted_projects: list[str] = []
+    for project in structured_buckets.get("project", ()):
+        normalized_project = str(project or "").strip()
+        if not normalized_project:
+            continue
+        if _text_matches_topic(normalized_project, normalized_query) or _shares_topic_token(
+            normalized_project,
+            normalized_query,
+        ):
+            hinted_projects.append(normalized_project)
+    deduped: list[str] = []
+    for project in hinted_projects:
+        if project not in deduped:
+            deduped.append(project)
+    return tuple(deduped)
+
+
 def _append_structured_memory_line(
     *,
     bucketed: dict[str, list[str]],
@@ -212,11 +271,16 @@ async def plan_memory_retrieval(
         active_projects=active_projects,
     )
     normalized_query = query.strip()
-    provider_retrieval = await retrieve_additive_memory_provider_context(
+    provider_project_hints = _project_hint_candidates(
         query=normalized_query,
         active_projects=active_projects,
+        structured_buckets=structured_buckets,
+    )
+    provider_retrieval = await retrieve_additive_memory_provider_context(
+        query=normalized_query,
+        active_projects=provider_project_hints,
         limit=3,
-        include_user_model=bool(active_projects),
+        include_user_model=bool(provider_project_hints),
     )
     if not normalized_query:
         return MemoryRetrievalPlanResult(

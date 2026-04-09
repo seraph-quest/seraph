@@ -3852,11 +3852,23 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
                     "src.profile.service.sync_soul_file_to_profile",
                     AsyncMock(return_value={"Identity": "Builder"}),
                 ),
+                patch(
+                    "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                    AsyncMock(
+                        return_value=(
+                            "- [project] Atlas launch\n- [goal] Support Atlas launch",
+                            {
+                                "project": ("Atlas launch",),
+                                "goal": ("Support Atlas launch",),
+                            },
+                        )
+                    ),
+                ),
                 patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
                 patch("src.audit.repository.audit_repository.list_events", return_value=[]),
                 patch(
                     "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
-                    return_value=["Atlas launch"],
+                    return_value=[],
                 ),
                 patch(
                     "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
@@ -3865,7 +3877,7 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
             ):
                 state = await build_guardian_state(
                     session_id="provider-memory-current",
-                    user_message="",
+                    user_message="What matters for Atlas today?",
                     memory_query="",
                 )
                 inventory = await list_memory_providers()
@@ -3889,6 +3901,9 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
             "memory_provider_diagnostics_visible": bool(state.memory_provider_diagnostics),
             "memory_provider_quality_focused": any(
                 "quality=focused" in item for item in state.memory_provider_diagnostics
+            ),
+            "provider_query_hint_without_recent_project": any(
+                "topic_matches=Atlas launch" in item for item in state.memory_provider_diagnostics
             ),
             "memory_provider_diagnostics_show_authority": any(
                 "authority=guardian" in item and "provenance=external_advisory" in item
@@ -4165,6 +4180,14 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                     "importance": 0.22,
                     "project": "Atlas launch",
                 },
+                {
+                    "text": "Alice owns launch communications.",
+                    "kind": "collaborator",
+                    "summary": "Alice owns launch communications",
+                    "confidence": 0.92,
+                    "importance": 0.9,
+                    "subject": "Alice",
+                },
             ],
             "facts": [],
             "patterns": [],
@@ -4213,6 +4236,10 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
             "provider_writeback_suppressed_low_quality": consolidation_event["provider_writeback_diagnostics"][0][
                 "suppressed_reason_counts"
             ]["low_quality"]
+            == 1,
+            "provider_writeback_suppressed_missing_project_anchor": consolidation_event["provider_writeback_diagnostics"][0][
+                "suppressed_reason_counts"
+            ]["missing_project_anchor"]
             == 1,
             "provider_writeback_sync_policy_guarded": consolidation_event["provider_writeback_diagnostics"][0]["sync_policy"]
             == "post_canonical_guarded_writeback",

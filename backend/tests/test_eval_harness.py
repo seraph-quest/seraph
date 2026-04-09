@@ -1199,11 +1199,25 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-mini",
     ]
     assert details_by_name["provider_routing_decision_audit"]["completion_budget_steering_mode"] == "prefer_lower_budget"
-    assert details_by_name["provider_routing_decision_audit"]["completion_selected_route_score"] >= 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_route_score"] < 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selection_policy_mode"] == (
+        "retain_primary_until_reroute"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_model"] == (
+        "openai/gpt-4o-mini"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_selected"] is False
+    assert details_by_name["provider_routing_decision_audit"]["completion_best_alternate_model"] == (
+        "openai/gpt-4o-mini"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_vs_best_alternate_margin"] < 0.0
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_failure_risk_score"] == 0.0
     assert details_by_name["provider_routing_decision_audit"]["completion_selected_production_readiness"] == "ready"
     assert details_by_name["provider_routing_decision_audit"]["completion_route_explanation"].startswith(
         "selected openrouter/anthropic/claude-sonnet-4"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_route_comparison_summary"].startswith(
+        "retained primary openrouter/anthropic/claude-sonnet-4 even though openai/gpt-4o-mini"
     )
     assert details_by_name["provider_routing_decision_audit"]["completion_simulated_route_count"] == 4
     assert details_by_name["provider_routing_decision_audit"]["completion_first_route_entry"] == (
@@ -1222,9 +1236,21 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4o-mini",
     ]
     assert details_by_name["provider_routing_decision_audit"]["agent_budget_steering_mode"] == "none"
+    assert details_by_name["provider_routing_decision_audit"]["agent_selection_policy_mode"] == (
+        "highest_ranked_attemptable"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_model"] == "ollama/llama3.2"
+    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_selected"] is True
+    assert details_by_name["provider_routing_decision_audit"]["agent_best_alternate_model"] == (
+        "openai/gpt-4.1-nano"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["agent_selected_vs_best_alternate_margin"] >= 0.0
     assert details_by_name["provider_routing_decision_audit"]["agent_primary_decision"] == "skipped"
     assert details_by_name["provider_routing_decision_audit"]["agent_primary_feedback_state"] == "cooldown"
     assert details_by_name["provider_routing_decision_audit"]["agent_primary_failure_risk_score"] > 0.0
+    assert details_by_name["provider_routing_decision_audit"]["agent_route_comparison_summary"].startswith(
+        "selected ollama/llama3.2 over openai/gpt-4.1-nano"
+    )
     assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
         "agent_primary_reason_codes"
     ]

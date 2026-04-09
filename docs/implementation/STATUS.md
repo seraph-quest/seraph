@@ -38,6 +38,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The same broader reach continuity contract now also feeds the threaded operator timeline and Activity Ledger, so typed source-adapter and imported-reach recovery remains visible outside the raw observer endpoint and cockpit shell.
 - [x] The same broader reach continuity contract now also carries explicit presence-surface inventory across messaging connectors, channel adapters, node adapters, and observer definitions, with ready-versus-attention summaries plus repair/follow-up actions visible in cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger.
 - [x] Backend CI now also weights historically slow backend suites, runs ten isolated backend shards in GitHub Actions, and pins the real shard-runner executable contract instead of letting runner skew and stale local assumptions dominate the current backend matrix.
+- [x] Runtime routing now also exposes richer provider-planning comparison details, including capability-gap penalties, live-feedback penalties, retained-primary-versus-planning-winner summaries, best-alternate route margins, and the same comparison contract across runtime audit, operator, and activity surfaces.
 - [x] The extension platform now also exposes package version lines, compatibility truth, publisher metadata, and diagnostics summaries consistently across lifecycle, catalog, and capability surfaces, while the cockpit operator surface summarizes extension health plus update/studio actions instead of leaving package triage buried in separate inventories.
 - [x] Backend CI now also applies per-file watchdog timeouts for the heaviest backend suites, so hung `test_workflows.py` or `test_eval_harness.py` files stop consuming an entire shard budget on hosted runners.
 - [x] The additive memory-provider surface now also exposes ranked usefulness diagnostics, guardian-visible provider provenance lines, stale-versus-irrelevant suppression counts, and post-canonical writeback guardrails that suppress duplicate or low-quality canonical memories before they are mirrored into external providers.
@@ -229,8 +230,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 
 ### Runtime and execution
 
-- [ ] deeper provider planning beyond the first simulation-grade route scoring and explicit budget steering pass, especially with richer live-provider feedback loops and production-like failure modeling beyond the new per-target failure-risk/readiness layer
-- [ ] broader live-provider and long-running integration eval coverage beyond the shipped deterministic REST, WebSocket, observer, delivery, activity-ledger, imported-capability, tool/MCP guardrail, delegated workflow, and workflow-composition contracts
+- [ ] broader live-provider and long-running integration proof beyond the shipped deterministic REST, WebSocket, observer, delivery, activity-ledger, imported-capability, tool/MCP guardrail, delegated workflow, workflow-composition, and provider-planning comparison contracts
 - [ ] stronger execution isolation and privileged-path hardening beyond the current workflow/tool, browser-mode, and connector-boundary pass
 - [ ] richer capability installation, recommendation, and recovery beyond the shipped catalog/install, runbook preflight, bounded bootstrap flow, extension studio, and imported-reach governance surfaces
 

@@ -763,11 +763,24 @@ async def get_activity_ledger(
             "selected_failure_risk_score",
             "selected_production_readiness",
             "selected_budget_preference_score",
+            "selected_preference_score",
+            "selected_capability_gap_count",
+            "selected_live_feedback_penalty",
+            "selection_policy_mode",
+            "planning_winner_model",
+            "planning_winner_profile",
+            "planning_winner_source",
+            "best_alternate_model",
+            "best_alternate_profile",
+            "best_alternate_source",
+            "best_alternate_route_score",
+            "selected_vs_best_alternate_margin",
             "required_task_class",
             "max_budget_class",
             "max_cost_tier",
             "max_latency_tier",
             "route_explanation",
+            "route_comparison_summary",
         ):
             value = _request_metadata_value(details, key)
             if value is not None:
@@ -782,6 +795,9 @@ async def get_activity_ledger(
         selected_live_feedback = details.get("selected_live_feedback")
         if isinstance(selected_live_feedback, dict) and selected_live_feedback:
             metadata_entry["selected_live_feedback"] = selected_live_feedback
+        planning_winner_selected = details.get("planning_winner_selected")
+        if isinstance(planning_winner_selected, bool):
+            metadata_entry["planning_winner_selected"] = planning_winner_selected
         rejected_target_summaries = details.get("rejected_target_summaries")
         if isinstance(rejected_target_summaries, list) and rejected_target_summaries:
             metadata_entry["rejected_target_summaries"] = rejected_target_summaries
@@ -903,6 +919,39 @@ async def get_activity_ledger(
                     routing_metadata,
                     "selected_budget_preference_score",
                 ),
+                "selected_preference_score": _request_metadata_value(
+                    routing_metadata,
+                    "selected_preference_score",
+                ),
+                "selected_capability_gap_count": _request_metadata_value(
+                    routing_metadata,
+                    "selected_capability_gap_count",
+                ),
+                "selected_live_feedback_penalty": _request_metadata_value(
+                    routing_metadata,
+                    "selected_live_feedback_penalty",
+                ),
+                "selection_policy_mode": _request_metadata_value(
+                    routing_metadata,
+                    "selection_policy_mode",
+                ),
+                "planning_winner_model": _request_metadata_value(
+                    routing_metadata,
+                    "planning_winner_model",
+                ),
+                "planning_winner_selected": routing_metadata.get("planning_winner_selected"),
+                "best_alternate_model": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_model",
+                ),
+                "best_alternate_route_score": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_route_score",
+                ),
+                "selected_vs_best_alternate_margin": _request_metadata_value(
+                    routing_metadata,
+                    "selected_vs_best_alternate_margin",
+                ),
                 "max_budget_class": _request_metadata_value(routing_metadata, "max_budget_class"),
                 "required_task_class": _request_metadata_value(routing_metadata, "required_task_class"),
                 "max_cost_tier": _request_metadata_value(routing_metadata, "max_cost_tier"),
@@ -910,6 +959,10 @@ async def get_activity_ledger(
                 "required_policy_intents": routing_metadata.get("required_policy_intents", []),
                 "selected_live_feedback": routing_metadata.get("selected_live_feedback"),
                 "route_explanation": _request_metadata_value(routing_metadata, "route_explanation"),
+                "route_comparison_summary": _request_metadata_value(
+                    routing_metadata,
+                    "route_comparison_summary",
+                ),
                 "rejected_target_summaries": routing_metadata.get("rejected_target_summaries", []),
                 "capability_family": capability_family,
             },

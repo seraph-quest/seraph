@@ -44,6 +44,19 @@ _CONFLICT_POLICY = "guardian_wins"
 _RECONCILIATION_POLICY = "canonical_first"
 _RETRIEVAL_SYNC_POLICY = "read_augment_only"
 _WRITEBACK_SYNC_POLICY = "post_canonical_guarded_writeback"
+_USER_MODEL_SYNC_POLICY = "advisory_model_overlay"
+
+_CAPABILITY_SYNC_POLICIES = {
+    "retrieval": _RETRIEVAL_SYNC_POLICY,
+    "user_model": _USER_MODEL_SYNC_POLICY,
+    "consolidation": _WRITEBACK_SYNC_POLICY,
+}
+
+_CAPABILITY_OPERATION_MODES = {
+    "retrieval": "augment_recall",
+    "user_model": "augment_model",
+    "consolidation": "mirror_canonical_memory",
+}
 
 _PROVIDER_STALE_WINDOWS_DAYS = {
     MemoryKind.commitment: 30,
@@ -221,6 +234,72 @@ def _provider_memory_contract_payload() -> dict[str, Any]:
         "provider_retrieval_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
         "provider_model_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
         "provider_writeback_provenance": _PROVENANCE_PROVIDER_MIRROR,
+    }
+
+
+def _used_capability_contracts_payload(capabilities: list[str]) -> dict[str, dict[str, Any]]:
+    return {
+        capability: _capability_contract_payload(capability)
+        for capability in capabilities
+        if capability in _CAPABILITY_SYNC_POLICIES
+    }
+
+
+def _capability_contract_payload(capability: str, *, state: str | None = None) -> dict[str, Any]:
+    sync_policy = _CAPABILITY_SYNC_POLICIES[capability]
+    provenance = (
+        _PROVENANCE_PROVIDER_MIRROR
+        if capability == "consolidation"
+        else _PROVENANCE_EXTERNAL_ADVISORY
+    )
+    return {
+        "operation_mode": _CAPABILITY_OPERATION_MODES[capability],
+        "sync_policy": sync_policy,
+        "provenance": provenance,
+        "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
+        "conflict_policy": _CONFLICT_POLICY,
+        "reconciliation_policy": _RECONCILIATION_POLICY,
+        "requires_canonical_persistence": capability == "consolidation",
+        "failure_behavior": (
+            "canonical_memory_remains_authoritative"
+            if capability == "consolidation"
+            else "degrade_to_guardian_memory"
+        ),
+        **({"state": state} if state else {}),
+    }
+
+
+def _provider_capability_contracts_payload(
+    declared_capabilities: tuple[str, ...],
+    capability_states: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    return {
+        capability: _capability_contract_payload(
+            capability,
+            state=capability_states.get(capability, "undeclared"),
+        )
+        for capability in declared_capabilities
+        if capability in _CAPABILITY_SYNC_POLICIES
+    }
+
+
+def _provider_adapter_model_payload(
+    declared_capabilities: tuple[str, ...],
+    capability_states: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "adapter_kind": "provider_neutral_memory_adapter",
+        "authoritative_memory": _CANONICAL_MEMORY_AUTHORITY,
+        "provider_role": _PROVIDER_ROLE,
+        "capability_contracts": _provider_capability_contracts_payload(
+            declared_capabilities,
+            capability_states,
+        ),
+        "sync_order": [
+            "canonical_guardian_memory_first",
+            "provider_augmentation_or_mirroring_second",
+            "guardian_conflict_resolution_last",
+        ],
     }
 
 
@@ -666,6 +745,10 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             "conflict_policy": _CONFLICT_POLICY,
             "reconciliation_policy": _RECONCILIATION_POLICY,
         }
+        item["adapter_model"] = _provider_adapter_model_payload(
+            tuple(item.get("capabilities", [])),
+            capability_states,
+        )
         item["quality_controls"] = {
             "freshness_windows_days": {
                 kind.value if hasattr(kind, "value") else str(kind): days
@@ -702,6 +785,11 @@ def list_memory_provider_inventory() -> dict[str, Any]:
         ],
         "canonical_memory_contract": _canonical_memory_contract_payload(),
         "provenance_taxonomy": list(_provenance_taxonomy_payload()),
+        "adapter_model_rules": [
+            "Every provider capability is modeled as an additive adapter contract, not a parallel truth system.",
+            "Retrieval and user-model augmentation stay advisory read paths; consolidation stays a post-canonical mirror path.",
+            "Capability state is visible next to its sync contract so degraded adapters fail closed instead of widening authority.",
+        ],
         "reconciliation_rules": [
             "Canonical guardian memory wins when provider evidence conflicts with guardian-owned memory.",
             "Provider evidence that is stale or does not line up with the live project/query is suppressed before it can shape guardian state.",
@@ -908,6 +996,7 @@ async def retrieve_additive_memory_provider_context(
                 "notes": provider_notes,
                 "attempted_capabilities": attempted_capabilities,
                 "capabilities_used": capabilities_used,
+                "capability_contracts_used": _used_capability_contracts_payload(capabilities_used),
                 "failed_capabilities": failed_capabilities,
                 "bucket_counts": bucket_counts,
                 "stale_hit_count": stale_hit_count,
@@ -1021,6 +1110,7 @@ async def writeback_additive_memory_providers(
                     "summary": "No canonically persisted memories met additive provider writeback guardrails.",
                     "notes": provider_notes,
                     "capabilities_used": [],
+                    "capability_contracts_used": {},
                     "failed_capabilities": [],
                     "accepted_kinds": [],
                     "considered_memory_count": len(memories),
@@ -1061,6 +1151,7 @@ async def writeback_additive_memory_providers(
                     "summary": "",
                     "notes": provider_notes,
                     "capabilities_used": [],
+                    "capability_contracts_used": {},
                     "failed_capabilities": ["consolidation"],
                     "accepted_kinds": [],
                     "considered_memory_count": len(memories),
@@ -1092,6 +1183,7 @@ async def writeback_additive_memory_providers(
                 "summary": result.summary.strip(),
                 "notes": provider_notes,
                 "capabilities_used": ["consolidation"],
+                "capability_contracts_used": _used_capability_contracts_payload(["consolidation"]),
                 "failed_capabilities": ["consolidation"] if result.write_failure_count else [],
                 "accepted_kinds": [kind for kind in result.accepted_kinds if kind],
                 "considered_memory_count": len(memories),

@@ -1304,6 +1304,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_user_model_behavior"]["provider_user_model_ready"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["provider_contract_authoritative_guardian"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["provider_contract_advisory_provenance"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_adapter_model_user_sync_policy"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_collaborator"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_obligation"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["memory_context_has_provider_project"] is True
@@ -1317,12 +1318,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_stale_evidence_behavior"]["quality_state_guarded"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_contract_is_guarded"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_adapter_model_writeback_requires_canonical"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["canonical_memory_kept_project"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_sync_policy_guarded"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_runtime_contract_visible"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_is_stable_within_session"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_includes_todo_overlay"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_line_count"] <= 8

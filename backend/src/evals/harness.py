@@ -3879,12 +3879,18 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
             "provider_consolidation_unsupported": provider["capability_states"].get("consolidation") == "unsupported"
             if "consolidation" in provider["capability_states"]
             else True,
+            "provider_contract_authoritative_guardian": provider["memory_contract"]["authoritative_memory"] == "guardian",
+            "provider_contract_advisory_provenance": provider["memory_contract"]["provider_model_provenance"] == "external_advisory",
             "world_model_has_provider_collaborator": "Alice owns Atlas launch communications." in state.world_model.collaborators,
             "world_model_has_provider_obligation": "Atlas launch investor note goes out on Friday." in state.world_model.recurring_obligations,
             "memory_context_has_provider_project": "Atlas launch remains the live project anchor." in state.memory_context,
             "memory_provider_diagnostics_visible": bool(state.memory_provider_diagnostics),
             "memory_provider_quality_focused": any(
                 "quality=focused" in item for item in state.memory_provider_diagnostics
+            ),
+            "memory_provider_diagnostics_show_authority": any(
+                "authority=guardian" in item and "provenance=external_advisory" in item
+                for item in state.memory_provider_diagnostics
             ),
         }
 
@@ -4194,6 +4200,7 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
         provider = inventory["providers"][0]
         return {
             "provider_consolidation_ready": provider["capability_states"]["consolidation"] == "ready",
+            "provider_writeback_contract_is_guarded": provider["memory_contract"]["provider_writeback_provenance"] == "provider_mirror",
             "provider_writeback_called": bool(adapter.writeback_calls),
             "provider_writeback_kinds": adapter.writeback_calls[0]["kinds"] if adapter.writeback_calls else [],
             "audit_has_provider_writeback": consolidation_event["provider_writeback_count"] == 2,
@@ -4203,6 +4210,8 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                 "suppressed_reason_counts"
             ]["low_quality"]
             == 1,
+            "provider_writeback_sync_policy_guarded": consolidation_event["provider_writeback_diagnostics"][0]["sync_policy"]
+            == "post_canonical_guarded_writeback",
         }
 
 

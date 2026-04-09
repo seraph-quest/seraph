@@ -417,6 +417,8 @@ def _memory_provider_diagnostic_lines(
             if isinstance(capability, str) and capability.strip()
         ]
         quality_state = str(item.get("quality_state") or "idle")
+        canonical_authority = str(item.get("canonical_authority") or "").strip()
+        provenance = str(item.get("provenance") or "").strip()
         hit_count = int(item.get("hit_count") or 0)
         stale_hit_count = int(item.get("stale_hit_count") or 0)
         suppressed_irrelevant_hit_count = int(item.get("suppressed_irrelevant_hit_count") or 0)
@@ -428,7 +430,10 @@ def _memory_provider_diagnostic_lines(
         line = (
             f"{name} quality={quality_state}, capabilities="
             f"{', '.join(capabilities) if capabilities else 'none'}, "
-            f"hits={hit_count}, stale_suppressed={stale_hit_count}, "
+            f"hits={hit_count}, "
+            f"{f'authority={canonical_authority}, ' if canonical_authority else ''}"
+            f"{f'provenance={provenance}, ' if provenance else ''}"
+            f"stale_suppressed={stale_hit_count}, "
             f"irrelevant_suppressed={suppressed_irrelevant_hit_count}"
         )
         if topic_matches:
